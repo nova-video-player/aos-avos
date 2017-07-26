@@ -1,0 +1,26 @@
+# Copyright 2017 Archos SA
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+APP_ALLOW_MISSING_DEPS=true
+APP_CFLAGS := -DARCHOS_ENHANCEMENT
+ifeq (,$(NDK_APP_ABI))
+APP_ABI := armeabi-v7a
+else
+APP_ABI := $(NDK_APP_ABI)
+endif
+ifneq ($(filter $(APP_ABI), arm64-v8a, x86_64, mips64),)
+APP_PLATFORM := android-21
+else
+APP_PLATFORM := android-14
+endif

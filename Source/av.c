@@ -725,6 +725,8 @@ void show_subtitle_props( SUB_PROPERTIES *sub )
 	serprintf("  name    [%s]\r\n", sub->name);
 	serprintf("  gfx     %d\r\n", sub->gfx);
 	serprintf("  ext     %d\r\n", sub->ext);
+	serprintf("  scale   %u\r\n", sub->scale);
+	serprintf("  rate    %u\r\n", sub->rate);
 	serprintf("  crypted %s  type %d\r\n", sub->crypted ? "YES" : "no", sub->crypt_type);
 	
 	if( sub->extraDataSize ) {

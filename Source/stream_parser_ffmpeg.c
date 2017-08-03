@@ -1276,6 +1276,72 @@ ErrorExit:
 	return 0;
 }
 
+static int msk_fixup_ssa( char *dst, int max, const char *src, int src_size, int time, int duration )
+{
+	const char *layer = NULL;
+	const char *ptr = src; 
+	const char *end = src + src_size;
+	
+	// skip the count
+	for ( ; *ptr != ',' && ptr < end - 1; ptr++ );
+	
+	// we are at the layer tag
+	if ( *ptr == ',' )
+		layer = ++ptr;
+	
+	// find next comma
+	for ( ; *ptr != ',' && ptr < end - 1; ptr++ );
+	
+	// we are at the rest to copy verbatim
+	if ( layer && *ptr == ',' ) {
+		int sc =  time / 10;
+		int ec = (time + duration) / 10;
+		
+		int sh  = sc / 360000;
+		    sc -= 360000 * sh;
+		int sm  = sc / 6000;
+		    sc -= 6000 * sm;
+		int ss  = sc / 100;
+		    sc -= 100 * ss;
+		
+		int eh  = ec / 360000;
+		    ec -= 360000 * eh;
+		int em  = ec / 6000;
+		    ec -= 6000 * em;
+		int es  = ec / 100;
+		    ec -= 100 * es;
+		char *layere = (char*)ptr;
+		
+		*layere = '\0';
+		snprintf( dst, max, "Dialogue: %s,%d:%02d:%02d.%02d,%d:%02d:%02d.%02d,", layer, sh, sm, ss, sc, eh, em, es, ec );
+		*layere = ',';
+		
+		max -= strlen(dst) + 3;
+		char *d = dst + strlen(dst);
+		ptr ++;
+		while( max-- > 0 && *ptr && ptr != end )
+			*d++ = *ptr++;
+		*d++ = '\r';
+		*d++ = '\n';
+		*d++ = '\0';
+	} else {
+		strcpy( dst, "" );
+	}
+	return strlen( dst );
+}
+
+static int msk_fixup_srt( char *dst, int max, const char *src, int src_size, int time, int duration )
+{
+	char *d = dst;
+	max --;
+	snprintf( d, max, "%d:%d,", time, time + duration );
+	max -= strlen(dst);
+	d   += strlen(dst);
+	int copy = MIN( max, src_size );
+	snprintf( d, copy + 1, "%s", src );
+	return strlen( dst );
+}
+
 // ************************************************************
 //
 //	_get_subtitle_cdata
@@ -1293,9 +1359,9 @@ static int ff_get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_C
 		return 1;
 	}
 
-	if( sub_buffer->size < packet->size ) {
+	if( sub_buffer->size < packet->size + 128 ) {
 serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
-		if ( realloc_clever_buffer( sub_buffer, packet->size ) ) {
+		if ( realloc_clever_buffer( sub_buffer, packet->size + 128 ) ) {
 			_dispose_packet( packet );			
 			return 1;
 		}
@@ -1312,8 +1378,15 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 	cdata->pos        = packet->pos;
 DBGC32 serprintf("get  sub : size %6d  pos %8lld  time %8d  pkt %4d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
 
-	memcpy( sub_buffer->data, packet->data, packet->size );
 	
+	int duration = GET_SUB_TS( packet->duration );
+	if( s->subtitle->format == SUB_FORMAT_SSA ) {
+		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
+	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
+		cdata->size = msk_fixup_srt( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
+	} else {
+		memcpy( sub_buffer->data, packet->data, packet->size );
+	}
 	cdata->valid = CHUNK_VALID;
 
 	_dispose_packet( packet );			

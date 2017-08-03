@@ -1307,7 +1307,7 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 	cdata->type 	  = 0;
 	cdata->key   	  = 1;
 	cdata->size       = packet->size;
-	cdata->time       = (GET_SUB_TS( packet->pts ) == -1) ? -1 : - ff_p->start_time;
+	cdata->time       = (GET_SUB_TS( packet->pts) == -1) ? -1 : GET_SUB_TS(packet->pts) - ff_p->start_time;
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 DBGC32 serprintf("get  sub : size %6d  pos %8lld  time %8d  pkt %4d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );

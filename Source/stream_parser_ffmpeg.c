@@ -269,7 +269,7 @@ DBGP serprintf("size     %lld\r\n", priv->size );
 	}
 	
 	if (fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
-		priv->duration = 1000 * (UINT64)fmt->duration / AV_TIME_BASE;
+		priv->duration = 1000 * (INT64)fmt->duration / AV_TIME_BASE;
 DBGP serprintf("duration %d\r\n", priv->duration );
 	} else {
 		if( priv->s )
@@ -278,7 +278,8 @@ DBGP serprintf("duration ---\r\n" );
 	}
 
 	if (fmt->start_time != AV_NOPTS_VALUE) {
-		priv->start_time = 1000 * (UINT64)fmt->start_time / AV_TIME_BASE;
+DBGP serprintf("FFMPEG start    %lld\r\n",  fmt->start_time);
+		priv->start_time = 1000 * (INT64)fmt->start_time / AV_TIME_BASE;
 DBGP serprintf("start    %d\r\n", priv->start_time );
 	}
 DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
@@ -1014,7 +1015,7 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 	
 	int av_flags = dir & STREAM_SEEK_BACKWARD ? AVSEEK_FLAG_BACKWARD : 0;
 	
-	UINT64 new_pos;
+	INT64 new_pos;
 	if( time == -1 ) {
 		// seek to pos
 		new_pos = s->size * pos / STREAM_POS_MAX;
@@ -1022,17 +1023,17 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 		
 		if( new_pos > s->size ) {
 			// pos is beyond end of file - what do we do now?
-DBGP serprintf("at end %llu %llu\r\n", new_pos, s->size);
+DBGP serprintf("at end %lld %llu\r\n", new_pos, s->size);
 			if ( s->size > 1024 * 1024ul ) {
 				new_pos = s->size - 1024 * 1024ul; // 1MB before end
 			} else {
 				new_pos = 0;
 			}
 		}
-DBGP serprintf("FFMPEG: new pos: %llu\r\n", new_pos ); 
+DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 	} else {
-		new_pos = (UINT64)(time + ff_p->start_time) * AV_TIME_BASE / 1000;
-DBGP serprintf("FFMPEG: new time: %llu\r\n", new_pos ); 
+		new_pos = (INT64)(time + ff_p->start_time) * AV_TIME_BASE / 1000;
+DBGP serprintf("FFMPEG: new time: %lld\r\n", new_pos );
 	}
 
 	__attribute__((unused))	

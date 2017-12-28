@@ -17,6 +17,11 @@
 #include <string.h>
 #include <inttypes.h>
 
+#ifdef __ANDROID_API__
+#undef __ANDROID_API__
+#define __ANDROID_API__ 21
+#endif
+
 #include <media/NdkMediaCodec.h>
 
 #include "sfdec_common.h"

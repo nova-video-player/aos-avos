@@ -557,8 +557,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	dec->ctx = ctx;
 	p->dec = dec;
 	
-	// assume this codec can reorder properly by itself:
-	p->reorder_pts = video->never_reorder_pts ? 0 : 1;
+	p->reorder_pts = video->reorder_pts;
 
 	if (hw_type == HW_TYPE_OMAP4 || hw_type == HW_TYPE_ARCHOS_OMAP4) {
 		/*

@@ -399,6 +399,9 @@ serprintf("FF: parse H264 SPS\n");
 					video->reorder_pts = 1;
 					break;
 				}
+				if( !strcmp("avi", fmt->iformat->name ) ) {
+					video->reorder_pts = 0;
+				}
 				if( force_reorder != -1 ) {
 					video->reorder_pts = force_reorder;
 				}

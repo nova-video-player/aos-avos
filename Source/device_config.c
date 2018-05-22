@@ -28,7 +28,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
- 
+
 #ifdef CONFIG_ANDROID
 #include "androidndk_utils.h"
 int acodecs_is_supported(int format, int is_video, int is_sw_allowed);
@@ -75,11 +75,11 @@ int device_has_dsp()
 int device_has_dsp_overdrive()
 {
 	static int dspod = -1;
-	
+
 	// forced by flag?
-	if( has_dsp_overdrive ) 
+	if( has_dsp_overdrive )
 		return 1;
-	
+
 	// check the fs
 	if( dspod == -1 ) {
 		STAT st;
@@ -342,7 +342,7 @@ static int is_supported(int format, int is_video)
 		return 1;
 	if (acodecs_is_supported(format, is_video, 1))
 		return 1;
-	return 0;
+	return 1;
 #else
 	return 1;
 #endif
@@ -383,4 +383,3 @@ int device_config_is_video_format_supported(int format)
 		return 1;
 	}
 }
-

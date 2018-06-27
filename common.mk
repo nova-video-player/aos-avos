@@ -71,7 +71,7 @@ CFLAGS = -pipe -Werror-implicit-function-declaration -Wall -Wno-missing-braces \
 	 -Wpointer-arith -Wno-cast-align -fno-strict-aliasing -Wno-pointer-sign \
 	 -Wno-format-security -Wno-deprecated-declarations
 CFLAGS += -Wno-unused -Wno-sign-compare -Wno-missing-field-initializers #TODO
-CFLAGS += -Werror
+CFLAGS += -Werror -no-integrated-as
 
 ifeq ($(ASAN),1)
 CFLAGS += -g -fsanitize=address -fno-omit-frame-pointer

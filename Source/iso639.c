@@ -125,6 +125,8 @@ static const ISO639 map[] = {
 	{ "zho",	"s_chinese" },
 	{ "chi",	"s_chinese" },
 
+	{ "vie",	"s_vietnamese" },
+
 	{ "hrv",	"Croatian" },
 };
 

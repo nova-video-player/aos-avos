@@ -36,9 +36,8 @@
 
 #endif
 
-#define FRAG_SIZE      8192
-#define FRAG_SIZE_BITS   13
-#define FRAG_COUNT        8
+static int frag_count     = 4;
+static int frag_size_bits = 10;
 
 static int dsp_fd = -1;
 static int fsize = -1;
@@ -336,9 +335,17 @@ serprintf( "OSS: %d channels > %d\r\n", channels, oss_max_channels );
 		return 1;
 	}
 	
+	if( freq < 16000 ) {
+		frag_size_bits = 8;
+	} else if ( freq < 32000 ) {
+		frag_size_bits = 9;
+	} else {
+		frag_size_bits = 10;
+	}
+
 	int ossFormat = AFMT_S16_LE;
 	
-	set_buffersize(FRAG_SIZE_BITS, FRAG_COUNT);
+	set_buffersize(frag_size_bits, frag_count);
 	
 	set_rate( &freq );
 	set_channels( &channels );
@@ -349,7 +356,7 @@ serprintf( "OSS: %d channels > %d\r\n", channels, oss_max_channels );
 
 static int oss_get_delay(audio_ctx_t *ctx)
 {
-	return 1000 * (FRAG_SIZE * FRAG_COUNT) / (freq * oss_chan * 2);
+	return 1000 * ((1 << frag_size_bits) * frag_count) / (freq * oss_chan * 2);
 }
 
 static void oss_flush_output(audio_ctx_t *ctx) 

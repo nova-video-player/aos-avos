@@ -230,6 +230,12 @@ DBGV serprintf("drop audio chunk: time %d\r\n", cdata.time );
 			}
 			
 			if( cdata.valid ) {
+				if( cdata.time < 0 ) {
+					// drop this shit!
+DBGV serprintf("audio in the past! %d\r\n", cdata.time );			
+					continue;
+				}
+
 				if( stream_force_audio_props ) {
 					cdata.changed = stream_force_audio_props;
 					stream_force_audio_props = NULL;

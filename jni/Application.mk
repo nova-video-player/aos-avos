@@ -19,8 +19,5 @@ APP_ABI := armeabi-v7a
 else
 APP_ABI := $(NDK_APP_ABI)
 endif
-ifneq ($(filter $(APP_ABI), arm64-v8a, x86_64, mips64),)
 APP_PLATFORM := android-21
-else
-APP_PLATFORM := android-14
-endif
+APP_STL := c++_shared

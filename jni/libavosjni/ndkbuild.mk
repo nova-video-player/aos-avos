@@ -19,9 +19,9 @@ LOCAL_PATH:= $(call my-dir)
 LIBNATIVEHELPER_DIR := libnativehelper
 include $(CLEAR_VARS)
 LOCAL_MODULE    := libnativehelper
-LOCAL_SRC_FILES := ../../../$(LIBNATIVEHELPER_DIR)/obj/local/$(TARGET_ARCH_ABI)/libnativehelper.a
+LOCAL_SRC_FILES := ../../../$(LIBNATIVEHELPER_DIR)/obj/local/$(TARGET_ARCH_ABI)/libnativehelper.so
 LOCAL_EXPORT_C_INCLUDES :=  ../../../$(LIBNATIVEHELPER_DIR)/include
-include $(PREBUILT_STATIC_LIBRARY)
+include $(PREBUILT_SHARED_LIBRARY)
 
 
 include $(CLEAR_VARS)
@@ -43,8 +43,7 @@ LOCAL_C_INCLUDES := \
 
 LOCAL_MODULE_TAGS := optional
 
-LOCAL_STATIC_LIBRARIES := libnativehelper
-LOCAL_SHARED_LIBRARIES := libavos$(AVOS_LIBS_SUFFIX)
+LOCAL_SHARED_LIBRARIES := libnativehelper libavos$(AVOS_LIBS_SUFFIX)
 LOCAL_MODULE := libavosjni$(AVOS_LIBS_SUFFIX)
 
 include $(BUILD_SHARED_LIBRARY)

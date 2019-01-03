@@ -71,11 +71,6 @@ include $(LOCAL_PATH)/ndkbuild.mk
 LOCAL_PATH := $(EXTERNAL_DIR)/libdeinterlace
 include $(LOCAL_PATH)/ndkbuild.mk
 
-### libiomx ###
-
-LOCAL_PATH := $(EXTERNAL_DIR)/libiomx
-include $(LOCAL_PATH)/ndkbuild.mk
-
 ### colorconversion ###
 
 LOCAL_PATH := $(ANDROID_DIR)/colorconversion/

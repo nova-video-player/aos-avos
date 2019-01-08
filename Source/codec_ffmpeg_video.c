@@ -550,8 +550,10 @@ Dump( data, 64 );
 	av_init_packet(&avpkt);
 	if( p->reorder_pts ) {
 		vctx->reordered_opaque = avos_frame->time;
+        avpkt.pts = avos_frame->time;
 	} else {
 		vctx->reordered_opaque = avos_frame->user_ID;
+        avpkt.pts = avos_frame->user_ID;
 	}
 DBGCV2 serprintf("<"); 
 	int start = time_update_time();
@@ -637,9 +639,15 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->width           = vctx->width;
 		avos_frame->height          = vctx->height;
 		if( p->reorder_pts ) {
-			avos_frame->time    = vframe->reordered_opaque;
+            if (vframe->reordered_opaque != 0)
+			    avos_frame->time    = vframe->reordered_opaque;
+            else 
+                avos_frame->time = vframe->pts;
 		} else {
-			avos_frame->user_ID = vframe->reordered_opaque;
+            if (vframe->reordered_opaque != 0)
+                avos_frame->user_ID = vframe->reordered_opaque;
+            else
+                avos_frame->user_ID = vframe->pts;
 		}
 	} else {
 			avos_frame->time    = -1;

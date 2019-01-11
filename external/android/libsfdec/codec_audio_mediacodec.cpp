@@ -29,7 +29,7 @@
 typedef struct dec_audio_mediacodec sfdec_priv_t;
 #include "sfdec_priv.h"
 
-#define DBG if (1)
+#define DBG if (0)
 
 #undef LOG
 #define LOG(fmt, ...) do { \

@@ -559,7 +559,28 @@ DBGCV2 serprintf("<");
 	int start = time_update_time();
 	int ret = 0;
 	if( !_ff_fake ) {
-		ret = avcodec_decode_video2( vctx, vframe, &got_picture, &avpkt);
+        ret = avcodec_send_packet(vctx, &avpkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+             //try again later -- ignore error silently
+             ret = 0;
+        }
+        else if (ret < 0) {
+            serprintf("FFM: avcodec_send_packet failed\r\n");
+        }
+        else
+            decoded += size;
+
+        ret = avcodec_receive_frame(vctx, vframe);
+        if (ret == AVERROR(EAGAIN) ) {
+             //try again later -- ignore error silently
+             ret = 0;
+        }
+        else if (ret < 0) {
+            serprintf("FFM: avcodec_receive_frame error\r\n");
+        }
+        else
+            got_picture = 1;
+
 	} else {
 		got_picture = 1;
 		vframe->reordered_opaque = vctx->reordered_opaque;
@@ -580,7 +601,6 @@ DBGCV2 serprintf("siz %6d  ret %6d  %d|%c  out %8d  ",
 DBGCV3 serprintf("[line %4d %3d %3d  px %d -> %d]", 
 	vframe->linesize[0], vframe->linesize[1], vframe->linesize[2], vctx->pix_fmt, avos_frame->linestep[0]);
 
-	decoded += size;
 	
 	if( 0 ) {
 		STREAM *s = dec->ctx;

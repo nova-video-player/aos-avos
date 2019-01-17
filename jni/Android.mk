@@ -34,13 +34,8 @@ else
 AVOS_LIBS_SUFFIX :=
 endif
 
-ifeq ($(TARGET_PLATFORM),android-21)
 NDK_ANDROID_L := true
-HAVE_ANDROID_SYSTEM_PROP := false
-else
-NDK_ANDROID_L := false
 HAVE_ANDROID_SYSTEM_PROP := true
-endif
 
 ### libavos_android ###
 

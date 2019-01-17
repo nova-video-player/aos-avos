@@ -168,6 +168,7 @@ static int audiotrack_close(audio_ctx_t **pat)
 DBG	LOG();
 
 	if (at->init) {
+		call_void_method(at, "release", "()V");
 		(*at->env)->DeleteGlobalRef(at->env, at->obj);
 		(*at->env)->DeleteGlobalRef(at->env, at->jbuffer);
 		(*at->env)->DeleteGlobalRef(at->env, at->audiotrackClass);

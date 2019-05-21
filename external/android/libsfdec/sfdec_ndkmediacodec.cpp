@@ -88,6 +88,8 @@ static int init_renderer(sfdec_priv_t *sfdec)
     return 0;
 }
 
+static int err_count;
+
 static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             sfdec_flags_t flags,
             int *width, int *height, int rotation,
@@ -111,6 +113,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (sfdec == NULL)
         return NULL;
 
+    err_count = 0;
     sfdec->rotation = rotation;
     sfdec->width = *width;
     sfdec->height = *height;
@@ -225,6 +228,7 @@ static int sfdec_flush(sfdec_priv_t *sfdec)
     sfdec->flush = 1;
     media_status_t err = AMediaCodec_flush(sfdec->mCodec);
     CHECK_STATUS(err);
+    err_count = 0;
 
     return 0;
 }
@@ -248,6 +252,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
         index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, -1);
 
         if (index >= 0) {
+            err_count = 0;
             sfbuf_t *sfbuf = (sfbuf_t*) calloc(1, sizeof(sfbuf_t));
             if (sfbuf == NULL)
                 return -1;
@@ -273,7 +278,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
         } else if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
             DBG LOG("mCodec->dequeueOutputBuffer returned -EAGAIN");
             return 0;
-        } else if (index == 0xFFFFD8F0) {
+        } else if (index == -10000) { // 0xFFFFD8F0 but works in 64b
             if (sfdec->flush) {
                 LOG("mCodec->dequeueOutputBuffer returned -10000 while flushing IGNORE!");
             	return 0;
@@ -282,7 +287,12 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
                 return -1;
             }
         } else {
-            LOG("mCodec->dequeueOutputBuffer returned: %X", index);
+            err_count++;
+            LOG("mCodec->dequeueOutputBuffer returned: %zx", index);
+            if( err_count > 100 ) {
+                LOG("we had enough!");
+                return -1;
+            }
             return 0;
         }
     }

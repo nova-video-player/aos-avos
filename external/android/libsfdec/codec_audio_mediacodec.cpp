@@ -293,7 +293,7 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
         } else if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
             DBG LOG("mCodec->dequeueOutputBuffer returned -EAGAIN");
             return 0;
-        } else if (index == 0xFFFFD8F0) {
+        } else if (index == -10000) { // 0xFFFFD8F0 but works in 64b
             if (sfdec->flush) {
                 LOG("mCodec->dequeueOutputBuffer returned -10000 while flushing IGNORE!");
             	return 0;

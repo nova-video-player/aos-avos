@@ -26,7 +26,7 @@ comp:	comp.c ../Source/pcm_autogain.c ../Source/stream_filter_audio_agc.c
 	$(CC) -I../Include -g -o comp comp.c
 
 ff:	ff.c  ../Source/vobsub.c
-	$(CC) -I ../Include  -g -o ff -lavformat -lavcodec -lavutil ff.c
+	$(CC) -I ../Include  -g -o ff -lavformat -lavcodec -lavutil -lavfilter  ff.c
 
 clean:	
 	rm -f *.o $(ALL) *.out *~ *.bak core

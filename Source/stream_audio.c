@@ -370,7 +370,7 @@ serprintf(" ae! ");
 						s->audio_filter->filter( s->audio_filter, &audio_frame );
 					}
 
-					s->audio_sink->write( s, &audio_frame );
+					int size_written = s->audio_sink->write( s, &audio_frame );
 
 					if( s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time
@@ -381,8 +381,8 @@ serprintf(" ae! ");
 						}
 					}
 
-					size             -= audio_frame.size;
-					audio_frame.data += audio_frame.size;
+					size             -= size_written;
+					audio_frame.data += size_written;
 				}
 				
 				if( s->audio_sink->syncable( s ) && s->audio_sink->can_write( s, size ) ) {

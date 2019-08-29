@@ -836,7 +836,7 @@ void	stream_set_cpu_priority( STREAM *s, int cpu_prio );
 //	INTERNAL API
 //
 
-#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 2)
+#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 4)
 #define VIDEO_OVERLAP_SIZE		VIDEO_MINDATA_SIZE
 
 int 	stream_init ( STREAM *s );

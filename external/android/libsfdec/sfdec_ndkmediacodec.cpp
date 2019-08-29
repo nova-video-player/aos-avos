@@ -135,6 +135,9 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (input_size > 0)
         AMediaFormat_setInt32(sfdec->mFormat, "max-input-size", input_size);
 
+    if (extradata && (codec == SFDEC_VIDEO_HEVC))
+        AMediaFormat_setBuffer(sfdec->mFormat, "csd-0", extradata, extradata_size);
+
     err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, sfdec->mNativeWindow, NULL, 0);
     CHECK_STATUS(err);
 

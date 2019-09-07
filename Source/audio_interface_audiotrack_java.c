@@ -165,7 +165,9 @@ static int audiotrack_close(audio_ctx_t **pat)
 {
 	audio_ctx_t *at = *pat;
 
-DBG	LOG();
+    int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
+    if (underrun_count > 0)
+        ERR LOG("Underrun count: %d", underrun_count);
 
 	if (at->init) {
 		call_void_method(at, "release", "()V");
@@ -387,7 +389,7 @@ ERR		LOG("track not valid, error");
 	ssize_t len_to_write = MIN(at->buf_size, len);
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);
 	ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
-DBG	LOG("wrote %d", ret);
+DBG	LOG("wrote %d out of %d", ret, len);
 
 	if (at->passthrough && ret == -6 /* ERROR_DEAD_OBJECT */) {
 		audiotrack_set_passthrough(at, at->passthrough);

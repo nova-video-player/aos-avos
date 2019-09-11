@@ -63,12 +63,7 @@ int audio_interface_init(void)
 		}
 		impl_list[1] = NULL;
 	} else {
-			if (device_get_android_api() >= 23)
-				impl_list[0] = &audio_interface_impl_audiotrack_java;
-			else if (device_get_android_version() >= ANDROID_VERSION_JB_4_3)
-				impl_list[0] = &audio_interface_impl_audiotrack_new;
-			else
-				impl_list[0] = &audio_interface_impl_audiotrack;
+			impl_list[0] = &audio_interface_impl_audiotrack_java;
 			impl_list[1] = &audio_interface_impl_opensles;
 			impl_list[2] = NULL;
 	}

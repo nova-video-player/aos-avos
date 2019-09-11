@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <linux/soundcard.h>
+#include <sys/select.h>
 
 #ifndef STANDALONE
 

@@ -47,6 +47,7 @@
 
 #define CONFIG_I18N				// support for internationalization (asian fonts etc.) 
 #define CONFIG_CP1250				// support for Eastern Europe 
+#define CONFIG_CP28606				// support for Southern Europe
 #define CONFIG_CP1251				// support for Cyrillic Russian  
 #define CONFIG_CP1253				// support for Cyrillic Greek 
 #define CONFIG_CP1254				// support for Turkish 

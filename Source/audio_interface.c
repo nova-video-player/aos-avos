@@ -63,7 +63,20 @@ int audio_interface_init(void)
 		}
 		impl_list[1] = NULL;
 	} else {
-			if (device_get_android_api() >= 23)
+		if (device_get_android_version() >= ANDROID_VERSION_KK &&
+				( device_get_hw_type() != HW_TYPE_RK32
+				&& device_get_hw_type() != HW_TYPE_RK30
+				&& device_get_hw_type() != HW_TYPE_RK29
+				&& device_get_hw_type() != HW_TYPE_AMLOGIC
+				&& device_get_hw_type() != HW_TYPE_FBX
+				&& !( spdif_is_passthrough_on() == 1 || spdif_is_passthrough_on() == 2 ) )) {
+			/*
+			 * Some devices doesn't like audiotrack anymore after android 4.4
+			 */
+			impl_list[0] = &audio_interface_impl_opensles;
+			impl_list[1] = NULL;
+		} else {
+			if (device_get_android_api() >= 24)
 				impl_list[0] = &audio_interface_impl_audiotrack_java;
 			else if (device_get_android_version() >= ANDROID_VERSION_JB_4_3)
 				impl_list[0] = &audio_interface_impl_audiotrack_new;
@@ -71,6 +84,7 @@ int audio_interface_init(void)
 				impl_list[0] = &audio_interface_impl_audiotrack;
 			impl_list[1] = &audio_interface_impl_opensles;
 			impl_list[2] = NULL;
+		}
 	}
 	for (i = 0; impl_list[i] != NULL && impl == NULL; ++i) {
 		if (impl_list[i]->init() == 0) {

@@ -165,6 +165,8 @@ void device_config_init()
 		hw_type = HW_TYPE_RK30;
 	else if (strncmp(value, "rk32", strlen("rk32")) == 0)
 		hw_type = HW_TYPE_RK32;
+	else if (strncmp(value, "amlogic", strlen("amlogic")) == 0)
+		hw_type = HW_TYPE_AMLOGIC;
 	else if (strcmp(value, "tegra3") == 0)
 		hw_type = HW_TYPE_TEGRA3;
 	else if (strcmp(value, "tegra") == 0)

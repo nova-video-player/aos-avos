@@ -280,13 +280,13 @@ ERR			LOG("!!!EXCEPTION DeleteGlobalRef");
 	int channelConfig = track_chanmask << 2;
 	int audioFormat = track_format;
 	int mode = 1; /*MODE_STREAM*/
-	at->frame_count = call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
+	at->buf_size = (at->passthrough == 2) ? 32768 : call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
 
 	jobject audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass,
 		(*at->env)->GetMethodID(at->env, at->audiotrackClass, "<init>", "(IIIIII)V"),
 		streamType, sampleRateInHz, channelConfig,
-		audioFormat, at->frame_count, mode);
+		audioFormat, at->buf_size, mode);
 
 	int failed = 0;
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
@@ -308,8 +308,7 @@ ERR			LOG("audiotrack ctor failed");
 
 	if (!failed) {
 		//frame_size reported can be false for compressed formats
-		//(i.e. 16 instead of 24 or 32), needs to be fixed, in the meantime *2 waranties enough space
-		at->buf_size = 2 * at->frame_count * at->frame_size * ((at->passthrough == 2) ? 1 : at->channel_count);
+		at->frame_count = at->buf_size / at->frame_size;
 DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
 		at->jbuffer = (jbyteArray) (*at->env)->NewGlobalRef(at->env, (*at->env)->NewByteArray(at->env, at->buf_size));
 	}
@@ -433,7 +432,7 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 1 : at->channel_count);
+	len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
 	if ((buffer = (unsigned char *)malloc(len)) == NULL)
 		return -1;
 	memset(buffer, 0, len);

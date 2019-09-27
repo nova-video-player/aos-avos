@@ -417,6 +417,7 @@ typedef enum {
 #define VIDEO_FOURCC_H265		mmioFOURCC('H', '2', '6', '5')
 #define VIDEO_FOURCC_X265		mmioFOURCC('X', '2', '6', '5')
 #define VIDEO_FOURCC_HEVC		mmioFOURCC('H', 'E', 'V', 'C')
+#define VIDEO_FOURCC_AV01		mmioFOURCC('A', 'V', '0', '1')
 
 #define VIDEO_FOURCC_SVQ1		mmioFOURCC('S', 'V', 'Q', '1')
 #define VIDEO_FOURCC_SVQ3		mmioFOURCC('S', 'V', 'Q', '3')
@@ -497,6 +498,7 @@ enum {
 	VIDEO_FORMAT_THEORA,
 	VIDEO_FORMAT_HEVC,
 	VIDEO_FORMAT_LAVC,
+	VIDEO_FORMAT_AV1,
 };
 
 // video sub formats

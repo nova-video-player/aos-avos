@@ -623,6 +623,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 		case VIDEO_FORMAT_VP9:
 			sfdec_codec = SFDEC_VIDEO_VP9;
 			break;
+		case VIDEO_FORMAT_AV1:
+			sfdec_codec = SFDEC_VIDEO_AV1;
+			break;
 		case VIDEO_FORMAT_MPEG:
 			sfdec_codec = SFDEC_VIDEO_MPEG2;
 			break;
@@ -969,6 +972,7 @@ OMXC_REGISTER( VIDEO_FORMAT_VP8, NULL );
 #endif
 #ifdef CONFIG_OMX_VP9
 OMXC_REGISTER( VIDEO_FORMAT_VP9, NULL );
+OMXC_REGISTER( VIDEO_FORMAT_AV1, NULL );
 #endif
 
 #ifdef DEBUG_MSG
@@ -982,6 +986,7 @@ static STREAM_REG_DEC_VIDEO reg_rv4   = { VIDEO_FORMAT_RV40, 0, MAXW, MAXH, 0, D
 static STREAM_REG_DEC_VIDEO reg_rv3   = { VIDEO_FORMAT_RV30, 0, MAXW, MAXH, 0, DSP3, new_dec, "sfdec", NULL };
 static STREAM_REG_DEC_VIDEO reg_vp8   = { VIDEO_FORMAT_VP8, 0, MAXW, MAXH, 0, DSP3, new_dec, "sfdec", NULL };
 static STREAM_REG_DEC_VIDEO reg_vp9   = { VIDEO_FORMAT_VP9, 0, MAXW, MAXH, 0, DSP3, new_dec, "sfdec", NULL };
+static STREAM_REG_DEC_VIDEO reg_av1   = { VIDEO_FORMAT_AV1, 0, MAXW, MAXH, 0, DSP3, new_dec, "sfdec", NULL };
 
 static void _reg_sfc() 
 {
@@ -1013,8 +1018,11 @@ serprintf("register OMX for VIDEO_FORMAT_VP8\r\n");
 	stream_unregister_dec_video( VIDEO_FORMAT_VP8 );
 	stream_register_dec_video( &reg_vp8 );
 serprintf("register OMX for VIDEO_FORMAT_VP9\r\n");
-        stream_unregister_dec_video( VIDEO_FORMAT_VP9 );
-        stream_register_dec_video( &reg_vp9 );
+	stream_unregister_dec_video( VIDEO_FORMAT_VP9 );
+	stream_register_dec_video( &reg_vp9 );
+serprintf("register OMX for VIDEO_FORMAT_AV1\r\n");
+	stream_unregister_dec_video( VIDEO_FORMAT_AV1 );
+	stream_register_dec_video( &reg_av1 );
 }
 
 DECLARE_DEBUG_COMMAND_VOID( "regsfcc", _reg_sfc );

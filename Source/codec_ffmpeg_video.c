@@ -265,6 +265,9 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 	case VIDEO_FORMAT_VP9:
 		codec_id	= AV_CODEC_ID_VP9;
 		break;
+	case VIDEO_FORMAT_AV1:
+		codec_id    = AV_CODEC_ID_AV1;
+		break;
 	case VIDEO_FORMAT_RV10:
 		codec_id         = AV_CODEC_ID_RV10;
 		break;
@@ -851,6 +854,7 @@ STREAM_REGISTER_DEC_VIDEO( VIDEO_FORMAT_VP8,  0,                  MAXW, MAXH,   
 
 #ifdef CONFIG_FF_VP9
 STREAM_REGISTER_DEC_VIDEO( VIDEO_FORMAT_VP9,  0,                  MAXW, MAXH,                    GPP, _new ,"ffmpeg", NULL );
+STREAM_REGISTER_DEC_VIDEO( VIDEO_FORMAT_AV1,  0,                  MAXW, MAXH,                    GPP, _new ,"ffmpeg", NULL );
 #endif
 
 #ifdef CONFIG_THEORA

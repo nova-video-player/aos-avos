@@ -23,6 +23,8 @@ const char *get_mimetype(sfdec_codec_t codec)
             return "video/x-vnd.on2.vp9";
         case SFDEC_VIDEO_AVC:
             return "video/avc";
+        case SFDEC_VIDEO_AV1:
+            return "video/av01";
         case SFDEC_VIDEO_HEVC:
             return "video/hevc";
         case SFDEC_VIDEO_MPEG4:

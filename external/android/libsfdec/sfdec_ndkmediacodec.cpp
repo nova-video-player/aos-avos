@@ -68,23 +68,39 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
 } while (0)
 #define CHECK_STATUS(err) CHECK((err) == AMEDIA_OK)
 
+static const auto KEY_CROP_LEFT = "crop-left";
+static const auto KEY_CROP_RIGHT = "crop-right";
+static const auto KEY_CROP_BOTTOM = "crop-bottom";
+static const auto KEY_CROP_TOP = "crop-top";
+
 static int init_renderer(sfdec_priv_t *sfdec)
 {
     media_status_t err;
-    int32_t width, height;
+    int32_t width, height, crop_left, crop_right, crop_bottom, crop_top;
     AMediaFormat *format = AMediaCodec_getOutputFormat(sfdec->mCodec);
 
     if (format != NULL) {
-        if (AMediaFormat_getInt32(format, "width", &width)) {
-            LOG("width changed: %d -> %d", sfdec->width, width);
-            sfdec->width = width;
-        }
-        if (AMediaFormat_getInt32(format, "height", &height)) {
-            LOG("height changed: %d -> %d", sfdec->height, height);
-            sfdec->height = height;
-        }
-    }
+            if (AMediaFormat_getInt32(format, KEY_CROP_RIGHT, &crop_right)
+                            && AMediaFormat_getInt32(format, KEY_CROP_LEFT, &crop_left)
+                            && AMediaFormat_getInt32(format, KEY_CROP_BOTTOM, &crop_bottom)
+                            && AMediaFormat_getInt32(format, KEY_CROP_TOP, &crop_top)) {
 
+                sfdec->width = crop_right - crop_left + 1;
+                sfdec->height = crop_bottom - crop_top + 1;
+                LOG("crop changed: WxH %dx%d ; cr %d cl %d cb %d ct %d",
+                                sfdec->width, sfdec->height,
+                                crop_right, crop_left, crop_bottom, crop_top);
+            } else {
+                    if (AMediaFormat_getInt32(format, "width", &width)) {
+                            LOG("width changed: %d -> %d", sfdec->width, width);
+                            sfdec->width = width;
+                    }
+                    if (AMediaFormat_getInt32(format, "height", &height)) {
+                            LOG("height changed: %d -> %d", sfdec->height, height);
+                            sfdec->height = height;
+                    }
+            }
+    }
     return 0;
 }
 

@@ -76,12 +76,12 @@ static int init_renderer(sfdec_priv_t *sfdec)
 
     if (format != NULL) {
         if (AMediaFormat_getInt32(format, "width", &width)) {
-            LOG("width NOT changed: %d -> %d", sfdec->width, width);
-            //sfdec->width = width;
+            LOG("width changed: %d -> %d", sfdec->width, width);
+            sfdec->width = width;
         }
         if (AMediaFormat_getInt32(format, "height", &height)) {
-            LOG("height NOT changed: %d -> %d", sfdec->height, height);
-            //sfdec->height = height;
+            LOG("height changed: %d -> %d", sfdec->height, height);
+            sfdec->height = height;
         }
     }
 
@@ -268,14 +268,13 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
 
-	    // here we init renderer based on codec information that could be erroneous and yield to incorrect AR
             if (init_renderer(sfdec))
                 continue;
             read_out->flag |= SFDEC_READ_SIZE;
             read_out->size.width = sfdec->width;
             read_out->size.height = sfdec->height;
             read_out->size.interlaced = 0;
-            LOG("INFO_FORMAT_CHANGED: %dx%d", sfdec->width, sfdec->height);
+            DBG LOG("INFO_FORMAT_CHANGED: %dx%d", sfdec->width, sfdec->height);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
             DBG LOG("INFO_OUTPUT_BUFFERS_CHANGED");

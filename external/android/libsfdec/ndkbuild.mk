@@ -48,17 +48,20 @@ endif # ifneq ($(NDK_ANDROID_L),true)
 
 # sfdec.core.21 (using ndk API)
 
+define sfdec_build_shared
 include $(CLEAR_VARS)
-ANDROID_L_PLATFORMS := $(NDK_ROOT)/platforms/android-21/arch-$(TARGET_ARCH)
-LOCAL_MODULE := libsfdec.core.21$(AVOS_LIBS_SUFFIX)
+LOCAL_MODULE := libsfdec.core.$(1)$(AVOS_LIBS_SUFFIX)
 LOCAL_SRC_FILES := sfdec_ndkmediacodec.cpp codec_audio_mediacodec.cpp sfdec_common.cpp
 LOCAL_C_INCLUDES := \
-	$(AVOS_DIR)/common/Include \
-	$(ANDROID_L_PLATFORMS)/usr/include
-LOCAL_CFLAGS := -DSFDEC_ANDROID_API=21
+	$(AVOS_DIR)/common/Include
+LOCAL_CFLAGS := -DSFDEC_ANDROID_API=$(1)
 LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
-LOCAL_LDLIBS:= -L$(ANDROID_L_PLATFORMS)/usr/lib -lmediandk -landroid
+LOCAL_LDLIBS:= -lmediandk -landroid
 include $(BUILD_SHARED_LIBRARY)
+endef
+
+$(eval $(call sfdec_build_shared,21))
+$(eval $(call sfdec_build_shared,26))
 
 # libsfdec
 include $(CLEAR_VARS)

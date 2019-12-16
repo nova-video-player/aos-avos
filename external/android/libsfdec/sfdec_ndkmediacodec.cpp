@@ -19,7 +19,7 @@
 
 #ifdef __ANDROID_API__
 #undef __ANDROID_API__
-#define __ANDROID_API__ 21
+#define __ANDROID_API__ SFDEC_ANDROID_API
 #endif
 
 #include <media/NdkMediaCodec.h>
@@ -42,6 +42,7 @@ struct sfdec_mediacodec
 {
     ANativeWindow   *mNativeWindow;
     AMediaFormat    *mFormat;
+    AMediaFormat    *mScaling;
     AMediaCodec     *mCodec;
     int32_t width;
     int32_t height;
@@ -161,6 +162,13 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     CHECK_STATUS(err);
     sfdec->started = true;
 
+    // Try to impose scale to fit with crop on some SoC that fail to comply (namely amlogic) and result in bad aspect ratio
+    sfdec->mScaling = AMediaFormat_new();
+    CHECK(sfdec->mScaling != NULL);
+    // 2 = scale to fit with crop (check all values) 1 scale to fit
+    // scale to fit with crop should be ok for all configuration but to be checked
+    AMediaFormat_setInt32(sfdec->mScaling, "android._video-scaling", 2);
+
     if (extradata && (codec == SFDEC_VIDEO_HEVC || codec == SFDEC_VIDEO_WMV))
             sfdec_send_input2(sfdec, extradata, extradata_size, 0, 0, 1, 2/* BUFFER_FLAG_CODECCONFIG (not exported)*/);
     return sfdec;
@@ -183,6 +191,8 @@ static void sfdec_destroy(sfdec_priv_t *sfdec)
         AMediaCodec_delete(sfdec->mCodec);
     if (sfdec->mFormat != NULL)
         AMediaFormat_delete(sfdec->mFormat);
+    if (sfdec->mScaling != NULL)
+        AMediaFormat_delete(sfdec->mScaling);
     delete sfdec;
 }
 
@@ -283,6 +293,10 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
             DBG LOG("buf: %d / time: %lld", index, info.presentationTimeUs);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+            #if __ANDROID_API__ >= 26
+	    // Apply scale to scale to fit with crop for correct aspect ratio on amlogic (at least)
+	    AMediaCodec_setParameters(sfdec->mCodec, sfdec->mScaling);
+            #endif
 
             if (init_renderer(sfdec))
                 continue;
@@ -290,7 +304,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
             read_out->size.width = sfdec->width;
             read_out->size.height = sfdec->height;
             read_out->size.interlaced = 0;
-            DBG LOG("INFO_FORMAT_CHANGED: %dx%d", sfdec->width, sfdec->height);
+            LOG("INFO_FORMAT_CHANGED: %dx%d", sfdec->width, sfdec->height);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
             DBG LOG("INFO_OUTPUT_BUFFERS_CHANGED");
@@ -300,7 +314,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
         } else if (index == -10000) { // 0xFFFFD8F0 but works in 64b
             if (sfdec->flush) {
                 LOG("mCodec->dequeueOutputBuffer returned -10000 while flushing IGNORE!");
-            	return 0;
+                return 0;
             } else {
                 LOG("mCodec->dequeueOutputBuffer returned -10000");
                 return -1;

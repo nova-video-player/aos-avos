@@ -896,19 +896,14 @@ int stream_parser_get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STRE
 void stream_parser_send_video_extra( VIDEO_PROPERTIES *video, CBE *cbe, int *size )
 {
 #ifdef CONFIG_H264
-	if( video->format == VIDEO_FORMAT_H264 && video->needs_header ) {
-		if(!video->header_sent) {
-			if( !H264_parse_avcc( video, cbe, size, &video->nal_unit_size ) ) {
-DBGS serprintf("extra: AVCC!\r\n" );
-			}
-			video->header_sent = 1;
-		}
+	if( video->format == VIDEO_FORMAT_H264 ) {
+		// do not send extradata inline
 		return;
 	}
 #endif
 #ifdef CONFIG_HEVC
 	if( video->format == VIDEO_FORMAT_HEVC || video->format == VIDEO_FORMAT_WMV3 ) {
-		// do not send HEVC extradata inline
+		// do not send extradata inline
 		return;
 	}
 #endif

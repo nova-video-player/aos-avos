@@ -1775,6 +1775,7 @@ serprintf("AVCC: width from SPS %d > %d\n", s->video->sps.width, s->video->width
 serprintf("AVCC: height from SPS %d > %d\n", s->video->sps.height, s->video->height );
 					s->video->height = s->video->sps.height;
 				}
+			H264_convert_extradata( s->video );
 			}
 		}
 		// and now with even moar ugly:
@@ -1800,7 +1801,6 @@ DBGS serprintf("H264 with NO SPS in extradata!\n");
 			if( !HEVC_convert_extradata( s->video ) ) {
 DBGS serprintf("HVCC!\r\n" );
 				s->video->hvcc = 1;
-				//s->video->needs_header = 1;
 			}
 		}
 #endif

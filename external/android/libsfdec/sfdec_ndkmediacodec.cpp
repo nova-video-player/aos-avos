@@ -43,8 +43,11 @@ struct sfdec_mediacodec
     ANativeWindow   *mNativeWindow;
     AMediaFormat    *mFormat;
     AMediaCodec     *mCodec;
+    sfdec_codec_t codec;
     int32_t width;
     int32_t height;
+    void *extradata;
+    size_t extradata_size;
     int rotation;
     bool started;
     int flush;
@@ -114,9 +117,12 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
         return NULL;
 
     err_count = 0;
+    sfdec->codec = codec;
     sfdec->rotation = rotation;
     sfdec->width = *width;
     sfdec->height = *height;
+    sfdec->extradata = extradata;
+    sfdec->extradata_size = extradata_size;
     sfdec->mNativeWindow = (ANativeWindow *)surface_handle;
 
     DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
@@ -135,18 +141,14 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (input_size > 0)
         AMediaFormat_setInt32(sfdec->mFormat, "max-input-size", input_size);
 
-    if (extradata && (codec == SFDEC_VIDEO_HEVC))
-        AMediaFormat_setBuffer(sfdec->mFormat, "csd-0", extradata, extradata_size);
-
     err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, sfdec->mNativeWindow, NULL, 0);
     CHECK_STATUS(err);
 
     err = AMediaCodec_start(sfdec->mCodec);
     CHECK_STATUS(err);
     sfdec->started = true;
+    sfdec->flush = 1;
 
-    if (extradata && (codec == SFDEC_VIDEO_HEVC || codec == SFDEC_VIDEO_WMV))
-            sfdec_send_input2(sfdec, extradata, extradata_size, 0, 0, 1, 2/* BUFFER_FLAG_CODECCONFIG (not exported)*/);
     return sfdec;
 }
 
@@ -202,7 +204,11 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
     size_t bufsize = 0;
     uint8_t *buf = NULL;
 
-    sfdec->flush = 0;
+    if (sfdec->flush) {
+	sfdec->flush = 0;
+	if (sfdec->extradata && (sfdec->codec == SFDEC_VIDEO_AVC || sfdec->codec == SFDEC_VIDEO_HEVC || sfdec->codec == SFDEC_VIDEO_WMV))
+            sfdec_send_input2(sfdec, sfdec->extradata, sfdec->extradata_size, 0, 0, 1, 2/* BUFFER_FLAG_CODECCONFIG (not exported)*/);
+    }
 
     index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, wait ? -1ll : 0);
     if (index < 0)

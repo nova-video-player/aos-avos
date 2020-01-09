@@ -210,8 +210,6 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 		break;
 	case VIDEO_FORMAT_H264:
 		codec_id         = AV_CODEC_ID_H264;
-		// no extradata, we will convert to ES!
-		no_extra         = 1;
 		need_reorder     = 1;
 		break;
 #ifdef CONFIG_FF_HEVC

@@ -25,6 +25,7 @@ int H264_parse_slice_header( const H264_SPS *sps, const UCHAR *p, int *type, int
 int H264_parse_SPS( H264_SPS *sps, const UCHAR *p, int len );
 int H264_parse_PPS( H264_SPS *sps, const UCHAR *p, int len );
 
+int  H264_convert_extradata( VIDEO_PROPERTIES *video );
 int  H264_parse_avcc( VIDEO_PROPERTIES *video, CBE *cbe, int *out_size, int *nal_unit_size );
 int  H264_parse_NAL ( UCHAR *p, int size, CBE *cbe, int *out_size, int  nal_unit_size );
 void H264_end_NAL( CBE *cbe, int *out_size );

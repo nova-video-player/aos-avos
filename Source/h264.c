@@ -190,6 +190,109 @@ int H264_parse_avcc( VIDEO_PROPERTIES *video, CBE *cbe, int *out_size, int *nal_
 	return 0;
 }
 
+static int _convert_extradata( UCHAR *data, int data_size,
+                           int *_out_size, int *_nal_unit_size)
+{
+	UCHAR *p   = data;
+	UCHAR *end = data + data_size;
+
+	UCHAR *out;
+	int out_max  = data_size;
+	int out_size = 0;
+
+	if( end - p < 5 ) {
+		serprintf("extradata too small\n" );
+		return -1;
+	}
+
+	if( p[0] != 1 )
+		return 1;
+
+
+	out = amalloc( out_max );
+	if( !out ) {
+		return -1;
+	}
+
+	p += 4;
+
+	int nal_unit_size = (*p & 0x03) + 1;
+	if( _nal_unit_size ) {
+		*_nal_unit_size = nal_unit_size;
+	}
+	p++;
+	DBG serprintf("nal_unit_size : %d \r\n", nal_unit_size);
+
+	for (int j = 0; j < 2; j++) {
+		if( end - p < 1 ) {
+			serprintf("extradata too small\n" );
+			goto ErrorExit;
+		}
+
+		int count = *p++ & 0x1F;
+		DBG serprintf("sps/pps count     : %d  \r\n", count);
+
+		int i;
+		for( i = 0; i < count; i++ ) {
+			int nal_size;
+			if( end - p < 2 ) {
+				serprintf("avcc data too small!\n" );
+				goto ErrorExit;
+			}
+			nal_size = p[0] << 8 | p[1];
+			DBG serprintf("\t\t\tnal_size %d\n", nal_size );
+			p += 2;
+
+			if( nal_size < 0 || end - p < nal_size ) {
+				serprintf("NAL unit size does not match\n");
+				goto ErrorExit;
+			}
+
+			if( out_size + 4 + nal_size > out_max ) {
+				serprintf("outbuf too small\n");
+				goto ErrorExit;
+			}
+
+			memcpy(out + out_size, sync_word, 4);
+			out_size += 4;
+			memcpy(out + out_size, p, nal_size);
+			p += nal_size;
+			out_size += nal_size;
+		}
+	}
+	DBG serprintf("in %d  out %d\n", data_size, out_size );
+
+	memcpy( data, out, out_size );
+	if( _out_size ) {
+		*_out_size = out_size;
+	}
+
+	afree(out);
+	return 0;
+
+ErrorExit:
+	afree(out);
+	return 1;
+}
+
+int H264_convert_extradata( VIDEO_PROPERTIES *video )
+{
+        UCHAR *p;
+        int size;
+DBG serprintf("H264_convert_extradata\r\n");
+
+        if( video->extraDataSize ) {
+                p    = video->extraData;
+                size = video->extraDataSize;
+        } else if ( video->extraDataSize2 ) {
+                p    = video->extraData2;
+                size = video->extraDataSize2;
+        } else {
+                return 1;
+        }
+        return _convert_extradata(p, size, &video->extraDataSize, &video->nal_unit_size );
+}
+
 int H264_parse_NAL( UCHAR *d, int size, CBE *cbe, int *out_size, int nal_unit_size )
 {
 DBGP4 serprintf("H264_parse_NAL: %d\r\n", size);	

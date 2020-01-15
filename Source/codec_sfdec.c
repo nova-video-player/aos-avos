@@ -600,10 +600,6 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			sfdec_codec = SFDEC_VIDEO_HEVC;
 			break;
 		case VIDEO_FORMAT_MPG4: {
-			if (hw_type == HW_TYPE_QCOM_S1 || hw_type == HW_TYPE_MTK) {
-				CLOG("that codec doesn't work on that device: abort");
-				return 1;
-			}
 			sfdec_codec = SFDEC_VIDEO_MPEG4;
 			break;
 		}

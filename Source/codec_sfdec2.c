@@ -580,8 +580,6 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			CLOG("too much frames for OMXCodec/MediaCodec on TI: abort");
 			return 1;
 		}
-	} else if (hw_type == HW_TYPE_MTK) {
-		input_size = 768 * 1024;
 	}
 
 	if (video->extraDataSize) {

@@ -74,7 +74,7 @@ int audio_interface_init(void)
 				impl_list[0] = &audio_interface_impl_opensles;
 				break;
 			default:
-				impl_list[0] = &audio_interface_impl_opensles;
+				impl_list[0] = &audio_interface_impl_audiotrack_java;
 				break;
 			}
 			impl_list[1] = NULL;

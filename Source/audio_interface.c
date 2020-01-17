@@ -44,7 +44,9 @@ int audio_interface_init(void)
 	int i;
 	const audio_interface_impl_t *impl_list[3];
 
-	if (audio_interface_force != -1) {
+	int audio_interface = device_config_get_audio_interface();
+
+	if (audio_interface_force != -1 ) { // local source code force first
 		switch (audio_interface_force) {
 		case 0:
 			impl_list[0] = &audio_interface_impl_null;
@@ -63,12 +65,27 @@ int audio_interface_init(void)
 		}
 		impl_list[1] = NULL;
 	} else {
-		if (device_get_android_api() >= 24) // Nougat 7.0
-			impl_list[0] = &audio_interface_impl_audiotrack_java;
-		else
-			impl_list[0] = &audio_interface_impl_audiotrack_new;
-		impl_list[1] = &audio_interface_impl_opensles;
-		impl_list[2] = NULL;
+		if (audio_interface != 0) { // libavos forced
+			switch (audio_interface) {
+			case 1:
+				impl_list[0] = &audio_interface_impl_audiotrack_java;
+				break;
+			case 2:
+				impl_list[0] = &audio_interface_impl_opensles;
+				break;
+			default:
+				impl_list[0] = &audio_interface_impl_opensles;
+				break;
+			}
+			impl_list[1] = NULL;
+		} else { // normal selection logic
+			if (device_get_android_api() >= 24) // Nougat 7.0
+				impl_list[0] = &audio_interface_impl_audiotrack_java;
+			else
+				impl_list[0] = &audio_interface_impl_audiotrack_new;
+			impl_list[1] = &audio_interface_impl_opensles;
+			impl_list[2] = NULL;
+		}
 	}
 	for (i = 0; impl_list[i] != NULL && impl == NULL; ++i) {
 		if (impl_list[i]->init() == 0) {

@@ -44,6 +44,7 @@ void device_config_set_android_pkg_name(const char *pkg_name);
 void device_config_set_pluginlib(int pluginlib);
 void device_config_set_subtitlepath(const char *path);
 void device_config_set_decoder(int decoder);
+void device_config_set_audio_interface(int audio_interface);
 void device_config_set_output_sample_rate(int sample_rate);
 
 static pthread_t mainloop_thread;
@@ -119,6 +120,11 @@ void libavos_set_subtitlepath(const char *path)
 void libavos_set_decoder(int decoder)
 {
 	device_config_set_decoder(decoder);
+}
+
+void libavos_set_audio_interface(int audio_interface)
+{
+	device_config_set_audio_interface(audio_interface);
 }
 
 void libavos_set_codepage(int codepage)

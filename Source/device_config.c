@@ -52,6 +52,7 @@ static char brand[PROP_VALUE_MAX] = { 0 };
 static int has_pluginlib = 0;
 static char *subtitle_path = NULL;
 static int mp_decoder = MP_DECODER_ANY;
+static int mp_audio_interface = MP_AUDIO_INTERFACE_ANY;
 static int output_sample_rate = -1;
 
 static const char *hw_type_names[] = DEVICE_HW_TYPE_NAMES;
@@ -323,9 +324,21 @@ void device_config_set_decoder(int decoder)
 	serprintf("device_config.mp_decoder  %d\n", mp_decoder);
 }
 
+void device_config_set_audio_interface(int audio_interface)
+{
+	mp_audio_interface = audio_interface;
+	serprintf("device_config.mp_audio_interface  %d\n", mp_audio_interface);
+}
+
+
 int device_config_get_decoder(void)
 {
 	return mp_decoder;
+}
+
+int device_config_get_audio_interface(void)
+{
+	return mp_audio_interface;
 }
 
 void device_config_set_output_sample_rate(int sample_rate)

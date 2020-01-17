@@ -34,6 +34,7 @@ void libavos_debug_exit();
 void libavos_avsh(const char *cmd);
 void libavos_set_subtitlepath(const char *path);
 void libavos_set_decoder(int decoder);
+void libavos_set_audio_interface(int audio_interface);
 void libavos_set_codepage(int codepage);
 void libavos_set_output_sample_rate(int sample_rate);
 void libavos_set_passthrough(int force_passthrough);
@@ -296,6 +297,14 @@ Java_com_archos_medialib_LibAvos_nativeSetDecoder(JNIEnv *env, jobject thiz, jin
 {
     pthread_mutex_lock(&libavos.mtx);
     libavos_set_decoder(decoder);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetAudioInterface(JNIEnv *env, jobject thiz, jint audio_interface)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_audio_interface(audio_interface);
     pthread_mutex_unlock(&libavos.mtx);
 }
 

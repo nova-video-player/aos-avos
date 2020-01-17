@@ -95,6 +95,12 @@ enum mp_decoder_type {
 	MP_DECODER_HW_OMXPLUS,
 };
 
+enum mp_audio_interface_type {
+	MP_AUDIO_INTERFACE_ANY,
+	MP_AUDIO_INTERFACE_AUDIOTRACK,
+	MP_AUDIO_INTERFACE_OPENSLES,
+};
+
 int device_has_hdd( void );
 int device_has_dsp( void );
 int device_has_dsp_overdrive( void );
@@ -111,6 +117,7 @@ int device_config_has_pluginlib();
 int device_get_cpu_count(void);
 const char *device_config_get_subtitlepath(void);
 int device_config_get_decoder(void);
+int device_config_get_audio_interface(void);
 int device_config_get_output_sample_rate(void);
 int device_config_is_audio_format_supported(int format);
 int device_config_is_video_format_supported(int format);

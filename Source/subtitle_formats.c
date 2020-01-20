@@ -418,7 +418,7 @@ DBG serprintf("sub: UTF-16!\n");
 #ifdef CONFIG_ANDROID
 	char template[256];
 	snprintf(template, 255, "/data/data/%s/files/sub", device_config_get_android_pkg_name());
-	tmp_fd = open(template, O_CREAT|O_RDWR);
+	tmp_fd = open(template, O_CREAT|O_RDWR, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP);
 	chmod(template, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP);
 #else
 	char template[] = TMP_FILE;

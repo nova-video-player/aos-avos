@@ -101,7 +101,7 @@ int acodecs_is_supported(int format, int is_video, int is_sw_allowed)
 	int i;
 	const char *types[4] = { NULL, NULL, NULL, NULL };
 
-	serprintf("acodecs_is_supported(%d, is_video %d)\n", format, is_video);
+	DBG serprintf("acodecs_is_supported(%d, is_video %d)\n", format, is_video);
 	// to have the disable SW fake HW codec in Android via CodecDiscovery
 	// you need to have a types array entry declared
 	if (is_video) {

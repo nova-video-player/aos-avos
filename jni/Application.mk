@@ -21,3 +21,8 @@ APP_ABI := $(NDK_APP_ABI)
 endif
 APP_PLATFORM := android-21
 APP_STL := c++_shared
+
+ifeq (1,$(ASAN))
+APP_CFLAGS := -fsanitize=address -fno-omit-frame-pointer
+APP_LDFLAGS := -fsanitize=address
+endif

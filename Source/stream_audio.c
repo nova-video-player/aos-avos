@@ -353,6 +353,9 @@ serprintf(" ae! ");
 
 		if( s->audio_sink ) {
 			if( !audio_frame.error ) { 
+				if( s->audio_filter && !passthrough) {
+					s->audio_filter->filter( s->audio_filter, &audio_frame );
+				}
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
 				while( size > 0 ) {
@@ -365,11 +368,6 @@ serprintf(" ae! ");
 						}
 						stream_yield_RT();
 					}
-
-					if( s->audio_filter && !passthrough) {
-						s->audio_filter->filter( s->audio_filter, &audio_frame );
-					}
-
 					int size_written = s->audio_sink->write( s, &audio_frame );
 
 					if( s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {

@@ -172,8 +172,6 @@ void device_config_init()
 		hw_type = HW_TYPE_RK32;
 	else if (strcmp(value, "tegra3") == 0)
 		hw_type = HW_TYPE_TEGRA3;
-	else if (strcmp(value, "tegra") == 0)
-		hw_type = HW_TYPE_TEGRA2;
 	else if (strcmp(value, "msm7627a") == 0)
 	        hw_type = HW_TYPE_QCOM_S1;
 	else if (strcmp(value, "msm8960") == 0)

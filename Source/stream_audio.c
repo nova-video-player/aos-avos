@@ -376,6 +376,8 @@ serprintf(" ae! ");
 							s->audio_samples += ((passthrough==2)?audio_frame.fakeSize:size_written) / s->audio->bytesPerFrame;
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
 							_set_audio_time( s, s->audio_ref_time + delta );
+							// if size_written < size, we don't want to go out of sync on passthrough
+							audio_frame.fakeSize = 0;
 						}
 					}
 

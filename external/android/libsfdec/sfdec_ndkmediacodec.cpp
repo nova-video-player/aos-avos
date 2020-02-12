@@ -138,6 +138,8 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
         AMediaFormat_setInt64(sfdec->mFormat, "durationUs", duration_us);
     AMediaFormat_setInt32(sfdec->mFormat, "width", sfdec->width);
     AMediaFormat_setInt32(sfdec->mFormat, "height", sfdec->height);
+    AMediaFormat_setInt32(sfdec->mFormat, "max-width", sfdec->width);
+    AMediaFormat_setInt32(sfdec->mFormat, "max-height", sfdec->height);
     if (input_size > 0)
         AMediaFormat_setInt32(sfdec->mFormat, "max-input-size", input_size);
 

@@ -368,9 +368,9 @@ printf("open video\r\n");
 		
 		// Inform the codec that we can handle truncated bitstreams -- i.e.,
 		// bitstreams where frame boundaries can fall in the middle of packets
-		if( vCodec->capabilities & CODEC_CAP_TRUNCATED) {
+		if( vCodec->capabilities & AV_CODEC_CAP_TRUNCATED) {
 printf("can handle truncated\r\n");
-			vCodecCtx->flags |= CODEC_FLAG_TRUNCATED;
+			vCodecCtx->flags |= AV_CODEC_FLAG_TRUNCATED;
 		}
 		// Open codec
 		if (avcodec_open2(vCodecCtx, vCodec, NULL) < 0) {

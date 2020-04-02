@@ -849,7 +849,7 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 
 extern int stream_drive_wake_sleep;
 
-#define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->audio->scale     / s->audio->rate )
+#define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale     / s->audio->rate )
 #define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
 #define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale  / s->subtitle->rate )
 
@@ -871,7 +871,7 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_AUDIO_TS( packet->pts );
-	return (t == -1) ? -1 : t - ff_p->start_time;
+	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time;
 }
 
 // ************************************************************
@@ -1169,7 +1169,7 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 	
-	if( cdata->time != -1 ) {
+	if( cdata->time != STREAM_NO_PTS_VALUE ) {
 		if( ff_p->last_audio_time && abs(cdata->time - ff_p->last_audio_time) > 1000 ) {
 serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
 			cdata->audio_skip = 1;

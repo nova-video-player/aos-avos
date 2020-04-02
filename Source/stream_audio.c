@@ -230,7 +230,7 @@ DBGV serprintf("drop audio chunk: time %d\r\n", cdata.time );
 			}
 			
 			if( cdata.valid ) {
-				if( cdata.time < 0 ) {
+				if( cdata.time != STREAM_NO_PTS_VALUE && cdata.time < 0 ) {
 					// drop this shit!
 DBGV serprintf("audio in the past! %d\r\n", cdata.time );			
 					continue;
@@ -259,14 +259,14 @@ serprintf("audio_skip(%d)!\r\n", cdata.time);
 				}
 
 				if( s->sync_mode == STREAM_SYNC_SAMPLES && s->speed == STREAM_SPEED_NORMAL ) {
-					if( s->audio_ref_time == -1 && cdata.time != -1 ) {
+					if( s->audio_ref_time == -1 && cdata.time != STREAM_NO_PTS_VALUE ) {
 						s->audio_ref_time = cdata.time;
 						s->audio_samples  = 0;
 						_set_audio_time( s, cdata.time );
 DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 					}
 				} else {
-					if( cdata.time != -1 ) {
+					if( cdata.time != STREAM_NO_PTS_VALUE ) {
 						_set_audio_time( s, cdata.time );
 					}
 				}

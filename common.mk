@@ -72,7 +72,7 @@ CFLAGS = -pipe -Werror-implicit-function-declaration -Wall -Wno-missing-braces \
 	 -Wno-format-security -Wno-deprecated-declarations
 CFLAGS += -Wno-unused -Wno-sign-compare -Wno-missing-field-initializers #TODO
 CFLAGS += -Werror
-ifeq ($(TGT_BASE),arm)
+ifeq ($(BUILD_FROM),ANDROID)
 CFLAGS += -no-integrated-as
 endif
 

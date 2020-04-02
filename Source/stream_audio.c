@@ -245,13 +245,6 @@ DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 					stream_audio_props_changed( s, &cdata );
 				}
 
-				// check if the audio chunk is discontinuous and wait
-				if( cdata.audio_skip_time ) {
-serprintf("_wait!(%d)", cdata.audio_skip_time);
-					_wait( s, cdata.audio_skip_time );
-					cdata.audio_skip_time = 0;
-				}
-
 				// we have a valid chunk
 				if( cdata.pos != -1 ) {
 					s->audio_pos = cdata.pos;

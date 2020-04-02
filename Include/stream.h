@@ -128,7 +128,6 @@ typedef struct STREAM_CDATA
 	int		key;
 	int		video_skip;
 	int		audio_skip;
-	int		audio_skip_time;
 	
 	int 		frm_type;	// (video) frame type
 	int  		offset;

@@ -80,6 +80,8 @@ enum
 	CHUNK_VALID,
 };
 
+#define STREAM_NO_PTS_VALUE          ((int32_t)UINT32_C(0x80000000))
+
 typedef struct STREAM_CHUNK {
 	int  	      	type;		// audio or video chunk
 	

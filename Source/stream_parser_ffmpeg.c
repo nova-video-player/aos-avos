@@ -1177,7 +1177,7 @@ serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
 		ff_p->last_audio_time = cdata->time;
 	}
 	
-DBGC2 serprintf("get audio: size %6d  pos %8lld  tim %8d  pkt %4d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->aq.packets, ff_p->aq.mem_used );
+DBGC2  serprintf(" A   siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->aq.packets, ff_p->aq.mem_used );
 	memcpy( audio_buffer->data, packet->data, packet->size );
 	
 	cdata->valid = CHUNK_VALID;
@@ -1241,7 +1241,7 @@ static int _get_video_cdata( STREAM *s, CBE *cbe, STREAM_CDATA *cdata )
 	cdata->time       = _get_video_time( s, packet );
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
-DBGC8 serprintf("get VIDEO: size %6d  pos %8lld  key %d  tim %8d  pkt %4d  %8d\r\n", packet->size, packet->pos, cdata->key, cdata->time, ff_p->vq.packets, ff_p->vq.mem_used );
+DBGC8  serprintf("V    siz %6d  pos %8lld %d tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->key, cdata->time, ff_p->vq.packets, ff_p->vq.mem_used );
 	if( cdata->key ) {
 		// check video props change in case of key frame
 		VIDEO_PROPERTIES new = { 0 };
@@ -1380,7 +1380,7 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 	cdata->time       = (GET_SUB_TS( packet->pts) == -1) ? -1 : GET_SUB_TS(packet->pts) - ff_p->start_time;
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
-DBGC32 serprintf("get  sub : size %6d  pos %8lld  time %8d  pkt %4d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
+DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
 
 	
 	int duration = GET_SUB_TS( packet->duration );

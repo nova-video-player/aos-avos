@@ -2988,9 +2988,9 @@ static void _print_debug( STREAM *s )
 		if( !st )
 			return;	
 		if( st->buffer_size ) {
-			serprintf("[%2lld%%] ", (UINT64)st->buffer_used * 100 / (UINT64)st->buffer_size);
+			serprintf("[%3lld%%] ", (UINT64)st->buffer_used * 100 / (UINT64)st->buffer_size);
 			if( st->buffer2_size )
-				serprintf( "[%2lld%%] ", (UINT64)st->buffer2_used * 100 / (UINT64)st->buffer2_size );
+				serprintf( "[%3lld%%] ", (UINT64)st->buffer2_used * 100 / (UINT64)st->buffer2_size );
 		}
 		serprintf("[%6d  %8d  ", cdata_frame, cdata_time );
 //		serprintf("{%02d}", cdata_v_time );
@@ -3300,7 +3300,7 @@ DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), fram
 		if( s->video_sink->put_time ) {
 			output_frame = frame_q_get( &s->disp_q );
 			if( output_frame ) {
-serprintf("+");		
+//serprintf("+");		
 			}
 		} else {
 			break;

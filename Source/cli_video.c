@@ -185,7 +185,6 @@ DBGV serprintf("etype: %d\n", etype);
 
 void cli_handle_key( int key ) 
 {
-serprintf("key: %2d\n", key );
 	switch( key ) {
 	case KEY_OK:
 		if( AV_get_state() != AV_PLAYING ) {
@@ -224,6 +223,9 @@ serprintf("key: %2d\n", key );
 	case KEY_PGUP,
 	case KEY_PGDOWN,
 */
+	default:
+serprintf("key: %2d\n", key );
+		break;
 	}
 }
 

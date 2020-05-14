@@ -366,7 +366,7 @@ serprintf(" ae! ");
 					if( s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time
 						if( s->audio->samplesPerSec ) {
-							s->audio_samples += ((passthrough==2)?audio_frame.fakeSize:size_written) / s->audio->bytesPerFrame;
+							s->audio_samples += ((passthrough == 2)?audio_frame.fakeSize : size_written) / s->audio->bytesPerFrame;
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
 							_set_audio_time( s, s->audio_ref_time + delta );
 							// if size_written < size, we don't want to go out of sync on passthrough

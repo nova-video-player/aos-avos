@@ -273,8 +273,9 @@ void stream_sync( STREAM *s )
 	
 DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 		
-	if ( stream_no_sync || s->video_sink->put_time )
+	if ( stream_no_sync || s->video_sink->put_time ) {
 		goto EXIT;
+	}
 		 
 	s->drop_B = 0;
 

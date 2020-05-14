@@ -43,7 +43,6 @@
 #define LOG(fmt, ...) serprintf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
 #define DBGLOG  DBGS LOG
 
-static int num_sink_frames = 1;
 static int do_fake  = 0;
 static int force_blit  = 0;
 
@@ -744,6 +743,5 @@ err:
 
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_PARAM  ("ssdf", do_fake  );
-DECLARE_DEBUG_PARAM  ("snsf", num_sink_frames );
 DECLARE_DEBUG_TOGGLE ("ssfb", force_blit );
 #endif

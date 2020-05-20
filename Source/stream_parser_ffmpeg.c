@@ -673,7 +673,8 @@ printf("FFMPEG: cannot find stream info\r\n");
 	pthread_mutex_init( &ff_p->sq.mutex, NULL );
 
 	// make lavf parser use this sync mode!
-	s->sync_mode = STREAM_SYNC_SAMPLES;
+	//s->sync_mode = STREAM_SYNC_SAMPLES;
+	s->sync_mode = STREAM_SYNC_CDATA;
 
 	s->parser_open = 1;
 

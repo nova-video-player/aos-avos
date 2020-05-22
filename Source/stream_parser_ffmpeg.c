@@ -298,6 +298,8 @@ DBGP serprintf("AUDIO\r\n");
 DBGP serprintf("SUBTITLE\r\n");
 		} else if( st->codec->codec_type == AVMEDIA_TYPE_ATTACHMENT ){
 DBGP serprintf("ATTACHEMENT\r\n");
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_DATA ){
+DBGP serprintf("DATA\r\n");
 		} else {
 DBGP serprintf("<unknown> type %d\r\n", st->codec->codec_type);
 		}

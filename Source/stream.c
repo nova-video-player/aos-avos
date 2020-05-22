@@ -1203,6 +1203,21 @@ void stream_show_short_props( STREAM *s )
 			);
 		}
 	}
+	if( s->subtitle->valid ) {
+		int i;
+		for( i = 0; i < s->av.subs_max; i++ ) {
+			SUB_PROPERTIES *sub = s->av.sub + i;
+			serprintf("SUB:    [%04X] [%s] %s gfx %d  ext %d  %d/%d\r\n", 
+				sub->format, 
+				sub_get_format_name( sub ),
+				sub->name,
+				sub->gfx,
+				sub->ext,
+				sub->scale,
+				sub->rate
+			);
+		}
+	}
 }
 
 // *****************************************************************************

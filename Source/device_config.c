@@ -225,15 +225,7 @@ void device_config_init()
 
 	android_property_get("ro.build.version.sdk", value, "0");
 	android_api = atoi(value);
-	if (android_api > 13 && android_api <= 15)
-		android_version = ANDROID_VERSION_ICS;
-	else if (android_api == 16)
-		android_version = ANDROID_VERSION_JB;
-	else if (android_api == 17)
-		android_version = ANDROID_VERSION_JB_4_2;
-	else if (android_api == 18)
-		android_version = ANDROID_VERSION_JB_4_3;
-	else if (android_api > 18)
+	if (android_api > 18)
 		android_version = ANDROID_VERSION_KK;
 	if (android_api > 18) {
 		if (hw_type == HW_TYPE_RK30 || hw_type == HW_TYPE_RK29 ||

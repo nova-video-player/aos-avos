@@ -215,7 +215,8 @@ void device_config_init()
 		// test ro.hardware
 		android_property_get("ro.hardware", value, "0");
 
-		if (strncmp(value, "mt6", strlen("mt6")) == 0 ||
+		if (strncmp(value, "mt6", strlen("mt5")) == 0 ||
+		    strncmp(value, "mt8", strlen("mt6")) == 0 ||
 		    strncmp(value, "mt8", strlen("mt8")) == 0)
 			hw_type = HW_TYPE_MTK;
 		else if(strcmp(value, "fbx6lc") == 0)

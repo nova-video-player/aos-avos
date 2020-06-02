@@ -594,12 +594,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
                 extradata      = WMV_get_rcv_header(video, &rcv_size);
                 extradata_size = rcv_size;
 	}
-	if (!extradata_size) {
-		if (hw_type == HW_TYPE_QCOM_S1 || hw_type == HW_TYPE_MTK) {
-			CLOG("that codec need extradata and we don't have it: abort");
-			return 1;
-		}
-	}
+
 	switch (video->format) {
 		case VIDEO_FORMAT_H264:
 			sfdec_codec = SFDEC_VIDEO_AVC;

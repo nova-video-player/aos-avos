@@ -44,7 +44,7 @@ typedef struct android_buffer {
     size_t size;
 } android_buffer_t;
 
-android_surface_t *android_surface_create(void *surface_handle, int has_archos_enhancement);
+android_surface_t *android_surface_create(void *surface_handle);
 void android_surface_destroy(android_surface_t **as);
 int  android_surface_check_gralloc(void *surface_handle);
 

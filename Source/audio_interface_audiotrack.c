@@ -159,11 +159,6 @@ DBG		LOG("deleting track");
 		dl_at.dtor(at->obj);
 		at->valid = 0;
 	}
-	if (device_get_android_version() >= ANDROID_VERSION_JB &&
-	    device_has_archos_enhancement()) {
-		LOG("use AUDIO_OUTPUT_FLAG_DYNAMIC_RATE");
-		flags = AUDIO_OUTPUT_FLAG_DYNAMIC_RATE;
-	}
 	dl_at.ctor(at->obj, AUDIO_STREAM_MUSIC, rate, track_format,
 	    track_chanmask, framecount, flags, NULL, NULL, 0, 0);
 	if (dl_at.initCheck(at->obj) != 0) {

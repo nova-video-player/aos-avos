@@ -278,7 +278,7 @@ int avos_mp_fillmetadata(avos_mp_t *mp, int type, uint64_t size, ID3_TAG *id3_ta
 			ADD_STR(gap_key + AVOS_MP_METADATA_AUDIO_TRACK_NAME, audiop->name);
 
 			if (audiop->format == WAVE_FORMAT_DTS)
-				token = device_has_archos_enhancement() ? "Digital" :  "DTS";
+				token = "DTS";
 			else
 				token = audio_get_format_name(audiop);
 			ADD_STR(gap_key + AVOS_MP_METADATA_AUDIO_TRACK_FORMAT, token);

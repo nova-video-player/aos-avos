@@ -105,7 +105,6 @@ int device_has_hdd( void );
 int device_has_dsp( void );
 int device_has_dsp_overdrive( void );
 int device_zone( void );
-int device_has_archos_enhancement( void );
 DEVICE_HW_TYPE device_get_hw_type( void );
 const char *device_get_hw_type_name( void );
 DEVICE_ANDROID_VERSION device_get_android_version( void );

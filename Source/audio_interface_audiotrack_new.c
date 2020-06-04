@@ -214,11 +214,6 @@ DBG		LOG("deleting track");
 		at->init = 0;
 		reinit = 1;
 	}
-	if (device_get_android_version() >= ANDROID_VERSION_JB &&
-			device_has_archos_enhancement()) {
-		LOG("use AUDIO_OUTPUT_FLAG_DYNAMIC_RATE");
-		flags = AUDIO_OUTPUT_FLAG_DYNAMIC_RATE;
-	}
 
 	if(at->passthrough || at->direct)
 		flags = AUDIO_OUTPUT_FLAG_DIRECT;

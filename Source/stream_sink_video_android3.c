@@ -403,7 +403,7 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	priv_t *p = sink->priv;
 DBGS serprintf("stream_sink_video_android: open  num_frames %d  cpu_type %d\n", num_frames, rc->cpu_type);
 
-	p->as = android_surface_create(p->surface_handle, device_has_archos_enhancement());
+	p->as = android_surface_create(p->surface_handle);
 	if (!p->as) {
 		LOG("android_surface_create failed");
 		goto err;

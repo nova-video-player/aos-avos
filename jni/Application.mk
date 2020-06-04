@@ -13,7 +13,7 @@
 # limitations under the License.
 
 APP_ALLOW_MISSING_DEPS=true
-APP_CFLAGS := -DARCHOS_ENHANCEMENT
+APP_CFLAGS :=
 ifeq (,$(NDK_APP_ABI))
 APP_ABI := armeabi-v7a
 else

@@ -1143,33 +1143,6 @@ serprintf("OMX: unknown video format %i\r\n", video->format);
 #endif
 	if (comp_opened) {
 		set_video_props(p, video);
-#if 0
-		if (device_get_hw_type() == HW_TYPE_OMAP4 &&
-		    strcmp(p->comp, "OMX.TI.DUCATI1.VIDEO.DECODER") == 0) {
-			/*
-			 * The true video size is returned after the first
-			 * decode.  Apply ducati paddings to video size in
-			 * order to avoid a full realloc when the component
-			 * return the good video size.
-			 */
-			switch (video->format) {
-			case VIDEO_FORMAT_MPG4:
-			case VIDEO_FORMAT_H263:
-				video->padded_width  = ALIGN(video->padded_width + 2 * DUCATI_PADX_MPEG4, 128);
-				video->padded_height = ALIGN(video->padded_height + 4 * DUCATI_PADY_MPEG4, 16);
-#ifdef DEBUG_MSG
-				force_deblocking_value(p);
-#endif
-				break;
-			case VIDEO_FORMAT_H264:
-				video->padded_width  = ALIGN(video->padded_width + 2 * DUCATI_PADX_H264, 128);
-				video->padded_height = ALIGN(video->padded_height + 4 * DUCATI_PADY_H264, 16);
-				break;
-			default:
-				break;
-			}
-		} else
-#endif
 		if (device_get_hw_type() == HW_TYPE_RK30 && strcmp(p->comp, "OMX.rk.video_decoder") == 0) {
 			p->rk30_hack_size_nok = 1;
 		}

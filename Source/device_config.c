@@ -42,7 +42,6 @@ static int has_cpu = 0;
 static int has_hdd = 0;
 static int has_dsp = 1;
 static int has_dsp_overdrive = 0;
-static int has_archos_enhancement = 0;
 static int zone = 0;
 static DEVICE_HW_TYPE hw_type = HW_TYPE_UNKNOWN;
 static DEVICE_ANDROID_VERSION android_version = ANDROID_VERSION_UNKNOWN;
@@ -99,11 +98,6 @@ int device_zone()
 	return zone;
 }
 
-int device_has_archos_enhancement()
-{
-	return has_archos_enhancement;
-}
-
 DEVICE_HW_TYPE device_get_hw_type()
 {
 	return hw_type;
@@ -148,7 +142,6 @@ void device_config_init()
 	android_property_get("ro.board.zone", value, "0");
 	zone = atoi(value);
 	android_property_get("ro.hardware", value, "0");
-	has_archos_enhancement = strcmp(value, "archos") == 0;
 
 	// check if [ro.hardware]: [amlogic]
 	if (strncmp(value, "amlogic", strlen("amlogic")) == 0)
@@ -158,7 +151,7 @@ void device_config_init()
 
 	// test ro.board.platform
 	if (strcmp(value, "omap4") == 0) {
-		hw_type = has_archos_enhancement ? HW_TYPE_ARCHOS_OMAP4 : HW_TYPE_OMAP4;
+		hw_type = HW_TYPE_OMAP4;
 	}
 	else if (strcmp(value, "rockchip") == 0)
 		hw_type = HW_TYPE_RK29;
@@ -241,16 +234,14 @@ void device_config_init()
 	} else {
 		has_hdd = 0;
 	}
-	has_archos_enhancement = 1;
 #endif
 #ifdef CONFIG_ANDROID
 end:
 #endif
 	serprintf("device_config.has_hdd     %d\n", has_hdd);
 	serprintf("device_config.has_dsp     %d\n", has_dsp);
-	serprintf("device_config.has_dsp_od  %d\n", has_dsp);
+	serprintf("device_config.has_dsp_od  %d\n", has_dsp_overdrive);
 	serprintf("device_config.zone        %d\n", zone);
-	serprintf("device_config.has_archos_enhancement %d\n", has_archos_enhancement);
 	serprintf("device_config.hw_type     %s\n", device_get_hw_type_name());
 	serprintf("device_config.cpu_count   %d\n", device_get_cpu_count());
 }

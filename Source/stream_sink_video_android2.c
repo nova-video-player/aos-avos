@@ -482,7 +482,7 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	priv_t *p = sink->priv;
 DBGS serprintf("stream_sink_video_android: open  num_frames %d  cpu_type %d\n", num_frames, rc->cpu_type);
 
-	p->as = android_surface_create(p->surface_handle, device_has_archos_enhancement());
+	p->as = android_surface_create(p->surface_handle);
 	if (!p->as) {
 		LOG("android_surface_create failed");
 		goto err;
@@ -528,18 +528,6 @@ DBGS serprintf("stream_sink_video_android: open  num_frames %d  cpu_type %d\n", 
 	} else {
 		p->padded_width  = video->padded_width;
 		p->padded_height = video->padded_height;
-	}
-
-	/*
-	 * rk30 on jb wants output to be 32 aligned
-	 */
-	if (buffer_type == BUFFER_TYPE_HW &&
-	    device_get_hw_type() == HW_TYPE_RK30 &&
-	    device_get_android_version() == ANDROID_VERSION_JB) {
-		int aligned_width = ALIGN(p->padded_width, 32);
-		int aligned_height = ALIGN(p->padded_height, 32);
-		p->padded_width = aligned_width;
-		p->padded_height = aligned_height;
 	}
 
 	LOG("hal_format: 0x%X, buffer_type: %d hw_usage: 0x%X, size: %dx%d", hal_format, buffer_type, rc->hw_usage, p->padded_width, p->padded_height);

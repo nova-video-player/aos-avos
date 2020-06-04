@@ -43,7 +43,6 @@ struct android_surface {
 	ANativeWindow_Buffer *anbp;
 	int buffer_type;
 	int hal_format;
-	int has_archos_enhancement;
 	int usage;
 	gralloc_module_t const* gralloc;
 #ifdef MEM_OPTIM_HACK
@@ -138,18 +137,17 @@ static void mem_optim_hack_enable(android_surface_t *as)
 #endif
 
 
-android_surface_t *android_surface_create(void *surface_handle, int has_archos_enhancement)
+android_surface_t *android_surface_create(void *surface_handle)
 {
 	android_surface_t *as = NULL;
 	ANativeWindow *anw = (ANativeWindow *)surface_handle;
-	AVOSLOG("surface_handle: %p, anw: %p, archos_enhancement: %d", surface_handle, anw, has_archos_enhancement);
+	AVOSLOG("surface_handle: %p, anw: %p", surface_handle, anw);
 
 	as = (android_surface_t *) calloc(1, sizeof(android_surface_t));
 	if (!as)
 		goto err;
 
 	as->anw = anw;
-	as->has_archos_enhancement = has_archos_enhancement;
 	if (as->anw->common.magic != ANDROID_NATIVE_WINDOW_MAGIC &&
 			as->anw->common.version != sizeof(ANativeWindow))
 		goto err;
@@ -188,7 +186,7 @@ int android_surface_check_gralloc( void *surface_handle )
 	android_surface_t *as;
 	int gralloc = 0;
 	
-	as = android_surface_create(surface_handle, 0);
+	as = android_surface_create(surface_handle);
 	if (!as) {
 AVOSLOG("check_gralloc: android_surface_create failed");
 		return gralloc;
@@ -223,30 +221,13 @@ int android_buffer_setup(android_surface_t *as, int w, int h, int buffer_type, i
 		usage |= hw_usage | GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP;
 
 	as->usage = usage;
-#ifdef ARCHOS_ENHANCEMENT
-	if (as->has_archos_enhancement) {
-		if (buffer_type == BUFFER_TYPE_HW) {
-#ifdef MEM_OPTIM_HACK
-			if (w >= 1920 && *num_frames > 16) {
-				AVOSLOG("mem_optim_hack_enable");
-				mem_optim_hack_enable(as);
-			}
-#endif
-		}
-		usage |= GRALLOC_USAGE_FIX_VIDEO_ASPECT;
-	}
-#endif
 
 	if (as->gralloc) {
 		err = native_window_set_usage(as->anw, usage);
 		CHECK_ERR();
 		err = native_window_set_buffers_format(as->anw, hal_format);
 		CHECK_ERR();
-#if AVOS_ANDROID_API >= 18
 		err = native_window_set_buffers_user_dimensions(as->anw, w, h);
-#else
-		err = native_window_set_buffers_dimensions(as->anw, w, h);
-#endif
 		CHECK_ERR();
 		err = native_window_set_scaling_mode(as->anw, NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
 		CHECK_ERR();
@@ -291,7 +272,7 @@ int android_buffer_setcrop(android_surface_t *as, int ofs_x, int ofs_y, int w, i
 
 static int android_buffer_lock_data(android_surface_t *as, ANativeWindowBuffer_t *anb, void **pdata)
 {
-	if (as->gralloc && (as->buffer_type == BUFFER_TYPE_SW || as->has_archos_enhancement)) {
+	if (as->gralloc && (as->buffer_type == BUFFER_TYPE_SW)) {
 		void *data;
 
 		status_t err = as->gralloc->lock(as->gralloc, anb->handle, as->usage, 0, 0, anb->width, anb->height, &data);
@@ -306,7 +287,7 @@ static int android_buffer_lock_data(android_surface_t *as, ANativeWindowBuffer_t
 
 static int android_buffer_unlock_data(android_surface_t *as, ANativeWindowBuffer_t *anb)
 {
-	if (as->gralloc && (as->buffer_type == BUFFER_TYPE_SW || as->has_archos_enhancement)) {
+	if (as->gralloc && (as->buffer_type == BUFFER_TYPE_SW)) {
 		status_t err = as->gralloc->unlock(as->gralloc, anb->handle);
 		CHECK_ERR();
 	}

@@ -29,9 +29,6 @@
 #define NO_ERROR 0
 typedef int32_t status_t;
 
-#define MEM_OPTIM_HACK
-#define SET_TILER_OPTIM_SYM "_ZN7android21SurfaceComposerClient20setTilerOptimisationEi"
-
 #define GRALLOC_USAGE_FIX_VIDEO_ASPECT 0x04000000
 
 #define AVOSLOG(fmt, ...) do { printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); fflush(stdout); } while (0)
@@ -45,97 +42,7 @@ struct android_surface {
 	int hal_format;
 	int usage;
 	gralloc_module_t const* gralloc;
-#ifdef MEM_OPTIM_HACK
-	int mem_optim_hack;
-#endif
 };
-
-#ifdef MEM_OPTIM_HACK
-/*
- * hack that deactivate Tiler Optimsation with UI in order to have more space
- * available for HD video.
- * we catch crash/kill signals in order to restore the default behavior in case of crash.
- */
-
-#include <unistd.h>
-#include <pthread.h>
-
-static pthread_mutex_t tiler_optim_hack_mtx = PTHREAD_MUTEX_INITIALIZER;
-static struct {
-	int ref_cnt;
-	struct sigaction saterm;
-	struct sigaction sasegv;
-	struct sigaction safpe;
-	struct sigaction sapipe;
-	struct sigaction saill;
-	struct sigaction sabus;
-	int (*set_tiler_optim)(int);
-} tiler_optim_hack;
-
-static void mem_optim_hack_disable_locked()
-{
-	sigaction(SIGTERM, &tiler_optim_hack.saterm, NULL);
-	sigaction(SIGSEGV, &tiler_optim_hack.sasegv, NULL);
-	sigaction(SIGFPE, &tiler_optim_hack.safpe, NULL);
-	sigaction(SIGPIPE, &tiler_optim_hack.sapipe, NULL);
-	sigaction(SIGILL, &tiler_optim_hack.saill, NULL);
-	sigaction(SIGBUS, &tiler_optim_hack.sabus, NULL);
-	tiler_optim_hack.set_tiler_optim(1);
-}
-
-/*
- * proxy signal handler that restore tiler optim, restore previous signals
- * handler and rekill itself
- */
-static void mem_optim_hack_signal_handler(const int signo)
-{
-	mem_optim_hack_disable_locked();
-	kill(getpid(), signo);
-}
-
-static void mem_optim_hack_disable(android_surface_t *as)
-{
-	if (as->mem_optim_hack) {
-		pthread_mutex_lock(&tiler_optim_hack_mtx);
-		if (--tiler_optim_hack.ref_cnt == 0)
-			mem_optim_hack_disable_locked();
-		pthread_mutex_unlock(&tiler_optim_hack_mtx);
-	}
-}
-
-static void mem_optim_hack_enable(android_surface_t *as)
-{
-	pthread_mutex_lock(&tiler_optim_hack_mtx);
-
-	if (!tiler_optim_hack.set_tiler_optim) {
-		tiler_optim_hack.set_tiler_optim = (int (*)(int))dlsym(RTLD_DEFAULT, SET_TILER_OPTIM_SYM);
-		if (!tiler_optim_hack.set_tiler_optim) {
-			pthread_mutex_unlock(&tiler_optim_hack_mtx);
-			return;
-		}
-	}
-
-	if (tiler_optim_hack.ref_cnt++ == 0) {
-		struct sigaction sa;
-
-		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = 0;
-		sa.sa_handler = mem_optim_hack_signal_handler;
-		if (sigaction(SIGTERM, &sa, &tiler_optim_hack.saterm) == 0 &&
-				sigaction(SIGSEGV, &sa, &tiler_optim_hack.sasegv) == 0 &&
-				sigaction(SIGFPE, &sa, &tiler_optim_hack.safpe) == 0 &&
-				sigaction(SIGPIPE, &sa, &tiler_optim_hack.sapipe) == 0 &&
-				sigaction(SIGILL, &sa, &tiler_optim_hack.saill) == 0 &&
-				sigaction(SIGBUS, &sa, &tiler_optim_hack.sabus) == 0) {
-			tiler_optim_hack.set_tiler_optim(0);
-			as->mem_optim_hack = 1;
-		}
-	}
-	pthread_mutex_unlock(&tiler_optim_hack_mtx);
-	usleep(80000); // 80ms
-}
-#endif
-
 
 android_surface_t *android_surface_create(void *surface_handle)
 {
@@ -301,17 +208,9 @@ int android_buffer_dequeue(android_surface_t *as, void **handle)
 
 	if (as->gralloc) {
 		ANativeWindowBuffer_t *anb;
-		#if AVOS_ANDROID_API >= 18
 		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
-		#else
-		err = as->anw->dequeueBuffer(as->anw, &anb);
-		#endif
 		CHECK_ERR();
-		#if AVOS_ANDROID_API >= 18
 		err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
-		#else
-		err = as->anw->lockBuffer(as->anw, anb);
-		#endif
 		CHECK_ERR();
 		*handle = anb;
 
@@ -331,17 +230,9 @@ int android_buffer_dequeue_with_buffer(android_surface_t *as, void **handle, and
 
 	if (as->gralloc) {
 		ANativeWindowBuffer_t *anb;
-#if AVOS_ANDROID_API >= 18
 		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
-#else
-		err = as->anw->dequeueBuffer(as->anw, &anb);
-#endif
 		CHECK_ERR();
-#if AVOS_ANDROID_API >= 18
 		err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
-#else
-		err = as->anw->lockBuffer(as->anw, anb);
-#endif
 		CHECK_ERR();
 		*handle = anb;
 
@@ -374,11 +265,7 @@ int android_buffer_queue(android_surface_t *as, void *handle)
 	if (as->gralloc) {
 		err = android_buffer_unlock_data(as, anb);
 		CHECK_ERR();
-		#if AVOS_ANDROID_API >= 18
 		err = as->anw->queueBuffer_DEPRECATED(as->anw, anb);
-		#else
-		err = as->anw->queueBuffer(as->anw, anb);
-		#endif
 		CHECK_ERR();
 	} else {
 		err = ANativeWindow_unlockAndPost(as->anw);
@@ -397,17 +284,9 @@ int android_buffer_alloc(android_surface_t *as, android_buffer_t *buffer)
 	if (as->gralloc) {
 		ANativeWindowBuffer_t *anb = NULL;
 		void *data = NULL;
-		#if AVOS_ANDROID_API >= 18
 		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
-		#else
-		err = as->anw->dequeueBuffer(as->anw, &anb);
-		#endif
 		CHECK_ERR();
-		#if AVOS_ANDROID_API >= 18
 		err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
-		#else
-		err = as->anw->lockBuffer(as->anw, anb);
-		#endif
 		CHECK_ERR();
 		buffer->handle = anb;
 		buffer->img_handle = anb->handle;
@@ -444,11 +323,7 @@ int android_buffer_cancel(android_surface_t *as, void *handle)
 		err = android_buffer_unlock_data(as, anb);
 		CHECK_ERR();
 
-		#if AVOS_ANDROID_API >= 18
 		err = as->anw->cancelBuffer_DEPRECATED(as->anw, anb);
-		#else
-		err = as->anw->cancelBuffer(as->anw, anb);
-		#endif
 		CHECK_ERR();
 	} else {
 		AVOSLOG("using public native window\n");

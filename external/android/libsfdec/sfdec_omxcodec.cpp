@@ -402,11 +402,7 @@ public:
 
         ANativeWindowBuffer *awb = (ANativeWindowBuffer *) dl_oc.MediaBuffer_getGraphicBuffer(buffer).get();
 
-#if SFDEC_ANDROID_API >= 17
         err = mNativeWindow->queueBuffer(mNativeWindow.get(), awb, -1);
-#else
-        err = mNativeWindow->queueBuffer(mNativeWindow.get(), awb);
-#endif
 
         if (err == OK) {
             buffer->meta_data()->setInt32(kKeyRendered, 1);

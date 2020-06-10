@@ -30,17 +30,10 @@ DLHELPER_REG(DLHELPER_CRIT, MediaCodec_CreateByType,
     sp<MediaCodec>, (const sp<ALooper> &, const char *, bool),
     "_ZN7android10MediaCodec12CreateByTypeERKNS_2spINS_7ALooperEEEPKcb");
 
-#if SFDEC_ANDROID_API >= 18
 DLHELPER_REG(DLHELPER_CRIT, MediaCodec_configure,
     status_t, (void *,const sp<AMessage> &, const sp<Surface> &, const sp<ICrypto> &, uint32_t),
     "_ZN7android10MediaCodec9configureERKNS_2spINS_8AMessageEEERKNS1_INS_20SurfaceTextureClientEEERKNS1_INS_7ICryptoEEEj",
     "_ZN7android10MediaCodec9configureERKNS_2spINS_8AMessageEEERKNS1_INS_7SurfaceEEERKNS1_INS_7ICryptoEEEj");
-#else
-DLHELPER_REG(DLHELPER_CRIT, MediaCodec_configure,
-    status_t, (void *,const sp<AMessage> &, const sp<SurfaceTextureClient> &, const sp<ICrypto> &, uint32_t),
-    "_ZN7android10MediaCodec9configureERKNS_2spINS_8AMessageEEERKNS1_INS_20SurfaceTextureClientEEERKNS1_INS_7ICryptoEEEj",
-    "_ZN7android10MediaCodec9configureERKNS_2spINS_8AMessageEEERKNS1_INS_7SurfaceEEERKNS1_INS_7ICryptoEEEj");
-#endif
 
 DLHELPER_REG(DLHELPER_CRIT, MediaCodec_start,
     status_t, (void *),

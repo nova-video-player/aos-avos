@@ -183,8 +183,12 @@ void device_config_init()
 		if (strcmp(value2, "SEMC") == 0)
 			hw_type = HW_TYPE_UNKNOWN;
 
-	} else if (strcmp(value, "exynos5") == 0)
+	}
+	// do not detect exynos5 since samsung s8 triggers
+	/*
+	else if (strcmp(value, "exynos5") == 0)
 		hw_type = HW_TYPE_EXYNOS5;
+	*/
 	else if (strcmp(value, "exdroid") == 0)
 		hw_type = HW_TYPE_ALLWINER_A31;
 	else if (strcmp(value, "exDroid") == 0) {
@@ -208,11 +212,15 @@ void device_config_init()
 		// test ro.hardware
 		android_property_get("ro.hardware", value, "0");
 
-		if (strncmp(value, "mt6", strlen("mt5")) == 0 ||
-		    strncmp(value, "mt8", strlen("mt6")) == 0 ||
+		// do not detect MTK since it configures AV_IMAGE_YV12 instead of default AV_IMAGE_RGBX_32
+		/*
+		if (strncmp(value, "mt5", strlen("mt5")) == 0 ||
+		    strncmp(value, "mt6", strlen("mt6")) == 0 ||
 		    strncmp(value, "mt8", strlen("mt8")) == 0)
 			hw_type = HW_TYPE_MTK;
-		else if(strcmp(value, "fbx6lc") == 0)
+		*/
+
+		if(strcmp(value, "fbx6lc") == 0)
 			hw_type = HW_TYPE_FBX;
 	}
 

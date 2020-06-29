@@ -635,7 +635,6 @@ typedef struct _video_props {
 	
 	// for PTS/DTS issues:
 	int	reorder_pts;
-	int	never_reorder_pts;
 	
 	// for H264
 	H264_SPS sps;	
@@ -646,14 +645,6 @@ typedef struct _video_props {
 	// for MPG4
 	int	vol;
 	int	sprite_usage;
-	
-	// for RV10|20|30|40
-	int 	slice_sof;	// 1: start of frame, 0: end of frame	
-	
-	// for braindead formats
-	int	flip_h;
-	int	flip_v;
-
 } VIDEO_PROPERTIES;
 
 typedef struct _sub_props {
@@ -723,10 +714,6 @@ enum {
 	BR_VOP,		// this is a B frame that is used as a reference frame, so it cannot be dropped!
 	NOCODE_VOP	// this is actually not a valid frame, it's just there to keep the timestamp
 } FRAME_TYPE;
-
-enum {
-	FRAME_DROPPABLE = 1,
-} FRAME_FLAGS;
 
 static inline char frame_type( int type )
 {
@@ -851,7 +838,6 @@ const char *av_get_type_name( int type );
 int av_get_type_from_name( const char *name );
 const char *av_get_etype_name( int etype );
 int av_get_etype_from_name( const char *name );
-int av_is_HD( int width, int height );
 
 int video_get_format_from_fourcc( UINT32 fourcc, int *subfmt );
 const char *video_get_fourcc_name( VIDEO_PROPERTIES *video );

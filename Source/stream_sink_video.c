@@ -130,9 +130,7 @@ static void venc_vencode( SINK_PRIV *p )
 		while ( p->out_frame ) {
 			VIDEO_FRAME *f = p->out_frame;
 			
-			if( (f->flags & FRAME_DROPPABLE) && f->blit_time < p->venc_time ) {
-DBGSI serprintf("ssv: id:%i  DROP %8d  time:%8d\r\n", f->index, f->blit_time, f->time );
-			} else if ( f->blit_time < next_time ) {
+			if ( f->blit_time < next_time ) {
 DBGSI serprintf("ssv: id:%i  blit %8d  time:%8d\r\n", f->index, f->blit_time, f->time );
 				blit_video_frame( p, f );
 				blit = 1;

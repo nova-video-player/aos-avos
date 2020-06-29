@@ -618,7 +618,7 @@ void show_video_props( VIDEO_PROPERTIES *video )
 	if( video->rotation )
 		serprintf("  rotation %d\r\n", video->rotation);
 	serprintf("  duration %d\r\n", video->duration );
-	serprintf("  reorder  %d  never_reorder %d\r\n", video->reorder_pts, video->never_reorder_pts );
+	serprintf("  reorder  %d\r\n", video->reorder_pts);
 	if( video->interlaced )
 		serprintf("  interl.  %d\r\n", video->interlaced);
 	if( video->stereo_mode )
@@ -800,13 +800,6 @@ void av__reduce( int *a, int *b )
 		*a /= c;
 		*b /= c;
 	}
-}
-
-#define VIDEO_AREA_HD 500000
-
-int av_is_HD( int width, int height )
-{
-	return( width * height > VIDEO_AREA_HD );
 }
 
 // ************************************************************

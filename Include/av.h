@@ -536,8 +536,8 @@ enum {
 	SUB_FORMAT_EXT,		// external subs from separate files
 };
 
-#define AUDIO_TRACK_MAX	6
-#define VIDEO_TRACK_MAX	6
+#define AUDIO_TRACK_MAX		16
+#define VIDEO_TRACK_MAX		6
 #define SUB_TRACK_MAX		32
 #define AV_NAME_LEN		32
 

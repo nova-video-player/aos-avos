@@ -658,7 +658,7 @@ typedef struct STREAM {
 	int 		audio_buffer_size;
 	unsigned char 	*audio_buffer;
 	
-	char 		*sub_url[SUB_STREAM_MAX + 1 + 1];  // current path in slot "0"
+	char 		*sub_url[SUB_TRACK_MAX + 1 + 1];  // current path in slot "0"
 	VIDEO_FRAME 	*subtitle_frame; 
 	int 		subtitle_offset;
 	int		subtitle_ratio_n;		// allow to scale sub timestamps with a given ratio

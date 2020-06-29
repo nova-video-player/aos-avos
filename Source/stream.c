@@ -920,7 +920,7 @@ static void _free_subtitle_urls( STREAM *s )
 {
 	if( s ) {
 		int i;
-		for ( i = 0; i < SUB_STREAM_MAX && s->sub_url[i]; i++ ) {
+		for ( i = 0; i < SUB_TRACK_MAX && s->sub_url[i]; i++ ) {
 			afree( s->sub_url[i] );
 		}
 	}
@@ -1107,7 +1107,7 @@ void stream_show_props( STREAM *s )
 	serprintf("\n");
 	serprintf("stream: [%s]\r\n", s->src.url);
 	int i = 0;
-	while( i < SUB_STREAM_MAX && s->sub_url[i] ) {
+	while( i < SUB_TRACK_MAX && s->sub_url[i] ) {
 		serprintf(" sub_url:  [%s]\r\n", s->sub_url[i] );
 		i++;
 	}

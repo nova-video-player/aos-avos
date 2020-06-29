@@ -536,9 +536,9 @@ enum {
 	SUB_FORMAT_EXT,		// external subs from separate files
 };
 
-#define AUDIO_STREAM_MAX	6
-#define VIDEO_STREAM_MAX	6
-#define SUB_STREAM_MAX		32
+#define AUDIO_TRACK_MAX	6
+#define VIDEO_TRACK_MAX	6
+#define SUB_TRACK_MAX		32
 #define AV_NAME_LEN		32
 
 enum {
@@ -673,15 +673,15 @@ typedef struct _av_props {
 	int 		force_notify;
 	int		as;
 	int		as_max;
-	AUDIO_PROPERTIES audio[AUDIO_STREAM_MAX];
+	AUDIO_PROPERTIES audio[AUDIO_TRACK_MAX];
 
 	int		vs;
 	int		vs_max;
-	VIDEO_PROPERTIES video[VIDEO_STREAM_MAX];
+	VIDEO_PROPERTIES video[VIDEO_TRACK_MAX];
 
 	int		subs;
 	int		subs_max;
-	SUB_PROPERTIES sub[SUB_STREAM_MAX];
+	SUB_PROPERTIES sub[SUB_TRACK_MAX];
 
 } AV_PROPERTIES;
 
@@ -694,7 +694,7 @@ typedef struct _av_props {
 	(x)->video     = &(x)->av.video[0]; \
 	(x)->av.vs     = 0; \
 	(x)->av.vs_max = 0; \
-	for( i = 0; i < VIDEO_STREAM_MAX; i ++ ) { \
+	for( i = 0; i < VIDEO_TRACK_MAX; i ++ ) { \
 		(x)->av.video[i].aspect_n = 1;\
 		(x)->av.video[i].aspect_d = 1;\
 	} \

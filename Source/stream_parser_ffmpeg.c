@@ -338,7 +338,7 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 			}
 DBGP serprintf("\tPAR        %d/%d\r\n", codec->sample_aspect_ratio.num, codec->sample_aspect_ratio.den ); 
-			if ( priv->av.vs_max < VIDEO_STREAM_MAX ) {
+			if ( priv->av.vs_max < VIDEO_TRACK_MAX ) {
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
 				video->stream = i;
@@ -425,7 +425,7 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 			}
 
-			if ( priv->av.as_max < AUDIO_STREAM_MAX ) {	
+			if ( priv->av.as_max < AUDIO_TRACK_MAX ) {	
 				AUDIO_PROPERTIES *audio = priv->av.audio + priv->av.as_max;
 
 				audio->codec_id	     = codec->codec_id;
@@ -484,7 +484,7 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 			// subtitle
 			//
 			int fmt = get_ff_format( codec->codec_id, NULL );
-			if( fmt && priv->av.subs_max < SUB_STREAM_MAX ) {
+			if( fmt && priv->av.subs_max < SUB_TRACK_MAX ) {
 				SUB_PROPERTIES *sub = priv->av.sub + priv->av.subs_max;
 	
 				sub->valid          = 1;

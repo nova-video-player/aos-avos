@@ -1850,7 +1850,7 @@ serprintf("no duration!\r\n" );
 
 			// substract all audio rates (even with audio suppressed!)
 			int a;
-			for( a = 0; a < AUDIO_STREAM_MAX; a++) {
+			for( a = 0; a < AUDIO_TRACK_MAX; a++) {
 				AUDIO_PROPERTIES *audio = s->av.audio + a;
 				if( audio->bytesPerSec ) {
 					s->video->bytesPerSec -= audio->bytesPerSec;

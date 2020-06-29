@@ -251,7 +251,7 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 	}
 	if (mr->type == TYPE_AUD)
 		av->as_max = 1;
-	if (av->as_max > 0 && av->as_max <= AUDIO_STREAM_MAX) {
+	if (av->as_max > 0 && av->as_max <= AUDIO_TRACK_MAX) {
 		ADD_INT(AVOS_MR_METADATA_NB_AUDIO_TRACK, av->as_max);
 		for (i = 0; i < av->as_max; ++i) {
 			audiop = &av->audio[i];
@@ -284,7 +284,7 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 			ADD_INT(gap_key + AVOS_MR_METADATA_AUDIO_TRACK_SUPPORTED, supported);
 		}
 	}
-	if (mr->type == TYPE_VID && av && av->subs_max > 0 && av->subs_max <= SUB_STREAM_MAX) {
+	if (mr->type == TYPE_VID && av && av->subs_max > 0 && av->subs_max <= SUB_TRACK_MAX) {
 		ADD_INT(AVOS_MR_METADATA_NB_SUBTITLE_TRACK, av->subs_max);
 		for (i = 0; i < av->subs_max; ++i) {
 			gap_key = AVOS_MR_METADATA_SUBTITLE_TRACK + i * AVOS_MR_METADATA_SUBTITLE_TRACK_MAX;

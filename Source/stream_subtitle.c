@@ -478,7 +478,7 @@ void stream_set_subtitle_url( STREAM *s, const char **url_list )
 DBGS serprintf("stream_set_subtitle_url\n");		
 	if( s && url_list ) {
 		int i;
-		for( i = 0; i < SUB_STREAM_MAX && url_list[i]; i++ ) {
+		for( i = 0; i < SUB_TRACK_MAX && url_list[i]; i++ ) {
 DBGS serprintf("sub_url: %s\n", url_list[i] );
 			if ( s->sub_url[i + 1] != NULL )
 				afree( s->sub_url[i + 1] );

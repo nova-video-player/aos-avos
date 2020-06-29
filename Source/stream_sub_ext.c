@@ -184,7 +184,7 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] );
 	int i;
 	struct subt_orig_t *sub_files = p->files->files;
 	for( i = 0; i < p->subs->cnt; i++ ) {
-		if( s->av.subs_max >= SUB_STREAM_MAX )
+		if( s->av.subs_max >= SUB_TRACK_MAX )
 			break;
 				
 		SUB_PROPERTIES *sub = s->av.sub + s->av.subs_max;

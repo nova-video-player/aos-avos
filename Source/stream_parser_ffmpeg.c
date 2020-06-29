@@ -188,6 +188,7 @@ static struct id_fmt_str {
 	{ AV_CODEC_ID_DVD_SUBTITLE,SUB_FORMAT_DVD_GFX,	0 },
 //	{ AV_CODEC_ID_DVB_SUBTITLE,SUB_FORMAT_DVBT,	0 },
 	{ AV_CODEC_ID_TEXT,	SUB_FORMAT_TEXT,	0 },
+	{ AV_CODEC_ID_BIN_DATA,	SUB_FORMAT_TEXT,	0 },
 	{ AV_CODEC_ID_SUBRIP,   SUB_FORMAT_TEXT,        0 },	
 	{ AV_CODEC_ID_XSUB,	SUB_FORMAT_XSUB,	0 },
 	{ AV_CODEC_ID_SSA,	SUB_FORMAT_SSA,		0 },
@@ -479,7 +480,7 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 				priv->av.as_max ++;
 				discard = 0;
 			} 
-		} else if( st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codec->codec_type == AVMEDIA_TYPE_DATA ){
 			//
 			// subtitle
 			//

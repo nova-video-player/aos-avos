@@ -37,6 +37,7 @@ typedef struct ISO639 {
 //	{ "",		"" },
 static const ISO639 map[] = {
 	{ "ar",		"s_arabic" },
+	{ "ara",	"s_arabic" },
 
 	{ "bg",		"s_bulgarian" },
 	{ "bul",	"s_bulgarian" },
@@ -126,6 +127,10 @@ static const ISO639 map[] = {
 	{ "chi",	"s_chinese" },
 
 	{ "hrv",	"Croatian" },
+	{ "ind",	"s_indonesian" },
+	{ "tha",	"s_thai" },
+	{ "vie",	"s_vietnamese" },
+
 };
 
 // ***************************************

@@ -96,6 +96,7 @@ static const ISO639 map[] = {
 	
 	{ "no",		"s_norwegian" },
 	{ "nor",	"s_norwegian" },
+	{ "nob",	"s_norwegian" },
 
 	{ "pl",		"s_polish" },
 	{ "pol",	"s_polish" },
@@ -130,6 +131,9 @@ static const ISO639 map[] = {
 	{ "ind",	"s_indonesian" },
 	{ "tha",	"s_thai" },
 	{ "vie",	"s_vietnamese" },
+
+	{ "may",	"s_malay" },
+	{ "msa",	"s_malay" },
 
 };
 

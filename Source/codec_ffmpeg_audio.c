@@ -176,6 +176,9 @@ static AVCodec *get_avcodec( AUDIO_PROPERTIES *audio )
 	case WAVE_FORMAT_MULAW:
 		codec_id    = AV_CODEC_ID_PCM_MULAW;
 		break;
+	case WAVE_FORMAT_OPUS:
+		codec_id    = AV_CODEC_ID_OPUS;
+		break;
 	case WAVE_FORMAT_LAVC:
 		if( audio->codec_id ) {
 			codec_id = audio->codec_id;

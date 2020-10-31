@@ -227,5 +227,5 @@ static STREAM_DEC_AUDIO stream_dec_audio_mediacodec = {
 //STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AC3, stream_dec_audio_mediacodec, 6 );
 //STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS, stream_dec_audio_mediacodec, 8 );
 //STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD, stream_dec_audio_mediacodec, 8 );
-STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_OPUS, stream_dec_audio_mediacodec, 8 );
+//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_OPUS, stream_dec_audio_mediacodec, 8 );
 #endif

@@ -956,6 +956,7 @@ STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_MULAW, 		stream_dec_audio_ffmpeg, 2 );
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_IMA, 		stream_dec_audio_ffmpeg, 2 );
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_PCM, 		stream_dec_audio_ffmpeg, 8 );
 
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_OPUS, 		stream_dec_audio_ffmpeg, 8 );
 
 #ifdef DEBUG_MSG
 static STREAM_REG_DEC_AUDIO reg_aac  = { WAVE_FORMAT_AAC,        &stream_dec_audio_ffmpeg, 8 };

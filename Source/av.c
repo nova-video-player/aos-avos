@@ -660,24 +660,24 @@ void show_audio_props( AUDIO_PROPERTIES *audio )
 	serprintf("audio %d\r\n", audio->valid);
 	serprintf("  stream  %d\r\n", audio->stream);
 	serprintf("  name    [%s]\r\n", audio->name);
-    if( audio->priority )
-	serprintf("  priority %d\r\n", audio->priority);
+	if( audio->priority )
+		serprintf("  priority %d\r\n", audio->priority);
 	serprintf("  codec   [%d]  format  %04X/%d [%s]\r\n", audio->codec_id, audio->format, audio->subfmt, audio_get_format_name( audio ) );
 	serprintf("  kbit/s  %d\r\n", audio->bytesPerSec / 125);
 	serprintf("  scale   %d\r\n", audio->scale);
 	serprintf("  rate :  %d\r\n", audio->rate);
 	serprintf("  balign  %d\r\n", audio->blockAlign);			
 	serprintf("  frames  %d\r\n", audio->frames);
-    if( audio->sourceChannels )
-	serprintf("  chann   %d -> %d\r\n", audio->sourceChannels, audio->channels);
-    else 
-	serprintf("  chann   %d\r\n", audio->channels);
-    if( audio->sourceSamples )
-	serprintf("  samp/s  %d -> %d\r\n", audio->sourceSamples, audio->samplesPerSec);
-    else
-	serprintf("  samp/s  %d\r\n", audio->samplesPerSec);
-    if( audio->channelMask )
-	serprintf("  ch_mask %04X\r\n", audio->channelMask);
+	if( audio->sourceChannels )
+		serprintf("  chann   %d -> %d\r\n", audio->sourceChannels, audio->channels);
+	else
+		serprintf("  chann   %d\r\n", audio->channels);
+	if( audio->sourceSamples )
+		serprintf("  samp/s  %d -> %d\r\n", audio->sourceSamples, audio->samplesPerSec);
+	else
+		serprintf("  samp/s  %d\r\n", audio->samplesPerSec);
+	if( audio->channelMask )
+		serprintf("  ch_mask %04X\r\n", audio->channelMask);
 	
 	serprintf("  bits    %d -> %d  %s\r\n", audio->sourceBitsPerSample, audio->bitsPerSample, ( audio->bitsPerSample == 16 ) ? (audio->byteOrder ? "BE" : "LE" ) : "" );
 	serprintf("  samp/B  %d\r\n", audio->samplesPerBlock);
@@ -692,7 +692,7 @@ void show_audio_props( AUDIO_PROPERTIES *audio )
 	if( audio->extraDataSize2 && audio->extraData2 ) {
 		serprintf("  extraS2 %d\r\n", audio->extraDataSize2 );
 		Dump( audio->extraData2, MIN( 32, audio->extraDataSize2 ) );
-serprintf("\r\n" );
+		serprintf("\r\n" );
 	} 
 	
 	serprintf("\r\n");

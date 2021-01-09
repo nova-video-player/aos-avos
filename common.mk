@@ -80,7 +80,7 @@ ifeq ($(ASAN),1)
 CFLAGS += -g -fsanitize=address -fno-omit-frame-pointer
 endif
 
-ifeq (gcc,$(CCFLAVOR))
+ifneq (,$(filter $(CCFLAVOR),gcc clang))
 	CFLAGS += -Wno-misleading-indentation
 endif
 

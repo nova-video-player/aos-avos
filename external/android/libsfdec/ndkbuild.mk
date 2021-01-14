@@ -31,9 +31,6 @@ LOCAL_C_INCLUDES := \
 LOCAL_CFLAGS := -DSFDEC_ANDROID_API=$(1)
 LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
 LOCAL_LDLIBS:= -L$(TARGET_OUT) -lstagefright -lmedia -lcutils -lutils -lbinder -lui
-ifneq ($(TARGET_ARCH_ABI),x86)
-LOCAL_LDLIBS += -fuse-ld=bfd
-endif
 include $(BUILD_SHARED_LIBRARY)
 endef
 

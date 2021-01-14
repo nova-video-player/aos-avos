@@ -32,9 +32,6 @@ LOCAL_CFLAGS := -DAVOS_ANDROID_API=21
 endif
 
 LOCAL_LDLIBS:= -L$(TARGET_OUT) -landroid #-lstagefright -lmedia -lcutils -lutils -lbinder -lui -lhardware
-ifneq ($(TARGET_ARCH_ABI),x86)
-LOCAL_LDLIBS += -fuse-ld=bfd
-endif
 
 include $(BUILD_ANDROID_LIBS)
 include $(BUILD_SHARED_LIBRARY)

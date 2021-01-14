@@ -706,7 +706,7 @@ typedef struct _av_props {
 #define linestep_from_width32(width) (64 * (((width)  + 31 ) / 32))
 #define pad_height(height)         (16 * (((height) + 15 ) / 16))
 
-enum {
+typedef enum {
 	I_VOP = 0,
 	P_VOP,
 	B_VOP,

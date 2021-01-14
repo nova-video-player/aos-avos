@@ -62,10 +62,6 @@ LOCAL_LDLIBS := -L$(TARGET_OUT) -lz \
 	$(addsuffix $(AVOS_LIBS_SUFFIX), $(AVOS_SHARED_LIBS)) \
 	-llog
 
-ifneq ($(TARGET_ARCH_ABI),x86)
-LOCAL_LDLIBS += -fuse-ld=bfd
-endif
-
 LOCAL_STATIC_LIBRARIES := $(sort $(addsuffix $(AVOS_LIBS_SUFFIX), $(AVOS_STATIC_LIBS))) \
 	cpufeatures libyuv
 

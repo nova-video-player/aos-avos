@@ -34,9 +34,6 @@ LOCAL_SRC_FILES := \
 	avos_media_metadata_retriever.c
 
 LOCAL_LDLIBS:= -L$(TARGET_OUT) -llog -landroid
-ifneq ($(TARGET_ARCH_ABI),x86)
-LOCAL_LDLIBS += -fuse-ld=bfd
-endif
 
 LOCAL_C_INCLUDES := \
 	$(AVOS_DIR)/public

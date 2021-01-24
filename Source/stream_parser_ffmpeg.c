@@ -683,7 +683,7 @@ printf("FFMPEG: cannot find stream info\r\n");
 	s->parser_open = 1;
 
 	if( s->video->valid ) {
-		ff_p->need_key = 1;
+		ff_p->need_key = s->video->format != VIDEO_FORMAT_AV1;
 	}
 	return 0;
 
@@ -1087,7 +1087,7 @@ serprintf("FFMPEG: seek error\r\n");
 		if( packet ) {
 			int ts = _get_video_time( s, packet );
 
-			if( packet->flags & AV_PKT_FLAG_KEY ) {
+			if( packet->flags & AV_PKT_FLAG_KEY || s->video->format == VIDEO_FORMAT_AV1) {
 				if( ignore_first ) {
 DBGP serprintf("ignore! %d\n", ts);
 					ignore_first--;

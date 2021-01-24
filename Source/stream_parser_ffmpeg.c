@@ -116,6 +116,7 @@ typedef struct FF_PRIV
 	int 		packet_count;
 	
 	int 		need_key;
+	int		all_frames_are_keyframe;
 	int 		last_audio_time;
 	
 	int		apid;
@@ -687,6 +688,7 @@ printf("FFMPEG: cannot find stream info\r\n");
 
 	if( s->video->valid ) {
 		ff_p->need_key = s->video->format != VIDEO_FORMAT_AV1;
+		ff_p->all_frames_are_keyframe = 0;
 	}
 	return 0;
 
@@ -1090,7 +1092,7 @@ serprintf("FFMPEG: seek error\r\n");
 		if( packet ) {
 			int ts = _get_video_time( s, packet );
 
-			if( packet->flags & AV_PKT_FLAG_KEY || s->video->format == VIDEO_FORMAT_AV1) {
+			if( packet->flags & AV_PKT_FLAG_KEY || ff_p->all_frames_are_keyframe) {
 				if( ignore_first ) {
 DBGP serprintf("ignore! %d\n", ts);
 					ignore_first--;
@@ -1123,7 +1125,11 @@ DBGP serprintf("audio!  %d\n", ts);
 			_dispose_packet( packet );			
 		}
 	}
-	
+	if (retry == -1) {
+		serprintf("Retry...\n");
+		ff_p->all_frames_are_keyframe = 1;
+		return _seek( s, time, pos, dir, flags, force_reload, sc );
+        }
 	
 	return 0;
 }

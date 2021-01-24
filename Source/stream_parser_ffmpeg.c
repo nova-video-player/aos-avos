@@ -399,6 +399,9 @@ serprintf("FF: parse H264 SPS\n");
 					video->reorder_pts   = 0;
 					video->extraDataSize = 0;
 					break;
+				case VIDEO_FORMAT_AV1:
+					video->reorder_pts = 0;
+					break;
 				default:
 					video->reorder_pts = 1;
 					break;

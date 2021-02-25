@@ -133,7 +133,7 @@ CSRC_STREAM_CORE = \
 	stream_video.c \
 	stream_config.c \
 	stream_alloc.c \
-	stream_dumper.c stream_heap.c \
+	stream_dumper.c \
 	stream_global.c stream_sync.c  
 
 CSRC_STREAM_MISC = \

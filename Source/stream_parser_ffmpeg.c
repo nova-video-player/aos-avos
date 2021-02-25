@@ -28,7 +28,6 @@
 #include "hevc.h"
 #include "file_info_priv.h"
 #include "iso639.h"
-#include "stream_heap.h"
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
@@ -57,7 +56,6 @@
 #include <stdio.h>
 #include <signal.h>
 
-static int use_stream_heap = 1;
 static int max_delay       = 100000;
 static int log_debug       = 0;
 static int use_pts         = 1;
@@ -65,7 +63,6 @@ static int force_reorder   = -1;
 static int force_vpid      = 0;
 static int force_apid      = 0;
 
-DECLARE_DEBUG_TOGGLE("ffsh",  use_stream_heap );
 DECLARE_DEBUG_PARAM ("ffmd",  max_delay );
 DECLARE_DEBUG_PARAM ("fflog", log_debug );
 DECLARE_DEBUG_TOGGLE("ffpts", use_pts );
@@ -578,14 +575,7 @@ DBGS serprintf("FFMPEG: open: %s, buffer_size: %d\r\n", s->src.url, buffer_size)
 	
 	stream_parser_clear_chunks( s );
 
-	if( use_stream_heap ) {
-		if( stream_heap_create( buffer_size ) ) {
-			goto ErrorExit;
-		}
-		ff_p->buffer_size = (uint64_t)buffer_size * (uint64_t)90 / 100;	// allow 10% overhead in heap
-	} else {
 		ff_p->buffer_size = buffer_size;
-	}
 
 	av_log_set_callback(av_log_cb);
 	if( log_debug ) {
@@ -697,12 +687,6 @@ ErrorExit3:
 	avformat_network_deinit();
 
 ErrorExit2:
-	if( use_stream_heap ) {
-		if( ff_p->buffer_size ) {
-			stream_heap_destroy();
-		}
-	}
-	
 ErrorExit:
 	afree( ff_p );
 	s->parser_priv = NULL;
@@ -737,12 +721,6 @@ serprintf("FFMPEG: not open!\r\n" );
 		_flush_packets( &ff_p->vq, "VID" );
 		_flush_packets( &ff_p->aq, "AUD" );
 		_flush_packets( &ff_p->sq, "SUB" );
-
-		if( use_stream_heap ) {
-			if( ff_p->buffer_size ) {
-				stream_heap_destroy();
-			}
-		}
 
 		av_dict_free(&ff_p->fmt_opts);
 

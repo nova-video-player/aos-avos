@@ -607,9 +607,6 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 		ff_p->apid = force_apid;
 	}
 		
-#ifdef OPEN_AVIO
-	int avio_flags = AVIO_FLAG_READ;
-#endif
 	if( ff_p->vpid || ff_p->apid ) {
 		char buf[32];
 		av_dict_set(&ff_p->fmt_opts, "no_pat", "1", 0);
@@ -630,13 +627,6 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 		ff_p->fmt->flags |= AVFMT_FLAG_NOFILLIN;
 	}
 
-#ifdef OPEN_AVIO
-	// open the AVIO by hand so we can pass custom flags
-	if( avio_open2( &ff_p->fmt->pb, s->src.url, avio_flags , &ff_p->fmt->interrupt_callback, &ff_p->fmt_opts  ) ) {
-serprintf("FFMPEG: cannot open avio for %s\r\n", s->src.url);
-		goto ErrorExit3;
-	}
-#endif
 	av_dict_set(&ff_p->fmt_opts, "probesize", "10000000", 0);
 
 	if( avformat_open_input(&ff_p->fmt, s->src.url, NULL, &ff_p->fmt_opts ) != 0) {
@@ -678,11 +668,7 @@ printf("FFMPEG: cannot find stream info\r\n");
 	return 0;
 
 ErrorExit4:
-#ifdef OPEN_AVIO
-	avio_close(ff_p->fmt->pb);
-
 ErrorExit3:
-#endif
 	av_dict_free(&ff_p->fmt_opts);
 	avformat_network_deinit();
 
@@ -709,10 +695,6 @@ serprintf("FFMPEG: not open!\r\n" );
 	s->parser_open = 0;
 	if( ff_p ) {
 		if( ff_p->fmt ) {
-#ifdef OPEN_AVIO
-			// close the avio
-			avio_close(ff_p->fmt->pb);
-#endif
 			// Close the video file
 			avformat_close_input(&ff_p->fmt);
 		}

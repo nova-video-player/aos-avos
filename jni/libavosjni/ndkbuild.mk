@@ -18,8 +18,8 @@ LOCAL_PATH:= $(call my-dir)
 ### libnativehelper ###
 LIBNATIVEHELPER_DIR := libnativehelper
 include $(CLEAR_VARS)
-LOCAL_MODULE    := libnativehelper
-LOCAL_SRC_FILES := ../../../$(LIBNATIVEHELPER_DIR)/obj/local/$(TARGET_ARCH_ABI)/libnativehelper.so
+LOCAL_MODULE    := libnvpnativehelper
+LOCAL_SRC_FILES := ../../../$(LIBNATIVEHELPER_DIR)/obj/local/$(TARGET_ARCH_ABI)/libnvpnativehelper.so
 LOCAL_EXPORT_C_INCLUDES :=  ../../../$(LIBNATIVEHELPER_DIR)/include
 include $(PREBUILT_SHARED_LIBRARY)
 
@@ -40,7 +40,7 @@ LOCAL_C_INCLUDES := \
 
 LOCAL_MODULE_TAGS := optional
 
-LOCAL_SHARED_LIBRARIES := libnativehelper libavos$(AVOS_LIBS_SUFFIX)
+LOCAL_SHARED_LIBRARIES := libnvpnativehelper libavos$(AVOS_LIBS_SUFFIX)
 LOCAL_MODULE := libavosjni$(AVOS_LIBS_SUFFIX)
 
 include $(BUILD_SHARED_LIBRARY)

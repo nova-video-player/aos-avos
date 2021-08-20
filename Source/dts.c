@@ -43,15 +43,15 @@ int DTS_get_format_from_profile(int profile)
 {
 	switch(profile) {
 	case AV_PROFILE_DTS:	
+	case AV_PROFILE_DTS_ES:
 		return WAVE_FORMAT_DTS;
 	case AV_PROFILE_DTS_HD_MA:	
-		return WAVE_FORMAT_DTS_HD;
-	case AV_PROFILE_DTS_ES:
+	case AV_PROFILE_DTS_EXPRESS:
+		return WAVE_FORMAT_DTS_HD_MA;
 	case AV_PROFILE_DTS_96_24:
 	case AV_PROFILE_DTS_HD_HRA:
-	case AV_PROFILE_DTS_EXPRESS:
 		// default?			
-		return WAVE_FORMAT_DTS;
+		return WAVE_FORMAT_DTS_HD;
 	}
 	return WAVE_FORMAT_DTS;
 }

@@ -248,6 +248,7 @@ ERR			LOG("cannot set bits %d", bits);
 			case WAVE_FORMAT_DTS:
 				track_format = 7; //AudioFormat.ENCODING_DTS;
 				break;
+			case WAVE_FORMAT_DTS_HD_MA:
 			case WAVE_FORMAT_DTS_HD:
 				track_format = 8; //AudioFormat.ENCODING_DTS_HD;
 				break;

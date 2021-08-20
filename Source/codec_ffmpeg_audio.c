@@ -150,9 +150,8 @@ static AVCodec *get_avcodec( AUDIO_PROPERTIES *audio )
 		codec_id    = AV_CODEC_ID_FLAC;
 		break;
 	case WAVE_FORMAT_DTS:
-		codec_id    = AV_CODEC_ID_DTS;
-		break;
 	case WAVE_FORMAT_DTS_HD:
+	case WAVE_FORMAT_DTS_HD_MA:
 		codec_id    = AV_CODEC_ID_DTS;
 		break;
 	case WAVE_FORMAT_WAVPACK:
@@ -930,6 +929,7 @@ STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_FLAC, 		stream_dec_audio_ffmpeg, 6 );
 #ifdef CONFIG_DTS
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS, 		stream_dec_audio_ffmpeg, 8 );
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD, 		stream_dec_audio_ffmpeg, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD_MA,	stream_dec_audio_ffmpeg, 8 );
 #endif
 #ifdef CONFIG_WAVPACK
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_WAVPACK,		stream_dec_audio_ffmpeg, 6 );

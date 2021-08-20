@@ -139,6 +139,7 @@ int acodecs_is_supported(int format, int is_video, int is_sw_allowed)
 			break;
 		case WAVE_FORMAT_DTS:
 		case WAVE_FORMAT_DTS_HD:
+		case WAVE_FORMAT_DTS_HD_MA:
 		case WAVE_FORMAT_MS_DTS:
 			types[0] = "audio/dts";
 			break;

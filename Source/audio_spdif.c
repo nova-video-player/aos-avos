@@ -157,6 +157,7 @@ static int wave2libav_codecid( int codecid )
 		return AV_CODEC_ID_AC3;
 	case WAVE_FORMAT_EAC3:
                 return AV_CODEC_ID_EAC3;
+	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS:
 		return AV_CODEC_ID_DTS;
@@ -309,6 +310,12 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
 			audio->samplesPerSec = 192000;
 		break;
 	case WAVE_FORMAT_DTS_HD:
+		if (passthrough_on == 1)
+			break;
+		audio->channels      = 2;
+		audio->samplesPerSec = 192000;
+		break;
+	case WAVE_FORMAT_DTS_HD_MA:
 		if (passthrough_on == 1)
 			break;
 	case WAVE_FORMAT_TRUEHD:

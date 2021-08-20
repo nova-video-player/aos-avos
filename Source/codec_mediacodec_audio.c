@@ -55,6 +55,7 @@ static int wave2libav_codecid( int codecid )
 		return AV_CODEC_ID_AC3;
 	case WAVE_FORMAT_EAC3:
 		return AV_CODEC_ID_EAC3;
+	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS:
 		return AV_CODEC_ID_DTS;
@@ -90,6 +91,7 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 	case WAVE_FORMAT_DTS:
 		sfdec_codec = SFDEC_AUDIO_DTS;
 		break;
+	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 		sfdec_codec = SFDEC_AUDIO_DTS_HD;
 		break;

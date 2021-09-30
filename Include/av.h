@@ -463,6 +463,8 @@ typedef enum {
 
 #define VIDEO_FOURCC_LAVC		mmioFOURCC('L', 'A', 'V', 'C')
 
+#define VIDEO_FOURCC_DOLBY_VISION mmioFOURCC('D', 'V', 'V', 'C')
+
 #define VIDEO_MAX_WIDTH  7680
 #define VIDEO_MAX_HEIGHT 4320
 
@@ -500,6 +502,7 @@ enum {
 	VIDEO_FORMAT_HEVC,
 	VIDEO_FORMAT_LAVC,
 	VIDEO_FORMAT_AV1,
+	VIDEO_FORMAT_DOLBY_VISION,
 };
 
 // video sub formats

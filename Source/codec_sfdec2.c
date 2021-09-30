@@ -596,6 +596,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	}
 
 	switch (video->format) {
+		case VIDEO_FORMAT_DOLBY_VISION:
+			sfdec_codec = SFDEC_VIDEO_DOLBY_VISION;
+			break;
 		case VIDEO_FORMAT_H264:
 			sfdec_codec = SFDEC_VIDEO_AVC;
 			break;
@@ -945,6 +948,7 @@ OMXC_REGISTER( VIDEO_FORMAT_H264, &stream_video_mangler_H264 );
 #endif
 #ifdef CONFIG_OMX_HEVC
 OMXC_REGISTER( VIDEO_FORMAT_HEVC, NULL );
+OMXC_REGISTER( VIDEO_FORMAT_DOLBY_VISION, NULL );
 #endif
 #ifdef CONFIG_OMX_WMV
 OMXC_REGISTER( VIDEO_FORMAT_WMV3, NULL );

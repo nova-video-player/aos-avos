@@ -902,7 +902,7 @@ void stream_parser_send_video_extra( VIDEO_PROPERTIES *video, CBE *cbe, int *siz
 	}
 #endif
 #ifdef CONFIG_HEVC
-	if( video->format == VIDEO_FORMAT_HEVC || video->format == VIDEO_FORMAT_WMV3 ) {
+	if( video->format == VIDEO_FORMAT_HEVC || video->format == VIDEO_FORMAT_WMV3 || video->format == VIDEO_FORMAT_DOLBY_VISION ) {
 		// do not send extradata inline
 		return;
 	}

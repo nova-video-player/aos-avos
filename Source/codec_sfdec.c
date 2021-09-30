@@ -606,6 +606,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 		case VIDEO_FORMAT_H263:
 			sfdec_codec = SFDEC_VIDEO_H263;
 			break;
+		case VIDEO_FORMAT_DOLBY_VISION:
+			sfdec_codec = SFDEC_VIDEO_DOLBY_VISION;
+			break;
 #if 0
 		case VIDEO_FORMAT_MPEG:
 			sfdec_codec = SFDEC_VIDEO_MPEG2;

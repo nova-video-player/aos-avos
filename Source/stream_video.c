@@ -1796,7 +1796,7 @@ DBGS serprintf("H264 with NO SPS in extradata!\n");
 		}
 #endif				 
 #ifdef CONFIG_HEVC
-		if( s->video->fourcc == VIDEO_FOURCC_HEVC && s->video->extraDataSize ) {
+		if( (s->video->fourcc == VIDEO_FOURCC_HEVC || s->video->fourcc == VIDEO_FOURCC_DOLBY_VISION) && s->video->extraDataSize ) {
 			// convert extradata from HVCC to annexB if needed
 			if( !HEVC_convert_extradata( s->video ) ) {
 DBGS serprintf("HVCC!\r\n" );

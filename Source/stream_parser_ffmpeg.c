@@ -28,6 +28,7 @@
 #include "hevc.h"
 #include "file_info_priv.h"
 #include "iso639.h"
+#include "android_codec.h"
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
@@ -409,6 +410,21 @@ serprintf("FF: parse H264 SPS\n");
 				
 				priv->av.vs_max ++;
 				discard = 0;
+
+                        serprintf("HELLO, Found %d side data!\r\n", st->nb_side_data);
+                int sideDataI;
+                for (sideDataI = 0; sideDataI < st->nb_side_data; sideDataI++) {
+                    AVPacketSideData sd = st->side_data[i];
+#ifdef CONFIG_ANDROID
+                    if((sd.type == AV_PKT_DATA_DOVI_CONF) && acodecs_is_type_supported("video/dolby-vision", 0)) {
+#else
+                    if(sd.type == AV_PKT_DATA_DOVI_CONF) {
+#endif
+                        video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
+                        video->format = VIDEO_FORMAT_DOLBY_VISION;
+                        serprintf("HELLO, This is a dolby vision content!\r\n");
+                    }
+                }
 			}
 		} else if( st->codec->codec_type == AVMEDIA_TYPE_AUDIO ){
 			//

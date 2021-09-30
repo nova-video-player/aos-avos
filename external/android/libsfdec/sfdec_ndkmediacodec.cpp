@@ -206,7 +206,7 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
 
     if (sfdec->flush) {
 	sfdec->flush = 0;
-	if (sfdec->extradata && (sfdec->codec == SFDEC_VIDEO_AVC || sfdec->codec == SFDEC_VIDEO_HEVC || sfdec->codec == SFDEC_VIDEO_WMV))
+	if (sfdec->extradata && (sfdec->codec == SFDEC_VIDEO_AVC || sfdec->codec == SFDEC_VIDEO_HEVC || sfdec->codec == SFDEC_VIDEO_WMV || sfdec->codec == SFDEC_VIDEO_DOLBY_VISION) )
             sfdec_send_input2(sfdec, sfdec->extradata, sfdec->extradata_size, 0, 0, 1, 2/* BUFFER_FLAG_CODECCONFIG (not exported)*/);
     }
 

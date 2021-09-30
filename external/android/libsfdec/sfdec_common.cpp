@@ -27,6 +27,8 @@ const char *get_mimetype(sfdec_codec_t codec)
             return "video/av01";
         case SFDEC_VIDEO_HEVC:
             return "video/hevc";
+        case SFDEC_VIDEO_DOLBY_VISION:
+            return "video/dolby-vision";
         case SFDEC_VIDEO_MPEG4:
             return "video/mp4v-es";
         case SFDEC_VIDEO_H263:

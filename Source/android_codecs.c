@@ -32,7 +32,7 @@
  * read /system/etc/media_codecs.xml using MediaCodecList c++ class in order to
  * get supported codecs by the device.
  *
- * Used only for DTS/WMA WMV/MPEG2
+ * Used only for DTS/WMA WMV/MPEG2 Dolby Vision support
  */
 
 #define DLHELPER_HEADER "dlhelper_mediacodeclist.h"
@@ -44,7 +44,7 @@ extern JavaVM *myVm;
 extern jobject myClassLoader;
 extern jmethodID myFindClassMethod;
 
-static int acodecs_is_type_supported(const char *type, int is_sw_allowed)
+int acodecs_is_type_supported(const char *type, int is_sw_allowed)
 {
 	JNIEnv * env = NULL;
 	int i;
@@ -124,6 +124,9 @@ int acodecs_is_supported(int format, int is_video, int is_sw_allowed)
 			break;
 		case VIDEO_FORMAT_HEVC:
 			types[0] = "video/hevc";
+			break;
+		case VIDEO_FORMAT_DOLBY_VISION:
+			types[0] = "video/dolby-vision";
 			break;
 		}
 	} else {

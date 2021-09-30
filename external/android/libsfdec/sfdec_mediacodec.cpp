@@ -304,7 +304,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (extradata) {
         if (codec == SFDEC_VIDEO_AVC)
             nb_csd = set_avc_config(extradata, extradata_size, format);
-        else if (codec == SFDEC_VIDEO_MPEG4 || codec == SFDEC_VIDEO_HEVC)
+        else if (codec == SFDEC_VIDEO_MPEG4 || codec == SFDEC_VIDEO_HEVC || codec == SFDEC_VIDEO_DOLBY_VISION)
             nb_csd = set_buffer_config(extradata, extradata_size, format);
     }
     sp<Surface> nativeSurface(static_cast<android::Surface *>(sfdec->mNativeWindow.get()));

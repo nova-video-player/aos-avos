@@ -49,9 +49,9 @@ LD   = $(CROSS)ld
 ASM  = $(CROSS)gcc
 LINK = $(CROSS)gcc
 endif
-AR   = $(CROSS)ar
-STRIP= $(CROSS)strip
-OBJCOPY= $(CROSS)objcopy
+AR   = llvm-ar
+STRIP= llvm-strip
+OBJCOPY= llvm-objcopy
 MD5SUM = md5sum
 
 CCFLAVOR = $(shell $(CC) --version | grep -oE -m 1 '(^gcc|clang)')

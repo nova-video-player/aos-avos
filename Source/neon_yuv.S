@@ -373,8 +373,8 @@ neon_scale_420P10b_YUV:
         vqshrun.s32 d2, q4, #10
         vqshrun.s32 d3, q5, #10
   
-        vqshrun.s16 d4, q0, #0
-        vqshrun.s16 d5, q1, #0
+        vqmovun.s16 d4, q0
+        vqmovun.s16 d5, q1
         vst2.8      {d4, d5}, [r0]!
 
         sub        r2, r2, #16
@@ -395,7 +395,7 @@ neon_scale_420P10b_YUV:
 
         vqshrun.s32 d0, q2, #10
         vqshrun.s32 d1, q3, #10
-        vqshrun.s16 d4, q0, #0
+        vqmovun.s16 d4, q0
 
         vst1.8      {d4}, [r0]!
 
@@ -417,7 +417,7 @@ neon_scale_420P10b_YUV:
 
         vqshrun.s32 d0, q2, #10
         vqshrun.s32 d1, q3, #10
-        vqshrun.s16 d4, q0, #0
+        vqmovun.s16 d4, q0
 
         vst1.8      {d4[0]}, [r0]!
         vst1.8      {d4[1]}, [r0]!
@@ -442,7 +442,7 @@ neon_scale_420P10b_YUV:
 
         vqshrun.s32 d0, q2, #10
         vqshrun.s32 d1, q3, #10
-        vqshrun.s16 d4, q0, #0
+        vqmovun.s16 d4, q0
 
         vst1.8      {d4[0]}, [r0]!
         vst1.8      {d4[4]}, [r0]!
@@ -460,7 +460,7 @@ neon_scale_420P10b_YUV:
         vmla.s32    q2, q6, q7		@ R = Y * 220 + 16* 1024
 
         vqshrun.s32 d0, q2, #10
-        vqshrun.s16 d4, q0, #0
+        vqmovun.s16 d4, q0
 
         vst1.8      {d4[0]}, [r0]!
 

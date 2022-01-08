@@ -158,24 +158,24 @@ neon_rgb565_to_rgba8888:
 
 	@ Unpack 5-6-5 RGB values
 	vshrn.u16	 d2,  q0, #5				@ G xxGGGGGG
-	vshrn.u16	 d4,  q0, #0				@ B xxxBBBBB
+	vmovn.u16	 d4,  q0				@ B xxxBBBBB
 	vshr.u16	 q0,  q0, #11				@ R xxxRRRRR
-	vshrn.u16	 d0,  q0, #0				@ 
+	vmovn.u16	 d0,  q0
 	
 	vshrn.u16	d10,  q4, #5				@ G xxGGGGGG
 	vshrn.u16	d12,  q4, #0				@ B xxxBBBBB
 	vshr.u16	 q4,  q4, #11				@ R xxxRRRRR
-	vshrn.u16	 d8,  q4, #0				@ 
+	vmovn.u16	 d8,  q4
 
 	vshrn.u16	d18,  q8, #5				@ G xxGGGGGG
-	vshrn.u16	d20,  q8, #0				@ B xxxBBBBB
+	vmovn.u16	d20,  q8				@ B xxxBBBBB
 	vshr.u16	 q8,  q8, #11				@ R xxxRRRRR
-	vshrn.u16	d16,  q8, #0				@ 
+	vmovn.u16	d16,  q8
 
 	vshrn.u16	d26, q12, #5				@ G xxGGGGGG
-	vshrn.u16	d28, q12, #0				@ B xxxBBBBB
+	vmovn.u16	d28, q12				@ B xxxBBBBB
 	vshr.u16	q12, q12, #11				@ R xxxRRRRR
-	vshrn.u16	d24, q12, #0				@ 
+	vmovn.u16	d24, q12				@ 
 
 	@ shift RGB data to MSB	
 	vshl.u8		 d0,  d0, #3

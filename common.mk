@@ -73,7 +73,6 @@ CFLAGS = -pipe -Werror-implicit-function-declaration -Wall -Wno-missing-braces \
 CFLAGS += -Wno-unused -Wno-sign-compare -Wno-missing-field-initializers #TODO
 CFLAGS += -Werror
 ifeq ($(BUILD_FROM),ANDROID)
-CFLAGS += -no-integrated-as
 endif
 
 ifeq ($(ASAN),1)

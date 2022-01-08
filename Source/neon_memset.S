@@ -19,7 +19,6 @@
 
         .align 4
         .global neon_memset16
-        .func neon_memset16
 
 neon_memset16:
         cmp             r2, #0
@@ -139,8 +138,6 @@ memset_end:
         pop             {r0}
         bx              lr
 
-        .endfunc
-	
 /***************************************************************************
  Copyright (c) 2009,2010, Code Aurora Forum. All rights reserved.
 
@@ -159,7 +156,6 @@ memset_end:
 
 	.align 4
 	.global neon_memset32
-	.func neon_memset32
 
 	/* r0 = buffer, r1 = value, r2 = times to write */
 neon_memset32:
@@ -259,7 +255,6 @@ memset32_dropthru:
 	str		r1, [r0, #0]
 	bx		lr
 
-	.endfunc
 	.end
 		
 #endif

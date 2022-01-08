@@ -3,7 +3,6 @@
         .text
 
         .global neon_memcpy
-        .func   neon_memcpy
 neon_memcpy:
         push            {r4-r11}
         mov             r3, r0
@@ -22,7 +21,6 @@ neon_memcpy:
         bgt             1b
         pop             {r4-r11}
         bx              lr 
-        .endfunc
 
        .macro ple_set_chan cn
         mcr             p15, 0, \cn, c11, c2, 0
@@ -58,7 +56,6 @@ neon_memcpy:
 #define PLE_SIZE 4096
 
         .global neon_memcpy_ple
-	.func neon_memcpy_ple
 neon_memcpy_ple:
         push            {lr}
         mov             ip, #1
@@ -94,10 +91,8 @@ neon_memcpy_ple:
         mov             lr, #PLE_SIZE
         bgt             1b
         pop             {pc}
-        .endfunc
 
         .global neon_memset
-        .func   neon_memset
 neon_memset:
         push            {r4-r11}
         mov             r3,  r0
@@ -122,5 +117,4 @@ neon_memset:
         bgt             1b
         pop             {r4-r11}
         bx              lr
-        .endfunc
 #endif

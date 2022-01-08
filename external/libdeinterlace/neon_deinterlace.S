@@ -74,7 +74,6 @@
         .endm
 
         .global neon_XDeint8x8FieldC
-        .func neon_XDeint8x8FieldC
 neon_XDeint8x8FieldC:
         push        {r0,r1,r2,r7,lr}
         vld1.8      d0, [r1]! @load 16*8bits from src1
@@ -144,10 +143,8 @@ neon_XDeint8x8FieldC:
         vst1.8    d16, [r0]!
         
         pop         {r0,r1,r2,r7,pc}
-        .endfunc
 
         .global neon_XDeint8x8FieldC_pix
-        .func neon_XDeint8x8FieldC_pix
 neon_XDeint8x8FieldC_pix:
         push        {r1,r2,r7,lr}
         vld1.8      d0, [r1] @load 8*8bits from src1
@@ -173,10 +170,8 @@ neon_XDeint8x8FieldC_pix:
         vmov.32     r0, d12[0]
 
         pop         {r1,r2,r7,pc}
-        .endfunc
 
         .global neon_XDeint8x8FieldEC
-        .func   neon_XDeint8x8FieldEC
 neon_XDeint8x8FieldEC:
 @ dst[x] = (src[x] + src[2*i_src+x] ) >> 1;
         push        {r0,r1,r2,lr}
@@ -192,10 +187,8 @@ neon_XDeint8x8FieldEC:
         vqshrn.u16  d0, q4, #1 @(src1[x] + src1[2*i_src1+x]) >> 1
         vst1.8      d0, [r0]
         pop         {r0,r1,r2,pc}
-        .endfunc
 
         .global neon_XDeint8x8MergeC
-        .func   neon_XDeint8x8MergeC
 neon_XDeint8x8MergeC:
 @ dst[x] = (src1[x] + 6*src2[x] + src1[i_src1+x] + 4 ) >> 3;
         push        {r0,r1,lr}
@@ -216,10 +209,8 @@ neon_XDeint8x8MergeC:
         vqshrn.u16    d0, q3, #3 @(src1[x] + 6*src2[x] + src1[i_src1+x] + 4 ) >> 3
         vst1.8      d0, [r0]
         pop         {r0,r1,pc}
-        .endfunc
 
         .global neon_XDeint8x8DetectC
-        .func   neon_XDeint8x8DetectC
 
 neon_XDeint8x8DetectC:
         push        {r0,r5,lr}
@@ -265,7 +256,5 @@ neon_XDeint8x8DetectC:
         str          r5, [r3]
 
         pop         {r0,r5,pc}
-        .endfunc
-
 
 #endif

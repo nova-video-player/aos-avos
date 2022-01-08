@@ -27,7 +27,6 @@
 #define tw    r11
 
         .global neon_rgba8888_to_rgb565
-        .func   neon_rgba8888_to_rgb565
 neon_rgba8888_to_rgb565:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -105,7 +104,6 @@ neon_rgba8888_to_rgb565:
 	bgt 1b							@ if( h > 0 ) goto 1
 	
 	pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_rgb565_to_rgba8888( uint16_t *src, uint32_t *dst, int w, int h, int sw, int dw, int alpha)
 
@@ -125,7 +123,6 @@ neon_rgba8888_to_rgb565:
 #define tw    r11
 
         .global neon_rgb565_to_rgba8888
-        .func   neon_rgb565_to_rgba8888
 neon_rgb565_to_rgba8888:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -214,7 +211,6 @@ neon_rgb565_to_rgba8888:
 	bgt 1b							@ if( h > 0 ) goto 1
 
 	pop             {r4-r11,pc}
-        .endfunc
 
 @add Rotation stuff
 @----------------------------------------------------------------------------
@@ -1072,7 +1068,6 @@ exit:
 @------------------------------------------------------------
 
 	.global neon_copy_aligned32_rotated_CW270
-        .func   neon_copy_aligned32_rotated_CW270
 
 neon_copy_aligned32_rotated_CW270:
 
@@ -1099,7 +1094,6 @@ Copy2x2_CW270_32:
 	GLOBAL_ALPHA_CHANNEL_2x2 globalAlpha
 	SAVE_270CW_MATRIX_2x2 dstBuffer, dstStride
 	UPDATE_AREA_CW270_32	#2, Copy2x2_CW270_32
-	.endfunc 
 
 @------------------------------------------------------------
 @
@@ -1111,7 +1105,6 @@ Copy2x2_CW270_32:
 @------------------------------------------------------------
 
 	.global neon_copy_aligned32
-        .func   neon_copy_aligned32
 
 neon_copy_aligned32:
 	push	{r4-r12,lr}		@store used registers
@@ -1236,8 +1229,5 @@ exitCopy:
 
 	vpop	{q4-q7}
 	pop 	{r4-r12,pc}
-
-	.endfunc 
-
 
 #endif

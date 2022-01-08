@@ -276,7 +276,6 @@
 @ right shift the src and copy the result to dst
 
 	.global neon_memcpy_shift
-        .func   neon_memcpy_shift
 
 neon_memcpy_shift:
         push        {r0, r5, lr}
@@ -338,13 +337,11 @@ neon_memcpy_shift:
         b          5b
 6:
         pop         {r0, r5, pc}
-	.endfunc
 
 @ void neon_scale_420P10b_YUV(uint8_t *dst, uint16_t *src,const int length)
 @ scale 10bY value to 8bY right shift the src and copy the result to dst
 
 	.global neon_scale_420P10b_YUV
-        .func   neon_scale_420P10b_YUV
 
 neon_scale_420P10b_YUV:
         push        {r0, r5, lr}
@@ -471,13 +468,11 @@ neon_scale_420P10b_YUV:
         b          5b
 6:
         pop         {r0, r5, pc}
-	.endfunc
 
 @ void neon_copy_pack_shift(uint16_t *dst, const uint16_t *srcV, const uint16_t *srcU, const int length)
 @ right shift the src and copy the result to dst
 
 	.global neon_copy_pack_shift
-        .func   neon_copy_pack_shift
 
 neon_copy_pack_shift:
         push        {r0, lr}
@@ -571,7 +566,6 @@ neon_copy_pack_shift:
 
 7:
         pop         {r0, pc}
-	.endfunc
 
 @ neon_yuv420_to_BGRA32(uint8_t *yuv, uint8_t *y, uint8_t *u, uint8_t *v,
 @                  int w, int h, int yw, int cw, int dw)
@@ -592,7 +586,6 @@ neon_copy_pack_shift:
 #define dv  d31
 
         .global neon_yuv420_to_BGRA32
-        .func   neon_yuv420_to_BGRA32
 neon_yuv420_to_BGRA32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -628,7 +621,6 @@ neon_yuv420_to_BGRA32:
 	STORE_16xBGRA   rw, bgra2
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_yuv420_to_RGBX(uint8_t *yuv, uint8_t *y, uint8_t *u, uint8_t *v,
 @                  int w, int h, int yw, int cw, int dw)
@@ -649,7 +641,6 @@ neon_yuv420_to_BGRA32:
 #define dv  d31
 
         .global neon_yuv420_to_RGBX32
-        .func   neon_yuv420_to_RGBX32
 neon_yuv420_to_RGBX32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -685,7 +676,6 @@ neon_yuv420_to_RGBX32:
 	STORE_16xBGRA   rw, bgra2
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_yuv42010b_to_BGRA32(uint8_t *yuv, uint8_t *y, uint8_t *u, uint8_t *v,
 @                  int w, int h, int yw, int cw, int dw)
@@ -706,7 +696,6 @@ neon_yuv420_to_RGBX32:
 #define dv  d31
 
         .global neon_yuv42010b_to_BGRA32
-        .func   neon_yuv42010b_to_BGRA32
 neon_yuv42010b_to_BGRA32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -746,7 +735,6 @@ neon_yuv42010b_to_BGRA32:
 	STORE_16xBGRA   rw, bgra2
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_yuv42010b_to_RGBX(uint8_t *yuv, uint8_t *y, uint8_t *u, uint8_t *v,
 @                  int w, int h, int yw, int cw, int dw)
@@ -767,7 +755,6 @@ neon_yuv42010b_to_BGRA32:
 #define dv  d31
 
         .global neon_yuv42010b_to_RGBX32
-        .func   neon_yuv42010b_to_RGBX32
 neon_yuv42010b_to_RGBX32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -807,7 +794,6 @@ neon_yuv42010b_to_RGBX32:
 	STORE_16xBGRA   rw, bgra2
 
         pop             {r4-r11,pc}
-        .endfunc
 
 
 @ neon_yuv422_to_BGRA32(uint8_t *rgb, uint8_t *y, uint8_t *u, uint8_t *v,
@@ -825,7 +811,6 @@ neon_yuv42010b_to_RGBX32:
 #define dv  d31
 
         .global neon_yuv422_to_BGRA32
-        .func   neon_yuv422_to_BGRA32
 neon_yuv422_to_BGRA32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -848,7 +833,6 @@ neon_yuv422_to_BGRA32:
 	STORE_16xBGRA   l_422, bgra
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_yuv422_to_RGBX32(uint8_t *rgb, uint8_t *y, uint8_t *u, uint8_t *v,
 @                  int w, int h, int yw, int cw, int dw)
@@ -865,7 +849,6 @@ neon_yuv422_to_BGRA32:
 #define dv  d31
 
         .global neon_yuv422_to_RGBX32
-        .func   neon_yuv422_to_RGBX32
 neon_yuv422_to_RGBX32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -888,7 +871,6 @@ neon_yuv422_to_RGBX32:
 	STORE_16xBGRA   l_422, bgra
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_nv12_to_BGRA32(uint8_t *yuv, uint8_t *y, uint8_t *uv,
 @                  int w, int h, int yw, int cw, int dw)
@@ -908,7 +890,6 @@ neon_yuv422_to_RGBX32:
 #define dv  d31
 
         .global neon_nv12_to_BGRA32
-        .func   neon_nv12_to_BGRA32
 neon_nv12_to_BGRA32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -943,7 +924,6 @@ neon_nv12_to_BGRA32:
 	STORE_16xBGRA   nv12_rw, bgra2
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ neon_nv12_to_RGBX32(uint8_t *yuv, uint8_t *y, uint8_t *uv,
 @                  int w, int h, int yw, int cw, int dw)
@@ -963,7 +943,6 @@ neon_nv12_to_BGRA32:
 #define dv  d31
 
         .global neon_nv12_to_RGBX32
-        .func   neon_nv12_to_RGBX32
 neon_nv12_to_RGBX32:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -998,7 +977,6 @@ neon_nv12_to_RGBX32:
 	STORE_16xBGRA   nv12_rw, bgra2
 
         pop             {r4-r11,pc}
-        .endfunc
 
 @ yuv420_to_yuv422(uint8_t *yuv, uint8_t *y, uint8_t *u, uint8_t *v,
 @                  int w, int h, int yw, int cw, int dw)
@@ -1020,7 +998,6 @@ neon_nv12_to_RGBX32:
 #define i    lr
 
         .global neon_yuv420_to_YUYV
-        .func   neon_yuv420_to_YUYV
 neon_yuv420_to_YUYV:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -1090,10 +1067,8 @@ neon_yuv420_to_YUYV:
         bgt             1b
 
         pop             {r4-r11,pc}
-        .endfunc
 
         .global neon_yuv420_to_UYVY
-        .func   neon_yuv420_to_UYVY
 neon_yuv420_to_UYVY:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -1171,10 +1146,8 @@ neon_yuv420_to_UYVY:
         bgt             1b
 
         pop             {r4-r11,pc}
-        .endfunc
 
         .global neon_yuv422_to_UYVY
-        .func   neon_yuv422_to_UYVY
 neon_yuv422_to_UYVY:
         push            {r4-r11,lr}
         add             r4,  sp,  #36
@@ -1267,7 +1240,6 @@ neon_yuv422_to_UYVY:
         bgt             1b
 
         pop             {r4-r11,pc}
-        .endfunc
 
 
 	.macro	TURN_2_UYUV_PIXELS src0, src1, dst0, dst1, darker
@@ -1295,7 +1267,6 @@ YUV_tlb:	.word 0x0B020900		@ pix1 = Dn[0] | Dn+1[1] << 8 | Dn[2] << 16 | Dn+1[3]
 		.word 0x13021100		@ pix2 = Dn[0] | Dn+2[1] << 8 | Dn[2] << 16 | Dn+2[3] <<24
 
 	.global neon_copy_yuv_rotated_4
-        .func   neon_copy_yuv_rotated_4
 neon_copy_yuv_rotated_4:
 
 	push	{r4-r12,lr}		@store used arm registers
@@ -1310,7 +1281,6 @@ neon_copy_yuv_rotated_4:
 
 	vpop	{q4-q7}			@restore used neon registers
 	pop	{r4-r12,pc}		@restore used arm registers	
-	.endfunc
 
 
 #endif

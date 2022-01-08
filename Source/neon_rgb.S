@@ -163,7 +163,7 @@ neon_rgb565_to_rgba8888:
 	vmovn.u16	 d0,  q0
 	
 	vshrn.u16	d10,  q4, #5				@ G xxGGGGGG
-	vshrn.u16	d12,  q4, #0				@ B xxxBBBBB
+	vmovn.u16	d12,  q4				@ B xxxBBBBB
 	vshr.u16	 q4,  q4, #11				@ R xxxRRRRR
 	vmovn.u16	 d8,  q4
 

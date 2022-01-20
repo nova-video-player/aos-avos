@@ -24,6 +24,10 @@
 
 #include "avos_common_priv.h"
 
+#ifdef BIONIC
+#include <openssl/md5.h>
+#endif
+
 #define METADATA_BUFFER_SIZE 1024
 
 struct metadata_buffer {
@@ -162,9 +166,32 @@ int avos_metadata_write_begin(metadata_buffer_t *buffer)
 	return 0;
 }
 
+static int avos_metadata_changed(metadata_buffer_t *buffer)
+{
+#ifdef BIONIC
+	uint8_t hash[16];
+	MD5_CTX m;
+
+	MD5_Init(&m);
+	MD5_Update(&m, buffer->data, buffer->write_off);
+	MD5_Final(hash, &m);
+	if (memcmp(hash, buffer->hash, 16) != 0) {
+		memcpy(buffer->hash, hash, 16);
+		return 1;
+	} else {
+		return 0;
+	}
+#else
+	return 1;
+#endif
+}
+
 int avos_metadata_write_end(metadata_buffer_t *buffer)
 {
-	return 1;
+	int changed;
+
+	changed = avos_metadata_changed(buffer);
+	return changed;
 }
 
 int avos_metadata_read_begin(metadata_buffer_t *buffer)

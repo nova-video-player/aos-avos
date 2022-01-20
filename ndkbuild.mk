@@ -28,7 +28,6 @@ include $(AVOS_DIR)/common.mk
 
 INCLUDES +=  $(ANDROID_DIR)/obj/include/
 
-
 ### libyuv ###
 include $(CLEAR_VARS)
 LOCAL_MODULE    := libyuv
@@ -76,7 +75,7 @@ LOCAL_CFLAGS += -DARM_HAS_NEON
 LOCAL_ARM_NEON := true
 endif
 endif
-LOCAL_LDLIBS += -L$(LIBAV_CONFIG_DIR)/lib
+LOCAL_LDLIBS += -L$(LIBAV_CONFIG_DIR)/lib -L$(OPENSSL_CONFIG_DIR)/lib -L$(CURL_CONFIG_DIR)/lib
 
 ifeq ($(HAVE_ANDROID_SYSTEM_PROP),true)
 LOCAL_CFLAGS += -DHAVE_ANDROID_SYSTEM_PROP

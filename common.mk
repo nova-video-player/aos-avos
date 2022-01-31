@@ -140,8 +140,7 @@ CSRC_STREAM_MISC = \
 
 CSRC_STREAM_IO = \
 	stream_io_file.c \
-	stream_io_fd.c \
-	stream_io_curl.c
+	stream_io_fd.c
 
 CSRC_STREAM_PARSER = \
 	stream_parser.c \

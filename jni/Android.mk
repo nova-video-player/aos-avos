@@ -26,11 +26,7 @@ ifeq ($(LIBAV_CONFIG),)
 endif
 LIBAV_CONFIG_DIR := $(LIBAV_DIR)/dist-$(LIBAV_CONFIG)-$(TARGET_ARCH_ABI)
 
-OPENSSL_DIR := $(AVOS_DIR)/../openssl-android-builder
-CURL_DIR := $(AVOS_DIR)/../curl-android-builder
 AUDIOCOMPRESS_DIR := $(AVOS_DIR)/../audiocompress
-OPENSSL_CONFIG_DIR := $(OPENSSL_DIR)/dist-$(TARGET_ARCH_ABI)
-CURL_CONFIG_DIR := $(CURL_DIR)/dist-$(TARGET_ARCH_ABI)
 
 ifeq ($(TARGET_ARCH_ABI),armeabi)
 AVOS_LIBS_SUFFIX := _no_neon

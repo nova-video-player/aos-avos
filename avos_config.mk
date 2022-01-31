@@ -15,8 +15,6 @@
 GUI			= OFF
 CLI                     = ON
 
-CURL			= ON
-
 AUDIO			= ON
 AUDIO_FF_AMR		= ON
 AUDIO_FF_AMR_WB		= ON

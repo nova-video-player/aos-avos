@@ -18,9 +18,7 @@ CSRC += avos_common.c avos_mp.c avos_mp_video.c avos_mp_audio.c avos_mr.c androi
 INCLUDES += -I$(LOCAL_PATH)/public
 AVOS_SHARED_LIBS += -lavos_android
 endif
-INCLUDES += -I../$(OPENSSL_CONFIG_DIR)/include -I$(CURL_CONFIG_DIR)/include
 DEFINES += -DCONFIG_ANDROID
-SHARED_LIBS += -lcrypto -lssl
 endif
 
 ifeq ($(TTY),AVOS)
@@ -37,17 +35,4 @@ endif
 ifeq ($(LIBYUV),ON)
 LIBYUV_DIR := $(AVOS_DIR)/../libyuv
 DEFINES += -DCONFIG_LIBYUV
-endif
-
-ifeq ($(CURL),ON)
-
-ifeq ($(ARCH),i586)
-	AVOS_SHARED_LIBS += -lcurl
-else
-AVOS_SHARED_LIBS += -lcurl
-endif
-
-ifeq ($(BUILD_FROM),ANDROID)
-INCLUDES += -I$(OPENSSL_CONFIG_DIR)/include -I$(CURL_CONFIG_DIR)/include
-endif
 endif

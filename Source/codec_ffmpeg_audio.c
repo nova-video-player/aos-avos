@@ -230,7 +230,7 @@ serprintf("cannot open codec\r\n");
 
 	av_frame_unref(aframe);
 	avcodec_send_packet(actx, &avpkt);
-	int bytes = avcodec_receive_frame(actx, aframe);
+	avcodec_receive_frame(actx, aframe);
 	if( profile )
 		*profile = actx->profile;
 	if( channels )
@@ -633,7 +633,8 @@ Dump( data, size );
 	int t1 = time_update_time();
 	av_frame_unref(p->aframe);
 	avcodec_send_packet(p->actx, &avpkt);
-	int bytes = avcodec_receive_frame(p->actx, p->aframe);
+	avcodec_receive_frame(p->actx, p->aframe);
+	int bytes = av_get_bytes_per_sample(p->actx->sample_fmt) * p->aframe->nb_samples;
 	if( sleep_arm ) {
 		msec_sleep( sleep_arm );
 	}
@@ -790,7 +791,8 @@ DBGCA2 serprintf("drop %5d\n", parsed );
 
 	int t1 = time_update_time();
 	avcodec_send_packet(p->actx, &avpkt);
-	int bytes = avcodec_receive_frame(p->actx, p->aframe);
+	avcodec_receive_frame(p->actx, p->aframe);
+	int bytes = av_get_bytes_per_sample(p->actx->sample_fmt) * p->aframe->nb_samples;
 	if( sleep_arm ) {
 		msec_sleep( sleep_arm );
 	}

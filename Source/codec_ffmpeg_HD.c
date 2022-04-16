@@ -103,6 +103,8 @@ static void _queue_IM_buffers( void )
 static int _open( STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx, int *_need_flush, int *_need_reorder )
 {
 DBGS serprintf( "FF_HD: open: ");
+	avcodec_register_all();
+	
 	vctx = avcodec_alloc_context();
 
 	video->colorspace = AV_IMAGE_YUV_422;

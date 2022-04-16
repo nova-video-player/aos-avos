@@ -287,21 +287,21 @@ DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
 	int i;
 	for(i = 0; i < fmt->nb_streams; i++) {
 		AVStream *st          = fmt->streams[i];
-		AVCodecParameters *codecpar = st->codecpar;
+		AVCodecContext *codec = st->codec;
 		int discard = 1;
 DBGP serprintf("Stream #%d: ", i);
-		if(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
+		if(st->codec->codec_type == AVMEDIA_TYPE_VIDEO){
 DBGP serprintf("VIDEO\r\n");
-		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_AUDIO ){
 DBGP serprintf("AUDIO\r\n");
-		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE ){
 DBGP serprintf("SUBTITLE\r\n");
-		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_ATTACHMENT ){
 DBGP serprintf("ATTACHEMENT\r\n");
-		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_DATA ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_DATA ){
 DBGP serprintf("DATA\r\n");
 		} else {
-DBGP serprintf("<unknown> type %d\r\n", st->codecpar->codec_type);
+DBGP serprintf("<unknown> type %d\r\n", st->codec->codec_type);
 		}
 		int flags = fmt->iformat->flags;
 		if (flags & AVFMT_SHOW_IDS) {
@@ -313,19 +313,19 @@ DBGP serprintf("\tlanguage   %s -> %s\r\n", lang->value, map_ISO639_code( lang->
 		}
 		int gcd = av_gcd(st->time_base.num, st->time_base.den);
 DBGP serprintf("\tnum/dem    %d/%d\r\n", st->time_base.num/gcd, st->time_base.den/gcd);
-DBGP serprintf("\tcodec_id   %X\r\n", codecpar->codec_id);
-		const AVCodecDescriptor *desc = avcodec_descriptor_get(codecpar->codec_id);
+DBGP serprintf("\tcodec_id   %X\r\n", codec->codec_id);
+		const AVCodecDescriptor *desc = avcodec_descriptor_get(codec->codec_id);
 DBGP serprintf("\tcodec_name %s\r\n", desc ? desc->name : "");
-DBGP serprintf("\tcodec_tag  [%.4s]\r\n", &codecpar->codec_tag);
-		if( codecpar->extradata_size ) {
-DBGP serprintf("\textraSz    %d\r\n", codecpar->extradata_size);
+DBGP serprintf("\tcodec_tag  [%.4s]\r\n", &codec->codec_tag);
+		if( codec->extradata_size ) {
+DBGP serprintf("\textraSz    %d\r\n", codec->extradata_size);
 DBGP serprintf("\textra      "); 
-DBGP DumpLine( codecpar->extradata, MIN(128,codecpar->extradata_size), MIN(128,codecpar->extradata_size) );
+DBGP DumpLine( codec->extradata, MIN(128,codec->extradata_size), MIN(128,codec->extradata_size) );
 		}
-DBGP serprintf("\tbitrate    %d\r\n", codecpar->bit_rate);
+DBGP serprintf("\tbitrate    %d\r\n", codec->bit_rate);
 DBGP serprintf("\tdisposition %d / %s\r\n", st->disposition, disposition_name(st->disposition));
 		
-		if(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
+		if(st->codec->codec_type == AVMEDIA_TYPE_VIDEO){
 			//
 			// video
 			//
@@ -334,8 +334,10 @@ DBGP serprintf("\tdisposition %d / %s\r\n", st->disposition, disposition_name(st
 			}
 			if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
+			} else {
+DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 			}
-DBGP serprintf("\tPAR        %d/%d\r\n", codecpar->sample_aspect_ratio.num, codecpar->sample_aspect_ratio.den ); 
+DBGP serprintf("\tPAR        %d/%d\r\n", codec->sample_aspect_ratio.num, codec->sample_aspect_ratio.den ); 
 			if ( priv->av.vs_max < VIDEO_TRACK_MAX ) {
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
@@ -357,20 +359,20 @@ DBGP serprintf("\tPAR        %d/%d\r\n", codecpar->sample_aspect_ratio.num, code
 				//if( priv->av.vs_max == 0 && video->rate )
 				//	priv->duration = (UINT32)( 1000ull * (UINT64)video->frames * (UINT64) video->scale / (UINT64) video->rate);
 
-				video->codec_id	   = codecpar->codec_id;
+				video->codec_id	   = codec->codec_id;
 				strnZcpy( video->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				
-				video->fourcc      = codecpar->codec_tag;
-				video->format      = get_ff_format( codecpar->codec_id, &video->fourcc  );
+				video->fourcc      = codec->codec_tag;
+				video->format      = get_ff_format( codec->codec_id, &video->fourcc  );
 				if( video->format == 0 && video->codec_id ) {
 					video->format = VIDEO_FORMAT_LAVC;
 					video->fourcc = VIDEO_FOURCC_LAVC;
 				}
 				
-				if( codecpar->extradata_size ) {
-					if( codecpar->extradata_size <= sizeof( video->extraData ) ) {
-						video->extraDataSize = codecpar->extradata_size;
-						memcpy( video->extraData, codecpar->extradata, video->extraDataSize  );	
+				if( codec->extradata_size ) {
+					if( codec->extradata_size <= sizeof( video->extraData ) ) {
+						video->extraDataSize = codec->extradata_size;
+						memcpy( video->extraData, codec->extradata, video->extraDataSize  );	
 						if( video->format == VIDEO_FORMAT_H264 && video->extraData[0] == 0x00 ) {
 serprintf("FF: parse H264 SPS\n");
 							// for non-AVCC H264, parse the SPS/PPS here
@@ -378,16 +380,16 @@ serprintf("FF: parse H264 SPS\n");
 						}
 					} else {
 						video->extraDataSize  = 0;
-						video->extraDataSize2 = codecpar->extradata_size;
-						video->extraData2     = codecpar->extradata;
+						video->extraDataSize2 = codec->extradata_size;
+						video->extraData2     = codec->extradata;
 					}
 				} 
 				
-				video->width       = codecpar->width;
-				video->height      = codecpar->height;
-				video->aspect_n    = codecpar->sample_aspect_ratio.num;
-				video->aspect_d	   = codecpar->sample_aspect_ratio.den;
-				video->bytesPerSec = codecpar->bit_rate / 8;
+				video->width       = codec->width;
+				video->height      = codec->height;
+				video->aspect_n    = codec->sample_aspect_ratio.num;
+				video->aspect_d	   = codec->sample_aspect_ratio.den;
+				video->bytesPerSec = codec->bit_rate / 8;
 				
 				
 				switch( video->format ) {
@@ -424,24 +426,26 @@ serprintf("FF: parse H264 SPS\n");
                     }
                 }
 			}
-		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_AUDIO ){
 			//
 			// audio
 			//
-DBGP serprintf("\tsampleRate %d\r\n", codecpar->sample_rate);
-DBGP serprintf("\tblockAlign %d\r\n", codecpar->block_align);
-DBGP serprintf("\tchannels   %d\r\n", codecpar->channels);
+DBGP serprintf("\tsampleRate %d\r\n", codec->sample_rate);
+DBGP serprintf("\tblockAlign %d\r\n", codec->block_align);
+DBGP serprintf("\tchannels   %d\r\n", codec->channels);
 
 			if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
+			} else if( codec->time_base.den && codec->time_base.num ) {
+DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 			}
 
 			if ( priv->av.as_max < AUDIO_TRACK_MAX ) {	
 				AUDIO_PROPERTIES *audio = priv->av.audio + priv->av.as_max;
 
-				audio->codec_id	     = codecpar->codec_id;
+				audio->codec_id	     = codec->codec_id;
 				strnZcpy( audio->codec_name, desc ? desc->name : "", AV_NAME_LEN );
-				audio->format        = get_ff_format( codecpar->codec_id, NULL );
+				audio->format        = get_ff_format( codec->codec_id, NULL );
 
 				if( audio->format == 0 && audio->codec_id ) {
 					audio->format = WAVE_FORMAT_LAVC;
@@ -451,11 +455,11 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 				audio->scale         = st->time_base.num/gcd;
 				audio->rate          = st->time_base.den/gcd;
 				audio->frames        = 0;
-				audio->channels      = codecpar->channels;
-				audio->samplesPerSec = codecpar->sample_rate;
+				audio->channels      = codec->channels;
+				audio->samplesPerSec = codec->sample_rate;
 				audio->bitsPerSample = 0;
-				audio->blockAlign    = codecpar->block_align;
-				audio->bytesPerSec   = codecpar->bit_rate / 8;
+				audio->blockAlign    = codec->block_align;
+				audio->bytesPerSec   = codec->bit_rate / 8;
 				audio->valid         = 1;
 				stream_set_audio_name( audio, priv->av.as_max + 1 ); 
 				if( st->disposition && st->disposition != AV_DISPOSITION_DEFAULT ) {
@@ -470,14 +474,14 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 					audio->samplesPerBlock = 0;
 				}
 
-				if( codecpar->extradata_size ) {
-					if( codecpar->extradata_size <= sizeof( audio->extraData ) ) {
-						audio->extraDataSize = codecpar->extradata_size;
-						memcpy( audio->extraData, codecpar->extradata, audio->extraDataSize  );	
+				if( codec->extradata_size ) {
+					if( codec->extradata_size <= sizeof( audio->extraData ) ) {
+						audio->extraDataSize = codec->extradata_size;
+						memcpy( audio->extraData, codec->extradata, audio->extraDataSize  );	
 					} else {
 						audio->extraDataSize  = 0;
-						audio->extraDataSize2 = codecpar->extradata_size;
-						audio->extraData2     = codecpar->extradata;
+						audio->extraDataSize2 = codec->extradata_size;
+						audio->extraData2     = codec->extradata;
 					}
 				} 
 				
@@ -490,24 +494,24 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 				priv->av.as_max ++;
 				discard = 0;
 			} 
-		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codecpar->codec_type == AVMEDIA_TYPE_DATA ){
+		} else if( st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codec->codec_type == AVMEDIA_TYPE_DATA ){
 			//
 			// subtitle
 			//
-			int fmt = get_ff_format( codecpar->codec_id, NULL );
+			int fmt = get_ff_format( codec->codec_id, NULL );
 			if( fmt && priv->av.subs_max < SUB_TRACK_MAX ) {
 				SUB_PROPERTIES *sub = priv->av.sub + priv->av.subs_max;
 	
 				sub->valid          = 1;
-				sub->codec_id	    = codecpar->codec_id;
+				sub->codec_id	    = codec->codec_id;
 				strnZcpy( sub->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				sub->format         = fmt;
 				sub->gfx            = (sub->format == SUB_FORMAT_DVD_GFX) ? 1 : 0;
 				sub->stream         = i;
 				sub->scale          = st->time_base.num;
 				sub->rate           = st->time_base.den;
-				sub->extraData2     = codecpar->extradata;
-				sub->extraDataSize2 = codecpar->extradata_size;
+				sub->extraData2     = codec->extradata;
+				sub->extraDataSize2 = codec->extradata_size;
 
 				if( lang ) {
 					snprintf(sub->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
@@ -573,6 +577,7 @@ static int _open( STREAM *s, int buffer_size, int flags )
 {
 DBGS serprintf("FFMPEG: open: %s, buffer_size: %d\r\n", s->src.url, buffer_size);
 
+	av_register_all();
 	// allocate private data
 	if( !(s->parser_priv = (FF_PRIV*)amalloc( sizeof( FF_PRIV ) ) ) ) {
 		goto ErrorExit;
@@ -929,7 +934,7 @@ DBGP2 serprintf("\r\n");
 	}
 
 	// discard packet
-	av_packet_unref(&packet);
+	av_free_packet(&packet);
 			
 	return 0;
 }
@@ -1547,6 +1552,8 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 	
 	memset( priv, 0, sizeof( FF_PRIV ) );
 	av_init_props( priv );
+
+	av_register_all();
 
 	int err = 0;
 	// Open video file

@@ -307,15 +307,20 @@ DBGP serprintf("<unknown> type %d\r\n", st->codec->codec_type);
 		if (flags & AVFMT_SHOW_IDS) {
 DBGP serprintf("\tPID        0x%x\r\n", st->id);
 		}
-        	AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL,0);
+		AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
 		if (lang) {
 DBGP serprintf("\tlanguage   %s -> %s\r\n", lang->value, map_ISO639_code( lang->value ) );
+		}
+		AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
+		if (title) {
+DBGP serprintf("\ttitle   %s\r\n", title->value);
 		}
 		int gcd = av_gcd(st->time_base.num, st->time_base.den);
 DBGP serprintf("\tnum/dem    %d/%d\r\n", st->time_base.num/gcd, st->time_base.den/gcd);
 DBGP serprintf("\tcodec_id   %X\r\n", codec->codec_id);
 		const AVCodecDescriptor *desc = avcodec_descriptor_get(codec->codec_id);
 DBGP serprintf("\tcodec_name %s\r\n", desc ? desc->name : "");
+DBGP serprintf("\tcodec_long_name %s\r\n", desc ? desc->long_name : "");
 DBGP serprintf("\tcodec_tag  [%.4s]\r\n", &codec->codec_tag);
 		if( codec->extradata_size ) {
 DBGP serprintf("\textraSz    %d\r\n", codec->extradata_size);
@@ -461,10 +466,20 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 				audio->blockAlign    = codec->block_align;
 				audio->bytesPerSec   = codec->bit_rate / 8;
 				audio->valid         = 1;
-				stream_set_audio_name( audio, priv->av.as_max + 1 ); 
+				//stream_set_audio_name( audio, priv->av.as_max + 1 ); 
+				if (title) {
+					//strncat( audio->name, " ", sizeof(audio->name) - strlen(audio->name) - 1 );
+					strncat( audio->name, title->value, sizeof(audio->name) - strlen(audio->name) - 1 );
+				}
+				if (lang) {
+					if (title) strncat( audio->name, " (", sizeof(audio->name) - strlen(audio->name) - 1 );
+					//else strncat( audio->name, " ", sizeof(audio->name) - strlen(audio->name) - 1 );
+					strncat( audio->name, lang->value, sizeof(audio->name) - strlen(audio->name) - 1 );
+					if (title) strncat( audio->name, ")", sizeof(audio->name) - strlen(audio->name) - 1 );
+				}
 				if( st->disposition && st->disposition != AV_DISPOSITION_DEFAULT ) {
-					strcat( audio->name, " " );
-					strcat( audio->name, disposition_name(st->disposition) );
+					strncat( audio->name, " ", sizeof(audio->name) - strlen(audio->name) - 1 );
+					strncat( audio->name, disposition_name(st->disposition), sizeof(audio->name) - strlen(audio->name) - 1 );
 					if( st->disposition & (AV_DISPOSITION_HEARING_IMPAIRED | AV_DISPOSITION_VISUAL_IMPAIRED)) {
 						audio->priority = 2;
 					}

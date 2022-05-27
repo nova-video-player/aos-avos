@@ -543,7 +543,7 @@ enum {
 #define AUDIO_TRACK_MAX		16
 #define VIDEO_TRACK_MAX		6
 #define SUB_TRACK_MAX		32
-#define AV_NAME_LEN		32
+#define AV_NAME_LEN			256
 
 enum {
 	CRYPT_NONE = 0,

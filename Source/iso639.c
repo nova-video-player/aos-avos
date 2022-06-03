@@ -103,6 +103,7 @@ static const ISO639 map[] = {
 
 	{ "pt",		"s_portuguese" },
 	{ "por",	"s_portuguese" },
+	{ "pob",	"s_brazilian" },
 	
 	{ "ru",		"s_russian" },
 	{ "rus",	"s_russian" },
@@ -125,7 +126,8 @@ static const ISO639 map[] = {
 
 	{ "zh",		"s_chinese" },
 	{ "zho",	"s_chinese" },
-	{ "chi",	"s_chinese" },
+	{ "zt",		"s_traditional_chinese" },
+	{ "chi",	"s_traditional_chinese" },
 
 	{ "hrv",	"Croatian" },
 	{ "ind",	"s_indonesian" },
@@ -135,6 +137,11 @@ static const ISO639 map[] = {
 	{ "may",	"s_malay" },
 	{ "msa",	"s_malay" },
 
+	{ "uk",		"s_ukrainian" },
+	{ "ukr",	"s_ukrainian" },
+
+	{ "ku",		"s_kurdish" },
+	{ "kur",	"s_kurdish" },
 };
 
 // ***************************************

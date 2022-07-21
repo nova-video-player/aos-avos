@@ -49,6 +49,8 @@ void device_config_set_output_sample_rate(int sample_rate);
 
 static pthread_t mainloop_thread;
 
+static long hdmi_audio_codecs_flag = 0;
+
 //#define DUMP_OMX
 
 void libavos_init(const char *name, const char *pkg_name, int has_pluginlib)
@@ -144,6 +146,11 @@ void libavos_set_passthrough(int force_passthrough)
 	spdif_set_passthrough(force_passthrough);
 	audio_interface_init();
 #endif
+}
+
+void libavos_set_hdmi_supported_audio_codecs(long flag)
+{
+	set_hdmi_supported_audio_codecs(flag);
 }
 
 void libavos_set_downmix(int downmix)

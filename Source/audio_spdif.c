@@ -36,6 +36,40 @@
 #define DBGCA2 if(Debug[DBG_CA] > 1 )
 #define DBGS   if(Debug[DBG_STREAM])
 
+// check if bit at position in value is 1
+#define CHECK_BIT(value,position) (((value)>>(position)) & 1)
+
+// audio format flag
+#define ENCODING_INVALID                0
+#define ENCODING_DEFAULT                1
+#define ENCODING_PCM_16BIT              2
+#define ENCODING_PCM_8BIT               3
+#define ENCODING_PCM_FLOAT              4
+#define ENCODING_AC3                    5
+#define ENCODING_E_AC3                  6
+#define ENCODING_DTS                    7
+#define ENCODING_DTS_HD                 8
+#define ENCODING_MP3                    9
+#define ENCODING_AAC_LC                 10
+#define ENCODING_AAC_HE_V1              11
+#define ENCODING_AAC_HE_V2              12
+#define ENCODING_IEC61937               13
+#define ENCODING_DOLBY_TRUEHD           14
+#define ENCODING_AAC_ELD                15
+#define ENCODING_AAC_XHE                16
+#define ENCODING_AC4                    17
+#define ENCODING_E_AC3_JOC              18
+#define ENCODING_DOLBY_MAT              19
+#define ENCODING_OPUS                   20
+#define ENCODING_PCM_24BIT_PACKED       21
+#define ENCODING_PCM_32BIT              22
+#define ENCODING_MPEGH_BL_L3            23
+#define ENCODING_MPEGH_BL_L4            24
+#define ENCODING_MPEGH_LC_L3            25
+#define ENCODING_MPEGH_LC_L4            26
+#define ENCODING_DTS_UHD                27
+#define ENCODING_DRA                    28
+
 typedef struct {
 	char buf[64*1024];
 	int pos;
@@ -46,6 +80,8 @@ static AVFormatContext *fctxt;
 static buf_t b;
 static AVCodecParserContext *aparser;
 static AVCodecContext avctx;
+
+static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
 static int spdif_put( UCHAR *data, int size, int *decoded )
 {
@@ -154,15 +190,40 @@ static int wave2libav_codecid( int codecid )
 {
 	switch ( codecid ) {
 	case WAVE_FORMAT_AC3:
-		return AV_CODEC_ID_AC3;
+		// some TVs only declare EAC3 but can do AC3
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_AC3) | CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
+			serprintf("AC3 encoding passthrough supported\n");
+			return AV_CODEC_ID_AC3;
+		} else {
+			serprintf("AC3 encoding passthrough NOT supported\n");
+			return 0;
+		}
 	case WAVE_FORMAT_EAC3:
-                return AV_CODEC_ID_EAC3;
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
+			serprintf("EAC3 encoding passthrough supported\n");
+			return AV_CODEC_ID_EAC3;
+		} else {
+			serprintf("EAC3 encoding passthrough NOT supported\n");
+			return 0;
+		}
 	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS:
-		return AV_CODEC_ID_DTS;
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS)) {
+			serprintf("DTS encoding passthrough supported\n");
+			return AV_CODEC_ID_DTS;
+		} else {
+			serprintf("DTS encoding passthrough NOT supported\n");
+			return 0;
+		}
 	case WAVE_FORMAT_TRUEHD:
-		return AV_CODEC_ID_TRUEHD;
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DOLBY_TRUEHD)) {
+			serprintf("TRUEHD encoding passthrough supported\n");
+			return AV_CODEC_ID_TRUEHD;
+		} else {
+			serprintf("TRUEHD encoding passthrough NOT supported\n");
+			return 0;
+		}
 	default:
 		return 0;
 	}
@@ -171,56 +232,15 @@ static int wave2libav_codecid( int codecid )
 #ifdef CONFIG_ANDROID
 static int spdif_check( int codecid )
 {
-DBGS serprintf( "spdif_check, force %d\n", passthrough_on);
+DBGS serprintf( "spdif_check, check codecid %d, force %d\n", codecid, passthrough_on);
 	if ( !wave2libav_codecid( codecid ) ) {
-		serprintf( "codec not supported for passthrough...\n" );
+		serprintf("codec not supported for passthrough...\n" );
 		return 0;
 	}
 
 	av_register_all();
-	char val[PROP_VALUE_MAX] = { 0 };
 
-	if ( passthrough_on != -1 )
-		return passthrough_on;
-
-	//Supports rk and amlogic
-	int is_rockchip = device_get_hw_type(  ) == HW_TYPE_RK32 || device_get_hw_type(  ) == HW_TYPE_RK30 || device_get_hw_type(  ) == HW_TYPE_RK29;
-
-	int is_amlogic = device_get_hw_type(  ) == HW_TYPE_AMLOGIC;
-
-	int is_nexus_player = 0;
-
-	android_property_get( "ro.hardware", val, "" );
-	if ( strcmp( val, "fugu" ) == 0 )
-		is_nexus_player = 1;
-	if ( strcmp( val, "molly" ) == 0 )
-		is_nexus_player = 1;
-	
-	if ( !is_rockchip && !is_amlogic && !is_nexus_player )
-		return 0;
-
-	//This property is (un)setted on RK platform depending on the selected output
-	android_property_get( "media.cfg.audio.bypass", val, "false" );
-	if ( is_rockchip && strcmp( val, "true" ) != 0 ) {
-		serprintf( "RK bypass disabled...\n" );
-		return 0;
-	}
-
-	if ( is_amlogic ) {
-		//Only AC3 supported on amlogic ATM
-		if ( codecid != WAVE_FORMAT_AC3 )
-			return 0;
-		int v = 0;
-		sysfs_ll_read_int( "/sys/class/audiodsp/digital_raw", &v );
-		if ( !v ) {
-			serprintf( "AMLogic bypass disabled\n" );
-			return 0;
-		}
-	}
-
-	if ( is_nexus_player ) {
-	}
-	return 1;
+	return passthrough_on;
 }
 #else
 static int spdif_check(int codecid) 
@@ -230,6 +250,16 @@ DBGS serprintf( "spdif_check, force %d\n", passthrough_on);
 	return (passthrough_on == 1);
 }
 #endif
+
+void set_hdmi_supported_audio_codecs(long flag)
+{
+	hdmi_audio_codecs_flag = flag;
+}
+
+long get_hdmi_supported_audio_codecs()
+{
+	return hdmi_audio_codecs_flag;
+}
 
 int spdif_init( AUDIO_PROPERTIES *a )
 {

@@ -23,4 +23,6 @@ int spdif_init(AUDIO_PROPERTIES *);
 int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded );
 int spdif_set_passthrough(int on);
 int spdif_is_passthrough_on();
+void set_hdmi_supported_audio_codecs(long flag);
+long get_hdmi_supported_audio_codecs();
 #endif

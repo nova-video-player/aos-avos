@@ -510,6 +510,21 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 
 // ************************************************************
 //
+//	stream_set_av_speed
+//
+// ************************************************************
+int stream_set_av_speed( STREAM *s, float av_speed )
+{
+	if( !s )
+		return 1;
+	s->av_speed = av_speed;
+	serprintf("MARC stream:stream_set_av_speed to %f\n", av_speed);
+	audio_interface_change_audio_speed(s->audio_ctx, av_speed);
+	return 0;
+}
+
+// ************************************************************
+//
 //	stream_drive_sleep
 //
 // ************************************************************

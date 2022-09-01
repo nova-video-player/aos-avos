@@ -393,6 +393,7 @@ int avos_mp_video_seek(avos_mp_t *mp, avos_mp_video_t *video, uint32_t pos)
 
 		wind_start = stream_get_current_pos(video->s, &stream_total);
 		dir = pos >= wind_start ? STREAM_SEEK_FORWARD : STREAM_SEEK_BACKWARD;
+		serprintf("avos_mp_video:avos_mp_video_seek current_pos=%d to pos=%d direction=%d\n", wind_start, pos, dir);
 		stream_seek_pos(video->s, pos, dir, STREAM_SEEK_RELAXED );
 	}
 	return AVOS_ERR_OK;
@@ -406,7 +407,6 @@ int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret)
 	if (video->last_duration == 0) {
 		int total, pos;
 		pos = stream_get_current_pos(video->s, &total);
-
 		avos_mp_sendevent(mp, MEDIA_RELATIVE_POSITION_UPDATE,
 		    (uint32_t) ((double)(pos/(double)total) * 1000), 0);
 	} else if (video->buffered_pos) {
@@ -477,5 +477,12 @@ int avos_mp_video_setaudiofilter(avos_mp_t *mp, avos_mp_video_t *video, int n, i
 int avos_mp_video_setavdelay(avos_mp_t *mp, avos_mp_video_t *video, int delay)
 {
 	stream_set_av_delay(video->s, delay);
+	return AVOS_ERR_OK;
+}
+
+int avos_mp_video_setavspeed(avos_mp_t *mp, avos_mp_video_t *video, float speed)
+{
+	serprintf("MARC avos_mp_video:avos_mp_video_setavspeed to %f\n", speed);
+	stream_set_av_speed(video->s, speed);
 	return AVOS_ERR_OK;
 }

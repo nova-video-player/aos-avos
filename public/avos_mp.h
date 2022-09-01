@@ -60,6 +60,7 @@ typedef struct avos_mp_handle_t {
 	int (*setsubtitleratio)	(avos_mp_t *mp, uint32_t n, uint32_t d);
 	int (*setaudiofilter)	(avos_mp_t *mp, int n, int night_on);
 	int (*setavdelay)	(avos_mp_t *mp, int delay);
+	int (*setavspeed)	(avos_mp_t *mp, float speed);
 	// audio specific
 	int (*setnextrack)	(avos_mp_t *mp, const char *path);
 } avos_mp_handle_t;

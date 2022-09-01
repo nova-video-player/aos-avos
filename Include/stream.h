@@ -468,7 +468,8 @@ typedef struct STREAM {
 	int 		sink_delay_count;	// delay between video and it's sink
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
-	
+	float		av_speed;		// user provided AV speed
+
 	int 		audio_time;
 	int 		audio_ref_time;
 	int 		audio_samples;
@@ -796,6 +797,7 @@ int 	stream_set_abort_handler    ( STREAM *s, ABORT_HANDLER abort         );
 int	stream_set_progress_handler ( STREAM *s, PROGRESS_HANDLER progress   );
 int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
+int	stream_set_av_speed         ( STREAM *s, float av_speed );
 
 int 	stream_set_crypt( STREAM *s, int crypt, void *key );
 void 	stream_set_size( STREAM *s, UINT64 size );
@@ -837,7 +839,9 @@ void	stream_set_cpu_priority( STREAM *s, int cpu_prio );
 //	INTERNAL API
 //
 
-#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 4)
+// TODO MARC remove if not useful (audio_speed)
+//#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 4)
+#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 16)
 #define VIDEO_OVERLAP_SIZE		VIDEO_MINDATA_SIZE
 
 int 	stream_init ( STREAM *s );

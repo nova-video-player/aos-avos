@@ -108,6 +108,7 @@ int avos_mp_video_setsubtitledelay(avos_mp_t *mp, avos_mp_video_t *video, int de
 int avos_mp_video_setsubtitleratio(avos_mp_t *mp, avos_mp_video_t *video, uint32_t n, uint32_t d);
 int avos_mp_video_setaudiofilter(avos_mp_t *mp, avos_mp_video_t *video, int n, int night_on);
 int avos_mp_video_setavdelay(avos_mp_t *mp, avos_mp_video_t *video, int delay);
+int avos_mp_video_setavspeed(avos_mp_t *mp, avos_mp_video_t *video, float speed);
 
 int avos_mp_audio_abort(avos_mp_t *mp, avos_mp_audio_t *audio);
 int avos_mp_audio_start(avos_mp_t *mp, avos_mp_audio_t *audio);
@@ -749,9 +750,11 @@ static int avos_mp_setstarttime(avos_mp_t *mp, uint32_t msec)
 static int avos_mp_getpos(avos_mp_t *mp, uint32_t *ret)
 {
 	if (async_cmd_is_running(mp)) {
+		serprintf("MARC avos_mp:avos_mp_getpos async_cmd_is_running mp->last.pos=%d\n", mp->last.pos);
 		*ret = mp->last.pos;
 	} else {
 		AVOS_MP_COMMON(getpos, mp, ret);
+		serprintf("MARC avos_mp:avos_mp_getpos async_cmd_is_NOT_running ret=%d\n", *ret);
 		mp->last.pos = *ret;
 	}
 	//MPLOGV("%d", *ret);
@@ -847,6 +850,14 @@ static int avos_mp_setavdelay(avos_mp_t *mp, int delay)
 	return AVOS_ERR_OK;
 }
 
+static int avos_mp_setavspeed(avos_mp_t *mp, float speed)
+{
+	MPLOG("%f", speed);
+	async_cmd_wait(mp);
+	AVOS_MP_VIDEO(setavspeed, mp, speed);
+	return AVOS_ERR_OK;
+}
+
 static int avos_mp_setnextrack(avos_mp_t *mp, const char *path)
 {
 #ifdef UPNP_FUSE_TO_HTTP
@@ -890,6 +901,7 @@ static const avos_mp_handle_t avos_mp_handle = {
 	.setsubtitleratio = avos_mp_setsubtitleratio,
 	.setaudiofilter = avos_mp_setaudiofilter,
 	.setavdelay = avos_mp_setavdelay,
+	.setavspeed = avos_mp_setavspeed,
 	.setnextrack = avos_mp_setnextrack,
 };
 

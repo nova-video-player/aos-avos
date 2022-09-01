@@ -41,6 +41,8 @@ typedef unsigned char bool;
 
 #define NO_ERROR 0
 
+#define ENABLE_AUDIO_SPEED
+
 extern JavaVM *myVm;
 extern jobject myClassLoader;
 extern jmethodID myFindClassMethod;
@@ -190,115 +192,146 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	audio_format_t track_format;
 	int status = 0;
 
-DBG	LOG("rate %d, channels %d, bits %d, format %d, passthrough mode %d", rate, channels, bits, format, at->passthrough);
+	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d", rate, channels, bits, format,
+			 at->passthrough );
+	serprintf( "rate %d, channels %d, bits %d, format %d, passthrough mode %d\n", rate, channels, bits, format,
+			   at->passthrough );
 
-	attach_thread(at);
+	attach_thread( at );
 
 	at->rate = rate;
 	at->channel_count = channels;
 	at->format = format;
-	switch (at->channel_count) {
-		case 1:
-			track_chanmask = AUDIO_CHANNEL_OUT_MONO;
-			break;
-		case 2:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			break;
-		case 3:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
-			break;
-		case 4:
-			track_chanmask = AUDIO_CHANNEL_OUT_SURROUND;
-			break;
-		case 6:
-			track_chanmask = AUDIO_CHANNEL_OUT_5POINT1;
-			break;
-		case 8:
-			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-			break;
-		default:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			break;
+	switch( at->channel_count ) {
+	case 1:
+		track_chanmask = AUDIO_CHANNEL_OUT_MONO;
+		break;
+	case 2:
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+		break;
+	case 3:
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
+		break;
+	case 4:
+		track_chanmask = AUDIO_CHANNEL_OUT_SURROUND;
+		break;
+	case 6:
+		track_chanmask = AUDIO_CHANNEL_OUT_5POINT1;
+		break;
+	case 8:
+		track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+		break;
+	default:
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+		break;
 	}
 
-	switch (bits) {
-		case 8:
-			track_format = 3; //AudioFormat.ENCODING_PCM_8BIT
-			break;
-		case 16:
-			track_format = 2; //AudioFormat.ENCODING_PCM_16BIT
-			break;
-		case 24:
-		case 32:
-		default:
-ERR			LOG("cannot set bits %d", bits);
-			return -1;
+	switch( bits ) {
+	case 8:
+		track_format = 3; // AudioFormat.ENCODING_PCM_8BIT
+		break;
+	case 16:
+		track_format = 2; // AudioFormat.ENCODING_PCM_16BIT
+		break;
+	case 24:
+	case 32:
+	default:
+		ERR LOG( "cannot set bits %d", bits );
+		return -1;
 	}
 	at->frame_size = bits / 8 * at->channel_count;
 
-	if(at->passthrough == 2) {
+	if( at->passthrough == 2 ) {
 		at->frame_size = bits / 8;
-		switch (at->format) {
-			case WAVE_FORMAT_AC3:
-				track_format = 5; //AudioFormat.ENCODING_AC3;
-				break;
-			case WAVE_FORMAT_EAC3:
-				track_format = 6; //AudioFormat.ENCODING_E_AC3;
-				break;
-			case WAVE_FORMAT_DTS:
-				track_format = 7; //AudioFormat.ENCODING_DTS;
-				break;
-			case WAVE_FORMAT_DTS_HD_MA:
-			case WAVE_FORMAT_DTS_HD:
-				track_format = 8; //AudioFormat.ENCODING_DTS_HD;
-				break;
-			case WAVE_FORMAT_TRUEHD:
-				track_format = 14; //AudioFormat.ENCODING_DOLBY_TRUEHD;
-				break;
-			default:
-				track_format = 13; //AudioFormat.ENCODING_IEC61937
+		switch( at->format ) {
+		case WAVE_FORMAT_AC3:
+			track_format = 5; // AudioFormat.ENCODING_AC3;
+			break;
+		case WAVE_FORMAT_EAC3:
+			track_format = 6; // AudioFormat.ENCODING_E_AC3;
+			break;
+		case WAVE_FORMAT_DTS:
+			track_format = 7; // AudioFormat.ENCODING_DTS;
+			break;
+		case WAVE_FORMAT_DTS_HD_MA:
+		case WAVE_FORMAT_DTS_HD:
+			track_format = 8; // AudioFormat.ENCODING_DTS_HD;
+			break;
+		case WAVE_FORMAT_TRUEHD:
+			track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD;
+			break;
+		default:
+			track_format = 13; // AudioFormat.ENCODING_IEC61937
 		}
 	}
 
 	int reinit = 0;
-	if (at->init) {
-DBG		LOG("deleting track");
-		call_void_method(at, "release", "()V");
-		(*at->env)->DeleteGlobalRef(at->env, at->obj);
-		jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
-		if (exception) {
-ERR			LOG("!!!EXCEPTION DeleteGlobalRef");
-			(*at->env)->ExceptionClear(at->env);
+	if( at->init ) {
+		DBG LOG( "deleting track" );
+		call_void_method( at, "release", "()V" );
+		( *at->env )->DeleteGlobalRef( at->env, at->obj );
+		jthrowable exception = ( *at->env )->ExceptionOccurred( at->env );
+		if( exception ) {
+			ERR LOG( "!!!EXCEPTION DeleteGlobalRef" );
+			( *at->env )->ExceptionClear( at->env );
 		}
 
 		at->obj = NULL;
 		at->init = 0;
 		reinit = 1;
+		serprintf( "MARC audio_interface_audiotrack_java:audiotrack_set_output_params triggers reinit\n" );
 	}
 
 	int streamType = 3; /*STREAM_MUSIC*/
-	int sampleRateInHz = rate; 
+	int sampleRateInHz = rate;
 	int channelConfig = track_chanmask << 2;
 	int audioFormat = track_format;
 	int mode = 1; /*MODE_STREAM*/
-	at->buf_size = (at->passthrough == 2) ? 32768 : call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
-			sampleRateInHz, channelConfig, audioFormat);
 
+	int buffer_scale = 1;
+	if(at->passthrough == 0) { // 4x buffer size to enable audio_speed
+		// TODO MARC should be only max_audio_speed = 2 instead of 4
+		buffer_scale = 4;
+	}
+	at->buf_size = (at->passthrough == 2) ? 32768 : buffer_scale * call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
+			sampleRateInHz, channelConfig, audioFormat);
 	jobject audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass,
 		(*at->env)->GetMethodID(at->env, at->audiotrackClass, "<init>", "(IIIIII)V"),
 		streamType, sampleRateInHz, channelConfig,
 		audioFormat, at->buf_size, mode);
 
+	jobject playbackParams;
+	jclass playbackParamsClass;
+
+#ifdef ENABLE_AUDIO_SPEED
+	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
+		// get current audioparams
+		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
+			(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
+
+		// change that audioparam's speed
+		playbackParamsClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, "android/media/PlaybackParams"));
+		(*at->env)->CallObjectMethod(at->env, playbackParams,
+				(*at->env)->GetMethodID(at->env, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), audio_interface_get_audio_speed());
+
+		// set audiotrack's audioparams back to us
+		(*at->env)->CallVoidMethod(at->env, audioTrack,
+				(*at->env)->GetMethodID(at->env, at->audiotrackClass, "setPlaybackParams", "(Landroid/media/PlaybackParams;)V"), playbackParams);
+	}
+#endif
+
 	int failed = 0;
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
 	if (exception) {
 ERR		LOG("exception during constructor call");
+        (*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 		failed = 1;
 	}
 
 	if (!failed) {
-		at->obj = (*at->env)->NewGlobalRef(at->env,  audioTrack);
+		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params save audioTrack object in at->obj\n");
+		at->obj = (*at->env)->NewGlobalRef(at->env, audioTrack);
 
 		status = call_int_method(at, "getState", "()I");
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
@@ -316,6 +349,7 @@ DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count
 
 	if (failed && reinit) {
 		msec_sleep( 30 );
+		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
 		return audiotrack_set_output_params(at, rate, channels, bits, format);
 	}
 
@@ -328,12 +362,29 @@ DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count
 
 DBG	LOG("track created");
 
+#ifdef ENABLE_AUDIO_SPEED
+	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
+		// reuse already created audioTrack
+		audioTrack = at->obj;
+		// get current audioparams
+		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
+														 (*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
+
+		float speed_check = 0.0f;
+		speed_check = (*at->env)->CallFloatMethod(at->env, playbackParams,
+													 (*at->env)->GetMethodID(at->env, playbackParamsClass, "getSpeed", "()F"));
+
+		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params reread speed from playbackParams %f\n", speed_check);
+	}
+#endif
+
 	return 0;
 }
 
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
 	at->passthrough = passthrough;
+	serprintf("MARC audiotrack_interface_audiotrack_java:audiotrack_set_passthrough calls audiotrack_set_output_params\n");
 	audiotrack_set_output_params(at, at->rate, at->channel_count, (passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, at->format);
 	return 0;
 }
@@ -455,6 +506,105 @@ DBG	LOG();
 	return -1;
 }
 
+static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
+	serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f\n", speed);
+
+	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
+		attach_thread( at );
+
+		// call_void_method(at, "pause", "()V");
+		// call_void_method(at, "flush", "()V");
+
+		// reuse already created audioTrack
+		jobject audioTrack = at->obj;
+
+		// get current audioparams
+		jobject playbackParams =
+			( *at->env )
+				->CallObjectMethod( at->env, audioTrack,
+									( *at->env )
+										->GetMethodID( at->env, at->audiotrackClass, "getPlaybackParams",
+													   "()Landroid/media/PlaybackParams;" ) );
+
+		serprintf( "MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed get audio params ok\n" );
+
+		// change that audioparam's speed
+		jclass playbackParamsClass =
+			( *at->env )->NewGlobalRef( at->env, ( *at->env )->FindClass( at->env, "android/media/PlaybackParams" ) );
+		( *at->env )
+			->CallObjectMethod(
+				at->env, playbackParams,
+				( *at->env )
+					->GetMethodID( at->env, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
+				speed );
+
+		serprintf(
+			"MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed setSpeed on playbackParams to %f ok\n",
+			speed );
+
+		// set audiotrack's audioparams back to us
+		( *at->env )
+			->CallVoidMethod( at->env, audioTrack,
+							  ( *at->env )
+								  ->GetMethodID( at->env, at->audiotrackClass, "setPlaybackParams",
+												 "(Landroid/media/PlaybackParams;)V" ),
+							  playbackParams );
+
+		// save back audioTrack
+		at->obj = ( *at->env )->NewGlobalRef( at->env, audioTrack );
+
+		int failed = 0;
+		jthrowable exception = ( *at->env )->ExceptionOccurred( at->env );
+		if( exception ) {
+			ERR LOG( "exception during modification call" );
+			( *at->env )->ExceptionDescribe( at->env );
+			( *at->env )->ExceptionClear( at->env );
+			failed = 1;
+		}
+
+		if( failed ) {
+			serprintf(
+				"MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed set audio params FAILED!!!\n" );
+		} else {
+			serprintf( "MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed save audioTrack object in at->obj\n" );
+			at->obj = ( *at->env )->NewGlobalRef( at->env, audioTrack );
+
+			int status = call_int_method( at, "getState", "()I" );
+			if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
+				ERR LOG( "audiotrack change params failed" );
+				failed = 1;
+			}
+		}
+
+		// TODO MARC remove afterwards, this is a test: reread the speed to be sure it has been applied
+		// reuse already created audioTrack
+		audioTrack = at->obj;
+		// get current audioparams
+		playbackParams = ( *at->env )
+							 ->CallObjectMethod( at->env, audioTrack,
+												 ( *at->env )
+													 ->GetMethodID( at->env, at->audiotrackClass, "getPlaybackParams",
+																	"()Landroid/media/PlaybackParams;" ) );
+
+		float speed_check = 0.0f;
+		speed_check =
+			( *at->env )
+				->CallFloatMethod( at->env, playbackParams,
+								   ( *at->env )->GetMethodID( at->env, playbackParamsClass, "getSpeed", "()F" ) );
+
+		serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed reread speed from playbackParams is %f\n",
+				   speed_check );
+
+		DBG LOG( "audio speed changed" );
+
+		// call_void_method(at, "play", "()V");
+	} else {
+		serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough\n");
+	}
+
+	return 0;
+}
+
 const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.name = "audiotrack_java",
 	.init = audiotrack_init,
@@ -472,4 +622,5 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.get_session_id = audiotrack_get_session_id,
 	.set_passthrough = audiotrack_set_passthrough,
 	.get_passthrough = audiotrack_get_passthrough,
+	.change_audio_speed = audiotrack_change_audio_speed,
 };

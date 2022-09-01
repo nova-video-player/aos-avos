@@ -4189,7 +4189,8 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 		
 	real_time = _stream_get_real_time( s, time );
 	
-	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
+	int ret = _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
+	return ret;
 }
 
 // *****************************************************************************
@@ -4207,6 +4208,7 @@ int stream_seek_pos( STREAM *s, int pos, int dir, int flags )
 	if( !s->no_duration ) {
 		// if we have duration, pos is the same as time!!!
 		ret = stream_seek_time( s, pos, dir, flags );
+
 	} else {
 		ret = _stream_seek_abortable( s, -1, pos, dir, flags, 0 );
 	}
@@ -4435,7 +4437,7 @@ int stream_get_time_default( STREAM *s, int *total )
 	
 	if( total )
 		*total = s->duration;
-	int time = s->video->valid ? s->video_time : s->audio_time;
+	int time = audio_interface_get_audio_speed() * (s->video->valid ? s->video_time : s->audio_time);
 DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );	
 	return time;
 }
@@ -4449,7 +4451,6 @@ int stream_get_current_time( STREAM *s, int *total )
 {
 	if ( !s )
 		return 0;
-	
 	if( s->parser && s->parser->get_time ) {
 		return s->parser->get_time( s, total );
 	}

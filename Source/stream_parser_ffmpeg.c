@@ -845,6 +845,7 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 
 extern int stream_drive_wake_sleep;
 
+// timestamps derivation
 #define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale     / s->audio->rate )
 #define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
 #define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale  / s->subtitle->rate )
@@ -856,7 +857,8 @@ extern int stream_drive_wake_sleep;
 // ************************************************************
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
-	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts )) - ff_p->start_time;
+	// scale timestamps by audio_speed
+	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) / audio_interface_get_audio_speed() : GET_VIDEO_TS( packet->dts ) / audio_interface_get_audio_speed()) - ff_p->start_time / audio_interface_get_audio_speed();
 }
 
 // ************************************************************
@@ -866,8 +868,9 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 // ************************************************************
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
-	int t = GET_AUDIO_TS( packet->pts );
-	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time;
+	// scale timestamps by audio_speed
+	int t = GET_AUDIO_TS( packet->pts ) / audio_interface_get_audio_speed();
+	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time / audio_interface_get_audio_speed();
 }
 
 // ************************************************************
@@ -1076,8 +1079,8 @@ serprintf("FFMPEG: seek error\r\n");
 		AVPacket _packet;
 		AVPacket *packet = _peek_packet( &ff_p->vq, &_packet, 0 );
 		if( packet ) {
+			// note that it should not be scaled by * audio_speed to get real time timestamps otherwise forward seek leads to black screen
 			int ts = _get_video_time( s, packet );
-
 			if( packet->flags & AV_PKT_FLAG_KEY ) {
 				if( ignore_first ) {
 DBGP serprintf("ignore! %d\n", ts);
@@ -1101,8 +1104,8 @@ DBGP serprintf("FFMPEG: seek to time %8d  pos %5d  dir %d -> %d/%lld  (took %d)\
 		
 			if( !packet )
 				break;
-			
-			int ts = _get_audio_time( s, packet );
+			// note that it should not be scaled by * audio_speed to get real time timestamps otherwise forward seek leads to black screen
+			int ts = _get_audio_time( s, packet );			
 			if( ts >= sc->time ) {
 				break;
 			}
@@ -1373,13 +1376,14 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 	cdata->type 	  = 0;
 	cdata->key   	  = 1;
 	cdata->size       = packet->size;
-	cdata->time       = (GET_SUB_TS( packet->pts) == -1) ? -1 : GET_SUB_TS(packet->pts) - ff_p->start_time;
+	cdata->time       = (GET_SUB_TS( packet->pts) == -1) ? -1 : GET_SUB_TS(packet->pts) / audio_interface_get_audio_speed() - ff_p->start_time / audio_interface_get_audio_speed();
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
 
 	
-	int duration = GET_SUB_TS( packet->duration );
+	int duration = GET_SUB_TS( packet->duration ) / audio_interface_get_audio_speed();
+	//int duration = GET_SUB_TS( packet->duration );
 	if( s->subtitle->format == SUB_FORMAT_SSA ) {
 		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
@@ -1462,7 +1466,7 @@ static int _calc_rate( STREAM *s )
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
 			int first_time   = GET_VIDEO_TS( first->packet.dts );
-			int last_time    = GET_VIDEO_TS( last->packet.dts );
+			int last_time    = GET_VIDEO_TS( last->packet.dts ) * audio_interface_get_audio_speed();
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 

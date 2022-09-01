@@ -54,6 +54,7 @@ typedef int (*audio_interface_impl_set_output_volume_l_r)(audio_ctx_t *ctx, int 
 typedef int (*audio_interface_impl_get_session_id)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_set_passthrough)(audio_ctx_t *ctx, int pass);
 typedef int (*audio_interface_impl_get_passthrough)(audio_ctx_t *ctx);
+typedef int (*audio_interface_impl_change_audio_speed)(audio_ctx_t *ctx, float speed);
 
 
 typedef struct audio_interface_impl {
@@ -77,6 +78,7 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_get_session_id get_session_id;
 	audio_interface_impl_get_passthrough get_passthrough;
 	audio_interface_impl_set_passthrough set_passthrough;
+	audio_interface_impl_change_audio_speed change_audio_speed;
 } audio_interface_impl_t;
 
 int audio_interface_init(void);
@@ -101,5 +103,9 @@ int audio_interface_get_session_id(audio_ctx_t *ctx);
 
 int audio_interface_set_passthrough(audio_ctx_t *ctx, int pass);
 int audio_interface_get_passthrough(audio_ctx_t *ctx);
+
+void audio_interface_set_audio_speed(float speed);
+float audio_interface_get_audio_speed();
+int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed);
 
 #endif

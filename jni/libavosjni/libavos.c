@@ -273,7 +273,7 @@ Java_com_archos_medialib_LibAvos_nativeAvsh(JNIEnv *env, jobject thiz, jstring c
         const char *c_cmd = (*env)->GetStringUTFChars(env, cmd, NULL);
 
         pthread_mutex_lock(&libavos.mtx);
-	libavos_debug_acquire();
+		libavos_debug_acquire();
         libavos_avsh(c_cmd);
         pthread_mutex_unlock(&libavos.mtx);
     }
@@ -341,13 +341,21 @@ Java_com_archos_medialib_LibAvos_nativeSetHdmiSupoprtedAudioCodecs(JNIEnv *env, 
 }
 
 void
+Java_com_archos_medialib_LibAvos_nativeSetAudioSpeed(JNIEnv *env, jobject thiz, jfloat audio_speed)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    serprintf("MARC libavos:LibAvos_nativeSetAudioSpeed %f\n", audio_speed);
+    libavos_set_audio_speed(audio_speed);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
 Java_com_archos_medialib_LibAvos_nativeSetDownmix(JNIEnv *env, jobject thiz, jint downmix)
 {
     pthread_mutex_lock(&libavos.mtx);
     libavos_set_downmix(downmix);
     pthread_mutex_unlock(&libavos.mtx);
 }
-
 
 jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out_width, uint32_t out_height)
 {

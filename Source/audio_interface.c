@@ -24,6 +24,8 @@
 
 static int audio_interface_force = -1;
 
+static float audio_speed = 1.0f;
+
 #ifdef CONFIG_ANDROID
 extern const audio_interface_impl_t audio_interface_impl_opensles;
 extern const audio_interface_impl_t audio_interface_impl_audiotrack;
@@ -151,6 +153,7 @@ int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length
 
 int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format)
 {
+	serprintf("MARC audio_interface:audio_interface_set_output_params calls impl->set_output_params\n");
 	return impl->set_output_params(ctx, freq, channels, bits, format);
 }
 
@@ -202,6 +205,27 @@ int audio_interface_set_passthrough(audio_ctx_t *ctx, int pass)
 int audio_interface_get_passthrough(audio_ctx_t *ctx)
 {
 	return impl->get_passthrough ? impl->get_passthrough(ctx) : 0;
+}
+
+void audio_interface_set_audio_speed(float speed)
+{
+	if (audio_speed != speed) { // speed changed
+		serprintf("MARC audio_interface:audio_interface_set_audio_speed changed to %f\n", speed);
+		audio_speed = speed;
+	} else {
+		serprintf("MARC audio_interface:audio_interface_set_audio_speed already at speed %f\n", speed);
+	}
+}
+
+float audio_interface_get_audio_speed()
+{
+	return audio_speed;
+}
+
+int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed) {
+	serprintf("MARC audio_interface:audio_interface_change_audio_speed to %f\n", speed);
+	audio_interface_set_audio_speed(speed);
+	return impl->change_audio_speed ? impl->change_audio_speed(ctx, speed) : -1;
 }
 
 #ifdef DEBUG_MSG

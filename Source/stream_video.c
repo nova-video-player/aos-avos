@@ -2264,7 +2264,7 @@ serprintf("STP: not open!\r\n");
 	}
 
 	// stop all threads
-stream_close( s );
+	stream_close( s );
 
 	// stop audio sink
 	if( s->audio_sink) {

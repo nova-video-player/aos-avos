@@ -41,8 +41,6 @@ typedef unsigned char bool;
 
 #define NO_ERROR 0
 
-#define ENABLE_AUDIO_SPEED
-
 extern JavaVM *myVm;
 extern jobject myClassLoader;
 extern jmethodID myFindClassMethod;
@@ -81,6 +79,19 @@ ERR		LOG("!!!EXCEPTION");
 	}
 }
 
+static inline void call_void_method_current_vm(JNIEnv *jni_env, audio_ctx_t *at, const char * name, const char * signature)
+{
+	DBG2	LOG();
+	jmethodID method = (*jni_env)->GetMethodID(jni_env, at->audiotrackClass, name, signature);
+	(*jni_env)->CallVoidMethod(jni_env, at->obj, method);
+
+	jthrowable exception = (*jni_env)->ExceptionOccurred(jni_env);
+	if (exception) {
+		ERR		LOG("!!!EXCEPTION");
+		(*jni_env)->ExceptionClear(jni_env);
+	}
+}
+
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
 DBG2	LOG();
@@ -98,7 +109,6 @@ ERR		LOG("!!!EXCEPTION");
 
 	return result;
 }
-
 
 static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const char * name, const char * signature, ...)
 {
@@ -120,6 +130,22 @@ ERR	LOG("!!!EXCEPTION");
 
 static inline void attach_thread(audio_ctx_t *at) {
 	(*myVm)->AttachCurrentThread(myVm, &(at->env), NULL);
+}
+
+static inline JNIEnv * attach_thread_current_vm() {
+	JNIEnv *myEnv = NULL;
+	if ((*myVm)->GetEnv(myVm, (void**)&(myEnv), JNI_VERSION_1_4) != JNI_OK) {
+		serprintf("MARC ERROR: GetEnv failed\n");
+		if(((*myVm)->AttachCurrentThread(myVm, &(myEnv), NULL)) != 0 ) {
+			serprintf("MARC ERROR: Attach to JVM failed\n");
+			return NULL;
+		} else {
+			// TODO MARC CHECK
+			return NULL;
+		}
+	} else {
+		return myEnv;
+	}
 }
 
 static int audiotrack_init(void)
@@ -362,22 +388,6 @@ DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count
 
 DBG	LOG("track created");
 
-#ifdef ENABLE_AUDIO_SPEED
-	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
-		// reuse already created audioTrack
-		audioTrack = at->obj;
-		// get current audioparams
-		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
-														 (*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
-
-		float speed_check = 0.0f;
-		speed_check = (*at->env)->CallFloatMethod(at->env, playbackParams,
-													 (*at->env)->GetMethodID(at->env, playbackParamsClass, "getSpeed", "()F"));
-
-		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params reread speed from playbackParams %f\n", speed_check);
-	}
-#endif
-
 	return 0;
 }
 
@@ -444,6 +454,7 @@ ERR		LOG("track not valid, error");
 DBG	LOG("wrote %d out of %d", ret, len);
 
 	if (at->passthrough && ret == -6 /* ERROR_DEAD_OBJECT */) {
+		serprintf("MARC audiotrack_interface_audiotrack_java:audiotrack_write calls audiotrack_set_output_params\n");
 		audiotrack_set_passthrough(at, at->passthrough);
 	}
 	return ret;
@@ -470,6 +481,18 @@ ERR		LOG("track not valid, error");
 	attach_thread(at);
 	call_void_method(at, "pause", "()V");
 	call_void_method(at, "flush", "()V");
+}
+
+static void audiotrack_flush_output_current_vm(JNIEnv *jni_env, audio_ctx_t *at)
+{
+	DBG	LOG();
+	if (!at->init) {
+		ERR		LOG("track not valid, error");
+		return;
+	}
+
+	call_void_method_current_vm(jni_env, at, "pause", "()V");
+	call_void_method_current_vm(jni_env, at, "flush", "()V");
 }
 
 static int audiotrack_preload(audio_ctx_t *at)
@@ -510,32 +533,49 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 	serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f\n", speed);
 
 	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
-		attach_thread( at );
+		// TODO MARC TO REMOVE wrong jvm env
+		// attach_thread( at );
 
-		// call_void_method(at, "pause", "()V");
-		// call_void_method(at, "flush", "()V");
+		//call_void_method(at, "pause", "()V");
+		//call_void_method(at, "flush", "()V");
+
+		/*
+		JNIEnv *myEnv = NULL;
+		if ((*myVm)->GetEnv(myVm, (void**)&(myEnv), JNI_VERSION_1_4) != JNI_OK) {
+			LOG("ERROR: GetEnv failed");
+			if(((*myVm)->AttachCurrentThread(myVm, &(myEnv), NULL)) != 0 ) {
+				LOG("ERROR: Attach to JVM failed");
+				return 0;
+			}
+		}
+		 */
+
+		JNIEnv *myEnv = attach_thread_current_vm();
+		if (*myEnv == NULL) return 0;
+
+		audiotrack_flush_output_current_vm(myEnv, at);
 
 		// reuse already created audioTrack
 		jobject audioTrack = at->obj;
 
 		// get current audioparams
 		jobject playbackParams =
-			( *at->env )
-				->CallObjectMethod( at->env, audioTrack,
-									( *at->env )
-										->GetMethodID( at->env, at->audiotrackClass, "getPlaybackParams",
+			( *myEnv )
+				->CallObjectMethod( myEnv, audioTrack,
+									( *myEnv )
+										->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
 													   "()Landroid/media/PlaybackParams;" ) );
 
 		serprintf( "MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed get audio params ok\n" );
 
 		// change that audioparam's speed
 		jclass playbackParamsClass =
-			( *at->env )->NewGlobalRef( at->env, ( *at->env )->FindClass( at->env, "android/media/PlaybackParams" ) );
-		( *at->env )
+			( *myEnv )->NewGlobalRef( myEnv, ( *myEnv )->FindClass( myEnv, "android/media/PlaybackParams" ) );
+		( *myEnv )
 			->CallObjectMethod(
-				at->env, playbackParams,
-				( *at->env )
-					->GetMethodID( at->env, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
+				myEnv, playbackParams,
+				( *myEnv )
+					->GetMethodID( myEnv, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
 				speed );
 
 		serprintf(
@@ -543,22 +583,22 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 			speed );
 
 		// set audiotrack's audioparams back to us
-		( *at->env )
-			->CallVoidMethod( at->env, audioTrack,
-							  ( *at->env )
-								  ->GetMethodID( at->env, at->audiotrackClass, "setPlaybackParams",
+		( *myEnv )
+			->CallVoidMethod( myEnv, audioTrack,
+							  ( *myEnv )
+								  ->GetMethodID( myEnv, at->audiotrackClass, "setPlaybackParams",
 												 "(Landroid/media/PlaybackParams;)V" ),
 							  playbackParams );
 
 		// save back audioTrack
-		at->obj = ( *at->env )->NewGlobalRef( at->env, audioTrack );
+		at->obj = ( *myEnv )->NewGlobalRef( myEnv, audioTrack );
 
 		int failed = 0;
-		jthrowable exception = ( *at->env )->ExceptionOccurred( at->env );
+		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
 		if( exception ) {
 			ERR LOG( "exception during modification call" );
-			( *at->env )->ExceptionDescribe( at->env );
-			( *at->env )->ExceptionClear( at->env );
+			( *myEnv )->ExceptionDescribe( myEnv );
+			( *myEnv )->ExceptionClear( myEnv );
 			failed = 1;
 		}
 
@@ -567,37 +607,20 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 				"MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed set audio params FAILED!!!\n" );
 		} else {
 			serprintf( "MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed save audioTrack object in at->obj\n" );
-			at->obj = ( *at->env )->NewGlobalRef( at->env, audioTrack );
+			//at->obj = ( *myEnv )->NewGlobalRef( myEnv, audioTrack );
 
-			int status = call_int_method( at, "getState", "()I" );
+			int status =
+				( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
+									 ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
 			if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
 				ERR LOG( "audiotrack change params failed" );
 				failed = 1;
 			}
 		}
 
-		// TODO MARC remove afterwards, this is a test: reread the speed to be sure it has been applied
-		// reuse already created audioTrack
-		audioTrack = at->obj;
-		// get current audioparams
-		playbackParams = ( *at->env )
-							 ->CallObjectMethod( at->env, audioTrack,
-												 ( *at->env )
-													 ->GetMethodID( at->env, at->audiotrackClass, "getPlaybackParams",
-																	"()Landroid/media/PlaybackParams;" ) );
-
-		float speed_check = 0.0f;
-		speed_check =
-			( *at->env )
-				->CallFloatMethod( at->env, playbackParams,
-								   ( *at->env )->GetMethodID( at->env, playbackParamsClass, "getSpeed", "()F" ) );
-
-		serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed reread speed from playbackParams is %f\n",
-				   speed_check );
-
 		DBG LOG( "audio speed changed" );
 
-		// call_void_method(at, "play", "()V");
+		//call_void_method(at, "play", "()V");
 	} else {
 		serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough\n");
 	}

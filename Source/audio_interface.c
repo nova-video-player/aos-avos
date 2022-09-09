@@ -224,7 +224,6 @@ float audio_interface_get_audio_speed()
 
 int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed) {
 	serprintf("MARC audio_interface:audio_interface_change_audio_speed to %f\n", speed);
-	audio_interface_set_audio_speed(speed);
 	return impl->change_audio_speed ? impl->change_audio_speed(ctx, speed) : -1;
 }
 

@@ -618,6 +618,7 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 			}
 		}
 
+		audio_interface_set_audio_speed(speed);
 		DBG LOG( "audio speed changed" );
 
 		//call_void_method(at, "play", "()V");

@@ -356,7 +356,6 @@ ERR		LOG("exception during constructor call");
 	}
 
 	if (!failed) {
-		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params save audioTrack object in at->obj\n");
 		at->obj = (*at->env)->NewGlobalRef(at->env, audioTrack);
 
 		status = call_int_method(at, "getState", "()I");
@@ -375,7 +374,7 @@ DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count
 
 	if (failed && reinit) {
 		msec_sleep( 30 );
-		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
+ERR		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
 		return audiotrack_set_output_params(at, rate, channels, bits, format);
 	}
 
@@ -535,9 +534,6 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
 		// TODO MARC TO REMOVE wrong jvm env
 		// attach_thread( at );
-
-		//call_void_method(at, "pause", "()V");
-		//call_void_method(at, "flush", "()V");
 
 		/*
 		JNIEnv *myEnv = NULL;

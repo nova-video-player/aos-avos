@@ -520,10 +520,11 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	s->av_speed = av_speed;
 	// read current time before setting the audio_speed scaling since it impacts the result
 	int stream_current_time = stream_get_current_time( s, NULL );
-	serprintf("MARC stream:stream_set_av_speed %f->%f, seek %d -> \n", av_speed);
+	serprintf("MARC stream:stream_set_av_speed %f->%f, seek %d -> \n", audio_interface_get_audio_speed(), av_speed, stream_current_time);
 	audio_interface_change_audio_speed(s->audio_ctx, av_speed);
-	// seek to current time to flush and avoid any weird video catchup / timestamps in the past/fu
+	// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
 	stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
+	serprintf("MARC stream:stream_set_av_speed ends up ts=%d\n", stream_get_current_time( s, NULL ));
 	return 0;
 }
 

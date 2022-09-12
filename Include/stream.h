@@ -839,9 +839,9 @@ void	stream_set_cpu_priority( STREAM *s, int cpu_prio );
 //	INTERNAL API
 //
 
-// TODO MARC remove if not useful (audio_speed)
-//#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 4)
-#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 16)
+// to cope with video frames size (can be HUGE, needs to be increased with resolution increase)
+// history 2019 *2 again for H264 4K peak rates -> 1024 * 1536 * 4, 2015 *2 for H265 4K -> 1024 * 1536 * 2, 2011 1024 * 1024 -> 1024 * 1536 for HD frames
+#define VIDEO_MINDATA_SIZE		(1024 * 1536 * 4)
 #define VIDEO_OVERLAP_SIZE		VIDEO_MINDATA_SIZE
 
 int 	stream_init ( STREAM *s );

@@ -252,6 +252,7 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	} else {
 		_flags |= STREAM_MULTI;
 	}
+	// history 2022 24->48MB for 2x playback speed, 2015 12->24MB (20 NOK) for high bitrate 4k streaming,
 	if (_flags & STREAM_FILE_NONLOCAL) {
 		stream_set_buffer_size(video->s, 24); // use less memory for NONLOCAL playback
 	} else if ( !device_has_hdd() ) {

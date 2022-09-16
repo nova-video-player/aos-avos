@@ -135,12 +135,11 @@ static inline void attach_thread(audio_ctx_t *at) {
 static inline JNIEnv * attach_thread_current_vm() {
 	JNIEnv *myEnv = NULL;
 	if ((*myVm)->GetEnv(myVm, (void**)&(myEnv), JNI_VERSION_1_4) != JNI_OK) {
-		serprintf("MARC ERROR: GetEnv failed\n");
+ERR		serprintf("ERROR: GetEnv failed\n");
 		if(((*myVm)->AttachCurrentThread(myVm, &(myEnv), NULL)) != 0 ) {
-			serprintf("MARC ERROR: Attach to JVM failed\n");
+ERR		serprintf("ERROR: Attach to JVM failed\n");
 			return NULL;
 		} else {
-			// TODO MARC CHECK
 			return NULL;
 		}
 	} else {
@@ -220,11 +219,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d", rate, channels, bits, format,
 			 at->passthrough );
-	serprintf( "rate %d, channels %d, bits %d, format %d, passthrough mode %d\n", rate, channels, bits, format,
-			   at->passthrough );
 
 	attach_thread( at );
-
 	at->rate = rate;
 	at->channel_count = channels;
 	at->format = format;
@@ -305,7 +301,6 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		at->obj = NULL;
 		at->init = 0;
 		reinit = 1;
-		serprintf( "MARC audio_interface_audiotrack_java:audiotrack_set_output_params triggers reinit\n" );
 	}
 
 	int streamType = 3; /*STREAM_MUSIC*/
@@ -374,7 +369,7 @@ DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count
 
 	if (failed && reinit) {
 		msec_sleep( 30 );
-ERR		serprintf("MARC audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
+ERR		LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
 		return audiotrack_set_output_params(at, rate, channels, bits, format);
 	}
 
@@ -393,7 +388,6 @@ DBG	LOG("track created");
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
 	at->passthrough = passthrough;
-	serprintf("MARC audiotrack_interface_audiotrack_java:audiotrack_set_passthrough calls audiotrack_set_output_params\n");
 	audiotrack_set_output_params(at, at->rate, at->channel_count, (passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, at->format);
 	return 0;
 }
@@ -453,7 +447,7 @@ ERR		LOG("track not valid, error");
 DBG	LOG("wrote %d out of %d", ret, len);
 
 	if (at->passthrough && ret == -6 /* ERROR_DEAD_OBJECT */) {
-		serprintf("MARC audiotrack_interface_audiotrack_java:audiotrack_write calls audiotrack_set_output_params\n");
+ERR		LOG("audiotrack_interface_audiotrack_java:audiotrack_write dead object -> call audiotrack_set_output_params");
 		audiotrack_set_passthrough(at, at->passthrough);
 	}
 	return ret;
@@ -529,22 +523,9 @@ DBG	LOG();
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
-	serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f\n", speed);
+DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed");
 
 	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
-		// TODO MARC TO REMOVE wrong jvm env
-		// attach_thread( at );
-
-		/*
-		JNIEnv *myEnv = NULL;
-		if ((*myVm)->GetEnv(myVm, (void**)&(myEnv), JNI_VERSION_1_4) != JNI_OK) {
-			LOG("ERROR: GetEnv failed");
-			if(((*myVm)->AttachCurrentThread(myVm, &(myEnv), NULL)) != 0 ) {
-				LOG("ERROR: Attach to JVM failed");
-				return 0;
-			}
-		}
-		 */
 
 		JNIEnv *myEnv = attach_thread_current_vm();
 		if (*myEnv == NULL) return 0;
@@ -562,8 +543,6 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 										->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
 													   "()Landroid/media/PlaybackParams;" ) );
 
-		serprintf( "MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed get audio params ok\n" );
-
 		// change that audioparam's speed
 		jclass playbackParamsClass =
 			( *myEnv )->NewGlobalRef( myEnv, ( *myEnv )->FindClass( myEnv, "android/media/PlaybackParams" ) );
@@ -573,10 +552,6 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 				( *myEnv )
 					->GetMethodID( myEnv, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
 				speed );
-
-		serprintf(
-			"MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed setSpeed on playbackParams to %f ok\n",
-			speed );
 
 		// set audiotrack's audioparams back to us
 		( *myEnv )
@@ -597,29 +572,22 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 			( *myEnv )->ExceptionClear( myEnv );
 			failed = 1;
 		}
+		int status =
+			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
+									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
+		if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
+			failed = 1;
+		}
 
 		if( failed ) {
-			serprintf(
-				"MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed set audio params FAILED!!!\n" );
-		} else {
-			serprintf( "MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed save audioTrack object in at->obj\n" );
-			//at->obj = ( *myEnv )->NewGlobalRef( myEnv, audioTrack );
-
-			int status =
-				( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
-									 ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
-			if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
-				ERR LOG( "audiotrack change params failed" );
-				failed = 1;
-			}
+ERR LOG( "audiotrack change params failed" );
 		}
 
 		audio_interface_set_audio_speed(speed);
 		DBG LOG( "audio speed changed" );
 
-		//call_void_method(at, "play", "()V");
 	} else {
-		serprintf("MARC audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough\n");
+DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
 	}
 
 	return 0;

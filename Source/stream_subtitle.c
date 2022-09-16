@@ -274,7 +274,7 @@ void _sub_decode( STREAM *s )
 	}
 	if( s->subtitle->valid && !s->paused ) {
 		// sub time needs to be scaled by audio_speed because it is not derived from parser timestamps (TODO?)
-		serprintf("MARC stream_subtitle:_sub_decode audio_speed=%f time %d\n", audio_interface_get_audio_speed(), s->video_time);
+DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d\n", audio_interface_get_audio_speed(), s->video_time);
 		int time = s->video_time;
 		if( time != -1 ) {
 			// apply correction

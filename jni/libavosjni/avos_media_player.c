@@ -590,13 +590,10 @@ Java_com_archos_medialib_AvosMediaPlayer_nativeSetStartTime(JNIEnv *env, jobject
 int
 Java_com_archos_medialib_AvosMediaPlayer_getCurrentPosition(JNIEnv *env, jobject thiz)
 {
-    serprintf("MARC avos_media_player:Java_com_archos_medialib_AvosMediaPlayer_getCurrentPosition\n");
-
     uint32_t ret = 0;
     avos_mp_t *mp = get_mp_or_throw(env, thiz);
     if (!mp) return 0;
     CHECK(avos->getpos(mp, &ret));
-    serprintf("MARC avos_media_player:Java_com_archos_medialib_AvosMediaPlayer_getCurrentPosition ret=%d\n", ret);
     return ret;
 }
 

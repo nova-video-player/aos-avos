@@ -4069,7 +4069,7 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int was_paused;
 	int start1   = atime();
 	int old_time = s->video_time;
-	
+
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
 		return 1;
@@ -4438,7 +4438,7 @@ int stream_get_time_default( STREAM *s, int *total )
 	if( total )
 		*total = s->duration;
 	int time = audio_interface_get_audio_speed() * (s->video->valid ? s->video_time : s->audio_time);
-DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );	
+DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
 	return time;
 }
 
@@ -4454,7 +4454,6 @@ int stream_get_current_time( STREAM *s, int *total )
 	if( s->parser && s->parser->get_time ) {
 		return s->parser->get_time( s, total );
 	}
-	
 	return stream_get_time_default( s, total );
 }
 

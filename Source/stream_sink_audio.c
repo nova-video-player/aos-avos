@@ -45,7 +45,6 @@ static int _close( STREAM *s )
 
 static int start( STREAM *s )
 {
-	serprintf("MARC stream_sink_audio:start calls audio_interface_set_output_params\n");
 	if( audio_interface_set_output_params( s->audio_ctx, s->audio->samplesPerSec, s->audio->channels, s->audio->bitsPerSample, s->audio->format ) ) {
 serprintf("stream_sink_audio_start: cannot set params: fs %d  ch %d  bits %d\r\n", s->audio->samplesPerSec, s->audio->channels, s->audio->bitsPerSample );
 		return 1;

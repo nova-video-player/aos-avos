@@ -750,11 +750,9 @@ static int avos_mp_setstarttime(avos_mp_t *mp, uint32_t msec)
 static int avos_mp_getpos(avos_mp_t *mp, uint32_t *ret)
 {
 	if (async_cmd_is_running(mp)) {
-		serprintf("MARC avos_mp:avos_mp_getpos async_cmd_is_running mp->last.pos=%d\n", mp->last.pos);
 		*ret = mp->last.pos;
 	} else {
 		AVOS_MP_COMMON(getpos, mp, ret);
-		serprintf("MARC avos_mp:avos_mp_getpos async_cmd_is_NOT_running ret=%d\n", *ret);
 		mp->last.pos = *ret;
 	}
 	//MPLOGV("%d", *ret);

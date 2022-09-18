@@ -20,7 +20,9 @@
 #include <unistd.h>
 
 #ifndef UCLIBC
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #endif
 
 #ifdef STANDALONE
@@ -63,7 +65,7 @@ static inline void stream_free_dma( UCHAR **ptr, size_t size )
 
 static inline void *amalloc_align( size_t alignment, size_t size )
 {
-#ifdef UCLIBC
+#if defined(UCLIBC) || defined(__APPLE__)
 	void *ptr;
 	return posix_memalign( &ptr, alignment, size ) == 0 ? ptr : NULL;
 #else

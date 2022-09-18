@@ -25,7 +25,11 @@
 #include "i18n.h"
 #include "atime.h"
 #include "avos_lifetime.h"
+#ifndef __APPLE__
 #include "malloc.h"
+#else
+#include <stdlib.h>
+#endif
 
 #include <signal.h>
 #include <sys/resource.h>

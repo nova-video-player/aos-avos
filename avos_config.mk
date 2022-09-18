@@ -41,7 +41,7 @@ DEINTERLACE		= OFF
 ifeq ($(ARCH),arm)
 AUDIO_INTERFACE		= 
 else
-AUDIO_INTERFACE		= OSS
+AUDIO_INTERFACE		= // OSS
 endif
 
 ifeq ($(ARCH),arm)

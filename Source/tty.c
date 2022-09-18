@@ -27,8 +27,10 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#ifndef __APPLE__
 #include <linux/kd.h>
 #include <linux/vt.h>
+#endif
 
 static int tty_open = 0;
 #if !defined (CONFIG_RELEASE)

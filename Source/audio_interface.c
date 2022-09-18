@@ -33,7 +33,9 @@ extern const audio_interface_impl_t audio_interface_impl_audiotrack_new;
 extern const audio_interface_impl_t audio_interface_impl_audiotrack_java;
 int spdif_is_passthrough_on();
 #else
+#ifndef __APPLE__
 extern const audio_interface_impl_t audio_interface_impl_oss;
+#endif
 #endif
 
 extern const audio_interface_impl_t audio_interface_impl_null;
@@ -103,10 +105,12 @@ int audio_interface_init(void)
 		}
 	}
 #else
+#ifndef __APPLE__
 	if (!audio_interface_impl_oss.init()) {
 		impl = &audio_interface_impl_oss;
 		serprintf("audio_interface_init: %s\n", impl->name);
 	}
+#endif
 #endif
 	
 	return impl ? 0 : -1;

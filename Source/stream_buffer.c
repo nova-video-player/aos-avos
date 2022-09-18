@@ -304,7 +304,10 @@ DBGS serprintf("stream_buffer_resize(%s  new_size %d)\r\n", buffer->tag, new_siz
 		return 1;
 	} else if( buffer->flags & STREAM_BUFFER_MMAP ) {
 		int new_mmap_size = new_size + buffer->overlap_size;
+		unsigned char *data = MAP_FAILED;
+#ifndef __APPLE__ // mremap is linux specific
 		unsigned char *data = mremap(buffer->data, buffer->mmap_size, new_mmap_size, MREMAP_MAYMOVE);
+#endif
 		if( data == MAP_FAILED ) {
 serprintf("mremap failed with %s\n", strerror( errno ) );
 			return 1;

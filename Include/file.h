@@ -27,6 +27,10 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <utime.h>
+#ifdef __APPLE__
+#define off64_t off_t
+#define lseek64 lseek
+#endif
 
 typedef struct dirent 	DIRENT;
 typedef struct stat 	STAT;

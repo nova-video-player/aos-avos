@@ -798,7 +798,9 @@ serprintf("writing %s, size %d MB, chunk %d\r\n", path, atoi(argv[2]), chunk);
 
 	if( argc >= 5 && atoi(argv[4]) ){
 serprintf("\tusing O_DIRECT\r\n");
+#ifndef __APPLE__
 		flags |= O_DIRECT;
+#endif
 	} else {
 serprintf("\tusing STANDARD\r\n");
 	}

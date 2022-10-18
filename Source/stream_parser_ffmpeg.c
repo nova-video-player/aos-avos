@@ -846,7 +846,7 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 extern int stream_drive_wake_sleep;
 
 // timestamps derivation
-#define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale     / s->audio->rate )
+#define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale / s->audio->rate )
 #define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
 #define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale  / s->subtitle->rate )
 
@@ -1383,7 +1383,6 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 
 	
 	int duration = GET_SUB_TS( packet->duration ) / audio_interface_get_audio_speed();
-	//int duration = GET_SUB_TS( packet->duration );
 	if( s->subtitle->format == SUB_FORMAT_SSA ) {
 		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
@@ -1444,8 +1443,8 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->aq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
-			int first_time   = GET_AUDIO_TS( first->packet.dts );
-			int last_time    = GET_AUDIO_TS( last->packet.dts );
+			int first_time   = GET_AUDIO_TS( first->packet.dts ) / audio_interface_get_audio_speed();
+			int last_time    = GET_AUDIO_TS( last->packet.dts ) / audio_interface_get_audio_speed();
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
@@ -1465,8 +1464,8 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			int first_time   = GET_VIDEO_TS( first->packet.dts );
-			int last_time    = GET_VIDEO_TS( last->packet.dts ) * audio_interface_get_audio_speed();
+			int first_time   = GET_VIDEO_TS( first->packet.dts ) / audio_interface_get_audio_speed();
+			int last_time    = GET_VIDEO_TS( last->packet.dts ) / audio_interface_get_audio_speed();
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 

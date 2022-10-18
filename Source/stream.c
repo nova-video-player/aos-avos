@@ -41,6 +41,8 @@
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
 
+#define ENABLE_PLAYBACK_SPEED
+
 #ifdef CONFIG_ANDROID
 #include "android_buffer.h"
 STREAM_SINK_VIDEO *stream_sink_video_android_new(void *surface_handle);
@@ -515,6 +517,7 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
+#ifdef ENABLE_PLAYBACK_SPEED
 	if( !s )
 		return 1;
 	s->av_speed = av_speed;
@@ -522,7 +525,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	int stream_current_time = stream_get_current_time( s, NULL );
 	audio_interface_change_audio_speed(s->audio_ctx, av_speed);
 	// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
-	stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
+	if (stream_current_time > 0) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
+#endif
 	return 0;
 }
 

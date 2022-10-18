@@ -41,6 +41,8 @@ typedef unsigned char bool;
 
 #define NO_ERROR 0
 
+#define ENABLE_PLAYBACK_SPEED
+
 extern JavaVM *myVm;
 extern jobject myClassLoader;
 extern jmethodID myFindClassMethod;
@@ -310,10 +312,13 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int mode = 1; /*MODE_STREAM*/
 
 	int buffer_scale = 1;
+#ifdef ENABLE_PLAYBACK_SPEED
 	if(at->passthrough == 0) { // 4x buffer size to enable audio_speed
 		// TODO MARC should be only max_audio_speed = 2 instead of 4
 		buffer_scale = 4;
 	}
+#endif
+
 	at->buf_size = (at->passthrough == 2) ? 32768 : buffer_scale * call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
 	jobject audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass,
@@ -324,7 +329,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	jobject playbackParams;
 	jclass playbackParamsClass;
 
-#ifdef ENABLE_AUDIO_SPEED
+#ifdef ENABLE_PLAYBACK_SPEED
 	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
 		// get current audioparams
 		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
@@ -523,6 +528,7 @@ DBG	LOG();
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
+#ifdef ENABLE_PLAYBACK_SPEED
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed");
 
 	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
@@ -589,7 +595,7 @@ ERR LOG( "audiotrack change params failed" );
 	} else {
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
 	}
-
+#endif
 	return 0;
 }
 

@@ -481,18 +481,6 @@ ERR		LOG("track not valid, error");
 	call_void_method(at, "flush", "()V");
 }
 
-static void audiotrack_flush_output_current_vm(JNIEnv *jni_env, audio_ctx_t *at)
-{
-	DBG	LOG();
-	if (!at->init) {
-		ERR		LOG("track not valid, error");
-		return;
-	}
-
-	call_void_method_current_vm(jni_env, at, "pause", "()V");
-	call_void_method_current_vm(jni_env, at, "flush", "()V");
-}
-
 static int audiotrack_preload(audio_ctx_t *at)
 {
 	unsigned char *buffer;

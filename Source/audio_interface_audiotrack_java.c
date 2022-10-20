@@ -536,8 +536,6 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed");
 		JNIEnv *myEnv = attach_thread_current_vm();
 		if (*myEnv == NULL) return 0;
 
-		audiotrack_flush_output_current_vm(myEnv, at);
-
 		// reuse already created audioTrack
 		jobject audioTrack = at->obj;
 

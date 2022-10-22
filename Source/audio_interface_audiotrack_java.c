@@ -81,19 +81,6 @@ ERR		LOG("!!!EXCEPTION");
 	}
 }
 
-static inline void call_void_method_current_vm(JNIEnv *jni_env, audio_ctx_t *at, const char * name, const char * signature)
-{
-	DBG2	LOG();
-	jmethodID method = (*jni_env)->GetMethodID(jni_env, at->audiotrackClass, name, signature);
-	(*jni_env)->CallVoidMethod(jni_env, at->obj, method);
-
-	jthrowable exception = (*jni_env)->ExceptionOccurred(jni_env);
-	if (exception) {
-		ERR		LOG("!!!EXCEPTION");
-		(*jni_env)->ExceptionClear(jni_env);
-	}
-}
-
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
 DBG2	LOG();

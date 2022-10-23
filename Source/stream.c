@@ -517,6 +517,7 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
+DBGS	serprintf("stream:stream_set_av_speed %f\n", av_speed);
 #ifdef ENABLE_PLAYBACK_SPEED
 	if( !s )
 		return 1;
@@ -526,6 +527,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	audio_interface_change_audio_speed(s->audio_ctx, av_speed);
 	// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
 	if (stream_current_time > 0) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
+DBGS	serprintf("stream:stream_set_av_speed current_time_before=%d current_time_now=%d\n", stream_current_time, stream_get_current_time( s, NULL ));
 #endif
 	return 0;
 }

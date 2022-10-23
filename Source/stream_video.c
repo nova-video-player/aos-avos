@@ -4189,8 +4189,7 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 		
 	real_time = _stream_get_real_time( s, time );
 	
-	int ret = _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
-	return ret;
+	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
 }
 
 // *****************************************************************************
@@ -4432,11 +4431,17 @@ VIDEO_FRAME *stream_get_current_frame( STREAM *s )
 // *****************************************************************************
 int stream_get_time_default( STREAM *s, int *total )
 {
+	// returns the video_time which is the exact time without audio_speed scaling
 	if ( !s )
 		return 0;
 	
 	if( total )
 		*total = s->duration;
+
+	// note: audio_speed > 1 means that parsers are outputting audio/video quicker with smaller time units yielding higher timestamps
+	// this means real_time = stream_time(ts) / audio_speed to scale it back to real value, and conversely stream_time = real_time * audio_speed
+
+	// need to be scaled by audio_speed to get stream time since video_time is the real video time (otherwise seek with arrows at low speed is off)
 	int time = audio_interface_get_audio_speed() * (s->video->valid ? s->video_time : s->audio_time);
 DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
 	return time;

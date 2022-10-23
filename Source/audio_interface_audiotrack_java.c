@@ -301,8 +301,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int buffer_scale = 1;
 #ifdef ENABLE_PLAYBACK_SPEED
 	if(at->passthrough == 0) { // 4x buffer size to enable audio_speed
-		// TODO MARC should be only max_audio_speed = 2 instead of 4
-		buffer_scale = 4;
+		// need to scale buffer to capture max_audio_speed = 2
+		buffer_scale = 2;
 	}
 #endif
 

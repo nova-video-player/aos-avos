@@ -41,7 +41,7 @@
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
 
-#define ENABLE_PLAYBACK_SPEED
+#undef ENABLE_PLAYBACK_SPEED
 
 #ifdef CONFIG_ANDROID
 #include "android_buffer.h"

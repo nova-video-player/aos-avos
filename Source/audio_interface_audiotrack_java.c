@@ -41,7 +41,7 @@ typedef unsigned char bool;
 
 #define NO_ERROR 0
 
-#define ENABLE_PLAYBACK_SPEED
+#undef ENABLE_PLAYBACK_SPEED
 
 extern JavaVM *myVm;
 extern jobject myClassLoader;

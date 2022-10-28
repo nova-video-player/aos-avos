@@ -41,7 +41,7 @@ typedef unsigned char bool;
 
 #define NO_ERROR 0
 
-#undef ENABLE_PLAYBACK_SPEED
+#define ENABLE_PLAYBACK_SPEED if(1)
 
 extern JavaVM *myVm;
 extern jobject myClassLoader;
@@ -300,7 +300,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	int buffer_scale = 1;
 #ifdef ENABLE_PLAYBACK_SPEED
-	if(at->passthrough == 0) { // 4x buffer size to enable audio_speed
+	if(at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
 		buffer_scale = 4;
 	}
@@ -317,7 +317,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	jclass playbackParamsClass;
 
 #ifdef ENABLE_PLAYBACK_SPEED
-	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
+	if(at->passthrough == 0 && device_get_android_api() >= 23 && audio_interface_get_audio_speed() != 1.0) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
+DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", audio_interface_get_audio_speed());
 		// get current audioparams
 		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
 			(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
@@ -504,9 +505,9 @@ DBG	LOG();
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed) {
 #ifdef ENABLE_PLAYBACK_SPEED
-DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed");
 
-	if(at->passthrough == 0) { // adapt audio_speed only when passthrough disabled
+	if(at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
+DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
 
 		JNIEnv *myEnv = attach_thread_current_vm();
 		if (*myEnv == NULL) return 0;

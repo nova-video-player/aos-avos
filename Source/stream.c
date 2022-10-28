@@ -38,10 +38,12 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGP if(Debug[DBG_PARSER])
 
+#define DBG if(0)
+
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
 
-#undef ENABLE_PLAYBACK_SPEED
+#define ENABLE_PLAYBACK_SPEED if(1)
 
 #ifdef CONFIG_ANDROID
 #include "android_buffer.h"
@@ -517,17 +519,21 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
-DBGS	serprintf("stream:stream_set_av_speed %f\n", av_speed);
 #ifdef ENABLE_PLAYBACK_SPEED
-	if( !s )
-		return 1;
-	s->av_speed = av_speed;
-	// read current time before setting the audio_speed scaling since it impacts the result
-	int stream_current_time = stream_get_current_time( s, NULL );
-	audio_interface_change_audio_speed(s->audio_ctx, av_speed);
-	// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
-	if (stream_current_time > 0) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
-DBGS	serprintf("stream:stream_set_av_speed current_time_before=%d current_time_now=%d\n", stream_current_time, stream_get_current_time( s, NULL ));
+	if( !s ) return 1;
+	if( audio_interface_get_audio_speed() != av_speed ) {
+		DBG serprintf( "stream:stream_set_av_speed %f\n", av_speed );
+		s->av_speed = av_speed;
+		// read current time before setting the audio_speed scaling since it impacts the result
+		int stream_current_time = stream_get_current_time( s, NULL );
+		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
+		// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
+		if( stream_current_time > 0 ) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
+		DBG serprintf( "stream:stream_set_av_speed current_time_before=%d current_time_now=%d\n", stream_current_time,
+						stream_get_current_time( s, NULL ) );
+	} else {
+		DBG serprintf( "stream:stream_set_av_speed do nothing same speed %f\n", av_speed );
+	}
 #endif
 	return 0;
 }

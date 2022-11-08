@@ -302,8 +302,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 #ifdef ENABLE_PLAYBACK_SPEED
 	// NOTE than buffer_scale != 1 makes video stutters for some cf. #726, no solution so far
-	// need to keep buffer_scale = 1 to avoid stuttering but will make app crash on audio_speed change unless we start from audio_speed =! 1.0x
-	if(at->passthrough == 0 && device_get_android_api() >= 23 && audio_interface_get_audio_speed() != 1.0) { // 4x buffer size to enable audio_speed
+	if(at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 4x buffer" );
 		buffer_scale = 4; // TODO 3x seems to work as well

@@ -41,7 +41,7 @@ typedef unsigned char bool;
 
 #define NO_ERROR 0
 
-#define ENABLE_PLAYBACK_SPEED if(1)
+#undef ENABLE_PLAYBACK_SPEED
 
 extern JavaVM *myVm;
 extern jobject myClassLoader;
@@ -67,6 +67,8 @@ struct audio_ctx {
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
+
+static int buffer_scale = 1;
 
 static inline void call_void_method(audio_ctx_t *at, const char * name, const char * signature)
 {
@@ -298,16 +300,23 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int audioFormat = track_format;
 	int mode = 1; /*MODE_STREAM*/
 
-	int buffer_scale = 1;
 #ifdef ENABLE_PLAYBACK_SPEED
-	if(at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
+	// NOTE than buffer_scale != 1 makes video stutters for some cf. #726, no solution so far
+	// need to keep buffer_scale = 1 to avoid stuttering but will make app crash on audio_speed change unless we start from audio_speed =! 1.0x
+	if(at->passthrough == 0 && device_get_android_api() >= 23 && audio_interface_get_audio_speed() != 1.0) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
-		buffer_scale = 4;
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 4x buffer" );
+		buffer_scale = 4; // TODO 3x seems to work as well
+	} else {
+		buffer_scale = 1;
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 1x buffer" );
 	}
 #endif
 
 	at->buf_size = (at->passthrough == 2) ? 32768 : buffer_scale * call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
+	DBG LOG ( "audio_interface_audiotrack_java:audiotrack_set_output_params getMinBufferSize=%d\n", call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
+										 sampleRateInHz, channelConfig, audioFormat) );
 	jobject audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass,
 		(*at->env)->GetMethodID(at->env, at->audiotrackClass, "<init>", "(IIIIII)V"),
 		streamType, sampleRateInHz, channelConfig,
@@ -318,7 +327,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 #ifdef ENABLE_PLAYBACK_SPEED
 	if(at->passthrough == 0 && device_get_android_api() >= 23 && audio_interface_get_audio_speed() != 1.0) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
-DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", audio_interface_get_audio_speed());
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", audio_interface_get_audio_speed());
 		// get current audioparams
 		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
 			(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
@@ -331,6 +340,8 @@ DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_spe
 		// set audiotrack's audioparams back to us
 		(*at->env)->CallVoidMethod(at->env, audioTrack,
 				(*at->env)->GetMethodID(at->env, at->audiotrackClass, "setPlaybackParams", "(Landroid/media/PlaybackParams;)V"), playbackParams);
+	} else {
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params not applying setSpeed on AudioTrack PlaybackParams" );
 	}
 #endif
 
@@ -481,7 +492,9 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
+	// align buffer sizes (TODO check)
+	len = buffer_scale * at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
+
 	if ((buffer = (unsigned char *)malloc(len)) == NULL)
 		return -1;
 	memset(buffer, 0, len);
@@ -547,7 +560,7 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		int failed = 0;
 		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
 		if( exception ) {
-			ERR LOG( "exception during modification call" );
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during modification call" );
 			( *myEnv )->ExceptionDescribe( myEnv );
 			( *myEnv )->ExceptionClear( myEnv );
 			failed = 1;
@@ -560,11 +573,11 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		}
 
 		if( failed ) {
-ERR LOG( "audiotrack change params failed" );
+ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed" );
 		}
 
 		audio_interface_set_audio_speed(speed);
-		DBG LOG( "audio speed changed" );
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
 
 	} else {
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");

@@ -349,6 +349,14 @@ Java_com_archos_medialib_LibAvos_nativeSetAudioSpeed(JNIEnv *env, jobject thiz, 
 }
 
 void
+Java_com_archos_medialib_LibAvos_nativeEnableAudioSpeed(JNIEnv *env, jobject thiz, jboolean enable)
+{
+	pthread_mutex_lock(&libavos.mtx);
+	libavos_enable_audio_speed(enable);
+	pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
 Java_com_archos_medialib_LibAvos_nativeSetDownmix(JNIEnv *env, jobject thiz, jint downmix)
 {
     pthread_mutex_lock(&libavos.mtx);

@@ -43,8 +43,6 @@
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
 
-#undef ENABLE_PLAYBACK_SPEED
-
 #ifdef CONFIG_ANDROID
 #include "android_buffer.h"
 STREAM_SINK_VIDEO *stream_sink_video_android_new(void *surface_handle);
@@ -519,9 +517,8 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
-#ifdef ENABLE_PLAYBACK_SPEED
 	if( !s ) return 1;
-	if( audio_interface_get_audio_speed() != av_speed ) {
+	if( audio_interface_is_audio_speed_enabled() && audio_interface_get_audio_speed() != av_speed ) {
 		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
 		s->av_speed = av_speed;
 		// read current time before setting the audio_speed scaling since it impacts the result
@@ -534,7 +531,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	} else {
 		DBG serprintf( "stream:stream_set_av_speed do nothing same speed %f\n", av_speed );
 	}
-#endif
 	return 0;
 }
 

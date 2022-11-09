@@ -26,6 +26,8 @@ static int audio_interface_force = -1;
 
 static float audio_speed = 1.0f;
 
+static int is_audio_speed_enabled = 0;
+
 #ifdef CONFIG_ANDROID
 extern const audio_interface_impl_t audio_interface_impl_opensles;
 extern const audio_interface_impl_t audio_interface_impl_audiotrack;
@@ -218,6 +220,16 @@ void audio_interface_set_audio_speed(float speed)
 float audio_interface_get_audio_speed()
 {
 	return audio_speed;
+}
+
+void audio_interface_enable_audio_speed(int enable)
+{
+	is_audio_speed_enabled = enable;
+}
+
+int audio_interface_is_audio_speed_enabled()
+{
+	return is_audio_speed_enabled;
 }
 
 int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed) {

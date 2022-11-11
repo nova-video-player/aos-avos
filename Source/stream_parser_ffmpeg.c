@@ -17,6 +17,7 @@
 #include "types.h"
 #include "global.h"
 #include "stream.h"
+#include "stream_parser.h"
 #include "debug.h"
 #include "astdlib.h"
 #include "util.h"
@@ -687,9 +688,10 @@ printf("FFMPEG: cannot find stream info\r\n");
 	pthread_mutex_init( &ff_p->vq.mutex, NULL );
 	pthread_mutex_init( &ff_p->sq.mutex, NULL );
 
-	// make lavf parser use this sync mode!
+	// make lavf parser use this sync mode! 0 is for STREAM_SYNC_CDATA (PTS) and 1 for STREAM_SYNC_SAMPLES
 	//s->sync_mode = STREAM_SYNC_SAMPLES;
-	s->sync_mode = STREAM_SYNC_CDATA;
+	//s->sync_mode = STREAM_SYNC_CDATA; // current default one
+	s->sync_mode = stream_parser_get_sync_mode();
 
 	s->parser_open = 1;
 

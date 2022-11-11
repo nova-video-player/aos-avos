@@ -54,6 +54,8 @@ STREAM_IO *stream_io_timeshift_new( STREAM *s );
 
 int ignore_chunks = 0;
 
+static int sync_mode = 0;
+
 // ***********************************************************
 //
 //	stream_parser_prebuffer
@@ -1308,7 +1310,17 @@ int stream_parser_drop_video( STREAM *s, int time )
 	}
 	
 	return dropped;
-}	
+}
+
+void stream_parser_set_sync_mode(int mode)
+{
+	sync_mode = mode;
+}
+
+int stream_parser_get_sync_mode()
+{
+	return sync_mode;
+}
 
 #ifdef DEBUG_MSG
 void *AV_get_ctx( void );

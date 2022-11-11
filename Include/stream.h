@@ -1017,7 +1017,7 @@ int 	stream_parser_pauseable( STREAM *s );
 //
 extern STREAM_VIDEO_MANGLER 	stream_video_mangler_MPEG2;
 extern STREAM_VIDEO_MANGLER 	stream_video_mangler_H264;
-extern STREAM_VIDEO_MANGLER	stream_video_mangler_REAL; 
+extern STREAM_VIDEO_MANGLER	stream_video_mangler_REAL;
 
 #include "stream_config.h"
 

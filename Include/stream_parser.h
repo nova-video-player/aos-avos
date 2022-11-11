@@ -46,4 +46,7 @@ STREAM_PARSER_STATS *stream_parser_get_stats( struct STREAM *s, struct STREAM_PA
 int stream_parser_find_key_frame( struct STREAM *s, int max_time, int *time );
 int stream_parser_drop_video( struct STREAM *s, int time );
 
+int stream_parser_get_sync_mode();
+void stream_parser_set_sync_mode(int mode);
+
 #endif

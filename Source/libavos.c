@@ -163,6 +163,11 @@ void libavos_enable_audio_speed(int enable)
 	audio_interface_enable_audio_speed(enable);
 }
 
+void libavos_set_parser_sync_mode(int mode)
+{
+	stream_parser_set_sync_mode(mode);
+}
+
 void libavos_set_downmix(int downmix)
 {
 	stream_set_audio_downmix(downmix);

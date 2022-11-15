@@ -363,12 +363,29 @@ Java_com_archos_medialib_LibAvos_nativeParserSyncMode(JNIEnv *env, jobject thiz,
 	libavos_set_parser_sync_mode(mode);
 	pthread_mutex_unlock(&libavos.mtx);
 }
+
 void
 Java_com_archos_medialib_LibAvos_nativeSetDownmix(JNIEnv *env, jobject thiz, jint downmix)
 {
     pthread_mutex_lock(&libavos.mtx);
     libavos_set_downmix(downmix);
     pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetStreamMaxIframeSize(JNIEnv *env, jobject thiz, jint size)
+{
+	pthread_mutex_lock(&libavos.mtx);
+	libavos_set_default_stream_max_iframe_size(size);
+	pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetStreamBufferSize(JNIEnv *env, jobject thiz, jint size)
+{
+	pthread_mutex_lock(&libavos.mtx);
+	libavos_set_default_stream_buffer_size(size);
+	pthread_mutex_unlock(&libavos.mtx);
 }
 
 jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out_width, uint32_t out_height)

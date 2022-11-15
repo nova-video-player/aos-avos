@@ -172,3 +172,13 @@ void libavos_set_downmix(int downmix)
 {
 	stream_set_audio_downmix(downmix);
 }
+
+void libavos_set_default_stream_buffer_size(int size)
+{
+	define_default_stream_buffer_size(size);
+}
+
+void libavos_set_default_stream_max_iframe_size(int size)
+{
+	define_default_stream_max_iframe_size(size);
+}

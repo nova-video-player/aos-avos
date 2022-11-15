@@ -271,7 +271,7 @@ static int _allocate_video_buffers( STREAM *s )
 	if( s->video->valid ) {
 DBGS serprintf("_allocate_video_buffers, type %d  size %d  cs %d\r\n", mem_type, mem_size, s->video->colorspace);
 		// alloc a large CBE buffer for bitstream data
-		int size = mem_size ? mem_size : VIDEO_MINDATA_SIZE;
+		int size = mem_size ? mem_size : get_default_stream_max_iframe_size();
 		int type = (mem_type == STREAM_MEM_DMA) ? 1 : 0; 
 		if( !(s->cbe = cbe_new( size, size, type ) ) ) {
 serprintf("cannot alloc CBE\r\n");			

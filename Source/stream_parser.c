@@ -151,7 +151,7 @@ DBGS serprintf("stream_parser_open: %d  flags %04x\r\n", buffer_size, flags );
 	s->parser_open = 1;
 
 	if( !s->parser_mindata_size ) {
-		s->parser_mindata_size = VIDEO_MINDATA_SIZE;
+		s->parser_mindata_size = get_default_stream_max_iframe_size();
 	}
 	s->parser_flags = flags;
 	

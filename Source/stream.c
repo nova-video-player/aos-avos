@@ -64,6 +64,14 @@ DECLARE_DEBUG_TOGGLE ("sfvs", 	stream_use_fake_video_sink );
 DECLARE_DEBUG_TOGGLE ("sfas", 	stream_use_fake_audio_sink );
 DECLARE_DEBUG_TOGGLE ("snvs", 	stream_use_new_video_sink );
 
+// buffer used as cache before parser to tackle buffering issues in MB
+// history 2015 12->24MB (20 NOK) for high bitrate 4k streaming
+static int default_stream_buffer_size = 24;
+// to cope with video frames size (can be HUGE, needs to be increased with resolution increase)
+// history 2019 *2 again for H264 4K peak rates -> 1024 * 1536 * 4, 2015 *2 for H265 4K -> 1024 * 1536 * 2, 2011 1024 * 1024 -> 1024 * 1536 for HD frames
+// 1024 * 1536 * 4 = 6 * 1024 * 1024
+static int default_video_mindata_size = VIDEO_MINDATA_SIZE;
+
 // ************************************************************
 //
 //	stream_get_default_video_sink
@@ -1325,6 +1333,30 @@ static void _perform_stream_abort( void )
 	if (s) {
 		stream_set_abort(s);
 	}
+}
+
+void define_default_stream_buffer_size(int size)
+{
+	serprintf("MARC stream:define_default_stream_buffer_size %d\n", size);
+	default_stream_buffer_size = size;
+}
+
+int get_default_stream_buffer_size()
+{
+	serprintf("MARC stream:get_default_stream_buffer_size %d\n", default_stream_buffer_size);
+	return default_stream_buffer_size;
+}
+
+void define_default_stream_max_iframe_size(int size)
+{
+	serprintf("MARC stream:define_default_stream_max_iframe_size %d\n", size);
+	default_video_mindata_size = size * 1024 * 1024;
+}
+
+int get_default_stream_max_iframe_size()
+{
+	serprintf("MARC stream:get_default_stream_max_iframe_size %d\n", default_video_mindata_size);
+	return default_video_mindata_size;
 }
 
 DECLARE_DEBUG_COMMAND("sbs", 	_stream_buffer_sec      );

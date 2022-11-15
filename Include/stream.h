@@ -1021,4 +1021,9 @@ extern STREAM_VIDEO_MANGLER	stream_video_mangler_REAL;
 
 #include "stream_config.h"
 
+void define_default_stream_buffer_size(int size);
+int get_default_stream_buffer_size();
+void define_default_stream_max_iframe_size(int size);
+int get_default_stream_max_iframe_size();
+
 #endif

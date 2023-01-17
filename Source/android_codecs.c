@@ -38,11 +38,50 @@
 #define DLHELPER_HEADER "dlhelper_mediacodeclist.h"
 #include "dlhelper.h"
 
-#define DBG if(0)
+#define DBG if(1)
+#define ERR if(1)
 
 extern JavaVM *myVm;
-extern jobject myClassLoader;
-extern jmethodID myFindClassMethod;
+static jclass jCodecDiscoveryClass;
+static jmethodID jCodecSupportedMethod;
+
+void acodecs_init(void) {
+    int willDetach = 0;
+	JNIEnv * env = NULL;
+	if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
+		DBG serprintf("ERROR: acodecs_init GetEnv failed\n");
+		if(((*myVm)->AttachCurrentThread(myVm, &env, NULL)) != 0 ) {
+			ERR serprintf("ERROR: acodecs_init Attach to JVM failed\n");
+            return;
+		}
+		else
+			willDetach = 1;
+	}
+
+    const char* javaName = "com/archos/mediacenter/video/utils/CodecDiscovery";
+
+	DBG serprintf("%s\n", javaName);
+	jCodecDiscoveryClass = (*env)->NewGlobalRef(env, (*env)->FindClass(env, javaName));
+	jthrowable exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: acodecs_init:FindClass\n");
+		(*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        return;
+    }
+
+	jCodecSupportedMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass, "isCodecTypeSupported", "(Ljava/lang/String;Z)Z");
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: acodecs_init:isCodecTypeSupported\n");
+		(*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        return;
+    }
+
+	if (willDetach)
+		(*myVm)->DetachCurrentThread(myVm);
+}
 
 int acodecs_is_type_supported(const char *type, int is_sw_allowed)
 {
@@ -52,44 +91,27 @@ int acodecs_is_type_supported(const char *type, int is_sw_allowed)
 	jboolean result = 0;
 
 	if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
-		DBG serprintf("ERROR: GetEnv failed\n");
+		DBG serprintf("ERROR: acodecs_is_type_supported GetEnv failed\n");
 		if(((*myVm)->AttachCurrentThread(myVm, &env, NULL)) != 0 ) {
-			DBG serprintf("ERROR: Attach to JVM failed\n");
+			ERR serprintf("ERROR: acodecs_is_type_supported Attach to JVM failed\n");
                         return 0;
 		}
 		else
 			willDetach = 1;
-		// if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
 	}
-	const char * pkgName = "com/archos/mediacenter/video"; //device_config_get_android_pkg_name();
-	size_t lenPkgName = strlen(pkgName);
-	const char * suffix = "/utils/CodecDiscovery";
-	size_t lenSuffix = strlen(suffix);
-	char * javaName = (char*) malloc(sizeof(char)*(lenPkgName+lenSuffix+1));
 
-	strncpy(javaName, pkgName, lenPkgName+1);
-	for (i = 0; i < lenPkgName; i++)
-		if (javaName[i] == '.')
-			javaName[i] = '/';
-	strncat(javaName, suffix, lenSuffix);
-	DBG serprintf("%s\n", javaName);
-	jclass clazz = NULL;
-	clazz = (*env)->FindClass(env, javaName);
+	const jstring string = (*env)->NewStringUTF(env, type);
+	result = (*env)->CallStaticBooleanMethod(env, jCodecDiscoveryClass, jCodecSupportedMethod, string, (jboolean) is_sw_allowed);
 	jthrowable exception = (*env)->ExceptionOccurred(env);
 	if (exception) {
-		DBG serprintf("!!!EXCEPTION");
-                (*env)->ExceptionClear(env);
-		const jstring javaStringName = (*env)->NewStringUTF(env, javaName);
-		clazz = (jclass) (*env)->CallObjectMethod(env, myClassLoader,
-                                                          myFindClassMethod, javaStringName);
+		ERR serprintf("!!!EXCEPTION: acodecs_init:acodecs_is_type_supported CallStaticBooleanMethod\n");
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		return 1;
 	}
-	jmethodID method = (*env)->GetStaticMethodID(env, clazz, "isCodecTypeSupported", "(Ljava/lang/String;Z)Z");
-	const jstring string = (*env)->NewStringUTF(env, type);
-	result = (*env)->CallStaticBooleanMethod(env, clazz, method, string, (jboolean) is_sw_allowed);
 
 	(*env)->DeleteLocalRef(env, string);
 	
-	free(javaName);
 	if (willDetach)
 		(*myVm)->DetachCurrentThread(myVm);
 

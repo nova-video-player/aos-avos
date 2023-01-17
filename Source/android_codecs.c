@@ -38,7 +38,7 @@
 #define DLHELPER_HEADER "dlhelper_mediacodeclist.h"
 #include "dlhelper.h"
 
-#define DBG if(1)
+#define DBG if(0)
 #define ERR if(1)
 
 extern JavaVM *myVm;

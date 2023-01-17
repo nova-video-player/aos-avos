@@ -195,6 +195,8 @@ static int unregister_libavos(JNIEnv *env)
     return 0;
 }
 
+extern void acodecs_init(void);
+
 jint JNI_OnLoad(JavaVM* vm, void* reserved)
 {
     JNIEnv* env = NULL;
@@ -209,9 +211,10 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved)
     if (register_libavos(env) < 0) {
         LOGE("ERROR avosmediaplayer registration failed\n");
     }
+    myVm = vm;
+    acodecs_init();
     result = JNI_VERSION_1_4;
 
-    myVm = vm;
 bail:
     return result;
 }

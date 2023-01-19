@@ -61,10 +61,12 @@ struct audio_ctx {
 	size_t buf_size;
 	jclass audiotrackClass;
 	jclass audiosystemClass;
+	jclass playbackParamsClass;
 };
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
+static char * PLAYBACKPARAMS_CLASS_NAME = "android/media/PlaybackParams";
 
 static int buffer_scale = 1;
 
@@ -73,20 +75,21 @@ static int mode = 1; /*MODE_STREAM*/
 
 static inline void call_void_method(audio_ctx_t *at, const char * name, const char * signature)
 {
-DBG2	LOG();
+	DBG2 LOG();
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
 	(*at->env)->CallVoidMethod(at->env, at->obj, method);
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
 	if (exception) {
-ERR		LOG("!!!EXCEPTION");
+		ERR LOG("!!!EXCEPTION");
+		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
 }
 
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
-DBG2	LOG();
+	DBG2 LOG();
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
 	va_list args;
 	va_start(args, signature);
@@ -95,7 +98,8 @@ DBG2	LOG();
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
 	if (exception) {
-ERR		LOG("!!!EXCEPTION");
+		ERR LOG("!!!EXCEPTION: call_void_method");
+		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
 
@@ -104,7 +108,7 @@ ERR		LOG("!!!EXCEPTION");
 
 static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const char * name, const char * signature, ...)
 {
-DBG2	LOG();
+	DBG2 LOG();
 	jmethodID method = (*at->env)->GetStaticMethodID(at->env, clas, name, signature);
 	va_list args;
 	va_start(args, signature);
@@ -113,7 +117,8 @@ DBG2	LOG();
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
 	if (exception) {
-ERR	LOG("!!!EXCEPTION");
+		ERR LOG("!!!EXCEPTION: call_int_method");
+		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
 
@@ -127,9 +132,9 @@ static inline void attach_thread(audio_ctx_t *at) {
 static inline JNIEnv * attach_thread_current_vm() {
 	JNIEnv *myEnv = NULL;
 	if ((*myVm)->GetEnv(myVm, (void**)&(myEnv), JNI_VERSION_1_4) != JNI_OK) {
-ERR		serprintf("ERROR: GetEnv failed\n");
+		DBG serprintf("ERROR: audio_interface_audiotrack_java:attach_thread_current_vm GetEnv failed\n");
 		if(((*myVm)->AttachCurrentThread(myVm, &(myEnv), NULL)) != 0 ) {
-ERR		serprintf("ERROR: Attach to JVM failed\n");
+			ERR serprintf("ERROR: audio_interface_audiotrack_java:attach_thread_current_vm Attach to JVM failed\n");
 			return NULL;
 		} else {
 			return NULL;
@@ -157,17 +162,17 @@ static audio_ctx_t *audiotrack_open(int mode)
 
 	at = (audio_ctx_t *)calloc(1, sizeof(audio_ctx_t));
 	if (!at) {
-ERR		LOG("malloc failed");
+		ERR LOG("malloc failed");
 		return NULL;
 	}
 
-DBG	LOG("mode: %i", mode);
+	DBG	LOG("mode: %i", mode);
 
 	//let's attach to the java VM
 	if ((*myVm)->GetEnv(myVm, (void**)&(at->env), JNI_VERSION_1_4) != JNI_OK) {
-DBG		LOG("ERROR: GetEnv failed");
+		DBG LOG("ERROR: audio_interface_audiotrack_java:audiotrack_open GetEnv failed");
 		if(((*myVm)->AttachCurrentThread(myVm, &(at->env), NULL)) != 0 ) {
-DBG			LOG("ERROR: Attach to JVM failed");
+			ERR LOG("ERROR: Attach to JVM failed");
 			return 0;
 		}
 		else
@@ -176,6 +181,7 @@ DBG			LOG("ERROR: Attach to JVM failed");
 
 	at->audiotrackClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOTRACK_CLASS_NAME));
 	at->audiosystemClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOSYSTEM_CLASS_NAME));
+	at->playbackParamsClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, PLAYBACKPARAMS_CLASS_NAME));
 
 	return at;
 }
@@ -194,6 +200,7 @@ static int audiotrack_close(audio_ctx_t **pat)
 		(*at->env)->DeleteGlobalRef(at->env, at->jbuffer);
 		(*at->env)->DeleteGlobalRef(at->env, at->audiotrackClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audiosystemClass);
+		(*at->env)->DeleteGlobalRef(at->env, at->playbackParamsClass);
 		//if (at->willDetach)
 		//	(*myVm)->DetachCurrentThread(myVm);
 		at->init = 0;
@@ -315,13 +322,22 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			sampleRateInHz, channelConfig, audioFormat);
 	DBG LOG ( "audio_interface_audiotrack_java:audiotrack_set_output_params getMinBufferSize=%d\n", call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 										 sampleRateInHz, channelConfig, audioFormat) );
+
+	// audioTrack will be saved in at->obj if create correctly
 	jobject audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass,
 		(*at->env)->GetMethodID(at->env, at->audiotrackClass, "<init>", "(IIIIII)V"),
 		streamType, sampleRateInHz, channelConfig,
 		audioFormat, at->buf_size, mode);
+	int failed = 0;
+	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
+	if (exception) {
+		ERR LOG("exception during audioTrack constructor call");
+		(*at->env)->ExceptionDescribe(at->env);
+		(*at->env)->ExceptionClear(at->env);
+		failed = 1;
+	}
 
 	jobject playbackParams;
-	jclass playbackParamsClass;
 
 	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23 && audio_interface_get_audio_speed() != 1.0) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", audio_interface_get_audio_speed());
@@ -330,24 +346,22 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
 
 		// change that audioparam's speed
-		playbackParamsClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, "android/media/PlaybackParams"));
 		(*at->env)->CallObjectMethod(at->env, playbackParams,
-				(*at->env)->GetMethodID(at->env, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), audio_interface_get_audio_speed());
+				(*at->env)->GetMethodID(at->env, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), audio_interface_get_audio_speed());
 
-		// set audiotrack's audioparams back to us
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) { // not failing
+			ERR LOG("exception during setSpeed");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			audio_interface_set_audio_speed(1.0f); // if failing then revert to 1x ratio
+		}
+
+		// set audiotrack's audioparams
 		(*at->env)->CallVoidMethod(at->env, audioTrack,
 				(*at->env)->GetMethodID(at->env, at->audiotrackClass, "setPlaybackParams", "(Landroid/media/PlaybackParams;)V"), playbackParams);
 	} else {
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params not applying setSpeed on AudioTrack PlaybackParams" );
-	}
-
-	int failed = 0;
-	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
-	if (exception) {
-ERR		LOG("exception during constructor call");
-        (*at->env)->ExceptionDescribe(at->env);
-		(*at->env)->ExceptionClear(at->env);
-		failed = 1;
 	}
 
 	if (!failed) {
@@ -355,21 +369,19 @@ ERR		LOG("exception during constructor call");
 
 		status = call_int_method(at, "getState", "()I");
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
-ERR			LOG("audiotrack ctor failed");
+			ERR LOG("audiotrack ctor failed");
 			failed = 1;
 		}
-	}
 
-	if (!failed) {
 		//frame_size reported can be false for compressed formats
 		at->frame_count = at->buf_size / at->frame_size;
-DBG		LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
+		DBG LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
 		at->jbuffer = (jbyteArray) (*at->env)->NewGlobalRef(at->env, (*at->env)->NewByteArray(at->env, at->buf_size));
 	}
 
 	if (failed && reinit) {
 		msec_sleep( 30 );
-ERR		LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
+		ERR LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
 		return audiotrack_set_output_params(at, rate, channels, bits, format);
 	}
 
@@ -377,12 +389,12 @@ ERR		LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self call
 		return -1;
 
 	at->latency = call_static_int_method(at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
+	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
 	at->latency += (1000 * at->frame_count) / at->rate;
 	at->init = 1;
-	DBG	LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
+	DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
 
-
-DBG	LOG("track created");
+	DBG LOG("track created");
 
 	return 0;
 }
@@ -446,7 +458,7 @@ ERR		LOG("track not valid, error");
 	ssize_t len_to_write = MIN(at->buf_size, len);
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);
 	ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
-DBG	LOG("wrote %d out of %d", ret, len);
+DBG2	LOG("wrote %d out of %d", ret, len);
 
 	if (at->passthrough && ret == -6 /* ERROR_DEAD_OBJECT */) {
 ERR		LOG("audiotrack_interface_audiotrack_java:audiotrack_write dead object -> call audiotrack_set_output_params");
@@ -534,16 +546,23 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 													   "()Landroid/media/PlaybackParams;" ) );
 
 		// change that audioparam's speed
-		jclass playbackParamsClass =
-			( *myEnv )->NewGlobalRef( myEnv, ( *myEnv )->FindClass( myEnv, "android/media/PlaybackParams" ) );
 		( *myEnv )
 			->CallObjectMethod(
 				myEnv, playbackParams,
 				( *myEnv )
-					->GetMethodID( myEnv, playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
+					->GetMethodID( myEnv, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
 				speed );
 
-		// set audiotrack's audioparams back to us
+		int failed = 0;
+		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
+		if( exception ) {
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setSpeed call" );
+			( *myEnv )->ExceptionDescribe( myEnv );
+			( *myEnv )->ExceptionClear( myEnv );
+			failed = 1;
+		}
+
+		// set audiotrack's audioparams
 		( *myEnv )
 			->CallVoidMethod( myEnv, audioTrack,
 							  ( *myEnv )
@@ -551,17 +570,6 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 												 "(Landroid/media/PlaybackParams;)V" ),
 							  playbackParams );
 
-		// save back audioTrack
-		at->obj = ( *myEnv )->NewGlobalRef( myEnv, audioTrack );
-
-		int failed = 0;
-		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
-		if( exception ) {
-			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during modification call" );
-			( *myEnv )->ExceptionDescribe( myEnv );
-			( *myEnv )->ExceptionClear( myEnv );
-			failed = 1;
-		}
 		int status =
 			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
 									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
@@ -570,14 +578,15 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		}
 
 		if( failed ) {
-ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed" );
+			// fallback at 1.0x if it fails (soundbar?)
+			audio_interface_set_audio_speed(1.0f);
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed: reverting to 1x" );
+		} else {
+			audio_interface_set_audio_speed(speed);
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
 		}
-
-		audio_interface_set_audio_speed(speed);
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
-
 	} else {
-DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
 	}
 	return 0;
 }

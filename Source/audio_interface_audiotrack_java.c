@@ -312,7 +312,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 4x buffer" );
-		buffer_scale = 4; // TODO 3x seems to work as well
+		buffer_scale = 6; // TODO 3x instead of 4x seems to work as well on speakers. Note that with bluetooth headsets >4x avoids AudioTrack error
 	} else {
 		buffer_scale = 1;
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 1x buffer" );

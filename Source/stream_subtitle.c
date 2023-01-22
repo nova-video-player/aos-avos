@@ -120,9 +120,9 @@ DBG serprintf("stream_subtitle:_output_sub [diff %4d]  ", f->time - t );
 	f->time += s->subtitle_offset;
 	// s->video_time is not real time with audio_speed, audio_interface_get_audio_speed() * s->video_time
 	if( s->subtitle->gfx ) {
-DBG serprintf("stream_subtitle:_output_sub sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", audio_interface_get_audio_speed() * s->video_time, f->time, f->duration, f->window.width, f->window.height );
+DBG serprintf("stream_subtitle:_output_sub sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", s->video_time, f->time, f->duration, f->window.width, f->window.height );
 	} else {
-DBG serprintf("stream_subtitle:_output_sub new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", audio_interface_get_audio_speed() * s->video_time, f->time, f->duration, f->data );
+DBG serprintf("stream_subtitle:_output_sub new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_time, f->time, f->duration, f->data );
 	}
 	// tell the user
 	if( s->message_cb ) {
@@ -274,8 +274,8 @@ void _sub_decode( STREAM *s )
 	}
 	if( s->subtitle->valid && !s->paused ) {
 		// s->video_time is not real time with audio_speed, audio_interface_get_audio_speed() * s->video_time
+DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> %d\n", audio_interface_get_audio_speed(), s->video_time, audio_interface_get_audio_speed() * s->video_time);
 		int time = audio_interface_get_audio_speed() * s->video_time;
-DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> real time %d\n", audio_interface_get_audio_speed(), s->video_time , time);
 		if( time != -1 ) {
 			// apply correction
 			time -= s->subtitle_offset;

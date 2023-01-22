@@ -112,18 +112,17 @@ static void _output_sub( STREAM *s, VIDEO_FRAME *f, uint64_t pos )
 	if( pos && s->parser->get_time_for_pos ) {
 		int t = s->parser->get_time_for_pos( s, pos );
 		if( t != -1 ) {
-DBG serprintf("[diff %4d]  ", f->time - t );
+DBG serprintf("stream_subtitle:_output_sub [diff %4d]  ", f->time - t );
 			f->time = t;
 		}
 	}
-	
 	// we need to adjust the time the users sees for the delay:
 	f->time += s->subtitle_offset;
-	
+	// s->video_time is not real time with audio_speed, audio_interface_get_audio_speed() * s->video_time
 	if( s->subtitle->gfx ) {
-DBG serprintf("sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", s->video_time, f->time, f->duration, f->window.width, f->window.height );
+DBG serprintf("stream_subtitle:_output_sub sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", audio_interface_get_audio_speed() * s->video_time, f->time, f->duration, f->window.width, f->window.height );
 	} else {
-DBG serprintf("new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_time, f->time, f->duration, f->data );
+DBG serprintf("stream_subtitle:_output_sub new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", audio_interface_get_audio_speed() * s->video_time, f->time, f->duration, f->data );
 	}
 	// tell the user
 	if( s->message_cb ) {
@@ -179,8 +178,9 @@ serprintf("cannot allocate subtitle frame!\r\n");
 			// if the sub has a time of -1 just let it pass...
 			if( s->cdata_sub.time == -1 || s->cdata_sub.time <= time ) {
 				VIDEO_FRAME *f = s->subtitle_frame;
+				// TODO check if it should not be scaled by audio_speed too
 //DBG serprintf("SUB: size %5d  sub %8d  video %8d\r\n", s->cdata_sub.size, s->cdata_sub.time, s->video_time );
-				s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f ); 
+				s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f );
 				s->cdata_sub.valid = 0;
 				if( f ) {
 					_output_sub( s, f, s->cdata_sub.pos );
@@ -273,9 +273,9 @@ void _sub_decode( STREAM *s )
 		}
 	}
 	if( s->subtitle->valid && !s->paused ) {
-		// sub time needs to be scaled by audio_speed because it is not derived from parser timestamps (TODO?)
-DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d\n", audio_interface_get_audio_speed(), s->video_time);
-		int time = s->video_time;
+		// s->video_time is not real time with audio_speed, audio_interface_get_audio_speed() * s->video_time
+		int time = audio_interface_get_audio_speed() * s->video_time;
+DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> real time %d\n", audio_interface_get_audio_speed(), s->video_time , time);
 		if( time != -1 ) {
 			// apply correction
 			time -= s->subtitle_offset;

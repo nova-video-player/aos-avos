@@ -238,8 +238,7 @@ serprintf("cannot allocate subtitle frame!\r\n");
 			if( f && f->valid ) {
 DBG serprintf("got gfx data: %8d %8d  size %d\r\n", f->time, f->duration, f->valid );
 				VIDEO_FRAME *f2 = s->subtitle_frame;
-				
-				s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 ); 
+				s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 );
 				if( f2 ) {
 					f2->time = f->time;
 					_output_sub( s, f2, 0 );
@@ -274,8 +273,8 @@ void _sub_decode( STREAM *s )
 	}
 	if( s->subtitle->valid && !s->paused ) {
 		// s->video_time is not real time with audio_speed, audio_interface_get_audio_speed() * s->video_time
-DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> %d\n", audio_interface_get_audio_speed(), s->video_time, audio_interface_get_audio_speed() * s->video_time);
-		int time = audio_interface_get_audio_speed() * s->video_time;
+		int time = (int)(audio_interface_get_audio_speed() * s->video_time);
+		DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> %d\n", audio_interface_get_audio_speed(), s->video_time, time);
 		if( time != -1 ) {
 			// apply correction
 			time -= s->subtitle_offset;
@@ -285,7 +284,9 @@ DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> %d\n", aud
 		if( s->subtitle->ext ) {
 			_get_next_ext_sub( s, time );
 		} else {
-			_get_next_int_sub( s, time );
+			// internal sub operates on cdata.time and needs to be scaled back to s->video_time scale otherwise subs are off using audio_speed
+			int time_ts = (int)(time / audio_interface_get_audio_speed());
+			_get_next_int_sub( s, time_ts );
 		}
 	}
 }
@@ -307,7 +308,7 @@ DBGS serprintf("PID[%5d] stream_sub_dec_thread::Starting\r\n", getpid() );
 		}
 		stream_yield_RT();
 	}
-DBGS serprintf("PID[%5d] stream_sub_dec_thread::Exiting\r\n", getpid() );	
+DBGS serprintf("PID[%5d] stream_sub_dec_thread::Exiting\r\n", getpid() );
  	return NULL;
 }
 

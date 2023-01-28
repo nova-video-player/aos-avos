@@ -278,13 +278,14 @@ DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 	}
 		 
 	s->drop_B = 0;
-
-	if ( s->delay > stream_max_delay * s->video->msPerFrame ) {
+	float as = audio_interface_get_audio_speed();
+	int delay_s = (int)(stream_max_delay * s->video->msPerFrame / as);
+	if ( s->delay > delay_s ) {
 		// video is too fast, we have to slow down
 		s->drop = -1;
-		s->delay -= stream_max_delay * s->video->msPerFrame;
+		s->delay -= delay_s;
 DBGVY serprintf("_S(%3d)_", s->delay );
-	} else if ( s->delay < (-1 * stream_max_delay * s->video->msPerFrame)  ) {
+	} else if ( s->delay < (-1 * delay_s)  ) {
 		
 		if ( stream_pdrop_threshold && rdiff < (-1 * stream_pdrop_threshold) ) {
 			// we are totally late, see if we can skip to next key frame
@@ -301,11 +302,11 @@ DBGVY serprintf("XX(%d %d %d) ", num, key_time, dropped );
 		}
 
 		// video is late, we have to hurry up
-		if( stream_bdrop_threshold && s->delay < (-1 * stream_bdrop_threshold  * s->video->msPerFrame) ) {
+		if( stream_bdrop_threshold && s->delay < (-1 * (int)(stream_bdrop_threshold  * s->video->msPerFrame / as)) ) {
 			s->drop_B = 1;
 		}
 		s->drop = 1;
-		s->delay += stream_max_delay * s->video->msPerFrame;
+		s->delay += delay_s;
 DBGVY serprintf("_%s(%3d)_", s->drop_B ? "B" : "F", s->delay );
 	} else {
 DBGVY serprintf("  (   ) " );

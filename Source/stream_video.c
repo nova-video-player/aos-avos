@@ -2642,24 +2642,25 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 		} else {
 			_check_sink_ref_time( s, frame ); 
 
+			float as = audio_interface_get_audio_speed();
 			if( s->drop > 0 ) {
 				// drop one frame
 				s->drop --;
-				s->sink_ref_time -= s->video->msPerFrame;
+				s->sink_ref_time -= (int)(s->video->msPerFrame / as);
 				frames_dropped ++;
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
-					s->video_time += s->video->msPerFrame;
+					s->video_time += (int)(s->video->msPerFrame / as); // not real time with audio_speed
 				}
 			} else if( s->drop < 0 ) {
 				// double one frame
 				s->drop ++;
-				s->sink_ref_time += s->video->msPerFrame;
+				s->sink_ref_time += (int)(s->video->msPerFrame / as);
 				frames_doubled ++;
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
-					s->video_time -= s->video->msPerFrame;
+					s->video_time -= (int)(s->video->msPerFrame / as); // not real time with audio_speed
 				}
 			} else {	
 DBGY serprintf("[ %8d] ", frame->time );
@@ -4083,7 +4084,7 @@ serprintf("not seekable!\n");
 	// pause the stream
 	was_paused = _seek_pause( s );
 DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, dir );
-	
+
 	if( _stream_wait_for_idle( s, 1000 ) ) {
 		// un_pause the stream
 		_seek_un_pause( s, was_paused );

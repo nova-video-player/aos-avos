@@ -1350,7 +1350,7 @@ static void _queue_sink_frames( STREAM *s )
 		// got a frame, queue it
 		if( s->vtime_post_sink && frame->time != -1 ) {
 			if( frame->epoch == s->seek_epoch ) {
-				s->video_time = frame->time;
+				s->video_time = frame->time; // not real time with audio_speed
 			}
 		}
 
@@ -4093,7 +4093,7 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 
 	_seek_init( s );
 
-	if( time != -1 ) {
+	if( time != -1 ) { // the one used seeking with cursor (not when changing audio_speed)
 		// seek by time
 		if( (err = s->parser->seek_time ? s->parser->seek_time( s, time, dir, flags, force_reload, &sc ) : 1) ) {
 serprintf("stream_seek time err!\n");
@@ -4119,7 +4119,7 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 
 	if( s->audio->valid ) {
 		if( time == 0 || pos == 0 ) {
-serprintf("STUFF_ZERO!\n");
+serprintf("stream_video:_stream_seek_real STUFF_ZERO!\n");
 			s->audio_stuff_zero = 1;
 		}
 	}
@@ -4148,7 +4148,6 @@ DBGV serprintf("play one frame\n");
 	stream_sync_init( s, sc.time );
 	
 DBGS serprintf("\nseeked to frame %d  time %d|%d   pos %lld|%lld <------------ took %3d/%3d\n", sc.frame, s->video_time, s->audio_time, s->video_pos, s->audio_pos, atime() - start1, atime()- start2 );
-	
 	// un_pause the stream
 	_seek_un_pause( s, was_paused );
 	
@@ -4432,19 +4431,14 @@ VIDEO_FRAME *stream_get_current_frame( STREAM *s )
 // *****************************************************************************
 int stream_get_time_default( STREAM *s, int *total )
 {
-	// returns the video_time which is the exact time without audio_speed scaling
+	// returns the realtime which is the exact time without audio_speed scaling
 	if ( !s )
 		return 0;
-	
 	if( total )
 		*total = s->duration;
-
-	// note: audio_speed > 1 means that parsers are outputting audio/video quicker with smaller time units yielding higher timestamps
-	// this means real_time = stream_time(ts) / audio_speed to scale it back to real value, and conversely stream_time = real_time * audio_speed
-
-	// need to be scaled by audio_speed to get stream time since video_time is the real video time (otherwise seek with arrows at low speed is off)
+	// stream video_time is scaled by audio_speed (video_time = realtime / audio_speed)
 	int time = audio_interface_get_audio_speed() * (s->video->valid ? s->video_time : s->audio_time);
-DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
+	DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
 	return time;
 }
 
@@ -4460,7 +4454,7 @@ int stream_get_current_time( STREAM *s, int *total )
 	if( s->parser && s->parser->get_time ) {
 		return s->parser->get_time( s, total );
 	}
-	return stream_get_time_default( s, total );
+	return stream_get_time_default( s, total ); // this is the one used
 }
 
 // *****************************************************************************
@@ -4497,7 +4491,7 @@ int stream_get_current_pos( STREAM *s, int *total )
 	if( s->size ) {
 		UINT64 pos = s->video ? (s->video->valid ? s->video_pos : s->audio_pos) : s->audio_pos;
 		int    ret = pos * STREAM_POS_MAX / s->size;
-DBGT serprintf("sgcp  pos: %4d  tot %d\r\n", ret, total ? *total : -1 );	
+		DBGT serprintf("sgcp  pos: %4d  tot %d\r\n", ret, total ? *total : -1 );
 		return ret;
 	}
 	return 0;
@@ -4524,7 +4518,7 @@ int stream_get_buffered_pos( STREAM *s, int *total )
 	       	pos       += stream_buffer_get_used( s->buffer );
 		pos        = MIN( pos, s->size ); 
 		int ret    = pos * STREAM_POS_MAX / s->size;
-DBGT serprintf("sgbp  buf: %4d  tot %d\r\n", ret, total ? *total : -1 );	
+		DBGT serprintf("sgbp  buf: %4d  tot %d\r\n", ret, total ? *total : -1 );
 		return ret;
 	}
 	return 0;
@@ -4605,7 +4599,7 @@ serprintf("stream_redraw\r\n");
 		}
 
 		if( s->current_frame ) {
-			s->current_frame->time = s->video_time;
+			s->current_frame->time = s->video_time; // not real time with audio_speed
 			s->output_frame_fn( s, s->current_frame, NULL );
 		} else {
 serprintf("CANNOT redraw\r\n");

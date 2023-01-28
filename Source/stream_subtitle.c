@@ -178,7 +178,6 @@ serprintf("cannot allocate subtitle frame!\r\n");
 			// if the sub has a time of -1 just let it pass...
 			if( s->cdata_sub.time == -1 || s->cdata_sub.time <= time ) {
 				VIDEO_FRAME *f = s->subtitle_frame;
-				// TODO check if it should not be scaled by audio_speed too
 //DBG serprintf("SUB: size %5d  sub %8d  video %8d\r\n", s->cdata_sub.size, s->cdata_sub.time, s->video_time );
 				s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f );
 				s->cdata_sub.valid = 0;
@@ -272,7 +271,8 @@ void _sub_decode( STREAM *s )
 		}
 	}
 	if( s->subtitle->valid && !s->paused ) {
-		// s->video_time is not real time with audio_speed, audio_interface_get_audio_speed() * s->video_time
+		// video_time is not realtime with audio_speed, real time is audio_speed * video_time
+		// need to get back to realtime to apply possible subtitle time offset
 		int time = (int)(audio_interface_get_audio_speed() * s->video_time);
 		DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> %d\n", audio_interface_get_audio_speed(), s->video_time, time);
 		if( time != -1 ) {

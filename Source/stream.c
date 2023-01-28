@@ -528,7 +528,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( !s ) return 1;
 	if( audio_interface_is_audio_speed_enabled() && audio_interface_get_audio_speed() != av_speed ) {
 		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
-		s->av_speed = av_speed;
 		// read current time before setting the audio_speed scaling since it impacts the result
 		int stream_current_time = stream_get_current_time( s, NULL );
 		audio_interface_change_audio_speed( s->audio_ctx, av_speed );

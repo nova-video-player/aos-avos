@@ -468,7 +468,6 @@ typedef struct STREAM {
 	int 		sink_delay_count;	// delay between video and it's sink
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
-	float		av_speed;		// user provided AV speed
 
 	int 		audio_time;
 	int 		audio_ref_time;

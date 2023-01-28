@@ -1367,7 +1367,7 @@ static int msk_fixup_srt( char *dst, int max, const char *src, int src_size, int
 //	_get_subtitle_cdata
 //
 // ************************************************************
-static int ff_get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_CDATA *cdata )
+static int _get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_CDATA *cdata )
 {
 	if( cdata->valid != 0 ) {
 		return 0;
@@ -1549,7 +1549,7 @@ static STREAM_PARSER stream_parser_FFMPEG = {
 	_calc_rate,
 	_get_audio_cdata,
 	_get_video_cdata,
-	ff_get_subtitle_cdata,
+	_get_subtitle_cdata,
 	_peek_n_audio_chunk,
 	_seek_time,	//_seek_time
 	_seek_pos,	//_seek_pos

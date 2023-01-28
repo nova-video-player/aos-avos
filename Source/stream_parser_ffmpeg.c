@@ -1461,9 +1461,8 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->aq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
-			// need to be scaled by audio_speed to allow seek
-			int first_time   = GET_AUDIO_TS( first->packet.dts ) / audio_interface_get_audio_speed();
-			int last_time    = GET_AUDIO_TS( last->packet.dts ) / audio_interface_get_audio_speed();
+			int first_time   = GET_AUDIO_TS( first->packet.dts );
+			int last_time    = GET_AUDIO_TS( last->packet.dts );
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
@@ -1483,9 +1482,8 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			// need to be scaled by audio_speed to allow seek
-			int first_time   = GET_VIDEO_TS( first->packet.dts ) / audio_interface_get_audio_speed();
-			int last_time    = GET_VIDEO_TS( last->packet.dts ) / audio_interface_get_audio_speed();
+			int first_time   = GET_VIDEO_TS( first->packet.dts );
+			int last_time    = GET_VIDEO_TS( last->packet.dts );
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 

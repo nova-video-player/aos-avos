@@ -502,8 +502,7 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	// align buffer sizes (TODO check)
-	len = buffer_scale * at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
+	len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
 
 	if ((buffer = (unsigned char *)malloc(len)) == NULL)
 		return -1;

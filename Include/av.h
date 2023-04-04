@@ -538,6 +538,7 @@ enum {
 	SUB_FORMAT_SSA,
 	SUB_FORMAT_ASS,
 	SUB_FORMAT_EXT,		// external subs from separate files
+	SUB_FORMAT_MOV_TEXT
 };
 
 #define AUDIO_TRACK_MAX		16

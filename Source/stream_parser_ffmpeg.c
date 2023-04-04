@@ -194,6 +194,7 @@ static struct id_fmt_str {
 	{ AV_CODEC_ID_XSUB,	SUB_FORMAT_XSUB,	0 },
 	{ AV_CODEC_ID_SSA,	SUB_FORMAT_SSA,		0 },
 	{ AV_CODEC_ID_ASS,	SUB_FORMAT_SSA,		0 },
+	{ AV_CODEC_ID_MOV_TEXT,	SUB_FORMAT_MOV_TEXT,		0 },
 };
 
 
@@ -243,6 +244,7 @@ void av_log_cb(void* ptr, int level, const char* fmt, va_list vl)
 static int get_ff_format( int id, UINT32 *fourcc )
 {
 	int i;
+    serprintf("get_ff_format %d\n", id);
 	for( i = 0; i < sizeof( id_fmt ) / sizeof( struct id_fmt_str); i++ ) {
 		if( id_fmt[i].id == id ) {
 			if( fourcc ) {

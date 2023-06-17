@@ -35,6 +35,8 @@
 #define DBG2 if(0)
 #define ERR  if(1)
 
+#define AUDIO_SPEED_LATENCY_SHIFT 260 // 260ms for a 6x buffer, should be calculated
+
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
 
 typedef unsigned char bool;
@@ -416,7 +418,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->latency = call_static_int_method(at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
 	// scaling with audio_speed is required to avoid variable delay with different audio_speed
-	at->latency += (1000 * at->frame_count) / (as * at->rate);
+	if(is_audio_speed_enabled) {
+		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / as;
+	} else {
+		at->latency += (1000 * at->frame_count) / at->rate;
+	}
 	at->init = 1;
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency_norm=%d\n", at->latency);
 	DBG LOG("track created");
@@ -623,7 +629,7 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency=%d\n", at->latency);
 		// scaling with audio_speed is required to avoid variable delay with different audio_speed
-		at->latency += (1000 * at->frame_count) / (speed * at->rate);
+		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / speed;
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
 
 	} else {

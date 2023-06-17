@@ -38,7 +38,7 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGP if(Debug[DBG_PARSER])
 
-#define DBG if(0)
+#define DBG if(1)
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
@@ -528,8 +528,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( !s ) return 1;
 	if( audio_interface_is_audio_speed_enabled() && audio_interface_get_audio_speed() != av_speed ) {
 		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
-		// read current time before setting the audio_speed scaling since it impacts the result
-		int stream_current_time = stream_get_current_time( s, NULL );
+		// read current time (before setting the audio_speed scaling since it impacts the result
+		int stream_current_time = stream_get_current_time( s, NULL ); // returns real time
 		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 		// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
 		if( stream_current_time > 0 ) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );

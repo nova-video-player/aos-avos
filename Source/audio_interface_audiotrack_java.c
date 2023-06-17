@@ -73,6 +73,8 @@ static int buffer_scale = 1;
 static int streamType = 3; /*STREAM_MUSIC*/
 static int mode = 1; /*MODE_STREAM*/
 
+static int audio_rate = 1; /* called from stream_sink_audio represents s->audio->samplesPerSec */
+
 static inline void call_void_method(audio_ctx_t *at, const char * name, const char * signature)
 {
 	DBG2 LOG();
@@ -120,6 +122,24 @@ static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const cha
 		ERR LOG("!!!EXCEPTION: call_int_method");
 		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
+	}
+
+	return result;
+}
+
+static inline int call_int_method_current_vm(JNIEnv *jni_env, jclass clas, const char * name, const char * signature, ...)
+{
+	jmethodID method = (*jni_env)->GetStaticMethodID(jni_env, clas, name, signature);
+	va_list args;
+	va_start(args, signature);
+	jint result = (*jni_env)->CallStaticIntMethodV(jni_env, clas, method, args);
+	va_end(args);
+
+	jthrowable exception = (*jni_env)->ExceptionOccurred(jni_env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: call_static_int_method_current_vm\n");
+		(*jni_env)->ExceptionDescribe(jni_env);
+		(*jni_env)->ExceptionClear(jni_env);
 	}
 
 	return result;
@@ -220,6 +240,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			 at->passthrough );
 
 	attach_thread( at );
+
+	audio_rate = rate;
+	float as = audio_interface_get_audio_speed();
+	int is_audio_speed_enabled = audio_interface_is_audio_speed_enabled();
+
 	at->rate = rate;
 	at->channel_count = channels;
 	at->format = format;
@@ -309,7 +334,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	mode = 1; /*MODE_STREAM*/
 
 	// NOTE than buffer_scale != 1 makes video stutters for some cf. #726, enable audio_speed only if experimental feature set
-	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
+	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 4x buffer" );
 		buffer_scale = 6; // TODO 3x instead of 4x seems to work as well on speakers. Note that with bluetooth headsets >4x avoids AudioTrack error
@@ -339,15 +364,15 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	jobject playbackParams;
 
-	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23 && audio_interface_get_audio_speed() != 1.0) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", audio_interface_get_audio_speed());
+	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23 && as != 1.0) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", as);
 		// get current audioparams
 		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
 			(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
 
 		// change that audioparam's speed
 		(*at->env)->CallObjectMethod(at->env, playbackParams,
-				(*at->env)->GetMethodID(at->env, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), audio_interface_get_audio_speed());
+				(*at->env)->GetMethodID(at->env, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), as);
 
 		exception = (*at->env)->ExceptionOccurred(at->env);
 		if (exception) { // not failing
@@ -374,7 +399,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		}
 
 		//frame_size reported can be false for compressed formats
-		at->frame_count = at->buf_size / at->frame_size;
+		at->frame_count = at->buf_size / at->frame_size; // number of frames in the buffer
 		DBG LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
 		at->jbuffer = (jbyteArray) (*at->env)->NewGlobalRef(at->env, (*at->env)->NewByteArray(at->env, at->buf_size));
 	}
@@ -390,10 +415,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	at->latency = call_static_int_method(at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
-	at->latency += (1000 * at->frame_count) / at->rate;
+	// scaling with audio_speed is required to avoid variable delay with different audio_speed
+	at->latency += (1000 * at->frame_count) / (as * at->rate);
 	at->init = 1;
-	DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
-
+	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency_norm=%d\n", at->latency);
 	DBG LOG("track created");
 
 	return 0;
@@ -533,6 +558,8 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		JNIEnv *myEnv = attach_thread_current_vm();
 		if (*myEnv == NULL) return 0;
 
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed attached to current thread" );
+
 		// reuse already created audioTrack
 		jobject audioTrack = at->obj;
 
@@ -544,6 +571,8 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 										->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
 													   "()Landroid/media/PlaybackParams;" ) );
 
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed playbackparams fetched" );
+
 		// change that audioparam's speed
 		( *myEnv )
 			->CallObjectMethod(
@@ -551,6 +580,8 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 				( *myEnv )
 					->GetMethodID( myEnv, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
 				speed );
+
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed setspeed done" );
 
 		int failed = 0;
 		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
@@ -569,6 +600,8 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 												 "(Landroid/media/PlaybackParams;)V" ),
 							  playbackParams );
 
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
+
 		int status =
 			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
 									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
@@ -576,14 +609,23 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			failed = 1;
 		}
 
+	 	DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getstate %d",status );
+
 		if( failed ) {
-			// fallback at 1.0x if it fails (soundbar?)
-			audio_interface_set_audio_speed(1.0f);
+			// TODO MARC check fallback at 1.0x if it fails (soundbar?)
 			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed: reverting to 1x" );
+			audio_interface_set_audio_speed(1.0f);
 		} else {
-			audio_interface_set_audio_speed(speed);
 			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
+			audio_interface_set_audio_speed(speed);
 		}
+
+		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency=%d\n", at->latency);
+		// scaling with audio_speed is required to avoid variable delay with different audio_speed
+		at->latency += (1000 * at->frame_count) / (speed * at->rate);
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
+
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
 	}

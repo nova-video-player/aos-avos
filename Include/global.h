@@ -95,4 +95,8 @@
 
 //#define GFI_ASYNC
 
+// video_time is timestamp (1) or real time (0), timestamp = real time / audio_speed, ts=rs/as
+// note that video_time as real time DOES NOT work yet (but is more logical)
+#define VIDEO_TIME_IS_TS if(1)
+
 #endif	// _GLOBAL_H

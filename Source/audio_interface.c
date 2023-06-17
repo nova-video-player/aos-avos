@@ -25,6 +25,7 @@
 static int audio_interface_force = -1;
 
 static float audio_speed = 1.0f;
+static float previous_audio_speed = 1.0f;
 
 static int is_audio_speed_enabled = 0;
 
@@ -214,12 +215,18 @@ int audio_interface_get_passthrough(audio_ctx_t *ctx)
 
 void audio_interface_set_audio_speed(float speed)
 {
+	previous_audio_speed = audio_speed;
 	audio_speed = speed;
 }
 
 float audio_interface_get_audio_speed()
 {
 	return audio_speed;
+}
+
+float audio_interface_get_previous_audio_speed()
+{
+	return previous_audio_speed;
 }
 
 void audio_interface_enable_audio_speed(int enable)

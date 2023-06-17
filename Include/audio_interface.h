@@ -106,6 +106,7 @@ int audio_interface_get_passthrough(audio_ctx_t *ctx);
 
 void audio_interface_set_audio_speed(float speed);
 float audio_interface_get_audio_speed();
+float audio_interface_get_previous_audio_speed();
 void audio_interface_enable_audio_speed(int enable);
 int audio_interface_is_audio_speed_enabled();
 int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed);

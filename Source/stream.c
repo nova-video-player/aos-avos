@@ -38,7 +38,7 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGP if(Debug[DBG_PARSER])
 
-#define DBG if(1)
+#define DBG if(0)
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
@@ -1336,25 +1336,25 @@ static void _perform_stream_abort( void )
 
 void define_default_stream_buffer_size(int size)
 {
-	serprintf("MARC stream:define_default_stream_buffer_size %d\n", size);
+	DBG serprintf("stream:define_default_stream_buffer_size %d\n", size);
 	default_stream_buffer_size = size;
 }
 
 int get_default_stream_buffer_size()
 {
-	serprintf("MARC stream:get_default_stream_buffer_size %d\n", default_stream_buffer_size);
+	DBG serprintf("stream:get_default_stream_buffer_size %d\n", default_stream_buffer_size);
 	return default_stream_buffer_size;
 }
 
 void define_default_stream_max_iframe_size(int size)
 {
-	serprintf("MARC stream:define_default_stream_max_iframe_size %d\n", size);
+	DBG serprintf("stream:define_default_stream_max_iframe_size %d\n", size);
 	default_video_mindata_size = size * 1024 * 1024;
 }
 
 int get_default_stream_max_iframe_size()
 {
-	serprintf("MARC stream:get_default_stream_max_iframe_size %d\n", default_video_mindata_size);
+	DBG serprintf("stream:get_default_stream_max_iframe_size %d\n", default_video_mindata_size);
 	return default_video_mindata_size;
 }
 

@@ -263,6 +263,7 @@ static int get_ff_format( int id, UINT32 *fourcc )
 // ************************************************************
 static int _parse_format( int etype, FF_PRIV *priv ) 
 {
+	// audio_speed cannot be used there (i.e. scale/rate -> scale/(as*rate)) because it will not work with on the fly change of as
 	AVFormatContext *fmt = priv->fmt;
 
 DBGP serprintf("format   [%s]\r\n", fmt->iformat->name );
@@ -282,6 +283,7 @@ DBGP serprintf("duration ---\r\n" );
 	}
 
 	if (fmt->start_time != AV_NOPTS_VALUE) {
+		// start_time is rt
 DBGP serprintf("FFMPEG start    %lld\r\n",  fmt->start_time);
 		priv->start_time = 1000 * (INT64)fmt->start_time / AV_TIME_BASE;
 DBGP serprintf("start    %d\r\n", priv->start_time );
@@ -355,11 +357,14 @@ DBGP serprintf("\tPAR        %d/%d\r\n", codec->sample_aspect_ratio.num, codec->
 				if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 					video->rate  = st->avg_frame_rate.num;
 					video->scale = st->avg_frame_rate.den;
+DBGP serprintf("vrate=%d; vscale=%d\n", video->rate, video->scale);
 				} else {
 					//video->scale  = st->time_base.num;
 					//video->rate   = st->time_base.den;
+serprintf("untouched (!?) vrate=%d; vscale=%d\n", video->rate, video->scale);
 				}
-				
+
+				// this sets ff_p which requires a scaling too
 				priv->time_base_num = st->time_base.num/gcd;
 				priv->time_base_den = st->time_base.den/gcd;
 				video->frames = 0;
@@ -463,6 +468,7 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 				audio->stream        = i;
 				audio->scale         = st->time_base.num/gcd;
 				audio->rate          = st->time_base.den/gcd;
+DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				audio->frames        = 0;
 				audio->channels      = codec->channels;
 				audio->samplesPerSec = codec->sample_rate;
@@ -529,6 +535,7 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 				sub->stream         = i;
 				sub->scale          = st->time_base.num;
 				sub->rate           = st->time_base.den;
+DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				sub->extraData2     = codec->extradata;
 				sub->extraDataSize2 = codec->extradata_size;
 
@@ -554,7 +561,7 @@ DBGP serprintf("chapters:\r\n");
 			UINT64 start = 1000 * ch->start * ch->time_base.num / ch->time_base.den; 
 			UINT64 end   = 1000 * ch->end   * ch->time_base.num / ch->time_base.den; 
         		AVDictionaryEntry *t = av_dict_get(ch->metadata, "title", NULL, 0);
- DBGP serprintf("[%2d] id %08X  start/end %8lld/%8lld  [%s]\r\n", i, ch->id, start, end, t ? t->value : "(no title)" );
+DBGP serprintf("[%2d] id %08X  start/end %8lld/%8lld  [%s]\r\n", i, ch->id, start, end, t ? t->value : "(no title)" );
 			if( priv->s ) {
 				stream_add_chapter( priv->s, start, end, t ? t->value : "s_unknown" );
 			}
@@ -850,10 +857,11 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 
 extern int stream_drive_wake_sleep;
 
-// timestamps derivation not changed by audio_speed: this provides realtime
-// audio_speed > 1 means that parsers are outputting audio/video quicker with smaller time units yielding higher timestamps
+// audio_speed > 1 means that parsers are outputting audio/video quicker with smaller time units yielding smaller timestamps
 // this means realtime = stream->video_time * audio_speed to scale it back to real value, and conversely stream->video_time = real_time / audio_speed
+// ts = rt/as: i.e. ts<rt when as>1
 
+// GET_XXX_TS returns rt real time not ts timestamps
 #define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale / s->audio->rate )
 #define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
 #define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale  / s->subtitle->rate )
@@ -863,14 +871,13 @@ extern int stream_drive_wake_sleep;
 //	_get_video_time
 //
 // ************************************************************
-// _get_video_time returns real video_time (not scaled by * audio_speed)
+// _get_video_time returns ts = rt / as
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
-	int t = (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
 	float as = audio_interface_get_audio_speed();
-	DBG2 serprintf("stream_parser_ffmpeg:_get_video_time ts=%d, ts/as=%d, as=%f, return=%d\n",
-					   t, (int)(t / as), as, t - ff_p->start_time);
-	return (t - ff_p->start_time);
+	int t = (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
+	DBG2 serprintf("stream_parser_ffmpeg:_get_video_time rt=%d, ts=%d, return=%d\n", t - ff_p->start_time, (int)(t/as), (int)((t - ff_p->start_time)/as));
+	return (int)((t - ff_p->start_time) / as);
 }
 
 // ************************************************************
@@ -878,14 +885,13 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 //	_get_audio_time
 //
 // ************************************************************
-// _get_audio_time returns real video_time (not scaled by * audio_speed)
+// _get_audio_time returns ts = rt / as
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
-	int t = GET_AUDIO_TS( packet->pts );
 	float as = audio_interface_get_audio_speed();
-	DBG2 serprintf("stream_parser_ffmpeg:_get_audio_time ts=%d, ts/as=%d, as=%f, return=%d\n",
-					   t, (int)(t / as), as, t - ff_p->start_time);
-	return (t - ff_p->start_time);
+	int t = GET_AUDIO_TS( packet->pts );
+	DBG2 serprintf("stream_parser_ffmpeg:_get_audio_time rt=%d, ts=%d, return=%d\n", t - ff_p->start_time, (int)(t/as), (int)((t - ff_p->start_time)/as));
+	return (int)((t - ff_p->start_time) / as);
 }
 
 // ************************************************************
@@ -893,14 +899,13 @@ static int _get_audio_time( STREAM *s, AVPacket *packet )
 //	_get_subtitle_time
 //
 // ************************************************************
-// _get_subtitle_time returns real video_time (not scaled by * audio_speed)
+// _get_audio_time returns ts = rt / as
 static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_SUB_TS( packet->pts );
 	float as = audio_interface_get_audio_speed();
-	DBG2 serprintf( "stream_parser_ffmpeg:_get_subtitle_time ts=%d, ts/as=%d, as=%f, return=%d\n", t,
-					   (int)( t / as ), as, t - ff_p->start_time );
-	return ( t - ff_p->start_time );
+	DBG2 serprintf( "stream_parser_ffmpeg:_get_subtitle_time rt=%d, ts=%d, return=%d\n", t - ff_p->start_time, (int)(t/as), (int)((t - ff_p->start_time)/as));
+	return (int)((t - ff_p->start_time) / as);
 }
 
 
@@ -1040,6 +1045,7 @@ static int _seekable( STREAM *s )
 // ************************************************************
 static int _seek( STREAM *s, int time, int pos, int dir, int flags, int force_reload, STREAM_CHUNK *sc )
 {
+	// time is rt
 DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir); 
 	AVFormatContext *fmt = ff_p->fmt;
 	int start = atime();
@@ -1066,6 +1072,7 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 		}
 		DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 	} else {
+		// both time and start_time are rt
 		new_pos = (INT64)(time + ff_p->start_time) * AV_TIME_BASE / 1000;
 		DBGP serprintf("FFMPEG: new time: %lld\r\n", new_pos );
 	}
@@ -1111,15 +1118,15 @@ serprintf("FFMPEG: seek error\r\n");
 		AVPacket _packet;
 		AVPacket *packet = _peek_packet( &ff_p->vq, &_packet, 0 );
 		if( packet ) {
-			// important for seek: ts is timestamp i.e. realtime / audio_speed
-			int ts = (int)(_get_video_time( s, packet ) / audio_interface_get_audio_speed());
-			DBG2 serprintf("stream_parser_ffmpeg:_seek time %d, pos %d, _get_video_time=%d -> %d\n", time, pos, _get_video_time( s, packet ), ts);
+			// important for seek: ts is timestamp i.e. rt/as
+			int ts = _get_video_time( s, packet ); // chunks (sc) are in ts
+			DBG2 serprintf("stream_parser_ffmpeg:_seek time %d, pos %d, rt=%d -> ts=%d\n", time, pos, (int)(audio_interface_get_audio_speed() * ts), ts);
 			if( packet->flags & AV_PKT_FLAG_KEY ) {
 				if( ignore_first ) {
 					DBGP serprintf("ignore! %d\n", ts);
 					ignore_first--;
 				} else if( ts != -1 ) {
-					sc->time = ts;
+					sc->time = ts; // stream chunk is ts
 					break;
 				}
 			} else {
@@ -1138,7 +1145,7 @@ serprintf("FFMPEG: seek error\r\n");
 			if( !packet )
 				break;
 			// important for seek: ts is timestamp i.e. realtime / audio_speed
-			int ts = (int)(_get_audio_time( s, packet ) / audio_interface_get_audio_speed());
+			int ts = _get_audio_time( s, packet );
 			DBG2 serprintf("stream_parser_ffmpeg:_seek time ts audio time %d\n", ts);
 			if( ts >= sc->time ) {
 				break;
@@ -1148,7 +1155,6 @@ DBGP serprintf("audio!  %d\n", ts);
 			_dispose_packet( packet );			
 		}
 	}
-	
 	
 	return 0;
 }
@@ -1199,16 +1205,17 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 	cdata->key   	  = 1;
 	cdata->size       = packet->size;
 	// important to avoid jitter when changing audio_speed: cdata->time is realtime / audio_speed
-	cdata->time       = (int)(_get_audio_time( s, packet ) / audio_interface_get_audio_speed());
+	cdata->time       = _get_audio_time( s, packet ); // chunk data is ts
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
-	
+
+	// ff_p->last_audio_time is ts
 	if( cdata->time != STREAM_NO_PTS_VALUE ) {
 		if( ff_p->last_audio_time && abs(cdata->time - ff_p->last_audio_time) > 1000 ) {
 serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
 			cdata->audio_skip = 1;
 		}
-		ff_p->last_audio_time = cdata->time;
+		ff_p->last_audio_time = cdata->time; // ts
 	}
 	
 DBGC2  serprintf(" A   siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->aq.packets, ff_p->aq.mem_used );
@@ -1272,8 +1279,8 @@ static int _get_video_cdata( STREAM *s, CBE *cbe, STREAM_CDATA *cdata )
 	// copy relevant chunk info:
 	cdata->type 	  = 0;
 	cdata->key   	  = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
-	// important to avoid jitter when changing audio_speed: cdata->time is realtime / audio_speed
-	cdata->time       = (int)(_get_video_time( s, packet ) / audio_interface_get_audio_speed());
+	// important to avoid jitter when changing audio_speed: cdata->time is ts = rt / as
+	cdata->time       = _get_video_time( s, packet ); // chunk data is ts
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 DBGC8  serprintf("V    siz %6d  pos %8lld %d tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->key, cdata->time, ff_p->vq.packets, ff_p->vq.mem_used );
@@ -1413,13 +1420,13 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 	cdata->key   	  = 1;
 	cdata->size       = packet->size;
 	// important to avoid jitter when changing audio_speed: cdata->time is realtime / audio_speed
-	cdata->time       = (int)(_get_subtitle_time( s, packet ) / audio_interface_get_audio_speed());
+	cdata->time       = _get_subtitle_time( s, packet ); // chunk data is ts
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
 
 	// needs to be scaled by audio_speed to display sub not too long on UI (TS is timestamps not time thus needs scaling)
-	int duration = GET_SUB_TS( packet->duration ) / audio_interface_get_audio_speed();
+	int duration = (int)(GET_SUB_TS( packet->duration ) / audio_interface_get_audio_speed());
 	if( s->subtitle->format == SUB_FORMAT_SSA ) {
 		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
@@ -1475,13 +1482,15 @@ static int _set_audio_stream( STREAM *s, int audio_stream )
 // ************************************************************
 static int _calc_rate( STREAM *s )
 {
+	float as = audio_interface_get_audio_speed();
 	if( s->audio->valid ) {
 		pthread_mutex_lock( &ff_p->aq.mutex );
 		PacketNode *first = (PacketNode*)ff_p->aq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
-			int first_time   = GET_AUDIO_TS( first->packet.dts );
-			int last_time    = GET_AUDIO_TS( last->packet.dts );
+			// TODO MARC perhaps should not be scaled by as
+			int first_time   = (int)(GET_AUDIO_TS( first->packet.dts ) / as);
+			int last_time    = (int)(GET_AUDIO_TS( last->packet.dts ) / as);
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
@@ -1501,8 +1510,9 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			int first_time   = GET_VIDEO_TS( first->packet.dts );
-			int last_time    = GET_VIDEO_TS( last->packet.dts );
+			// TODO MARC perhaps should not be scaled by as
+			int first_time   = (int)(GET_VIDEO_TS( first->packet.dts ) / as);
+			int last_time    = (int)(GET_VIDEO_TS( last->packet.dts ) / as);
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 

@@ -33,6 +33,9 @@ typedef struct ISO639 {
 	const char *name;
 } ISO639;
 
+// IMPORTANT: not used anymore: it returns the primary code instead of the reference of the Android string:
+// Android will do the language mapping
+
 //	2/3 letter ISO	AVOS verbose name (possibly translatable)
 //	{ "",		"" },
 static const ISO639 map[] = {
@@ -183,14 +186,20 @@ const char *map_ISO639_code( const char *code )
 		
 	*p = '\0';
 //serprintf("prim: [%s] ", prim );	
-
+	/*
 	for ( i = 0; i < sizeof( map ) / sizeof( ISO639 ); i++ ) {
 		int map_len = strlen( map[i].iso );
 		if( map_len == p_len && !strncasecmp( prim, map[i].iso, p_len ) ) {
 //serprintf("name: %s ", map[i].name );	
 			return map[i].name;
+			//return map[i].iso;
 		} 
 	}
+	 */
+
+	for( i = 0; i < p_len; i++ )
+		prim[i] = tolower(prim[i]);
+
 	return prim;
 }
 

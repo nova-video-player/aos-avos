@@ -539,8 +539,14 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				sub->extraData2     = codec->extradata;
 				sub->extraDataSize2 = codec->extradata_size;
 
-				if( lang ) {
-					snprintf(sub->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
+				if (title) {
+					strncat( sub->name, title->value, sizeof(sub->name) - strlen(sub->name) - 1 );
+				}
+				if (lang) {
+					//snprintf(sub->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
+					if (title) strncat( sub->name, " (", sizeof(sub->name) - strlen(sub->name) - 1 );
+					strncat( sub->name, lang->value, sizeof(sub->name) - strlen(sub->name) - 1 );
+					if (title) strncat( sub->name, ")", sizeof(sub->name) - strlen(sub->name) - 1 );
 				}
 				priv->av.subs_max ++;
 				discard = 0;

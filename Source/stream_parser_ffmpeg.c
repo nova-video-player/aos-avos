@@ -476,20 +476,30 @@ DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				audio->blockAlign    = codec->block_align;
 				audio->bytesPerSec   = codec->bit_rate / 8;
 				audio->valid         = 1;
-				//stream_set_audio_name( audio, priv->av.as_max + 1 ); 
+				//stream_set_audio_name( audio, priv->av.as_max + 1 );
+
 				if (title) {
-					//strncat( audio->name, " ", sizeof(audio->name) - strlen(audio->name) - 1 );
-					strncat( audio->name, title->value, sizeof(audio->name) - strlen(audio->name) - 1 );
+					int n = snprintf(audio->name, AV_NAME_LEN, "%s", title->value);
+					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
 				}
 				if (lang) {
-					if (title) strncat( audio->name, " (", sizeof(audio->name) - strlen(audio->name) - 1 );
-					//else strncat( audio->name, " ", sizeof(audio->name) - strlen(audio->name) - 1 );
-					strncat( audio->name, lang->value, sizeof(audio->name) - strlen(audio->name) - 1 );
-					if (title) strncat( audio->name, ")", sizeof(audio->name) - strlen(audio->name) - 1 );
+					//snprintf(audio->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
+					if (title) {
+						int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, " (");
+						if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
+					}
+					int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, lang->value);
+					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
+					if (title) {
+						int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, ")");
+						if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
+					}
 				}
 				if( st->disposition && st->disposition != AV_DISPOSITION_DEFAULT ) {
-					strncat( audio->name, " ", sizeof(audio->name) - strlen(audio->name) - 1 );
-					strncat( audio->name, disposition_name(st->disposition), sizeof(audio->name) - strlen(audio->name) - 1 );
+					int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, " ");
+					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
+					n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, disposition_name(st->disposition));
+					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
 					if( st->disposition & (AV_DISPOSITION_HEARING_IMPAIRED | AV_DISPOSITION_VISUAL_IMPAIRED)) {
 						audio->priority = 2;
 					}
@@ -540,13 +550,21 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				sub->extraDataSize2 = codec->extradata_size;
 
 				if (title) {
-					strncat( sub->name, title->value, sizeof(sub->name) - strlen(sub->name) - 1 );
+					int n = snprintf(sub->name, AV_NAME_LEN, "%s", title->value);
+					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
 				}
 				if (lang) {
 					//snprintf(sub->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
-					if (title) strncat( sub->name, " (", sizeof(sub->name) - strlen(sub->name) - 1 );
-					strncat( sub->name, lang->value, sizeof(sub->name) - strlen(sub->name) - 1 );
-					if (title) strncat( sub->name, ")", sizeof(sub->name) - strlen(sub->name) - 1 );
+					if (title) {
+						int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, " (");
+						if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
+					}
+					int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, lang->value);
+					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
+					if (title) {
+						int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, ")");
+						if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
+					}
 				}
 				priv->av.subs_max ++;
 				discard = 0;

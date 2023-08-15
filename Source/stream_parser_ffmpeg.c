@@ -481,7 +481,7 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 						int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, " (");
 						if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
 					}
-					int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, lang->value);
+					int n = snprintf(audio->name, AV_NAME_LEN, "%s%s%s", audio->name, "l_", lang->value);
 					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN -1] = '\0';
 					if (title) {
 						int n = snprintf(audio->name, AV_NAME_LEN, "%s%s", audio->name, ")");
@@ -551,7 +551,7 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 						int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, " (");
 						if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
 					}
-					int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, lang->value);
+					int n = snprintf(sub->name, AV_NAME_LEN, "%s%s%s", sub->name, "l_", lang->value);
 					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
 					if (title) {
 						int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, ")");

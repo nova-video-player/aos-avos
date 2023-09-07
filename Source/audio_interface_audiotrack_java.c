@@ -398,6 +398,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
 			ERR LOG("audiotrack ctor failed");
 			failed = 1;
+			// If DTS HD failed, fallback to DTS for DTS core mode
+			if (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) {
+				return audiotrack_set_output_params(at, 48000, 2, 16, WAVE_FORMAT_DTS);
+			}
 		}
 
 		//frame_size reported can be false for compressed formats

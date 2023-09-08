@@ -336,7 +336,7 @@ Java_com_archos_medialib_LibAvos_nativeSetPassthrough(JNIEnv *env, jobject thiz,
 }
 
 void
-Java_com_archos_medialib_LibAvos_nativeSetHdmiSupoprtedAudioCodecs(JNIEnv *env, jobject thiz, jlong hdmi_audio_codecs_flag)
+Java_com_archos_medialib_LibAvos_nativeSetHdmiSupportedAudioCodecs(JNIEnv *env, jobject thiz, jlong hdmi_audio_codecs_flag)
 {
     pthread_mutex_lock(&libavos.mtx);
     libavos_set_hdmi_supported_audio_codecs(hdmi_audio_codecs_flag);

@@ -19,10 +19,15 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "jni.h"
 
 #include "libavos.h"
+
+int jniThrowException(C_JNIEnv* env, const char* className, const char* msg);
+int jniGetFDFromFileDescriptor(C_JNIEnv* env, jobject fileDescriptor);
 
 static const avos_mr_handle_t *avos = NULL;
 static const avos_metadata_handle_t *avos_metadata = NULL;

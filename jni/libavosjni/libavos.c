@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "jni.h"
 #include "libavos.h"
@@ -38,6 +40,8 @@ void libavos_set_audio_interface(int audio_interface);
 void libavos_set_codepage(int codepage);
 void libavos_set_output_sample_rate(int sample_rate);
 void libavos_set_passthrough(int force_passthrough);
+void libavos_set_downmix(int downmix);
+void libavos_set_hdmi_supported_audio_codecs(long flag);
 
 fields_t fields;
 extern JavaVM *myVm;

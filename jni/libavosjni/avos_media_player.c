@@ -21,10 +21,14 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <sys/queue.h>
+#include <stdlib.h>
 
 #include <android/native_window_jni.h>
 
 #include "jni.h"
+
+int jniThrowException(C_JNIEnv* env, const char* className, const char* msg);
+int jniGetFDFromFileDescriptor(C_JNIEnv* env, jobject fileDescriptor);
 
 #include "libavos.h"
 

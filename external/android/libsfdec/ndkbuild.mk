@@ -14,35 +14,6 @@
 
 LOCAL_PATH := $(call my-dir)
 
-ifneq ($(NDK_ANDROID_L),true)
-
-# not needed for android L and after
-
-define sfdec_build_shared
-include $(CLEAR_VARS)
-LOCAL_MODULE := libsfdec.core.$(1)$(AVOS_LIBS_SUFFIX)
-LOCAL_SRC_FILES := sfdec_omxcodec.cpp sfdec_common.cpp
-ifneq ($(1),14)
-LOCAL_SRC_FILES += sfdec_mediacodec.cpp
-endif
-LOCAL_C_INCLUDES := \
-	$(AVOS_DIR)/common/Include \
-	$(ANDROID_INCLUDES_$(1))
-LOCAL_CFLAGS := -DSFDEC_ANDROID_API=$(1)
-LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
-LOCAL_LDLIBS:= -L$(TARGET_OUT) -lstagefright -lmedia -lcutils -lutils -lbinder -lui
-include $(BUILD_SHARED_LIBRARY)
-endef
-
-# sfdec.core.*
-
-$(eval $(call sfdec_build_shared,14))
-$(eval $(call sfdec_build_shared,16))
-$(eval $(call sfdec_build_shared,18))
-$(eval $(call sfdec_build_shared,19))
-
-endif # ifneq ($(NDK_ANDROID_L),true)
-
 # sfdec.core.21 (using ndk API)
 
 include $(CLEAR_VARS)

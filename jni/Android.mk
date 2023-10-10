@@ -34,7 +34,6 @@ else
 AVOS_LIBS_SUFFIX :=
 endif
 
-NDK_ANDROID_L := true
 HAVE_ANDROID_SYSTEM_PROP := true
 
 ### libavos_android ###

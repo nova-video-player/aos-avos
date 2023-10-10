@@ -19,17 +19,7 @@ LOCAL_MODULE := libavos_android$(AVOS_LIBS_SUFFIX)
 
 LOCAL_SRC_FILES := android_buffer.c android_window.c
 
-ifneq ($(NDK_ANDROID_L),true)
-
-LOCAL_C_INCLUDES := $(LOCAL_PATH)/include $(ANDROID_INCLUDES_14)
-
-else
-
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/include $(ANDROID_INCLUDES_21)
-
-LOCAL_CFLAGS := -DAVOS_ANDROID_API=21
-
-endif
 
 LOCAL_LDLIBS:= -L$(TARGET_OUT) -landroid #-lstagefright -lmedia -lcutils -lutils -lbinder -lui -lhardware
 

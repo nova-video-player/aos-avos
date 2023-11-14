@@ -207,7 +207,6 @@ loop_exit:
 int ffmpeg_test( const char *name )
 {
 printf("[%s]\r\n\n", name );
-	av_register_all();
 	avformat_network_init();
 
 	AVFormatContext *fmt = avformat_alloc_context();

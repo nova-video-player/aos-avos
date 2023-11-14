@@ -66,7 +66,7 @@ void av_log_cb(void*, int, const char*, va_list);
 
 typedef struct PRIV {
 	AVCodecContext 	*vctx;
-	AVCodec 	*vcodec;
+	const AVCodec 	*vcodec;
 	AVFrame		*vframe;
 	
 	VIDEO_FRAME	*in_frame;
@@ -83,8 +83,6 @@ static int _open( STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx, int
 {
 DBGS serprintf( "FFMA: open");
 	PRIV *p = (PRIV*)dec->priv;
-
-   	avcodec_register_all();
 
 #ifdef CONFIG_SINK_VIDEO_ANDROID
 	video->colorspace = android_get_av_color(BUFFER_TYPE_SW);
@@ -127,7 +125,7 @@ serprintf( "FFMA: unknown format: %d\n", dec->video->format);
 	
 	// Find the decoder for the video stream
 	p->vcodec = avcodec_find_decoder( codec_id );
-	AVCodec *vcodec = p->vcodec;
+	const AVCodec *vcodec = p->vcodec;
 
 	if( !vcodec ) {
 serprintf("cannot find codec\r\n");
@@ -277,7 +275,29 @@ Dump( data, 64 );
 	}
 DBGCV2 serprintf("<"); 
 	int start = time_update_time();
-	int ret = avcodec_decode_video2( vctx, vframe, &got_picture, &avpkt);
+	int ret = 0;
+        ret = avcodec_send_packet(vctx, &avpkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+             //try again later -- ignore error silently
+             ret = 0;
+        }
+        else if (ret < 0) {
+            serprintf("FFM: avcodec_send_packet failed\r\n");
+        }
+        else
+            decoded += size;
+
+        ret = avcodec_receive_frame(vctx, vframe);
+        if (ret == AVERROR(EAGAIN) ) {
+             //try again later -- ignore error silently
+             ret = 0;
+        }
+        else if (ret < 0) {
+            serprintf("FFM: avcodec_receive_frame error\r\n");
+        }
+        else
+            got_picture = 1;
+
 	start = time_update_time() - start;
 DBGCV2 serprintf("> tim %3d  ", start); 
 	if( ret < 0 ) {
@@ -291,7 +311,6 @@ DBGCV2 serprintf("siz %6d  ret %6d  %d|%c  out %8d  ",
 DBGCV3 serprintf("[line %4d %3d %3d  px %d -> %d]", 
 	vframe->linesize[0], vframe->linesize[1], vframe->linesize[2], vctx->pix_fmt, avos_frame->linestep[0]);
 
-	decoded += size;
 	
 	if( 0 ) {
 		STREAM *s = dec->ctx;

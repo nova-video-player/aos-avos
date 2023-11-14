@@ -53,7 +53,7 @@ static int channel_map[8] = { CH_FL, CH_FR, CH_CTR, CH_SUB, CH_BL, CH_BR, CH_SL,
 //
 typedef struct PRIV {
 	AVCodecContext 	*actx;
-	AVCodec 	*acodec;
+	const AVCodec 	*acodec;
 	AVCodecParserContext *aparser;
 	AVFrame         *aframe;
 	SHORT		*asamples;
@@ -104,7 +104,7 @@ DBGS serprintf( "stream_dec_audio_delete_FFMPEG\r\n");
 	return 0;
 }
 
-static AVCodec *get_avcodec( AUDIO_PROPERTIES *audio )
+static const AVCodec *get_avcodec( AUDIO_PROPERTIES *audio )
 {
 	int codec_id;
 
@@ -197,9 +197,7 @@ int ffmpeg_audio_get_profile( AUDIO_PROPERTIES *audio, UCHAR *data, int size, in
 		*profile = 0;
 		
 DBGS serprintf( "ffmpeg_audio_get_profile: format %04X  size %d\n", audio->format, size);
-	avcodec_register_all();
-
-	AVCodec *acodec = get_avcodec( audio );
+	const AVCodec *acodec = get_avcodec( audio );
 	if( !acodec ) {
 serprintf("cannot find codec\r\n");
 		return 1;
@@ -230,9 +228,9 @@ serprintf("cannot open codec\r\n");
 	AVPacket avpkt = { .data = data, .size = size };
 	av_init_packet(&avpkt);
 
-	int got_frame;
 	av_frame_unref(aframe);
-	avcodec_decode_audio4( actx, aframe, &got_frame, &avpkt);
+	avcodec_send_packet(actx, &avpkt);
+	int bytes = avcodec_receive_frame(actx, aframe);
 	if( profile )
 		*profile = actx->profile;
 	if( channels )
@@ -262,7 +260,6 @@ DBGS serprintf( "stream_dec_audio_open_FFMPEG: ");
 	if (!p)
 		return 1;
 	memset( p, 0, sizeof( PRIV ) );
-	avcodec_register_all();
 
 	int need_parser = 0;
 
@@ -634,9 +631,9 @@ Dump( data, size );
 	av_init_packet(&avpkt);
 
 	int t1 = time_update_time();
-	int got_frame;
 	av_frame_unref(p->aframe);
-	int bytes = avcodec_decode_audio4( p->actx, p->aframe, &got_frame, &avpkt);
+	avcodec_send_packet(p->actx, &avpkt);
+	int bytes = avcodec_receive_frame(p->actx, p->aframe);
 	if( sleep_arm ) {
 		msec_sleep( sleep_arm );
 	}
@@ -792,8 +789,8 @@ DBGCA2 serprintf("drop %5d\n", parsed );
 	av_init_packet(&avpkt);
 
 	int t1 = time_update_time();
-	int got_frame = 0;
-	int bytes = avcodec_decode_audio4( p->actx, p->aframe, &got_frame, &avpkt);
+	avcodec_send_packet(p->actx, &avpkt);
+	int bytes = avcodec_receive_frame(p->actx, p->aframe);
 	if( sleep_arm ) {
 		msec_sleep( sleep_arm );
 	}
@@ -884,7 +881,6 @@ static int ffmpeg_audio_codec_get_rc( AUDIO_PROPERTIES *audio, STREAM_RC *rc)
 
 static int ffmpeg_audio_codec_is_supported( AUDIO_PROPERTIES *audio )
 {
-	avcodec_register_all();
 	return get_avcodec(audio) && device_config_is_audio_format_supported(audio->format) ? 1 : 0;
 }
 

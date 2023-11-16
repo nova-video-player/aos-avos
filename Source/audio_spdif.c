@@ -238,8 +238,6 @@ DBGS serprintf( "spdif_check, check codecid %d, force %d\n", codecid, passthroug
 		return 0;
 	}
 
-	av_register_all();
-
 	return passthrough_on;
 }
 #else

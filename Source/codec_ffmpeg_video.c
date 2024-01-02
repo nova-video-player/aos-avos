@@ -168,7 +168,7 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 #ifdef CONFIG_SINK_VIDEO_ANDROID
 	video->colorspace = android_get_av_color(BUFFER_TYPE_SW);
 #else
-	video->colorspace = _ff_colorspace ? AV_IMAGE_NV12 : AV_IMAGE_YUV_422;
+	video->colorspace = _ff_colorspace ? AV_IMAGE_NV12 : AV_IMAGE_RGBX_32;
 #endif
 	dec->ctx   = ctx;
 	dec->video = &dec->_video;

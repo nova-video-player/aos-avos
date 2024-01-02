@@ -22,6 +22,8 @@
 #include "threadcom.h"
 #include "profiling.h"
 
+#include <SDL2/SDL.h>
+
 #define MAX_TIMERS 32
 
 static Timer gui_timer_data[MAX_TIMERS];
@@ -128,6 +130,42 @@ void mainloop_enter( void )
 			tv.tv_usec = next_timer_msec * 1000;
 			service_data_events( &mainloop_events, &tv);
 		}
+
+    int ret, quit = 0;
+    SDL_Event event;
+
+    if (SDL_PollEvent(&event)){
+        switch (event.type) {
+        case SDL_KEYDOWN:
+            switch (event.key.keysym.sym) {
+            case SDLK_ESCAPE:
+            case SDLK_q:
+                quit = 1;
+                break;
+            default:
+                break;
+            }
+            break;
+        case SDL_QUIT:
+            quit = 1;
+            break;
+        case SDL_WINDOWEVENT:
+            switch(event.window.event){
+            case SDL_WINDOWEVENT_RESIZED:
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+                    //SDL_context.window_width  = event.window.data1;
+                    //SDL_context.window_height = event.window.data2;
+                //compute_texture_rect(s);
+                break;
+            default:
+                break;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
 
 		PROFILE_START(ml);
 

@@ -29,6 +29,10 @@
 #include "image.h"
 #include "athread.h"
 
+#include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
+#include <SDL2/SDL.h>
+
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FB_QVFB
 
@@ -71,46 +75,29 @@ typedef struct SINK_PRIV {
 	int 		dropped;
 	int 		total_dropped;
 
+    SDL_Window *sdl_window;
+    SDL_Renderer *sdl_renderer;
+    SDL_Texture *sdl_texture;
+    int sdl_fullscreen;
+    int sdl_window_width, sdl_window_height;
 } SINK_PRIV;
-
-void copy_yuv_image_rotated( int xpos, int ypos, const IMAGE *src, const IMAGE *dst, int fx_mask );
-
-#define VIDEO_IMAGE { \
-		.colorspace  = AV_IMAGE_YUV_422, \
-		.bpp[0]      = 2, \
-		.data[0]     = FB_get_video_data(), \
-		.linestep[0] = FB_get_video_linestep(), \
-		.width       = FB_get_video_width(), \
-		.height      = FB_get_video_height(), \
-		.size        = 2 * FB_get_video_width() * FB_get_video_height(), \
-		} 
 
 static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
 {
-	IMAGE dst = VIDEO_IMAGE;
-	
-	// local data we can tweak
-	VIDEO_FRAME src;
-	memcpy( &src, frame, sizeof( VIDEO_FRAME ) );
+    uint8_t *data[4];
+    int linesize[4];
+    const uint8_t * indata = frame->data[0];
+    av_image_fill_arrays(data, linesize,
+                             indata,
+                             AV_PIX_FMT_BGR32,
+                             p->width,
+                             p->height, 1);
 
-	src.window = p->rsz.src;
-
-	if ( p->rsz.rotation == 0 || p->rsz.rotation == 180 ) {
-		dst.window = p->rsz.dst;
-		image_resize( (IMAGE*)&src, &dst ); 	
-	} else {
-		VIDEO_FRAME *rot = frame_alloc( FB_get_video_height(), FB_get_video_width() );
-		rot->window = p->rsz.dst;
-		
-		image_resize( (IMAGE*)&src, (IMAGE*)rot ); 	
-		dst.height = rot->height;
-		dst.width  = rot->width;
-		
-		copy_yuv_image_rotated( 0, 0, (IMAGE*)rot, &dst, 0 );
-	
-		frame_free( rot );
-	}
-	FB_update( FB_UPDATE_VID );
+    SDL_UpdateTexture(p->sdl_texture, NULL,
+                      data[0], linesize[0]);
+    SDL_RenderClear(p->sdl_renderer);
+    SDL_RenderCopy(p->sdl_renderer, p->sdl_texture, NULL, NULL);
+    SDL_RenderPresent(p->sdl_renderer);
 }
 
 static int _put_time( STREAM_SINK_VIDEO *sink, int time )
@@ -347,6 +334,34 @@ static int _clear( STREAM_SINK_VIDEO *sink )
 	return 0;
 }
 
+static int sdl_open( STREAM_SINK_VIDEO *sink )
+{
+    SINK_PRIV *p = sink->priv;
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        return -1;
+        }
+
+    int flags = SDL_WINDOW_SHOWN |
+    (p->sdl_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+
+     if (SDL_CreateWindowAndRenderer(p->width, p->height,
+                                    flags, &p->sdl_window, &p->sdl_renderer) != 0) {
+            serprintf("Couldn't create window and renderer: %s\n", SDL_GetError());
+            return -1;
+    }
+
+    SDL_SetWindowTitle(p->sdl_window, "nova video player (avos)");
+    SDL_SetWindowPosition(p->sdl_window, SDL_WINDOWPOS_CENTERED , SDL_WINDOWPOS_CENTERED );
+    SDL_ShowWindow(p->sdl_window);
+
+    p->sdl_texture = SDL_CreateTexture(p->sdl_renderer,
+                                            SDL_PIXELFORMAT_ABGR8888,
+                                            SDL_TEXTUREACCESS_STREAMING,
+                                            p->width, p->height);
+    return 0;
+}
+
 static int _open( STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx, int num_frames, STREAM_RC *rc )
 {
 	if (sink->is_open)
@@ -383,9 +398,29 @@ DBGS serprintf("stream_sink_video_open: WxH %d x %d  num_frames %d  cached %d\r\
 
 	pthread_mutex_unlock( &p->venc_mutex );
 
+    sdl_open(sink);
+
 	sink->is_open = 1;
 
 	return 0;
+}
+
+static int sdl_close( STREAM_SINK_VIDEO *sink ) {
+    SINK_PRIV *p = sink->priv;
+
+    if (p->sdl_texture)
+        SDL_DestroyTexture(p->sdl_texture);
+    p->sdl_texture = NULL;
+
+    if (p->sdl_renderer)
+        SDL_DestroyRenderer(p->sdl_renderer);
+    p->sdl_renderer = NULL;
+
+    if (p->sdl_window)
+        SDL_DestroyWindow(p->sdl_window);
+    p->sdl_window = NULL;
+
+    return 0;
 }
 
 static int _close( STREAM_SINK_VIDEO *sink )
@@ -413,6 +448,8 @@ DBGS serprintf("venc_thread joined\r\n");
 
 	// free the out frames
 	free_frames( p );
+
+    sdl_close(sink);
 
 	sink->is_open = 0;
 	return 0;

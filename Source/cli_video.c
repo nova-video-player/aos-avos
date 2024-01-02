@@ -168,12 +168,6 @@ DBGV serprintf("etype: %d\n", etype);
 	AV_set_state( AV_PLAYING, type, DEV_HDD, v, &_video_cbs );
 	_setup_notify( _stopped, NULL );
 
-	// Erase background ( only needed on SIM )
-	IMAGE fb = FB_VIDEO_IMAGE;
-	// clear all buffer prevent green background surround in tv mode
-	image_full_window( &fb );
-	image_fill_window( &fb, YUV_BLACK );
-
 	FB_set_video_active(1);
 
 	if( !video_start_paused ) {

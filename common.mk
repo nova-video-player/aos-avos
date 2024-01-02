@@ -91,9 +91,6 @@ ifeq (DEBUG,$(BUILD))
 endif
 
 # shared libs that we link against
-ifeq ($(ARCH),i586)
-SHARED_LIBS += -lrt
-endif
 
 SHARED_LIBS += -ldl
 

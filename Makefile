@@ -71,18 +71,16 @@ CFLAGS += $(DEFINES)
 INCLUDES += -I$(TOOLCHAIN_PATH)/include/
 INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/
 INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/freetype2
+INCLUDES += -I/opt/homebrew/include
 
-SHARED_LIBS += -lzip -pthread -lm
+SHARED_LIBS += -lzip -pthread -lm -lSDL2
 
 LDFLAGS += -rdynamic
-LDFLAGS += -Wl,-Map,$(TGT_NAME).map
 
 LDFLAGS += -L$(TOOLCHAIN_PATH)/usr/$(LIBDIR)
-LDFLAGS += -Wl,-rpath-link=$(TOOLCHAIN_PATH)/usr/$(LIBDIR)
 
 LDFLAGS += -L$(TOOLCHAIN_PATH)/$(LIBDIR)
-LDFLAGS += -Wl,-rpath-link=$(TOOLCHAIN_PATH)/$(LIBDIR)
-
+LDFLAGS += -L/opt/homebrew/lib
 LDFLAGS += $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 
 # path to sources
@@ -104,7 +102,7 @@ quiet_CMD_MKDEP = "DEP $<"
       CMD_ASM_O_S = $(ASM) $(ASMFLAGS) -o $@ -c $<
 quiet_CMD_ASM_O_S =  "AS  $<"
 
-      CMD_LDSO = $(LINK) -shared -o $@ $^
+      CMD_LDSO = $(LINK) -shared $(LDFLAGS) -o $@ $^
 quiet_CMD_LDSO = "LD  $@"
 
       CMD_AR = $(AR) rcs $@ $^
@@ -147,7 +145,7 @@ ifeq (1,$(ASAN))
 ASAN_FLAGS = -g -fsanitize=address
 endif
 
-CMD_LIB = $(LINK) $(ASAN_FLAGS) -shared -o $(TGT_PATH)/$(LIB_NAME) $(LIB_OBJS)
+CMD_LIB = $(LINK) $(ASAN_FLAGS) $(LDFLAGS) -shared -o $(TGT_PATH)/$(LIB_NAME) $(LIB_OBJS)
 quiet_CMD_LIB = "LIB $(LIB_NAME)"
 
 ifeq (YES,$(LIBAVOS))

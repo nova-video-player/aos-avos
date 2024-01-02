@@ -1,2 +1,2 @@
 #!/bin/sh
-aoss ./build/avos "$@"
+./build/avos "$@"

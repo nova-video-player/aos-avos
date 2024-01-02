@@ -44,6 +44,8 @@ int DUMMY_connect(FRAME_BUFFER *fb)
 	return 0;
 }
 
+PLATFORM_REGISTER_FB( DUMMY_connect );
+
 static void DUMMY_update()
 {
 }

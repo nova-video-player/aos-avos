@@ -13,7 +13,7 @@
 # limitations under the License.
 
 ifeq ($(FRAMEBUFFER),QVFB)
-CSRC    += fb_qvfb.c
+CSRC    += fb_dummy.c
 DEFINES += -DCONFIG_FB_QVFB
 else ifeq ($(FRAMEBUFFER),ANDROID_NOFB)
 DEFINES += -DCONFIG_FB_OMAP_VIDEO -DCONFIG_V4L

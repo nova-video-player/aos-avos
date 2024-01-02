@@ -28,6 +28,10 @@
 struct audio_ctx {
 };
 
+static void null_exit(void)
+{
+}
+
 static int null_close(audio_ctx_t **pp)
 {
 	audio_ctx_t *p = *pp;
@@ -92,6 +96,7 @@ static int null_preload(audio_ctx_t *p)
 const audio_interface_impl_t audio_interface_impl_null = {
 	.name = "null",
 	.init = null_init,
+	.exit = null_exit,
 	.open = null_open,
 	.close = null_close,
 	.start = null_start,

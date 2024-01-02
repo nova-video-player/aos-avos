@@ -113,6 +113,9 @@ int audio_interface_init(void)
 		impl = &audio_interface_impl_oss;
 		serprintf("audio_interface_init: %s\n", impl->name);
 	}
+#else
+ impl = &audio_interface_impl_null;
+ serprintf("audio_interface_init: %s\n", impl->name);
 #endif
 #endif
 	

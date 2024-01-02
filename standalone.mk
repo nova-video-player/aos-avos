@@ -21,6 +21,5 @@ ifeq (,$(CONFIGMAKEFILE))
 	ARCH           = i586
 	PRODUCT        = G9L
 	FLAVOR         = LEGACY
-	LIBAVOS        = YES
-	LIB_RPATH      = -Wl,-rpath,$(BUILD_DIR) -Wl,-rpath=$(TOOLCHAIN_PATH)/usr/local/lib/
+	LIBAVOS        = NO
 endif

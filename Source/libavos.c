@@ -150,7 +150,9 @@ void libavos_set_passthrough(int force_passthrough)
 
 void libavos_set_hdmi_supported_audio_codecs(long flag)
 {
+#ifdef CONFIG_ANDROID
 	set_hdmi_supported_audio_codecs(flag);
+#endif
 }
 
 void libavos_set_audio_speed(float speed)

@@ -1058,7 +1058,7 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 #endif
 
 #ifdef CONFIG_LIBYUV
-	int (*convert_libyuv)(const uint8*, int, const uint8*, int, const uint8*, int, uint8*, int, int, int) = NULL;
+	int (*convert_libyuv)(const uint8_t*, int, const uint8_t*, int, const uint8_t*, int, uint8_t*, int, int, int) = NULL;
 	switch( frame->colorspace ) {
         case AV_IMAGE_YUV_422:
                 switch( pixfmt ) {

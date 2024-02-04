@@ -338,7 +338,8 @@ static const SUB_FORMAT sub_formats[] = {
 	SUB_FORMAT_SSA,   	"SSA",		
 	SUB_FORMAT_ASS,   	"ASS",		
 	SUB_FORMAT_EXT,   	"EXTERNAL",		
-	SUB_FORMAT_MOV_TEXT,"MOV_TEXT",		
+	SUB_FORMAT_MOV_TEXT,"MOV_TEXT",
+	SUB_FORMAT_PGS, "PGS",
 };
 
 // *****************************************************************************

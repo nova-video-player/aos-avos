@@ -444,7 +444,12 @@ serprintf("SsS: sub_stream already set\n");
 	thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
 
 	stream_un_pause( s, was_paused );
-	
+
+	// FIXME: there should be a better way without seek jumping
+	int current_time = stream_get_current_time( s, NULL );
+	// reseek to current time to get internal subtitle decoder to reinitialize
+	stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
+
 	return 0;
 }
 

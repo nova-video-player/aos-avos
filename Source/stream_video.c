@@ -2550,12 +2550,12 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 			}else {
 				s->video_sink->put_time(s->video_sink, frame->time ); 
 			}
-serprintf("  <NSR %d>", frame->time );
+DBGV2 serprintf("  <NSR %d>", frame->time );
 		} else {
 			s->vid_ref_time = frame->time;
 			int reftime = s->video_sink->get_time( s->video_sink );
 			s->sink_ref_time = reftime - s->vid_ref_time;
-serprintf("  <NSR %d/%d>", frame->time, reftime );
+DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 		}
 	}
 }

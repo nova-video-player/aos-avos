@@ -31,7 +31,6 @@
 
 #include <time.h>
 #include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
 
 #ifdef CONFIG_STREAM
 
@@ -46,7 +45,7 @@ int acodecs_is_supported( int format, int is_video, int is_sw_allowed );
 typedef struct PRIV {
 	sfdec_t *dec_audio;
 	AVCodecParserContext *aparser;
-	struct AVCodecContext avctx;
+	AVCodecContext avctx;
 } PRIV;
 
 static int wave2libav_codecid( int codecid )
@@ -71,6 +70,8 @@ static int wave2libav_codecid( int codecid )
 
 static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 {
+	av_register_all();
+
 	if( !( audio->priv = amalloc( sizeof( PRIV ) ) ) ) {
 		return 1;
 	}

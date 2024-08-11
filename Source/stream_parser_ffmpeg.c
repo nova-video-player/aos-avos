@@ -381,11 +381,8 @@ serprintf("untouched (!?) vrate=%d; vscale=%d\n", video->rate, video->scale);
 				
 				if( codecpar->extradata_size ) {
 					if( codecpar->extradata_size <= sizeof( video->extraData ) ) {
-						// libavformat used to skip the first 4 bytes in av1 private data
-						// hw codecs and our implementation using libavcodec still want this
-						int offset = ( video->format == VIDEO_FORMAT_AV1 ) ? 4 : 0 ;
-						video->extraDataSize = codecpar->extradata_size - offset ;
-						memcpy( video->extraData, codecpar->extradata + offset , video->extraDataSize );
+						video->extraDataSize = codecpar->extradata_size;
+						memcpy( video->extraData, codecpar->extradata, video->extraDataSize  );	
 						if( video->format == VIDEO_FORMAT_H264 && video->extraData[0] == 0x00 ) {
 serprintf("FF: parse H264 SPS\n");
 							// for non-AVCC H264, parse the SPS/PPS here

@@ -447,9 +447,10 @@ serprintf("SsS: sub_stream already set\n");
 
 	// FIXME: there should be a better way without seek jumping
 	int current_time = stream_get_current_time( s, NULL );
-	// reseek to current time to get internal subtitle decoder to reinitialize
-	stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
-
+	if( current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
+		// reseek to current time to get internal subtitle decoder to reinitialize
+		stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
+	}
 	return 0;
 }
 

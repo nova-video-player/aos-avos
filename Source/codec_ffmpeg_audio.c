@@ -231,14 +231,24 @@ serprintf("cannot open codec\r\n");
 	av_frame_unref(aframe);
 	int ret = avcodec_send_packet(actx, &avpkt);
     if (ret < 0) {
-serprintf("%s: Failed sending an audio frame to audio decoder", __FUNCTION__);
+serprintf("%s: Failed sending packet for decoding: %s\n", __FUNCTION__, av_err2str(ret));
         goto ErrorExit;
     }
 	ret = avcodec_receive_frame(actx, aframe);
     if (ret < 0) {
-serprintf("%s: Failed receiving an audio frame out of audio decoder", __FUNCTION__);
+serprintf("%s: Failed receiving an audio frame out of audio decoder %s\n", __FUNCTION__, av_err2str(ret));
         goto ErrorExit;
     }
+
+	while ( ret >= 0) {
+		// drain the decoder, should not be necessary
+		int ret_rx_post = avcodec_receive_frame(actx, aframe);
+		if (ret_rx_post == 0) {
+serprintf("%s: Got an unexpected additional audio frame %s\n", __FUNCTION__, av_err2str(ret_rx_post)));
+		} else {
+			break;
+		}
+	}
 	if( profile )
 		*profile = actx->profile;
 	if( channels )
@@ -642,9 +652,13 @@ Dump( data, size );
 	av_frame_unref(p->aframe);
 	int ret_send = avcodec_send_packet(p->actx, &avpkt);
     if (ret_send < 0) {
-serprintf("%s: Failed sending packet for decoding", __FUNCTION__);
+serprintf("%s: Failed sending packet for decoding: %s\n", __FUNCTION__, av_err2str(ret_send));
     }
 	int ret_rx = avcodec_receive_frame(p->actx, p->aframe);
+	if (ret_rx < 0) {
+serprintf("%s: Failed receiving an audio frame from audio decoder: %s\n", __FUNCTION__, av_err2str(ret_rx));
+	}
+
 	if( sleep_arm ) {
 		msec_sleep( sleep_arm );
 	}
@@ -656,7 +670,6 @@ serprintf("%s: Failed sending packet for decoding", __FUNCTION__);
 		decoded += size;
 	}
 
-		
 	if( size && ret_send < 0 ) {
 serprintf("FFMPEG_AUDIO_DEC ERROR!\r\n");
 msec_sleep( 10 );
@@ -680,10 +693,15 @@ DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%llX  bits %d/%d  fmt
 	avos_frame->format        = WAVE_FORMAT_PCM;
 	avos_frame->error         = 0;
 
-	int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
-    if (ret_rx_post == 0) {
-serprintf("%s: Got an unexpected additional audio frame", __FUNCTION__);
-    }
+	while ( ret_send >= 0) {
+		// drain the decoder, should not be necessary
+		int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
+		if (ret_rx_post == 0) {
+serprintf("%s: Got an unexpected additional audio frame %s\n", __FUNCTION__, av_err2str(ret_rx_post)));
+		} else {
+			break;
+		}
+	}
 
 	if( p->ignore > 0 ) {
 DBGCA2 serprintf("FFMPEG IGNORE!\r\n");
@@ -808,7 +826,7 @@ DBGCA2 serprintf("drop %5d\n", parsed );
 	int t1 = time_update_time();
 	int ret_send = avcodec_send_packet(p->actx, &avpkt);
     if (ret_send < 0) {
-serprintf("%s: Failed sending packet for decoding", __FUNCTION__);
+serprintf("%s: Failed sending packet for decoding: %s\n", __FUNCTION__, av_err2str(ret_send));
     }
 	int ret_rx = avcodec_receive_frame(p->actx, p->aframe);
 	if( sleep_arm ) {
@@ -818,6 +836,7 @@ serprintf("%s: Failed sending packet for decoding", __FUNCTION__);
 	
     int bytes = avpkt.size;
 	if ( ret_rx < 0 ) {
+serprintf("%s: Failed receiving an audio frame from audio decoder: %s\n", __FUNCTION__, av_err2str(ret_rx));
         bytes = 0;
 //		audio_bytes = 0;
 	}
@@ -846,10 +865,15 @@ DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%llX  bits %d/%d  fmt
 	avos_frame->format        = WAVE_FORMAT_PCM;
 	avos_frame->error         = 0;
 
-	int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
-    if (ret_rx_post == 0) {
-serprintf("%s: Got an unexpected additional audio frame", __FUNCTION__);
-    }
+	while ( ret_send >= 0) {
+		// drain the decoder, should not be necessary
+		int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
+		if (ret_rx_post == 0) {
+serprintf("%s: Got an unexpected additional audio frame %s\n", __FUNCTION__, av_err2str(ret_rx_post)));
+		} else {
+			break;
+		}
+	}
 
 	p->play = 1;
 	

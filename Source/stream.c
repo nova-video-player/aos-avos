@@ -532,7 +532,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		int stream_current_time = stream_get_current_time( s, NULL ); // returns real time
 		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 		// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
-		if( stream_current_time > 0 ) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
+		if( stream_current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
 		else serprintf( "stream:stream_set_av_speed DO NOT SEEK stream_current_time=%d<=0\n", stream_current_time );
 		DBG serprintf( "stream:stream_set_av_speed current_time_before=%d current_time_now=%d\n", stream_current_time, stream_get_current_time( s, NULL ) );
 	} else {

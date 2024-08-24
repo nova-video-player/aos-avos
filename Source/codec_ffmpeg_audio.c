@@ -871,6 +871,26 @@ static int ffmpeg_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, int 
 static int ffmpeg_audio_codec_flush( AUDIO_PROPERTIES *audio  )
 {
 	PRIV *p = (PRIV*)audio->priv;
+	int ret;
+
+	// enter draining mode by sending a NULL packet
+	ret = avcodec_send_packet(p->actx, NULL);
+	if (ret < 0) {
+serprintf("Error sending NULL packet for flushing: %s\n", av_err2str(ret));
+	}
+
+	// receive all remaining frames
+	while (ret >= 0) {
+		ret = avcodec_receive_frame(p->actx, p->aframe);
+		if (ret == AVERROR_EOF) {
+			// end of stream, stop draining
+			break;
+		} else if (ret < 0) {
+serprintf("Error receiving frame during flushing: %s\n", av_err2str(ret));
+			break;
+		}
+	}
+
 DBGCA serprintf("ffad flush\r\n" );
 	
 	avcodec_flush_buffers( p->actx );

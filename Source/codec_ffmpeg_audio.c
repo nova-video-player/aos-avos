@@ -873,9 +873,7 @@ static int ffmpeg_audio_codec_flush( AUDIO_PROPERTIES *audio  )
 	PRIV *p = (PRIV*)audio->priv;
 DBGCA serprintf("ffad flush\r\n" );
 	
-	if( audio->format != WAVE_FORMAT_AAC ) {
-		avcodec_flush_buffers( p->actx );
-	}
+	avcodec_flush_buffers( p->actx );
 	p->inbuf_residual = 0;
 
 	if( p->aparser ) {

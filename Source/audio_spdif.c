@@ -175,7 +175,7 @@ static int spdif_free( void )
 	return 0;
 }
 
-static int buf_write( void *opaque, unsigned char *buf, int size )
+static int buf_write( void *opaque, const uint8_t *buf, int size )
 {
 	buf_t *b = ( buf_t* ) opaque;
 	if ( b->pos + size > sizeof( b->buf ) ) {

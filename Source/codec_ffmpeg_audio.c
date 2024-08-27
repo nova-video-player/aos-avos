@@ -24,6 +24,8 @@
 #include "get.h"
 #include "downmix.h"
 #include "device_config.h"
+#include <libavutil/channel_layout.h>
+
 
 #ifdef CONFIG_FFMPEG_AUDIO
 #ifdef CONFIG_STREAM
@@ -208,7 +210,7 @@ serprintf("cannot find codec\r\n");
 	actx->sample_rate = audio->samplesPerSec;
 	actx->block_align = audio->blockAlign;
 	actx->bit_rate    = audio->bytesPerSec * 8;
-	actx->channels    = audio->channels;
+	actx->ch_layout.nb_channels    = audio->channels;
 
 	if( audio->extraDataSize2 ) {
 		actx->extradata      = audio->extraData2;
@@ -243,7 +245,7 @@ serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUN
 	if( profile )
 		*profile = actx->profile;
 	if( channels )
-		*channels = actx->channels;
+		*channels = actx->ch_layout.nb_channels;
 
 	while ( ret >= 0) {
 		// drain the decoder, should not be necessary
@@ -327,12 +329,16 @@ serprintf("cannot find codec\r\n");
 	p->actx->sample_rate      = audio->samplesPerSec;
 	p->actx->block_align      = audio->blockAlign;
 	p->actx->bit_rate         = audio->bytesPerSec * 8;
-	p->actx->channels         = audio->channels;
-	p->actx->request_channel_layout = av_get_default_channel_layout(audio->channels);
-	if (p->request_channels == 2)
-		p->actx->request_channel_layout = av_get_default_channel_layout(audio->channels ? MIN(2, audio->channels) : 2);
+	p->actx->ch_layout.nb_channels         = audio->channels;
+	av_channel_layout_default(&p->actx->ch_layout, audio->channels);
+	if (p->request_channels == 2) {
+		int channels = audio->channels ? MIN(2, audio->channels) : 2;
+		av_channel_layout_default(&p->actx->ch_layout, channels);
+	}
 
-DBGCA2	serprintf("requested channel layout id %d for %d channel(s)\r\n", p->actx->request_channel_layout, p->actx->channels);
+	char layout_desc[256];
+	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
+DBGCA2  serprintf("requested channel layout: %s for %d channel(s)\r\n", layout_desc, p->actx->ch_layout.nb_channels);
 
 	if( audio->extraDataSize2 ) {
 		p->actx->extradata      = audio->extraData2;
@@ -363,7 +369,7 @@ DBGS serprintf("name %s  type %d  id %d \r\n", p->acodec->name, p->acodec->type,
 		case AV_SAMPLE_FMT_DBL:
 		case AV_SAMPLE_FMT_FLTP:
 		case AV_SAMPLE_FMT_DBLP:
-			p->request_channels = av_get_channel_layout_nb_channels(p->actx->request_channel_layout);
+			p->request_channels = p->actx->ch_layout.nb_channels;
 			break;
 		default:
 			break;
@@ -379,7 +385,7 @@ serprintf("downmix to stereo S16\r\n");
 		audio->channels      = 2;
 		audio->bitsPerSample = 16;
 	} else {
-		audio->channels = p->actx->channels;
+		audio->channels = p->actx->ch_layout.nb_channels;
 		audio->bitsPerSample = 16; //av_get_bytes_per_sample(p->actx->sample_fmt) * 4;
 	}
 	if (audio->sourceSamples != audio->samplesPerSec)
@@ -458,7 +464,7 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 	switch( p->actx->sample_fmt ) {	
 	case AV_SAMPLE_FMT_FLT:
 	case AV_SAMPLE_FMT_DBL:
-		downmix_float( p->bsamples, data, samples, p->actx->channels, bps, channel_map ); 
+		downmix_float( p->bsamples, data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
 		*pcm_data = (UCHAR*)p->bsamples;
 		break;
 		
@@ -467,15 +473,15 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 #ifdef IS_FFMPEG
 	case AV_SAMPLE_FMT_S64:
 #endif
-		downmix( p->bsamples, data, samples, p->actx->channels, bps, channel_map ); 
+		downmix( p->bsamples, data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
 		*pcm_data = (UCHAR*)p->bsamples;
 		break;
 		
 	case AV_SAMPLE_FMT_S16:
-		if( p->actx->channels == 2 ) {
+		if( p->actx->ch_layout.nb_channels == 2 ) {
 			memcpy( p->bsamples, data, samples * 2 * 2);
 		} else {
-			downmix( p->bsamples, data, samples, p->actx->channels, bps, channel_map ); 
+			downmix( p->bsamples, data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
 		}
 		*pcm_data = (UCHAR*)p->bsamples;
 		break;
@@ -486,14 +492,14 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 #ifdef IS_FFMPEG
 	case AV_SAMPLE_FMT_S64P:
 #endif
-		downmix_planar( p->bsamples, frame->data, samples, p->actx->channels, bps, channel_map ); 
+		downmix_planar( p->bsamples, frame->data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
 		*pcm_data = (UCHAR*)p->bsamples;
 		break;
 	
 	
 	case AV_SAMPLE_FMT_FLTP:
 	case AV_SAMPLE_FMT_DBLP:
-		downmix_float_planar( p->bsamples, frame->data, samples, p->actx->channels, bps, channel_map ); 
+		downmix_float_planar( p->bsamples, frame->data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
 		*pcm_data = (UCHAR*)p->bsamples;
 		break;
 
@@ -552,19 +558,19 @@ static int convert( PRIV *p, AVFrame *frame, UCHAR **out_data, int *out_channels
 		int shift = (bits == 32) ? 16 : (bits == 24 ) ? 8 : 0;
 		uint8_t *dest = (uint8_t*) p->bsamples;
 
-		if( p->actx->channels < p->request_channels ) {
-serprintf("upmix %d -> %d\n", p->actx->channels, p->request_channels);
+		if( p->actx->ch_layout.nb_channels < p->request_channels ) {
+serprintf("upmix %d -> %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
 			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
 				int i, j;
-serprintf("planar %d / %d\n", p->actx->channels, p->request_channels);
+serprintf("planar %d / %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
 				for (i = 0; i < frame->nb_samples; ++i) {
-					for (j = 0; j < p->actx->channels; ++j) {
+					for (j = 0; j < p->actx->ch_layout.nb_channels; ++j) {
 						uint8_t *src = frame->data[j] + i * bytes_per_samples;
 						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
 						memcpy(dest, &res, 2);
 						dest += 2;
 					}
-					for (j = 0; j < (p->request_channels - p->actx->channels); ++j) {
+					for (j = 0; j < (p->request_channels - p->actx->ch_layout.nb_channels); ++j) {
 						memset(dest, 0, 2);
 						dest += 2;
 					}
@@ -573,13 +579,13 @@ serprintf("planar %d / %d\n", p->actx->channels, p->request_channels);
 				int i, j;
 				uint8_t *src = frame->data[0];
 				for (i = 0; i < frame->nb_samples; i++) {
-					for( j = 0; j < p->actx->channels; j++) {
+					for( j = 0; j < p->actx->ch_layout.nb_channels; j++) {
 						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
 						memcpy(dest, &res, 2);
 						dest += 2;
 						src += bytes_per_samples;
 					}
-					for (j = 0; j < (p->request_channels - p->actx->channels); j++) {
+					for (j = 0; j < (p->request_channels - p->actx->ch_layout.nb_channels); j++) {
 						memset(dest, 0, 2);
 						dest += 2;
 					}
@@ -589,9 +595,9 @@ serprintf("planar %d / %d\n", p->actx->channels, p->request_channels);
 		} else {
 			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
 				int i, j;
-//serprintf("planar %d / %d\n", p->actx->channels, p->request_channels);
+//serprintf("planar %d / %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
 				for (i = 0; i < frame->nb_samples; ++i) {
-					for (j = 0; j < p->actx->channels; ++j) {
+					for (j = 0; j < p->actx->ch_layout.nb_channels; ++j) {
 						uint8_t *src = frame->data[j] + i * bytes_per_samples;
 						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
 						memcpy(dest, &res, 2);
@@ -600,13 +606,13 @@ serprintf("planar %d / %d\n", p->actx->channels, p->request_channels);
 				}
 			} else {
 				int i;
-				for (i = 0; i < frame->nb_samples *  p->actx->channels; ++i) {
+				for (i = 0; i < frame->nb_samples *  p->actx->ch_layout.nb_channels; ++i) {
 					int16_t res = convert_to_S16(frame->data[0] + i * bytes_per_samples, bits, shift, p->actx->sample_fmt);
 					memcpy(dest, &res, 2);
 					dest += 2;
 				}
 			}
-			*out_channels = p->actx->channels;
+			*out_channels = p->actx->ch_layout.nb_channels;
 		}
 
 		out_size  = frame->nb_samples * 2 * *out_channels;
@@ -687,10 +693,12 @@ msec_sleep( 10 );
 	int audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
 	int t3 = time_update_time();
 
-DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%llX  bits %d/%d  fmt %X  tim %3d/%3d\r\n", 
-		decoded, p->aframe->nb_samples, audio_bytes, p->actx->sample_rate, p->actx->channels, p->actx->channel_layout, 
-		p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
-	
+	char layout_desc[256];
+	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
+DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %X  tim %3d/%3d\r\n",
+					  decoded, p->aframe->nb_samples, audio_bytes, p->actx->sample_rate, p->actx->ch_layout.nb_channels, layout_desc,
+					  p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
+
 	avos_frame->data          = pcm_data;
 	avos_frame->size          = audio_bytes;
 	avos_frame->bits          = bits;
@@ -703,7 +711,7 @@ DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%llX  bits %d/%d  fmt
 		// drain the decoder, should not be necessary
 		int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
 		if (ret_rx_post == 0) {
-serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post)));
+serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
 		} else {
 			break;
 		}
@@ -859,10 +867,12 @@ msec_sleep( 10 );
 	int audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
 	int t3 = time_update_time();
 
-DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%llX  bits %d/%d  fmt %X  tim %3d/%3d\r\n", 
-		bytes, p->aframe->nb_samples, audio_bytes, p->actx->sample_rate, p->actx->channels, p->actx->channel_layout, 
-		p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
-	
+	char layout_desc[256];
+	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
+DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %X  tim %3d/%3d\r\n",
+				  bytes, p->aframe->nb_samples, audio_bytes, p->actx->sample_rate, p->actx->ch_layout.nb_channels, layout_desc,
+				  p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
+
 	avos_frame->data          = pcm_data;
 	avos_frame->size          = audio_bytes;
 	avos_frame->bits          = bits;
@@ -875,7 +885,7 @@ DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%llX  bits %d/%d  fmt
 		// drain the decoder, should not be necessary
 		int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
 		if (ret_rx_post == 0) {
-serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post)));
+serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
 		} else {
 			break;
 		}

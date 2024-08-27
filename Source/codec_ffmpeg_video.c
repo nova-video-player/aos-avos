@@ -547,12 +547,12 @@ Dump( data, 64 );
 
 	AVPacket avpkt = { .data = data, .size = size };
 	av_init_packet(&avpkt);
-	if( p->reorder_pts ) {
-		vctx->reordered_opaque = avos_frame->time;
-        avpkt.pts = avos_frame->time;
+	if (p->reorder_pts) {
+		vframe->opaque = (void*)(intptr_t)avos_frame->time;
+		avpkt.pts = avos_frame->time;
 	} else {
-		vctx->reordered_opaque = avos_frame->user_ID;
-        avpkt.pts = avos_frame->user_ID;
+		vframe->opaque = (void*)(intptr_t)avos_frame->user_ID;
+		avpkt.pts = avos_frame->user_ID;
 	}
 DBGCV2 serprintf("<"); 
 	int start = time_update_time();
@@ -582,7 +582,7 @@ DBGCV2 serprintf("<");
 
 	} else {
 		got_picture = 1;
-		vframe->reordered_opaque = vctx->reordered_opaque;
+		vframe->opaque = (void*)(intptr_t)(p->reorder_pts ? avos_frame->time : avos_frame->user_ID);
 		vctx->width  = dec->video->width;
 		vctx->height = dec->video->height;
 		vframe->interlaced_frame = 0;
@@ -595,8 +595,8 @@ DBGCV2 Dump( data, MIN( size, 32 ) );
 		avos_frame->error = 1;
 		return -1;
 	}
-DBGCV2 serprintf("siz %6d  ret %6d  %d|%c  out %8d  ", 
-	size, ret, !!got_picture, frame_type( vframe->pict_type - 1), vframe->reordered_opaque );
+DBGCV2 serprintf("siz %6d  ret %6d  %d|%c  out %8" PRId64 "  ",
+				  size, ret, !!got_picture, frame_type(vframe->pict_type - 1), (int64_t)(intptr_t)vframe->opaque);
 DBGCV3 serprintf("[line %4d %3d %3d  px %d -> %d]", 
 	vframe->linesize[0], vframe->linesize[1], vframe->linesize[2], vctx->pix_fmt, avos_frame->linestep[0]);
 
@@ -652,21 +652,22 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->interlaced      = vframe->interlaced_frame;
 		avos_frame->top_field_first = vframe->top_field_first;
 		avos_frame->pts             = vframe->pts;
-		avos_frame->cpn             = vframe->coded_picture_number;
-		avos_frame->dpn             = vframe->display_picture_number;
+		// does not exist anymore in ffmpeg 7.0+
+		//avos_frame->cpn             = vframe->coded_picture_number;
+		//avos_frame->dpn             = vframe->display_picture_number;
 
 		avos_frame->width           = vctx->width;
 		avos_frame->height          = vctx->height;
-		if( p->reorder_pts ) {
-            if (vframe->reordered_opaque != 0)
-			    avos_frame->time    = vframe->reordered_opaque;
-            else 
-                avos_frame->time = vframe->pts;
+		if (p->reorder_pts) {
+			if (vframe->opaque != NULL)
+				avos_frame->time = (int64_t)(intptr_t)vframe->opaque;
+			else
+				avos_frame->time = vframe->pts;
 		} else {
-            if (vframe->reordered_opaque != 0)
-                avos_frame->user_ID = vframe->reordered_opaque;
-            else
-                avos_frame->user_ID = vframe->pts;
+			if (vframe->opaque != NULL)
+				avos_frame->user_ID = (int64_t)(intptr_t)vframe->opaque;
+			else
+				avos_frame->user_ID = vframe->pts;
 		}
 	} else {
 			avos_frame->time    = -1;

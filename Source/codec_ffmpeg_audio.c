@@ -232,31 +232,37 @@ serprintf("cannot open codec\r\n");
 	int ret = avcodec_send_packet(actx, &avpkt);
     if (ret < 0) {
 serprintf("%s: Failed sending packet for decoding: %s\n", __FUNCTION__, av_err2str(ret));
-        goto ErrorExit;
+        goto ErrorExit2;
     }
 	ret = avcodec_receive_frame(actx, aframe);
     if (ret < 0) {
 serprintf("%s: Failed receiving an audio frame out of audio decoder %s\n", __FUNCTION__, av_err2str(ret));
-        goto ErrorExit;
+        goto ErrorExit2;
     }
+
+	if( profile )
+		*profile = actx->profile;
+	if( channels )
+		*channels = actx->channels;
 
 	while ( ret >= 0) {
 		// drain the decoder, should not be necessary
 		int ret_rx_post = avcodec_receive_frame(actx, aframe);
 		if (ret_rx_post == 0) {
-serprintf("%s: Got an unexpected additional audio frame %s\n", __FUNCTION__, av_err2str(ret_rx_post)));
+serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
 		} else {
 			break;
 		}
 	}
-	if( profile )
-		*profile = actx->profile;
-	if( channels )
-		*channels = actx->channels;
 	
 	av_free(aframe);
 
 	return 0;
+
+ErrorExit2:
+	if ( aframe ) {
+		av_free(aframe);
+	}
 
 ErrorExit:
 	// Close the codec

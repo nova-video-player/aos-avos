@@ -343,9 +343,6 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->interlaced      = vframe->interlaced_frame;
 		avos_frame->top_field_first = vframe->top_field_first;
 		avos_frame->pts             = vframe->pts;
-		// does not exist anymore in ffmpeg 7.0+
-		//avos_frame->cpn             = vframe->coded_picture_number;
-		//avos_frame->dpn             = vframe->display_picture_number;
 
 		avos_frame->width           = vctx->width;
 		avos_frame->height          = vctx->height;

@@ -329,7 +329,6 @@ serprintf("cannot find codec\r\n");
 	p->actx->sample_rate      = audio->samplesPerSec;
 	p->actx->block_align      = audio->blockAlign;
 	p->actx->bit_rate         = audio->bytesPerSec * 8;
-	p->actx->ch_layout.nb_channels         = audio->channels;
 	av_channel_layout_default(&p->actx->ch_layout, audio->channels);
 	if (p->request_channels == 2) {
 		int channels = audio->channels ? MIN(2, audio->channels) : 2;

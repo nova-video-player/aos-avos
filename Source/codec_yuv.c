@@ -99,8 +99,6 @@ swap16_buf( p, 2 * dec->video->width );
 	frame->interlaced      = 0;
 	frame->top_field_first = 0;
 	frame->pts             = 0;
-	frame->cpn             = 0;
-	frame->dpn             = 0;
 	frame->valid	       = 1;
 
 	*pframe = frame;

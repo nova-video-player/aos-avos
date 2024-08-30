@@ -119,7 +119,6 @@ ifeq ($(VIDEO),ON)
 		DEFINES += -DCONFIG_FFMPEG_PARSER
 		CSRC_STREAM_CODEC += codec_ffmpeg_video.c 
 		CSRC_STREAM_CODEC += codec_lavc_async.c 
-		CSRC_STREAM_CODEC += codec_ffmpeg_HD.c
 		CSRC_STREAM_CODEC += codec_ffmpeg_audio.c 
 		
 		ifneq (,$(LIBAV_CONFIG_DIR))

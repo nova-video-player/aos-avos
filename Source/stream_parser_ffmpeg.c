@@ -194,8 +194,8 @@ static struct id_fmt_str {
 	{ AV_CODEC_ID_XSUB,	SUB_FORMAT_XSUB,	0 },
 	{ AV_CODEC_ID_SSA,	SUB_FORMAT_SSA,		0 },
 	{ AV_CODEC_ID_ASS,	SUB_FORMAT_SSA,		0 },
-	{ AV_CODEC_ID_MOV_TEXT,	SUB_FORMAT_MOV_TEXT,		0 },
-		{ AV_CODEC_ID_HDMV_PGS_SUBTITLE, SUB_FORMAT_PGS, 0 },
+	{ AV_CODEC_ID_MOV_TEXT,	SUB_FORMAT_MOV_TEXT,	0 },
+	{ AV_CODEC_ID_HDMV_PGS_SUBTITLE, SUB_FORMAT_PGS,        0 },
 };
 
 
@@ -539,7 +539,8 @@ DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				sub->codec_id	    = codecpar->codec_id;
 				strnZcpy( sub->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				sub->format         = fmt;
-				sub->gfx            = (sub->format == SUB_FORMAT_DVD_GFX) ? 1 : 0;
+				// TODO MARC
+				sub->gfx            = (sub->format == SUB_FORMAT_DVD_GFX || sub->format == SUB_FORMAT_PGS) ? 1 : 0;
 				sub->stream         = i;
 				sub->scale          = st->time_base.num;
 				sub->rate           = st->time_base.den;

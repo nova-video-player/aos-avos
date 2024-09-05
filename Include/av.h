@@ -790,8 +790,6 @@ typedef struct vfr_str {
 
 	int		user_ID;
 	int		pts;
-	int		cpn;
-	int		dpn;
 
 	int		interlaced;
 	int		top_field_first;

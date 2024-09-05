@@ -446,7 +446,7 @@ serprintf("FF: parse H264 SPS\n");
 			//
 DBGP serprintf("\tsampleRate %d\r\n", codecpar->sample_rate);
 DBGP serprintf("\tblockAlign %d\r\n", codecpar->block_align);
-DBGP serprintf("\tchannels   %d\r\n", codecpar->channels);
+DBGP serprintf("\tchannels   %d\r\n", codecpar->ch_layout.nb_channels);
 
 			if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
@@ -468,7 +468,7 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 				audio->rate          = st->time_base.den/gcd;
 DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				audio->frames        = 0;
-				audio->channels      = codecpar->channels;
+				audio->channels      = codecpar->ch_layout.nb_channels;
 				audio->samplesPerSec = codecpar->sample_rate;
 				audio->bitsPerSample = 0;
 				audio->blockAlign    = codecpar->block_align;

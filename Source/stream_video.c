@@ -2866,8 +2866,6 @@ DBGS serprintf("VIDEO SIZE CHANGED! %dx%d|%d -> %dx%d|%d\r\n", s->video->width, 
 		frame->interlaced      = 0;
 		frame->top_field_first = 0;
 		frame->pts	       = 0;
-		frame->cpn	       = 0;
-		frame->dpn	       = 0;
 	}
 	s->vcodec.decoded = decoded;
 

@@ -25,7 +25,7 @@
 #ifdef CONFIG_I18N
 #define CONFIG_ALL_FONTS
 
-#define DBG if(1)
+#define DBG if(0)
 
 typedef struct {
 	wchar cp;
@@ -56,7 +56,7 @@ static int load_codepage( int codepage )
 		return 0;
 	}
 	
-serprintf("load_codepage: %d\r\n", codepage );
+DBG serprintf("load_codepage: %d\r\n", codepage );
 	unload_codepage();
 	
 	switch( codepage ) {
@@ -79,7 +79,7 @@ serprintf("load_codepage: %d\r\n", codepage );
 	default:
 		break;
 	}
-serprintf("codepage_entries: %d\r\n", codepage_entries );
+DBG serprintf("codepage_entries: %d\r\n", codepage_entries );
 	
 	codepage_loaded = codepage;
 	return 0;
@@ -684,7 +684,7 @@ int I18N_get_codepage( void )
 // ************************************************
 int I18N_load( void )
 {
-serprintf("I18N_load\r\n");
+DBG serprintf("I18N_load\r\n");
 	return 0;
 }
 
@@ -695,7 +695,7 @@ serprintf("I18N_load\r\n");
 // ************************************************
 int I18N_unload( void )
 {
-serprintf("I18N_unload\r\n");
+DBG serprintf("I18N_unload\r\n");
 	unload_codepage();
 	return 0;
 }
@@ -778,13 +778,13 @@ void I18N_check_encoding_update( void *ctx, const unsigned char *text, int size 
 void I18N_check_encoding_finish( void *ctx, int *utf8 )
 {
 	struct enc_ctx *c = ctx;
-serprintf("total: %d  utf %d  ", c->total, c->utf8 );
+DBG serprintf("total: %d  utf %d  ", c->total, c->utf8 );
 	// do not allow any error, all chars must conform to UTF-8!
 	if( c->utf8 == c->total ) {
-serprintf("UTF8!\n");		
+DBG serprintf("UTF8!\n");
 		*utf8 = 1;
 	} else {
-serprintf("ASCII/CODEPAGE!\n");		
+DBG serprintf("ASCII/CODEPAGE!\n");
 		*utf8 = 0;
 	}
 	afree( ctx );
@@ -802,12 +802,12 @@ static void test( void )
 	void *ctx = I18N_check_encoding_init();
 	I18N_check_encoding_update( ctx, cp, strlen( cp ) );
 	I18N_check_encoding_finish( ctx, &utf8 );
-serprintf("utf: %d\n", utf8 );
+DBG serprintf("utf: %d\n", utf8 );
 	ctx = I18N_check_encoding_init();
 	I18N_check_encoding_update( ctx, utf1, strlen( utf1 ) );
 	I18N_check_encoding_update( ctx, utf2, strlen( utf2 ) );
 	I18N_check_encoding_finish( ctx, &utf8 );
-serprintf("utf: %d\n", utf8 );
+DBG serprintf("utf: %d\n", utf8 );
 }
 DECLARE_DEBUG_COMMAND_VOID( "tcp", test );
 
@@ -817,14 +817,14 @@ static void set_codepage( int argc, char **argv )
 		int cp = atoi( argv[1] );
 		I18N_set_codepage( cp );
 	}
-	serprintf("loaded codepage: %d\r\n", I18N_get_codepage() );
+	DBG serprintf("loaded codepage: %d\r\n", I18N_get_codepage() );
 }
 
 static void dump_codepage( int argc, char **argv )
 {
 	int i;	
 	for( i = 0; i < CP2UC_NUM; i++ ) {
-		serprintf("[%2d] %4d\n", i, cp2uc[i].codepage );
+		DBG serprintf("[%2d] %4d\n", i, cp2uc[i].codepage );
 	}
 
 }

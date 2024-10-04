@@ -308,7 +308,7 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
     }
 }
 
-static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfdec_buf, int render)
+static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfdec_buf, int render, int asap)
 {
     media_status_t err;
     if( render ) {

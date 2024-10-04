@@ -403,7 +403,7 @@ CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d"
 			if (do_render) {
 DBGCV3 CLOG("render ->");
 				int start = time_update_time();
-				sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1);
+				sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 1);
 				int took = time_update_time() - start;
 DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );
 DBGCV3 CLOG("render <-");

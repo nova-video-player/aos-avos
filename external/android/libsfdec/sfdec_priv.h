@@ -35,8 +35,9 @@ typedef ssize_t	(*sfdec_send_input_t)(sfdec_priv_t *sfdec, void *data, size_t si
 typedef int	(*sfdec_flush_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_stop_input_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_read_t)(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
-typedef int	(*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render);
+typedef int	(*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap);
 typedef int	(*sfdec_buf_release_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf);
+typedef int	(*sfdec_reset_ts_t)(sfdec_priv_t *sfdec);
 
 typedef struct sfdec_itf {
 	const char *name;
@@ -50,6 +51,7 @@ typedef struct sfdec_itf {
 	sfdec_read_t read;
 	sfdec_buf_render_t buf_render;
 	sfdec_buf_release_t buf_release;
+	sfdec_reset_ts_t reset_ts;
 } sfdec_itf_t;
 
 struct sfdec {

@@ -96,7 +96,7 @@ int dec_audio_read(sfdec_t *dec_audio, int64_t seek, sfdec_read_out_t *read_out)
 
 int dec_audio_buf_render(sfdec_t *dec_audio, sfbuf_t *sfbuf, int render)
 {
-	return dec_audio->itf->buf_render(dec_audio->priv, sfbuf, render);
+	return dec_audio->itf->buf_render(dec_audio->priv, sfbuf, render, 1);
 }
 
 int dec_audio_buf_release(sfdec_t *dec_audio, sfbuf_t *sfbuf)

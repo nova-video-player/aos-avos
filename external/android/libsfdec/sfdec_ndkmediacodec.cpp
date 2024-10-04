@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <time.h>
 
 #ifdef __ANDROID_API__
 #undef __ANDROID_API__
@@ -51,12 +52,21 @@ struct sfdec_mediacodec
     int rotation;
     bool started;
     int flush;
+
+    // the CLOCK_MONOTONIC value when we started/resumed playback
+    int64_t start_monotonic;
+    // the 1st frame timestamp since starting/resumed playback
+    int64_t start_off;
+
+    int64_t last_off;
+    int64_t last_monotonic;
 };
 
 struct sfbuf
 {
     size_t index;
     bool released;
+    int64_t timestamp_us;
 };
 
 static void sfdec_destroy(sfdec_priv_t *sfdec);
@@ -124,6 +134,8 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->extradata = extradata;
     sfdec->extradata_size = extradata_size;
     sfdec->mNativeWindow = (ANativeWindow *)surface_handle;
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
 
     DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
 
@@ -267,6 +279,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
                 return -1;
             sfbuf->index = index;
             sfbuf->released = false;
+            sfbuf->timestamp_us = info.presentationTimeUs;
             read_out->flag |= SFDEC_READ_BUF;
             read_out->buf.sfbuf = sfbuf;
             read_out->buf.time_us = info.presentationTimeUs;
@@ -308,11 +321,49 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
     }
 }
 
-static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render)
+static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap)
 {
     media_status_t err;
     if( render ) {
-        err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
+        if (asap) {
+            err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
+        } else {
+            int64_t now_ts;
+
+            {
+                struct timespec now;
+                int ret = clock_gettime(CLOCK_MONOTONIC, &now);
+                now_ts = now.tv_sec * 1000000000LL + now.tv_nsec;
+            }
+
+            int64_t off_delta = sfbuf->timestamp_us * 1000LL - sfdec->last_off;
+            if (
+                    !sfdec->start_off || //Got reset
+                    (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL || //If we had no frame since the last 500ms, user did pause/resume
+                    (off_delta < -500*1000LL*1000LL || off_delta > 500*1000LL*1000LL) // If distance between two frames is >500ms, that's a seek
+                    ) {
+                // We store the first frame (its realtime timestamp -- now & codec timestamp)
+                sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 100ms
+                sfdec->start_off = sfbuf->timestamp_us * 1000LL;
+                // display first frame there asap
+                asap = 1;
+            }
+            // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
+            int64_t ts = sfbuf->timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+
+            if (asap)
+                DBG LOG("Scheduling frame in a jiffy");
+            else
+                DBG LOG("Scheduling frame in %lld", ts - now_ts);
+
+            sfdec->last_monotonic = now_ts;
+            sfdec->last_off = sfbuf->timestamp_us * 1000LL;
+
+            if (asap)
+                err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
+            else
+                err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, ts);
+        }
     } else {
         err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
     }
@@ -331,6 +382,13 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
     return err == AMEDIA_OK ? 0 : -1;
 }
 
+static int sfdec_reset_ts(sfdec_priv_t *sfdec)
+{
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
+    return 0;
+}
+
 sfdec_itf_t sfdec_itf_mediacodec = {
     "MediaCodec",
     sfdec_init,
@@ -343,4 +401,5 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_read,
     sfdec_buf_render,
     sfdec_buf_release,
+    sfdec_reset_ts,
 };

@@ -112,12 +112,19 @@ int sfdec_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out)
 	return sfdec->itf->read(sfdec->priv, seek, read_out);
 }
 
-int sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render)
+int sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render, int asap)
 {
-	return sfdec->itf->buf_render(sfdec->priv, sfbuf, render);
+	return sfdec->itf->buf_render(sfdec->priv, sfbuf, render, asap);
 }
 
 int sfdec_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf)
 {
 	return sfdec->itf->buf_release(sfdec->priv, sfbuf);
+}
+
+int sfdec_reset_ts(sfdec_t *sfdec)
+{
+	if (sfdec->itf->reset_ts != NULL)
+		return sfdec->itf->reset_ts(sfdec->priv);
+    return 0;
 }

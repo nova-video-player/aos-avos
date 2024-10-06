@@ -38,7 +38,7 @@
 #define DBGCV   if(0||Debug[DBG_CV])
 #define DBGCV2  if(0||Debug[DBG_CV] > 1 )
 #define DBGCV3  if(0||Debug[DBG_CV] > 2 )
-#define DBGSI   if(1||Debug[DBG_SINK] )
+#define DBGSI   if(0||Debug[DBG_SINK] )
 #define DBGSI2  if(0||Debug[DBG_SINK] > 1 )
 
 #define MAXW VIDEO_MAX_WIDTH
@@ -55,6 +55,7 @@ static int sfdec_force_hw   = -1;
 static int sfdec_force_blit = 0;
 static int sfdec_no_drop    = 0;
 static int sfdec_threshold  = 200;
+static int android_sync = 1;
 
 DECLARE_DEBUG_PARAM ("sfmf", sfdec_max_frames );
 DECLARE_DEBUG_PARAM ("sfhw", sfdec_force_hw );
@@ -355,7 +356,6 @@ static void *videosink_thread(void *ctx)
 			goto endloop;
 		}
 
-static int android_sync = 1;
 		int do_render = 1;
 		int venc_time = _get_time(p);
 		int blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
@@ -943,6 +943,12 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	}
 
 	return dec;
+}
+
+void set_android_sync(int sync)
+{
+	DBGSI serprintf("set_android_sync: %d\n", sync);
+	android_sync = sync;
 }
 
 #define OMXC_REGISTER( format, mangler ) \

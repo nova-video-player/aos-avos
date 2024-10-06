@@ -52,6 +52,7 @@ extern fields_t fields;
 jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out_width, uint32_t out_height);
 
 void libavos_set_audio_speed(float speed);
+void libavos_set_android_frame_timing(int enable);
 void libavos_enable_audio_speed(int enable);
 void libavos_set_parser_sync_mode(int mode);
 void libavos_set_default_stream_buffer_size(int size);

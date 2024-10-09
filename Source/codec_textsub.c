@@ -119,6 +119,6 @@ static STREAM_DEC_SUB *_new_dec_text( void )
 	return dec;
 }
 
-STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec_text, "TEXT" );
+//STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec_text, "TEXT" );
 
 #endif

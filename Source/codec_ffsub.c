@@ -112,7 +112,7 @@ static int _decode( STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_
 		AVSubtitleRect *rect = sub.rects[i];
 		DBG serprintf("... text is %s ass is %s type is %d\n", rect->text, rect->ass, rect->type);
 		if(rect->text != NULL) {
-			strnZcpy(dst, rect->ass, max-1);
+			strnZcpy(dst, rect->text, max-1);
 		} else if(rect->ass != NULL) {
 			char *pos = rect->ass;
 

@@ -55,6 +55,7 @@ static int sfdec_force_hw   = -1;
 static int sfdec_force_blit = 0;
 static int sfdec_no_drop    = 0;
 static int sfdec_threshold  = 200;
+static int android_sync = 1;
 
 DECLARE_DEBUG_PARAM ("sfmf", sfdec_max_frames );
 DECLARE_DEBUG_PARAM ("sfhw", sfdec_force_hw );
@@ -359,7 +360,12 @@ static void *videosink_thread(void *ctx)
 		int venc_time = _get_time(p);
 		int blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
 
-DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d", blit_duration, f->index, f->time, f->duration);
+        // Android sync displays the frame 100ms in the future
+        // And it'll block based on timestamps (so blit_duration will usually be < 0)
+        // So offset the waiting time by 200ms
+        if (android_sync) blit_duration -= 200;
+
+DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
 		if( s && s->paused ) {
 DBGSI serprintf(" paused\n");
 		} else if (blit_duration > 0) {
@@ -381,7 +387,8 @@ DBGSI serprintf(" wait\n");
 			if (!p->locked.run) {
 DBGCV CLOG("stop thread 2");
 			}
-		} else if ( blit_duration < -40 && p->dropped < 5 ) {
+		// Android sync will happily drop the frames for us
+		} else if ( !android_sync && (blit_duration < -40 && p->dropped < 5) ) {
 			if( 1 ) {
 				// drop frames if thread is stopped or we are too late (more than 40ms) 
 				// but don't drop too many consecutives frames
@@ -404,13 +411,17 @@ DBGSI serprintf(" ok\n");
 		if (do_render) {
 DBGCV3 CLOG("render ->");
 			int start = time_update_time();
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1);
+			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, !android_sync);
 			int took = time_update_time() - start;
 			p->dropped = 0;
 DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );
 DBGCV3 CLOG("render <-");
 		} else {
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0);
+			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0);
+		}
+		// "Paused" here usually mean "seek"
+		if( s && s->paused ) {
+			sfdec_reset_ts(p->sfdec);
 		}
 
 		pthread_mutex_lock(&p->locked.mtx);
@@ -932,6 +943,12 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	}
 
 	return dec;
+}
+
+void set_android_sync(int sync)
+{
+	DBGSI serprintf("set_android_sync: %d\n", sync);
+	android_sync = sync;
 }
 
 #define OMXC_REGISTER( format, mangler ) \

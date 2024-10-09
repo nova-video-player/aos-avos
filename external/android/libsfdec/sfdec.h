@@ -98,8 +98,9 @@ ssize_t		sfdec_send_input(sfdec_t *sfdec, void *data, size_t size, int64_t time_
 int		sfdec_flush(sfdec_t *sfdec);
 int		sfdec_stop_input(sfdec_t *sfdec);
 int		sfdec_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
-int		sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render);
+int		sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render, int asap);
 int		sfdec_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf);
+int		sfdec_reset_ts(sfdec_t *sfdec);
 
 #if __cplusplus
 }

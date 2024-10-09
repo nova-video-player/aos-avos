@@ -169,3 +169,5 @@ static STREAM_DEC_SUB *_new_dec_text( void )
 }
 
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_MOV_TEXT, _new_dec_text, "MOV_TEXT" );
+STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec_text, "TEXT" );
+STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec_text, "SSA" );

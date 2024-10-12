@@ -116,7 +116,7 @@ serprintf("vobsub: cannot alloc context\n");
 	return dec;
 }
 
-STREAM_REGISTER_DEC_SUB( SUB_FORMAT_DVD_GFX, _new_dec_vobsub, "vobsub" );
+//STREAM_REGISTER_DEC_SUB( SUB_FORMAT_DVD_GFX, _new_dec_vobsub, "vobsub" );
 
 #endif
 #endif

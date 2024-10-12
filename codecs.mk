@@ -124,7 +124,7 @@ ifeq ($(VIDEO),ON)
 		ifneq (,$(LIBAV_CONFIG_DIR))
 			INCLUDES += -I$(LIBAV_CONFIG_DIR)/include
 		endif
-		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter
+		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter -lswscale
 	endif
 
 	ifeq ($(VIDEO_REALVIDEO),ON)

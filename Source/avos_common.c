@@ -70,22 +70,6 @@ avos_msg_t *avos_msg_new_text_subtitle(uint32_t id, uint32_t position, uint32_t 
 	return msg;
 }
 
-static void grayscale_to_argb888(int8_t *src, uint32_t src_width, uint32_t src_height, uint32_t src_linestep, int *dst)
-{
-    int8_t *src_end = src + src_linestep * src_height;
-    int val;
-    while (src < src_end) {
-        int8_t *line = src;
-		uint32_t y;
-        for (y = 0; y < src_width; ++y) {
-            val = *line < 0 ? *line + 0xff : *line;
-            *(dst++) = val == 0 ? 0 : ((0xff)<<24)|(val<<16)|(val<<8)|val;
-            ++line;
-        }
-        src += src_linestep;
-    }
-}
-
 // TODO MARC pass pointer instead of copy but let's see if it works first
 static void bgra32_to_argb888(uint8_t *src, uint32_t src_width, uint32_t src_height, uint32_t src_linestep, int *dst)
 {
@@ -120,7 +104,6 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 	//sub->bitmap.data = (uint8_t *)cropped.data[0]; // Directly use the original bitmap data
 
 	serprintf("avos_msg_new_bitmap_subtitle: cropped.width %d, cropped.height %d, cropped.linestep[0] %d\n", cropped.width, cropped.height, cropped.linestep[0]);
-	//grayscale_to_argb888((int8_t *)cropped.data[0], cropped.width, cropped.height, cropped.linestep[0], (int *)sub->data);
 	bgra32_to_argb888((uint8_t *)cropped.data[0], cropped.width, cropped.height, cropped.linestep[0], (int *)sub->data);
 	sub->bitmap.data = sub->data;
 

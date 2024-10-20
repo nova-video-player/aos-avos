@@ -212,7 +212,10 @@ VIDEO_FRAME *_frame_alloc( int width, int height, int colorspace, int mem_type )
 		frame->linestep[0] = linestep_from_width( width ) / 2;
 		frame->bpp[0]      = 4;
 		break;
-
+	case AV_IMAGE_BGRA_32_new:
+		frame->linestep[0] = linestep_from_width32(width) * 2; // TODO MARC FIXME
+		frame->bpp[0] = 4;
+		break;
 	case AV_IMAGE_YUV_422:
 		frame->linestep[0] = linestep_from_width( width );
 		frame->bpp[0]      = 2;

@@ -101,14 +101,8 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 	sub->bitmap.linestep = cropped.width;
 	sub->bitmap.data_size = rgba_size;
 
-	//sub->bitmap.data = (uint8_t *)cropped.data[0]; // Directly use the original bitmap data
-
-	serprintf("avos_msg_new_bitmap_subtitle: cropped.width %d, cropped.height %d, cropped.linestep[0] %d\n", cropped.width, cropped.height, cropped.linestep[0]);
 	bgra32_to_argb888((uint8_t *)cropped.data[0], cropped.width, cropped.height, cropped.linestep[0], (int *)sub->data);
 	sub->bitmap.data = sub->data;
-
-	// if the source is already BGRA
-	//sub->bitmap.data = (uint8_t *)sub->argb888_data[0];
 
 	return msg;
 }

@@ -237,14 +237,6 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 				serprintf("codec_ffsub: likely a PAL8 bitmap\n");
 			}
 
-			// Dump palette
-			const uint32_t *palette = (uint32_t *)rect->data[1];
-			serprintf("codec_ffsub: rect[%d] palette number of colors %d array=[", i, rect->nb_colors);
-			for (int i = 0; i < rect->nb_colors; i++) {
-				serprintf("0x%08X,", palette[i]);
-			}
-			serprintf("]\n");
-
 			// perform the blending
 
 			// Initialize SwsContext for this rectangle

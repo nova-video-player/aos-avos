@@ -102,7 +102,6 @@ static int _close( STREAM_DEC_SUB *dec )
 
 static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_FRAME **pframe)
 {
-	serprintf("codec_ffsub: _decode\n");
 	my_dec_sub *self = (my_dec_sub*)dec;
 	DBG {
 		serprintf("codec_ffsub: ffsub decode\n", data, size);
@@ -116,7 +115,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	frame->time = time;
 	frame->duration = -1;
 
-	serprintf("codec_ffsub: frame width=%d, height=%d, size=%d\n", frame->width, frame->height, frame->size);
+	DBGS serprintf("codec_ffsub: frame width=%d, height=%d, size=%d\n", frame->width, frame->height, frame->size);
 
 	AVPacket *avpkt = av_packet_alloc();
 	if (!avpkt) {
@@ -180,7 +179,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	if (has_bitmap) {
 		// Allocate BGRA bitmap
-		serprintf("codec_ffsub: Bounding box: left=%d, top=%d, right=%d, bottom=%d\n", left, top, right, bottom);
+		DBGS serprintf("codec_ffsub: Bounding box: left=%d, top=%d, right=%d, bottom=%d\n", left, top, right, bottom);
 		bb_width = right - left;
 		bb_height = bottom - top;
 
@@ -228,14 +227,6 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		} else if (rect->type == SUBTITLE_BITMAP) {
 			// Check if the bitmap rect is not empty and contains non-black pixels
 			DBGS serprintf("codec_ffsub: blend bitmap rect\n");
-
-			if (rect->data[0] && !rect->data[1]) {
-				serprintf("codec_ffsub: likely an RGB bitmap\n");
-			} else if (rect->data[0] && rect->data[1] && rect->data[2]) {
-				serprintf("codec_ffsub: likely a YUV bitmap (e.g., YUV 4:2:0)\n");
-			} else if (rect->data[0] && rect->data[1] && ! rect->data[2]) {
-				serprintf("codec_ffsub: likely a PAL8 bitmap\n");
-			}
 
 			// perform the blending
 

@@ -397,11 +397,13 @@ int stream_register_dec_sub( STREAM_REG_DEC_SUB *reg )
 // *****************************************************************************
 STREAM_DEC_SUB *stream_get_new_dec_sub( int format )
 {
-DBGS serprintf("stream_get_sub_dec( %d )\r\n", format ); 
+DBGS serprintf("stream_get_sub_dec( %d )\r\n", format );
+serprintf("stream_get_sub_dec( %d )\r\n", format );
 
-	STREAM_REG_DEC_SUB *s = _stream_reg_dec_sub;
+STREAM_REG_DEC_SUB *s = _stream_reg_dec_sub;
 	while( s ) {
 		if( s->format == format ) {
+			// TODO MARC here
 			return s->new();
 		}
 		s = s->next;

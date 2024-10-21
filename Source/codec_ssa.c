@@ -220,7 +220,7 @@ DBGS serprintf("end:   %s  %d  ", word, frame->duration  );
 		word = c;
 DBGS serprintf("text:  %s\r\n", word );
 		strnZcpy( frame->data[0], word, frame->size - 1 );
-		SSA_clean_text( frame->data[0] );
+		//SSA_clean_text( frame->data[0] );
 DBGS serprintf("clean: %s\r\n", frame->data[0] );
 	}	
 	return 0;

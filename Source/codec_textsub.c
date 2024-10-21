@@ -27,7 +27,7 @@
 
 #ifdef CONFIG_STREAM
 
-#define DBGS	if(Debug[DBG_STREAM])
+#define DBGS	if(1|Debug[DBG_STREAM])
 #define DBG 	if(Debug[DBG_SUB])
 #define DBG2 	if(Debug[DBG_SUB] > 1)
 
@@ -46,7 +46,7 @@ DBGS serprintf("sub_dec_open_TEXT\r\n");
 
 static int _close( STREAM_DEC_SUB *dec )
 {
-DBGS serprintf( "sub_dec_close_TEXT\r\n");
+DBGS serprintf( "codec_textsub: sub_dec_close_TEXT\r\n");
 	if( !dec->is_open ) {
 serprintf("SSA: not open!\r\n");
 		return 1;
@@ -58,7 +58,7 @@ serprintf("SSA: not open!\r\n");
 
 static int _decode( STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_FRAME **pframe )
 {
-DBG serprintf("TEXT_decode: size %5d  time %d  [%s]\r\n", size, time, data );	
+DBGS serprintf("codec_textsub: TEXT_decode: size %5d  time %d  [%s]\r\n", size, time, data );
 DBG2 Dump( data, size );
 	int start;
 	int end;

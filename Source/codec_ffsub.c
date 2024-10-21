@@ -55,11 +55,13 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 		DBGS serprintf("codec_ffsub: ffsub: Open text\n");
 		myCodec = avcodec_find_decoder(AV_CODEC_ID_TEXT);
 	} else if (sub->format == SUB_FORMAT_SSA) {
+		// TODO MARC codec not found with embedded ssa subs: need to add libssa
 		DBGS serprintf("codec_ffsub: ffsub: Open ssa\n");
 		myCodec = avcodec_find_decoder(AV_CODEC_ID_SSA);
 	} else if (sub->format == SUB_FORMAT_ASS) {
+		// TODO MARC codec not found with embedded ssa subs: need to add libssa
 		DBGS serprintf("codec_ffsub: ffsub: Open ass\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_ASS);
+		myCodec = avcodec_find_decoder(AV_CODEC_ID_SSA);
 	} else if (sub->format == SUB_FORMAT_MOV_TEXT) {
 		DBGS serprintf("codec_ffsub: ffsub: Open mov_text\n");
 		myCodec = avcodec_find_decoder(AV_CODEC_ID_MOV_TEXT);
@@ -206,10 +208,23 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	for (int i = 0; i < sub.num_rects; i++) {
 		AVSubtitleRect *rect = sub.rects[i];
-		DBGS serprintf("codec_ffsub: ... text is %s ass is %s type is %d\n", rect->text, rect->ass, rect->type);
+		DBGS serprintf("codec_ffsub: text is %s ass is %s type is %d\n", rect->text, rect->ass, rect->type);
+		DBGS serprintf("codec_ffsub: unprocessed sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, sub.end_display_time - sub.start_display_time, sub.pts + sub.start_display_time);
 		if (rect->text != NULL) {
+			// Note that external srt are handled directly by Android and not by codec_ffsub
+			frame->time = sub.pts + sub.start_display_time;
+			frame->duration = sub.end_display_time - sub.start_display_time;
 			strnZcpy(dst, rect->text, max - 1);
 		} else if (rect->ass != NULL) {
+			// surprisingly start and end are zero out of the ffmpeg decoder and we need to parse the data (it could be also inferred from the ass text)
+			if (sub.start_display_time == 0 && sub.end_display_time == 0) {
+				int start;
+				int end;
+				if(sscanf( data, "%d:%d,", &start, &end ) == 2) {
+					frame->time = start;
+					frame->duration = end - start;
+				}
+			}
 			char *pos = rect->ass;
 
 			// Skip 9 comas to transform ass to text
@@ -258,23 +273,25 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	if (has_bitmap) {
-		frame->window.x = left;
-		frame->window.y = top;
-		frame->window.width = bb_width;
-		frame->window.height = bb_height;
 		frame->time = sub.pts + sub.start_display_time;
 		frame->duration = sub.end_display_time - sub.start_display_time;
 		if (sub.start_display_time == 0 && sub.end_display_time == -1) {
 			// note that for PGS subtitles there is no start_display_time and end_display_time
 			// so we have to calculate the duration from the avpkt->duration but it is always 0
-			sub.start_display_time = time;
-			//frame->duration = avpkt->duration;
-			// TODO MARC fixme
-			frame->duration = 100000;
+			if (avpkt->duration > 0) {
+				frame->duration = avpkt->duration;
+			} else {
+				// TODO MARC fixme
+				frame->duration = 100000;
+			}
 		} else {
 			frame->duration = sub.end_display_time - sub.start_display_time;
 		}
-		//frame->duration = 300;
+
+		frame->window.x = left;
+		frame->window.y = top;
+		frame->window.width = bb_width;
+		frame->window.height = bb_height;
 		// Copy the BGRA bitmap to the VIDEO_FRAME
 		uint8_t *frame_data = frame->data[0] + top * frame->linestep[0] + left * 4;
 		for (int y = 0; y < bb_height; y++) {
@@ -283,6 +300,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		// Free the BGRA bitmap
 		av_freep(&bgra_data[0]);
 	}
+
+	DBGS serprintf("codec_ffsub: decoded sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, frame->duration, frame->time);
+
 	av_packet_free(&avpkt);
 
 	return 0;
@@ -303,7 +323,8 @@ static int _destroy( STREAM_DEC_SUB *dec )
 } 
 
 static STREAM_DEC_SUB *_new_dec( void )
-{ 
+{
+	DBGS serprintf("codec_ffsub: ffsub_new\n");
 	my_dec_sub *self = (my_dec_sub*)amalloc(sizeof(my_dec_sub));
 	if( !self )
 		return NULL;
@@ -327,6 +348,6 @@ static STREAM_DEC_SUB *_new_dec( void )
 
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_MOV_TEXT, _new_dec, "MOV_TEXT" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec, "TEXT" );
-STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec, "SSA" );
+//STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec, "SSA" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_PGS, _new_dec, "PGS" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_DVD_GFX, _new_dec, "vobsub" );

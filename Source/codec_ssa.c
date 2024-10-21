@@ -28,7 +28,7 @@
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_VOBSUB
 
-#define DBGS	if(Debug[DBG_STREAM])
+#define DBGS	if(1|Debug[DBG_STREAM])
 #define DBG 	if(Debug[DBG_SUB])
 #define DBG2 	if(Debug[DBG_SUB] > 1)
 
@@ -209,19 +209,19 @@ static int SSA_parse_dialogue( char *line, int size, SSA_PRIV *priv, VIDEO_FRAME
 DBG2 serprintf("word: %d [%s]\r\n", count, word );		
 		if( count == priv->start ) {
 			frame->time = get_time( word );
-DBG serprintf("start: %s  %d  ", word, frame->time );
+DBGS serprintf("start: %s  %d  ", word, frame->time );
 		} else if( count == priv->end ) {
 			frame->duration = get_time( word ) - frame->time;
-DBG serprintf("end:   %s  %d  ", word, frame->duration  );
+DBGS serprintf("end:   %s  %d  ", word, frame->duration  );
 		} 
 		count++;
 	}
 	if( count == priv->text ) {
 		word = c;
-DBG serprintf("text:  %s\r\n", word );
+DBGS serprintf("text:  %s\r\n", word );
 		strnZcpy( frame->data[0], word, frame->size - 1 );
 		SSA_clean_text( frame->data[0] );
-DBG serprintf("clean: %s\r\n", frame->data[0] );
+DBGS serprintf("clean: %s\r\n", frame->data[0] );
 	}	
 	return 0;
 }
@@ -309,7 +309,7 @@ static STREAM_DEC_SUB *_new_dec_ssa( void )
 	return dec;
 }
 
-//STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec_ssa, "SSA" );
+STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec_ssa, "SSA" );
 
 #endif
 #endif

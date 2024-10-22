@@ -211,27 +211,49 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		DBGS serprintf("codec_ffsub: text is %s ass is %s type is %d\n", rect->text, rect->ass, rect->type);
 		DBGS serprintf("codec_ffsub: unprocessed sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, sub.end_display_time - sub.start_display_time, sub.pts + sub.start_display_time);
 		if (rect->text != NULL) {
+			DBGS serprintf("codec_ffsub: rect->text%s\n", rect->text);
 			// Note that external srt are handled directly by Android and not by codec_ffsub
 			frame->time = sub.pts + sub.start_display_time;
 			frame->duration = sub.end_display_time - sub.start_display_time;
-			strnZcpy(dst, rect->text, max - 1);
-		} else if (rect->ass != NULL) {
-			// surprisingly start and end are zero out of the ffmpeg decoder and we need to parse the data (it could be also inferred from the ass text)
+			// revert to data parsing to get start and end time if decoder fails to provide start_display_time and end_display_time
 			if (sub.start_display_time == 0 && sub.end_display_time == 0) {
-				int start;
-				int end;
+				int start, end;
 				if(sscanf( data, "%d:%d,", &start, &end ) == 2) {
 					frame->time = start;
 					frame->duration = end - start;
 				}
 			}
+			strnZcpy(dst, rect->text, max - 1);
+		} else if (rect->ass != NULL) {
+			// note that AV_CODEC_ID_TEXT codec outputs ass rect
+			DBGS serprintf("codec_ffsub: rect->ass=%s\n", rect->ass);
+			int start, end;
 			char *pos = rect->ass;
-
-			// Skip 9 comas to transform ass to text
-			for (int i = 0; i < 9 && pos != NULL; i++) {
+			// surprisingly start and end are zero out of the ffmpeg decoder: try to infer it from ass txt and if it fails  parse the data
+			// typical format is rect->ass="rect->ass=1,0,Default,,0,0,0,,4704:7998,- Kids?\N- Phil, would you get them?"
+			// skip to 9th comma to extract start and end times
+			for (int i = 0; i < 8 && pos != NULL; i++) {
 				pos = strchr(pos, ',');
 				if (pos) pos++;
 			}
+			if (pos != NULL && sscanf(pos, "%d:%d,", &start, &end) == 2) {
+				frame->time = start;
+				frame->duration = end - start;
+			} else {
+				// parsing error get back to text data parsing
+				if (sub.start_display_time == 0 && sub.end_display_time == 0) {
+					if(sscanf( data, "%d:%d,", &start, &end ) == 2) {
+						frame->time = start;
+						frame->duration = end - start;
+					}
+				}
+			}
+			// Continue skipping to the 9th comma to reach the text content
+			if (pos != NULL) {
+				pos = strchr(pos, ',');
+				if (pos) pos++;
+			}
+			// Extract text zone and convert \N to \n
 			if (pos != NULL) {
 				strnZcpy(dst, pos, max - 1);
 				while ((pos = strstr(dst, "\\N")) != NULL) {

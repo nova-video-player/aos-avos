@@ -268,19 +268,25 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			// perform the blending
 
 			// Initialize SwsContext for this rectangle
-			struct SwsContext *sws_ctx = sws_getContext(
-				rect->w, rect->h, AV_PIX_FMT_PAL8,
-				rect->w, rect->h, AV_PIX_FMT_BGRA,
-				SWS_BILINEAR, NULL, NULL, NULL);
+			struct SwsContext *sws_ctx = sws_getContext( rect->w, rect->h, AV_PIX_FMT_PAL8, rect->w, rect->h,
+														 AV_PIX_FMT_BGRA, SWS_BILINEAR, NULL, NULL, NULL );
 
-			if (!sws_ctx) {
-				serprintf("codec_ffsub: Failed to create SwsContext\n");
+			if( !sws_ctx ) {
+				serprintf( "codec_ffsub: Failed to create SwsContext\n" );
 				continue;
 			}
 
 			// Set up source data pointers and line sizes
 			const uint8_t *src_data[4] = { rect->data[0], rect->data[1], NULL, NULL };
 			int src_linesize[4] = { rect->linesize[0], 0, 0, 0 };
+			if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX && rect->nb_colors == 4) { // vobsubs with 4 colors palette
+				// vobsubs palette in RGBA format rect->data[1]{transparent background, outline, main text, anti-aliasing or shadow for edges}={0x00000000, 0xCC000000, 0x00000000, 0xBBFEFEFE}
+				uint32_t *palette = (uint32_t *)rect->data[1];
+				// swap the semi-transparent black and white: i.e. black_index = 1 (0xCC000000) with white_index = 3 (0xBBFEFEFE)
+				uint32_t tmp = palette[1];
+				palette[1] = palette[3];
+				palette[3] = tmp;
+            }
 
 			// Set up destination data pointers and line sizes
 			uint8_t *dst_data[4] = { bgra_data[0] + (rect->y - top) * bgra_linesize[0] + (rect->x - left) * 4, NULL, NULL, NULL };

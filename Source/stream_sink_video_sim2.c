@@ -300,7 +300,7 @@ DBGS serprintf("stream_sink_video: allocated %d frames\r\n", p->num_frames);
 
 	if( _sink_force_single_frame ) {
 		// alloc blit frame:
-		if( !(p->blit_frame = frame_alloc_with_cs_and_mem( p->width, p->height, p->colorspace, STREAM_MEM_NRM ) ) ) {
+		if( !(p->blit_frame = frame_alloc_with_cs_and_mem( p->width, p->height, p->colorspace, STREAM_MEM_NRM, 1 ) ) ) {
 serprintf("stream_sink_video: cant alloc blit frame\r\n");
 			return 1;
 		}

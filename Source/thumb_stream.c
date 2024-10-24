@@ -63,7 +63,7 @@ static int _open( STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx, i
 	p->num_frames = num_frames;
 
 	for( i = 0; i < p->num_frames; i++ ) {
-		p->frames[i] = frame_alloc_with_cs_and_mem( video->width, video->height, video->colorspace, STREAM_MEM_NRM );
+		p->frames[i] = frame_alloc_with_cs_and_mem( video->width, video->height, video->colorspace, STREAM_MEM_NRM, 1 );
 		if( !p->frames[i] ) {
 serprintf("cannot alloc frame %d\r\n", i);
 			return 1;

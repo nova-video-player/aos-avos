@@ -112,8 +112,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	VIDEO_FRAME *frame = *pframe;
 	int max = frame->size - 1;
-	char *dst = frame->data[0];
-	*dst = 0;
+
 	frame->time = time;
 	frame->duration = -1;
 
@@ -164,8 +163,6 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	int has_bitmap = 0;
 
 	// BGRA bitmap
-	uint8_t *bgra_data[4] = {NULL};
-	int bgra_linesize[4] = {0};
 	int bb_width = 0, bb_height = 0;
 
 	for (int i = 0; i < sub.num_rects; i++) {
@@ -196,7 +193,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		bb_width = MAX(bb_width, 1);
 		bb_height = MAX(bb_height, 1);
 
-		int ret = av_image_alloc(bgra_data, bgra_linesize, bb_width, bb_height, AV_PIX_FMT_BGRA, 32);
+		int ret = av_image_alloc(frame->data, frame->linestep, bb_width, bb_height, AV_PIX_FMT_BGRA, 32);
 		if (ret < 0) {
 			char error_buffer[AV_ERROR_MAX_STRING_SIZE] = {0};
 			av_strerror(ret, error_buffer, AV_ERROR_MAX_STRING_SIZE);
@@ -211,6 +208,8 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		DBGS serprintf("codec_ffsub: text is %s ass is %s type is %d\n", rect->text, rect->ass, rect->type);
 		DBGS serprintf("codec_ffsub: unprocessed sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, sub.end_display_time - sub.start_display_time, sub.pts + sub.start_display_time);
 		if (rect->text != NULL) {
+			char *dst = frame->data[0];
+			*dst = 0;
 			DBGS serprintf("codec_ffsub: rect->text%s\n", rect->text);
 			// Note that external srt are handled directly by Android and not by codec_ffsub
 			frame->time = sub.pts + sub.start_display_time;
@@ -225,6 +224,8 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			}
 			strnZcpy(dst, rect->text, max - 1);
 		} else if (rect->ass != NULL) {
+			char *dst = frame->data[0];
+			*dst = 0;
 			// note that AV_CODEC_ID_TEXT codec outputs ass rect
 			DBGS serprintf("codec_ffsub: rect->ass=%s\n", rect->ass);
 			int start, end;
@@ -289,8 +290,8 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
             }
 
 			// Set up destination data pointers and line sizes
-			uint8_t *dst_data[4] = { bgra_data[0] + (rect->y - top) * bgra_linesize[0] + (rect->x - left) * 4, NULL, NULL, NULL };
-			int dst_linesize[4] = { bgra_linesize[0], 0, 0, 0 };
+			uint8_t *dst_data[4] = { frame->data[0] + (rect->y - top) * frame->linestep[0] + (rect->x - left) * 4, NULL, NULL, NULL };
+			int dst_linesize[4] = { frame->linestep[0], 0, 0, 0 };
 
 			// Perform the conversion
 			sws_scale(sws_ctx, src_data, src_linesize, 0, rect->h, dst_data, dst_linesize);
@@ -320,13 +321,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		frame->window.y = top;
 		frame->window.width = bb_width;
 		frame->window.height = bb_height;
-		// Copy the BGRA bitmap to the VIDEO_FRAME
-		uint8_t *frame_data = frame->data[0] + top * frame->linestep[0] + left * 4;
-		for (int y = 0; y < bb_height; y++) {
-			memcpy(frame_data + y * frame->linestep[0], bgra_data[0] + y * bgra_linesize[0], bb_width * 4);
-		}
-		// Free the BGRA bitmap
-		av_freep(&bgra_data[0]);
+		frame->colorspace = AV_IMAGE_BGRA_32;  // Set the colorspace to BGRA
 	}
 
 	DBGS serprintf("codec_ffsub: decoded sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, frame->duration, frame->time);

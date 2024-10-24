@@ -290,7 +290,7 @@ DBGS serprintf("delay %d  num_frames %d\r\n",s->video->delay_frames, s->num_fram
 				if( cached ) {
 					s->frames[i] = frame_alloc_cached( width, height );
 				} else {
-					s->frames[i] = frame_alloc_with_cs_and_mem( width, height, s->video->colorspace, vid_mem_type );
+					s->frames[i] = frame_alloc_with_cs_and_mem( width, height, s->video->colorspace, vid_mem_type, 1 );
 				}
 				if( !s->frames[i] ) {
 serprintf("cannot alloc frame %d\r\n", i);			

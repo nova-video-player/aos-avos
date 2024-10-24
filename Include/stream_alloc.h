@@ -26,7 +26,7 @@ VIDEO_FRAME *frame_alloc( int width, int height );
 VIDEO_FRAME *frame_alloc_cached( int width, int height );
 VIDEO_FRAME *frame_flush_cached( VIDEO_FRAME* frame );
 VIDEO_FRAME *frame_alloc_with_cs( int width, int height, int colorspace );
-VIDEO_FRAME *frame_alloc_with_cs_and_mem( int width, int height, int colorspace, int mem_type );
+VIDEO_FRAME *frame_alloc_with_cs_and_mem( int width, int height, int colorspace, int mem_type, int perform_allocation );
 void	     frame_free( VIDEO_FRAME *f );
 
 void *stream_malloc           ( size_t size );

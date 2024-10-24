@@ -30,7 +30,7 @@
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 
-#define DBGS	if(1 || Debug[DBG_STREAM])
+#define DBGS	if(Debug[DBG_STREAM])
 #define DBG 	if(Debug[DBG_SUB])
 #define DBG2 	if(Debug[DBG_SUB] > 1)
 

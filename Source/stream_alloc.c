@@ -196,7 +196,7 @@ static void stream_frame_free_dma_cached( VIDEO_FRAME *f )
 //	frame_alloc
 //
 // ***********************************************************
-VIDEO_FRAME *_frame_alloc( int width, int height, int colorspace, int mem_type )
+VIDEO_FRAME *_frame_alloc( int width, int height, int colorspace, int mem_type, int perform_allocation )
 {
 	VIDEO_FRAME *frame = amalloc( sizeof( VIDEO_FRAME ) );
 	int i;
@@ -209,12 +209,8 @@ VIDEO_FRAME *_frame_alloc( int width, int height, int colorspace, int mem_type )
 	switch( colorspace ) {
 	case AV_IMAGE_BGRA_32:
 	case AV_IMAGE_RGBX_32:
-		frame->linestep[0] = linestep_from_width( width ) / 2;
+		frame->linestep[0] = linestep_from_width( width ) / 2; // TODO FIXME perhaps wrong because 4bits per pixel?
 		frame->bpp[0]      = 4;
-		break;
-	case AV_IMAGE_BGRA_32_new:
-		frame->linestep[0] = linestep_from_width32(width) * 2; // TODO MARC FIXME
-		frame->bpp[0] = 4;
 		break;
 	case AV_IMAGE_YUV_422:
 		frame->linestep[0] = linestep_from_width( width );
@@ -247,30 +243,32 @@ serprintf("frame_alloc: unknown color space: %d\r\n", colorspace );
 		frame->size += frame->data_size[i];
 	}
 
-	switch( mem_type ) {
-	case STREAM_MEM_NRM:
-		for (i = 0; frame->linestep[i]; i++)
-			frame->data[i] = stream_malloc( frame->data_size[i] );
-		frame->destroy = stream_frame_free2;
-		break;
+	if (perform_allocation) {
+		switch( mem_type ) {
+		case STREAM_MEM_NRM:
+			for( i = 0; frame->linestep[i]; i++ )
+				frame->data[i] = stream_malloc( frame->data_size[i] );
+			frame->destroy = stream_frame_free2;
+			break;
 
-	case STREAM_MEM_DMA:
-		for (i = 0; frame->linestep[i]; i++)
-			frame->data[i] =  stream_malloc_dma( frame->data_size[i] );
-		frame->destroy = stream_frame_free_dma;
-		break;
+		case STREAM_MEM_DMA:
+			for( i = 0; frame->linestep[i]; i++ )
+				frame->data[i] = stream_malloc_dma( frame->data_size[i] );
+			frame->destroy = stream_frame_free_dma;
+			break;
 
-	case STREAM_MEM_DMA_CACHED:
-		for (i = 0; frame->linestep[i]; i++)
-			frame->data[i] = stream_malloc_dma_cached( frame->data_size[i] );
-		frame->destroy = stream_frame_free_dma_cached;
-		break;
-	}
-	
-	if ( !frame->data[0] && mem_type != STREAM_MEM_BYO && mem_type != STREAM_MEM_ANDROID ) {
-serprintf("frame_alloc: error allocating %d x %d frame!\r\n", width, height );
-		afree( frame );
-		return NULL;
+		case STREAM_MEM_DMA_CACHED:
+			for( i = 0; frame->linestep[i]; i++ )
+				frame->data[i] = stream_malloc_dma_cached( frame->data_size[i] );
+			frame->destroy = stream_frame_free_dma_cached;
+			break;
+		}
+
+		if( !frame->data[0] && mem_type != STREAM_MEM_BYO && mem_type != STREAM_MEM_ANDROID ) {
+			serprintf( "frame_alloc: error allocating %d x %d frame!\r\n", width, height );
+			afree( frame );
+			return NULL;
+		}
 	}
 
 	frame->width    = width;
@@ -281,22 +279,22 @@ serprintf("frame_alloc: error allocating %d x %d frame!\r\n", width, height );
 
 VIDEO_FRAME *frame_alloc( int width, int height )
 {
-	return _frame_alloc( width, height, AV_IMAGE_YUV_422, STREAM_MEM_DMA );
+	return _frame_alloc( width, height, AV_IMAGE_YUV_422, STREAM_MEM_DMA, 1 );
 }
 
 VIDEO_FRAME *frame_alloc_cached( int width, int height )
 {
-	return _frame_alloc( width, height, AV_IMAGE_YUV_422, STREAM_MEM_DMA_CACHED );
+	return _frame_alloc( width, height, AV_IMAGE_YUV_422, STREAM_MEM_DMA_CACHED, 1 );
 }
 
 VIDEO_FRAME *frame_alloc_with_cs( int width, int height, int colorspace )
 {
-	return _frame_alloc( width, height, colorspace, STREAM_MEM_NRM );
+	return _frame_alloc( width, height, colorspace, STREAM_MEM_NRM, 1 );
 }
 
-VIDEO_FRAME *frame_alloc_with_cs_and_mem( int width, int height, int colorspace, int mem_type  )
+VIDEO_FRAME *frame_alloc_with_cs_and_mem( int width, int height, int colorspace, int mem_type, int perform_allocation )
 {
-	return _frame_alloc( width, height, colorspace, mem_type );
+	return _frame_alloc( width, height, colorspace, mem_type, perform_allocation );
 }
 
 // ************************************************************
@@ -322,7 +320,7 @@ int stream_alloc_frames( VIDEO_FRAME *(*frames)[], int width, int height, int co
 {
 	int i;
 	for( i = 0; i < *count; i++ ) {
-		if( !( (*frames)[i] = frame_alloc_with_cs_and_mem( width, height, colorspace, mem_type ) ) ) {
+		if( !( (*frames)[i] = frame_alloc_with_cs_and_mem( width, height, colorspace, mem_type, 1 ) ) ) {
 			// that is all we can do, stop
 			break;
 		}

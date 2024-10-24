@@ -23,6 +23,8 @@
 #include "debug.h"
 
 #include "avos_common_priv.h"
+#include <libavutil/imgutils.h>
+#include <libavutil/mem.h>
 
 #define METADATA_BUFFER_SIZE 1024
 
@@ -70,23 +72,23 @@ avos_msg_t *avos_msg_new_text_subtitle(uint32_t id, uint32_t position, uint32_t 
 	return msg;
 }
 
-// TODO MARC pass pointer instead of copy but let's see if it works first
 static void bgra32_to_argb888(uint8_t *src, uint32_t src_width, uint32_t src_height, uint32_t src_linestep, int *dst)
 {
-	// Copy the data directly from src to dst as they are already in ARGB888 format
-	for (uint32_t y = 0; y < src_height; ++y) {
-		memcpy(dst, src, src_width * 4);
-		src += src_linestep;
-		dst += src_width;
-	}
+	// Define the source and destination image planes
+	const uint8_t *src_planes[1] = { src };
+	const int src_stride[1] = { src_linestep };
+	uint8_t *dst_planes[1] = { (uint8_t *)dst };
+	const int dst_stride[1] = { src_width * 4 };
+
+	// Use av_image_copy to copy the data
+	av_image_copy(dst_planes, dst_stride, src_planes, src_stride, AV_PIX_FMT_BGRA, src_width, src_height);
 }
 
 avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_t duration, IMAGE *img)
 {
 	avos_msg_t *msg;
 	avos_bitmap_subtitle_t *sub;
-	IMAGE cropped = image_crop(img, &img->window);
-	int rgba_size = cropped.width * cropped.height * 4;
+	int rgba_size = img->window.width * img->window.height * 4;
 
 	msg = avos_msg_new(0, AVOS_MSG_TYPE_BITMAP_SUBTITLE, sizeof(avos_bitmap_subtitle_t) + rgba_size);
 	if (!msg)
@@ -96,14 +98,16 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 	sub->duration = duration;
 	sub->orig_width = img->width;
 	sub->orig_height = img->height;
-	sub->bitmap.width = cropped.width;
-	sub->bitmap.height = cropped.height;
-	sub->bitmap.linestep = cropped.width;
+	sub->bitmap.width = img->window.width;
+	sub->bitmap.height = img->window.height;
+	sub->bitmap.linestep = img->window.width;
 	sub->bitmap.data_size = rgba_size;
-
-	bgra32_to_argb888((uint8_t *)cropped.data[0], cropped.width, cropped.height, cropped.linestep[0], (int *)sub->data);
+	serprintf("avos_msg_new_bitmap_subtitle: img->width=%d, img->window.width=%d, img->height=%d img->window.height=%d, img->linestep[0]=%d\n", img->width, img->window.width, img->height, img->window.height, img->linestep[0]);
+	bgra32_to_argb888((uint8_t *)img->data[0], img->window.width, img->window.height, img->linestep[0], (int *)sub->data);
+	// sub->bitmap.data = sub->data;
 	sub->bitmap.data = sub->data;
-
+	av_freep(&img->data[0]);
+	//sub->bitmap.data = img->bgra_data[0]; // directly use the original bitmap data
 	return msg;
 }
 

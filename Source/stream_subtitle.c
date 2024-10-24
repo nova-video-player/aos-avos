@@ -95,16 +95,15 @@ static void alloc_sub_frame( STREAM *s )
 {
 	// TODO MARC this is where the bitmap is allocated
 	if( !s->subtitle_frame ) {
-		int cs = AV_IMAGE_BGRA_32_new;
-		//int cs = AV_IMAGE_GRAYSCALE;
+		int cs = AV_IMAGE_BGRA_32;
 		if( s->subtitle->gfx ) {
 			int w = MAX( 720, s->video->width  );
 			int h = MAX( 576, s->video->height );
 DBG serprintf("stream_subtitle: alloc_sub_frame: %dx%d\n", w, h);
-			s->subtitle_frame = frame_alloc_with_cs_and_mem( w, h, cs, STREAM_MEM_NRM );
+			s->subtitle_frame = frame_alloc_with_cs_and_mem( w, h, cs, STREAM_MEM_NRM, 0);
 		} else {
 			// this is for text subs, so just allocate a large enuf buffer
-			s->subtitle_frame = frame_alloc_with_cs_and_mem( 128, 8, cs, STREAM_MEM_NRM );
+			s->subtitle_frame = frame_alloc_with_cs_and_mem( 128, 8, cs, STREAM_MEM_NRM, 1);
 		}
 	}					 
 }

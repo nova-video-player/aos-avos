@@ -26,6 +26,8 @@
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
 
+#define DBG 	if(0)
+
 #define METADATA_BUFFER_SIZE 1024
 
 struct metadata_buffer {
@@ -102,7 +104,7 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 	sub->bitmap.height = img->window.height;
 	sub->bitmap.linestep = img->window.width;
 	sub->bitmap.data_size = rgba_size;
-	serprintf("avos_msg_new_bitmap_subtitle: img->width=%d, img->window.width=%d, img->height=%d img->window.height=%d, img->linestep[0]=%d\n", img->width, img->window.width, img->height, img->window.height, img->linestep[0]);
+	DBG serprintf("avos_msg_new_bitmap_subtitle: img->width=%d, img->window.width=%d, img->height=%d img->window.height=%d, img->linestep[0]=%d\n", img->width, img->window.width, img->height, img->window.height, img->linestep[0]);
 	bgra32_to_argb888((uint8_t *)img->data[0], img->window.width, img->window.height, img->linestep[0], (int *)sub->data);
 	// sub->bitmap.data = sub->data;
 	sub->bitmap.data = sub->data;

@@ -535,7 +535,6 @@ DBGP serprintf("\tfps        %5.2f fps(c)\r\n", 1/av_q2d(codec->time_base));
 				sub->codec_id	    = codec->codec_id;
 				strnZcpy( sub->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				sub->format         = fmt;
-				// TODO MARC
 				sub->gfx            = (sub->format == SUB_FORMAT_DVD_GFX || sub->format == SUB_FORMAT_PGS) ? 1 : 0;
 				sub->stream         = i;
 				sub->scale          = st->time_base.num;

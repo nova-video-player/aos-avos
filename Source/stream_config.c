@@ -403,7 +403,6 @@ serprintf("stream_get_sub_dec( %d )\r\n", format );
 STREAM_REG_DEC_SUB *s = _stream_reg_dec_sub;
 	while( s ) {
 		if( s->format == format ) {
-			// TODO MARC here
 			return s->new();
 		}
 		s = s->next;

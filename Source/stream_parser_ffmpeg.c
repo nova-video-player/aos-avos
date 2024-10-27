@@ -542,7 +542,6 @@ DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				sub->codec_id	    = codec->codec_id;
 				strnZcpy( sub->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				sub->format         = fmt;
-				// TODO MARC
 				sub->gfx            = (sub->format == SUB_FORMAT_DVD_GFX || sub->format == SUB_FORMAT_PGS) ? 1 : 0;
 				sub->stream         = i;
 				sub->scale          = st->time_base.num;

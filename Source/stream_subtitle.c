@@ -93,7 +93,6 @@ void stream_buffer_fix_subs( STREAM_BUFFER *buffer );
 // *****************************************************************************
 static void alloc_sub_frame( STREAM *s )
 {
-	// TODO MARC this is where the bitmap is allocated
 	if( !s->subtitle_frame ) {
 		int cs = AV_IMAGE_BGRA_32;
 		if( s->subtitle->gfx ) {

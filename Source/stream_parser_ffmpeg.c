@@ -1509,13 +1509,13 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->aq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
-			// TODO MARC perhaps should not be scaled by as
-			int first_time   = (int)(GET_AUDIO_TS( first->packet.dts ) / as);
-			int last_time    = (int)(GET_AUDIO_TS( last->packet.dts ) / as);
+			// Time difference should be in real time (RT), not scaled by audio speed
+			int first_time   = GET_AUDIO_TS( first->packet.dts );
+			int last_time    = GET_AUDIO_TS( last->packet.dts );
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
-			s->atime_parsed = last_time - first_time;
+			s->atime_parsed = (int)((last_time - first_time) / as); // scale by audio_speed
 			if( s->atime_parsed ) {
 				s->acurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
 			} else {
@@ -1531,13 +1531,13 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			// TODO MARC perhaps should not be scaled by as
-			int first_time   = (int)(GET_VIDEO_TS( first->packet.dts ) / as);
-			int last_time    = (int)(GET_VIDEO_TS( last->packet.dts ) / as);
+			// Time difference should be in real time (RT), not scaled by audio speed
+			int first_time   = GET_VIDEO_TS( first->packet.dts );
+			int last_time    = GET_VIDEO_TS( last->packet.dts );
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
-			s->vtime_parsed = last_time - first_time;
+			s->vtime_parsed = (int)((last_time - first_time) / as); // scale by audio_speed
 			if( s->atime_parsed ) {
 				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
 			} else {

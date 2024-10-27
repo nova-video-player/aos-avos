@@ -2665,7 +2665,7 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 				s->drop --;
 DBG2 serprintf("stream_video:_output_frame_no_resize drop\n");
 				// sink_ref_time is ts
-				s->sink_ref_time -= s->video->msPerFrame;
+				s->sink_ref_time -= (int)(s->video->msPerFrame / as); // rt
 				frames_dropped ++;
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
@@ -2680,7 +2680,7 @@ DBGY serprintf("[-%8d] ", frame->time );
 DBG2 serprintf("stream_video:_output_frame_no_resize double\n");
 				// double one frame
 				s->drop ++;
-				s->sink_ref_time += s->video->msPerFrame;
+				s->sink_ref_time += (int)(s->video->msPerFrame / as); // rt
 				frames_doubled ++;
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {

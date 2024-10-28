@@ -1359,11 +1359,7 @@ static void _queue_sink_frames( STREAM *s )
 		if( s->vtime_post_sink && frame->time != -1 ) {
 			if( frame->epoch == s->seek_epoch ) {
 				// frame->time is ts
-				VIDEO_TIME_IS_TS {
-					s->video_time = frame->time; // ts
-				} else {
-					s->video_time = (int)(audio_interface_get_audio_speed() * frame->time); // rt
-				}
+				s->video_time = frame->time; // ts
 				DBG2 serprintf("stream_video:_queue_sink_frames frame->time=%d, s->video_time=%d\n", frame->time, s->video_time);
 			}
 		}
@@ -2491,6 +2487,11 @@ serprintf("PAU: not_open\r\n");
 // ************************************************************
 static int _real_time( STREAM *s, int frame_time )
 {
+	// returns the real time in ts and s->vide_ref_time is always 0
+	DBGS serprintf("_real_time: frame_time=%d=%02d:%02d, s->vid_ref_time=%d=%02d:%02d\n",
+					frame_time, frame_time / 60000, (frame_time % 60000) / 1000,
+					s->vid_ref_time, s->vid_ref_time / 60000, (s->vid_ref_time % 60000) / 1000);
+
 	int mul = 1;
 	int div = 1;
 	
@@ -2507,7 +2508,16 @@ static int _real_time( STREAM *s, int frame_time )
 		case STREAM_SPEED_FAST_8: div = 8; break;
 	}
 
+	// formula ensures that the video frames are displayed (blit) at the correct adjusted time based on the playback speed,
+	// maintaining the relative order and timing of the frames
+	// with audio_speed, this returns frame_time which is correct (and does not need any modification)
 	return s->vid_ref_time + (frame_time - s->vid_ref_time) * mul / div;
+
+	/*
+	float as = audio_interface_get_audio_speed();
+	// this code is not correct because plays too quick
+	return s->vid_ref_time + (int)((frame_time - s->vid_ref_time) / as);
+	 */
 }
 
 #if 1
@@ -2542,17 +2552,18 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 {
 	if( s->sink_ref_time == -1 ) {			
 		if( s->video_sink->put_time ) {
+			// frame-> is ts => s->sink_ref_time is ts
 			s->sink_ref_time = frame->time; 
 
 			if( s->audio->valid ) {
 				// set the time to 0 to prevent video from playing and let the audio thread update it
 				s->video_sink->put_time(s->video_sink, 1 ); 
-			}else {
+			} else {
 				s->video_sink->put_time(s->video_sink, frame->time ); 
 			}
 DBGV2 serprintf("  <NSR %d>", frame->time );
 		} else {
-			s->vid_ref_time = frame->time;
+			s->vid_ref_time = frame->time; // ts
 			int reftime = s->video_sink->get_time( s->video_sink );
 			s->sink_ref_time = reftime - s->vid_ref_time;
 DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
@@ -2568,11 +2579,14 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	if( s->video_sink->put_time ) {
-		frame->blit_time = _real_time( s, time );
+		DBGS serprintf("_put_frame_in_sink: time=%d=%02d:%02d, frame->time=%d=%02d:%02d\n",
+				   time, time / 60000, (time % 60000) / 1000,
+				   frame->time, frame->time / 60000, (frame->time % 60000) / 1000);
+		frame->blit_time = _real_time( s, time ); // ts
 	} else {
 		// we add "stream_sink_preroll" here because the sink might switch to it's next frame
 		// while we do the call!
-		frame->blit_time = _real_time( s, time ) + s->sink_ref_time + stream_sink_preroll;
+		frame->blit_time = _real_time( s, time ) + s->sink_ref_time + stream_sink_preroll; // ts
 	}
 //serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), s->sink_ref_time, frame->blit_time );
 	frame->time = time;
@@ -2665,30 +2679,24 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 				s->drop --;
 DBG2 serprintf("stream_video:_output_frame_no_resize drop\n");
 				// sink_ref_time is ts
-				s->sink_ref_time -= (int)(s->video->msPerFrame / as); // rt
+				s->sink_ref_time -= (int)(s->video->msPerFrame / as); // ts
+				//s->sink_ref_time -= s->video->msPerFrame; // rst
 				frames_dropped ++;
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
-					VIDEO_TIME_IS_TS {
-						s->video_time += s->video->msPerFrame; // ts
-					} else {
-						s->video_time += (int)(as * s->video->msPerFrame); // rt
-					}
+					s->video_time += (int)(s->video->msPerFrame / as); // ts
 				}
 			} else if( s->drop < 0 ) {
 DBG2 serprintf("stream_video:_output_frame_no_resize double\n");
 				// double one frame
 				s->drop ++;
 				s->sink_ref_time += (int)(s->video->msPerFrame / as); // rt
+				//s->sink_ref_time += s->video->msPerFrame;
 				frames_doubled ++;
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
-					VIDEO_TIME_IS_TS {
-						s->video_time -= s->video->msPerFrame; // ts
-					} else {
-						s->video_time -= (int)(as * s->video->msPerFrame); // rt
-					}
+					s->video_time -= (int)(s->video->msPerFrame / as); // ts
 				}
 			} else {	
 DBGY serprintf("[ %8d] ", frame->time );
@@ -4091,19 +4099,18 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 // *****************************************************************************
 static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, int force_reload )
 {
+	// time is rst
+	DBGS serprintf("_stream_seek_real: time=%d=%02d:%02d\n", time, time / 60000, (time % 60000) / 1000);
+
 	int err = 1;
 	STREAM_CHUNK sc = { 0 };
 	int was_paused;
 	int start1   = atime();
 	int old_time;
-	VIDEO_TIME_IS_TS {
-		// since s->video_time is based on previous as it needs to be rescaled to current as
-		float as = audio_interface_get_audio_speed();
-		float pas = audio_interface_get_previous_audio_speed();
-		old_time = (int)(pas * s->video_time / as); // ts
-	} else {
-		old_time = s->video_time; // rt
-	}
+	// since s->video_time is based on previous as it needs to be rescaled to current as
+	float as = audio_interface_get_audio_speed();
+	float pas = audio_interface_get_previous_audio_speed();
+	old_time = (int)(pas * s->video_time / as); // ts
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
 		return 1;
@@ -4139,7 +4146,7 @@ DBG2 serprintf("stream_video:_stream_seek_real: seek by pos=%d\n", pos);
 serprintf("stream_seek pos err!\n");
 		}
 	}
-DBGS serprintf("\nparser seeked to time %d\n", sc.time );
+DBGS serprintf("\nparser seeked to time %dsc.time=%d=%02d:%02d\n", sc.time, sc.time / 60000, (sc.time % 60000) / 1000 );
 	// sc.time is ts (chunk)
 	_video_init( s, sc.time );
 
@@ -4217,12 +4224,17 @@ serprintf("STREAM_seek: aborted\r\n");
 // *****************************************************************************
 int stream_seek_time( STREAM *s, int time, int dir, int flags )
 {
+	// time is rst
 	int real_time;
 	
 	if( time < 0 )
 		time = 0;
 		
-	real_time = _stream_get_real_time( s, time );
+	real_time = _stream_get_real_time( s, time ); // rst
+
+	DBGS serprintf("stream_seek_time: time=%d=%02d:%02d, real_time=%d=%02d:%02d\n",
+					time, time / 60000, (time % 60000) / 1000,
+					real_time, real_time / 60000, (real_time % 60000) / 1000);
 	
 	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
 }
@@ -4257,7 +4269,7 @@ int stream_seek_pos( STREAM *s, int pos, int dir, int flags )
 // *****************************************************************************
 int stream_seek_frame( STREAM *s, int frame, int dir, int force_reload )
 {
-	// provides rt thus should not be scaled by as
+	// provides rst thus should not be scaled by as
 	int time = (int)(1000 * (UINT64)frame * (UINT64)s->video->scale / (UINT64)s->video->rate);
 	if( !s->open ) {
 serprintf("SFR: not open!\r\n");
@@ -4309,6 +4321,7 @@ serprintf("PNF: not open!\r\n");
 // *****************************************************************************
 int stream_set_speed( STREAM *s, STREAM_SPEED speed )
 {
+	// Note: for audio_speed do not use stream_set_speed (it is legacy code with audio muted)
 	int unmute = 0;
 serprintf("stream_video_set_speed( %d )\r\n", speed );
 	if( !s->open ) {
@@ -4467,19 +4480,15 @@ VIDEO_FRAME *stream_get_current_frame( STREAM *s )
 // *****************************************************************************
 int stream_get_time_default( STREAM *s, int *total )
 {
-	// returns the realtime which is the exact time without audio_speed scaling
+	// returns the realtime rst which is the exact time without audio_speed scaling
 	if ( !s )
 		return 0;
 	if( total )
 		*total = s->duration;
 DBG2 serprintf("stream_get_time_default: video_time=%d, audio_time=%d\n", s->video_time, s->audio_time);
-	// video_time is ts, getting rt needs scaling by as
+	// video_time is ts, getting rst needs scaling by as
 	int time;
-	VIDEO_TIME_IS_TS {
-		time = (int)(audio_interface_get_audio_speed() * (s->video->valid ? s->video_time : s->audio_time)); // rt
-	} else {
-		time = (s->video->valid ? s->video_time : s->audio_time); // rt
-	}
+	time = (int)(audio_interface_get_audio_speed() * (s->video->valid ? s->video_time : s->audio_time)); // rst
 	DBGT serprintf("sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
 	return time;
 }
@@ -4489,9 +4498,9 @@ DBG2 serprintf("stream_get_time_default: video_time=%d, audio_time=%d\n", s->vid
 //	stream_get_current_time
 //
 // *****************************************************************************
-// returns rt not ts
 int stream_get_current_time( STREAM *s, int *total )
 {
+	// returns rst not ts
 	if ( !s )
 		return 0;
 	if( s->parser && s->parser->get_time ) {
@@ -4642,12 +4651,7 @@ serprintf("stream_redraw\r\n");
 		}
 
 		if( s->current_frame ) {
-			s->current_frame->time = s->video_time; // not real time with audio_speed
-			VIDEO_TIME_IS_TS {
-				s->current_frame->time = s->video_time; // ts
-			} else {
-				s->current_frame->time = (int)(s->video_time / audio_interface_get_audio_speed()); // ts
-			}
+			s->current_frame->time = s->video_time; // ts
 			s->output_frame_fn( s, s->current_frame, NULL );
 		} else {
 serprintf("CANNOT redraw\r\n");

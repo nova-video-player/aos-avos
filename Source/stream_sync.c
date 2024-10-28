@@ -95,6 +95,7 @@ DBGS serprintf("sync_init\r\n");
 // *****************************************************************************
 int stream_sync_av_delay( STREAM *s )
 {
+	// returns ts
 	if ( !s->audio->valid || !s->video->valid ) {
 		// if we have no audio & video
 		return 0;
@@ -111,23 +112,15 @@ int stream_sync_av_delay( STREAM *s )
 		video_delay = 0;
 	} else {
 		// we sample before the sink, so the video frames have to pass through the sink
-		video_delay = ( s->video_sink && s->video_sink->delay )  ? s->video_sink->delay( s->video_sink ) : 0; // ts
+		video_delay = ( s->video_sink && s->video_sink->delay ) ? s->video_sink->delay( s->video_sink ) : 0; // ts
  	}
 	DBG serprintf("codec_delay=%d\n", codec_delay);
 
 	float as = audio_interface_get_audio_speed();
 	if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
-		VIDEO_TIME_IS_TS {
-			return /*codec_delay +*/ sink_delay - video_delay; // ts
-		} else { // TODO to be checked when video_time in rt works
-			return /*codec_delay +*/ sink_delay - video_delay; // rt
-		}
-	} else {
-		VIDEO_TIME_IS_TS {
-			return (int)(codec_delay / as) + sink_delay - video_delay;
-		} else { // TODO to be checked when video_time in rt works
-			return codec_delay + sink_delay - video_delay;
-		}
+		return /*codec_delay +*/ sink_delay - video_delay; // ts
+	} else { // note default sync mode currently
+		return (int)(codec_delay / as) + sink_delay - video_delay;
 	}
 }
 
@@ -139,11 +132,7 @@ int stream_sync_av_delay( STREAM *s )
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time ) // XXX_time is ts
 {
 	float as = audio_interface_get_audio_speed();
-	VIDEO_TIME_IS_TS {
-		return video_time - audio_time + stream_sync_av_delay( s ) + (int)((s->av_delay + stream_dbg_delay)/ as); // ts
-	} else { // TODO to be checked when video_time in rt works
-		return video_time - audio_time + (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay); // rt
-	}
+	return video_time - audio_time + stream_sync_av_delay( s ) + (int)((s->av_delay + stream_dbg_delay)/ as); // ts
 }
 
 // ************************************************************
@@ -156,10 +145,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	float as = audio_interface_get_audio_speed();
 	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
-			VIDEO_TIME_IS_TS {
-				s->video_sink->put_time( s->video_sink, audio_time - (stream_sync_av_delay(s) +  (int)((s->av_delay + stream_dbg_delay) / as)) );
-			} else { // TODO to be checked when video_time in rt works
-				s->video_sink->put_time( s->video_sink, audio_time - (stream_sync_av_delay(s) +  s->av_delay + stream_dbg_delay) );			}
+			s->video_sink->put_time( s->video_sink, audio_time - (stream_sync_av_delay(s) +  (int)((s->av_delay + stream_dbg_delay) / as)) ); // ts
 		}
 	}
 
@@ -190,7 +176,7 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 		return 1;
 	
 	// if audio is in the future, delay it
-	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
+	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time ); // ts
 	if ( diff < 0 ) {
 DBGY serprintf("{{A %d}} ", diff );
 		s->sync_video = 0;
@@ -236,7 +222,7 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		return 1;
 
 	// if video is in the future, delay it
-	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
+	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time ); // ts
 	// if we sample post sink, allow us to start 500ms early
 	int max = s->vtime_post_sink ? 500 : 0;
 	if ( diff > max ) {
@@ -284,14 +270,14 @@ void stream_sync( STREAM *s )
 	
 	// ... we calc the delay between audio and video frames and
 	// try adjust it to zero
-	int rdiff = _stream_av_diff( s, s->video_time, s->audio_time ); // ts if VIDEO_TIME_IS_TS
-	int diff  = MAX( MIN( rdiff,  250 ), -250 ); // ts if VIDEO_TIME_IS_TS
+	int rdiff = _stream_av_diff( s, s->video_time, s->audio_time ); // ts
+	int diff  = MAX( MIN( rdiff,  250 ), -250 ); // ts
 	
  	if( !s->delay_valid ) {
 //serprintf("(D %d)", diff );	
 		s->delay = diff; // ts
 	} else {
-		s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000; // ts if VIDEO_TIME_IS_TS (let's assume this is an average)
+		s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000; // ts (let's assume this is an average)
 	}
 	s->delay_valid = 1;
 	
@@ -302,17 +288,13 @@ DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 	}
 
 	s->drop_B = 0;
-	// msPerFrame is ts not rt
-	int delay_s; // threshold delay in ts if VIDEO_TIME_IS_TS
-	VIDEO_TIME_IS_TS {
-		delay_s = (int)(stream_max_delay * s->video->msPerFrame); // ts
-	} else { // TODO to be checked when video_time in rt works
-		delay_s = (int)(stream_max_delay * s->video->msPerFrame * as); // rt
-	}
+	// msPerFrame is rst
+	int delay_s; // threshold delay
+	delay_s = (int)(stream_max_delay * s->video->msPerFrame / as); // ts
 	if ( s->delay > delay_s ) {
 		// video is too fast, we have to slow down
 		s->drop = -1;
-		s->delay -= delay_s;
+		s->delay -= delay_s; // ts
 DBGVY serprintf("_S(%3d)_", s->delay );
 	} else if ( s->delay < (-1 * delay_s)  ) {
 		
@@ -331,14 +313,9 @@ DBGVY serprintf("XX(%d %d %d) ", num, key_time, dropped );
 		}
 
 		// video is late, we have to hurry up
-		VIDEO_TIME_IS_TS {
-			if( stream_bdrop_threshold && s->delay < (-1 * (int)(stream_bdrop_threshold  * s->video->msPerFrame)) ) {
-				s->drop_B = 1;
-			}
-		} else { // TODO to be checked when video_time in rt works
-			if( stream_bdrop_threshold && s->delay < (-1 * (int)(stream_bdrop_threshold  * s->video->msPerFrame * as)) ) {
-				s->drop_B = 1;
-			}
+		if( stream_bdrop_threshold && s->delay < (-1 * (int)(stream_bdrop_threshold  * s->video->msPerFrame / as)) ) {
+			serprintf("video late, hurry up! Bdrop %d %d\n", s->delay, stream_bdrop_threshold);
+			s->drop_B = 1;
 		}
 
 		s->drop = 1;

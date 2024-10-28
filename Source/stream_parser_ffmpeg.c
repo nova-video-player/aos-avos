@@ -879,10 +879,11 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 extern int stream_drive_wake_sleep;
 
 // audio_speed > 1 means that parsers are outputting audio/video quicker with smaller time units yielding smaller timestamps
-// this means realtime = stream->video_time * audio_speed to scale it back to real value, and conversely stream->video_time = real_time / audio_speed
-// ts = rt/as: i.e. ts<rt when as>1
+// this means that real stream time = timestamps * audio_speed or rst = ts * as
+// conversely timestamp = real stream time / audio_speed or ts = rst / as
+// ts = rst/as: i.e. ts<rst when as>1
 
-// GET_XXX_TS returns rt real time not ts timestamps
+// GET_XXX_TS returns rst real stream time not ts timestamps
 #define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale / s->audio->rate )
 #define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
 #define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale  / s->subtitle->rate )
@@ -892,7 +893,7 @@ extern int stream_drive_wake_sleep;
 //	_get_video_time
 //
 // ************************************************************
-// _get_video_time returns ts = rt / as
+// _get_video_time returns ts = rst / as
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
 	float as = audio_interface_get_audio_speed();
@@ -906,7 +907,7 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 //	_get_audio_time
 //
 // ************************************************************
-// _get_audio_time returns ts = rt / as
+// _get_audio_time returns ts = rst / as
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
 	float as = audio_interface_get_audio_speed();
@@ -920,7 +921,7 @@ static int _get_audio_time( STREAM *s, AVPacket *packet )
 //	_get_subtitle_time
 //
 // ************************************************************
-// _get_audio_time returns ts = rt / as
+// _get_audio_time returns ts = rst / as
 static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_SUB_TS( packet->pts );
@@ -1066,7 +1067,7 @@ static int _seekable( STREAM *s )
 // ************************************************************
 static int _seek( STREAM *s, int time, int pos, int dir, int flags, int force_reload, STREAM_CHUNK *sc )
 {
-	// time is rt
+	// time is rst
 DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir); 
 	AVFormatContext *fmt = ff_p->fmt;
 	int start = atime();
@@ -1416,6 +1417,8 @@ static int msk_fixup_srt( char *dst, int max, const char *src, int src_size, int
 // ************************************************************
 static int _get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_CDATA *cdata )
 {
+	DBGP serprintf("_get_subtitle_cdata stream %d \r\n", s->subtitle->stream);
+
 	if( cdata->valid != 0 ) {
 		return 0;
 	}
@@ -1510,12 +1513,11 @@ static int _calc_rate( STREAM *s )
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
 			// Time difference should be in real time (RT), not scaled by audio speed
-			int first_time   = GET_AUDIO_TS( first->packet.dts );
-			int last_time    = GET_AUDIO_TS( last->packet.dts );
+			int first_time   = GET_AUDIO_TS( first->packet.dts ); // rst
+			int last_time    = GET_AUDIO_TS( last->packet.dts ); // rst
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
-
-			s->atime_parsed = (int)((last_time - first_time) / as); // scale by audio_speed
+			s->atime_parsed = last_time - first_time; // rst
 			if( s->atime_parsed ) {
 				s->acurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
 			} else {
@@ -1532,12 +1534,11 @@ static int _calc_rate( STREAM *s )
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
 			// Time difference should be in real time (RT), not scaled by audio speed
-			int first_time   = GET_VIDEO_TS( first->packet.dts );
-			int last_time    = GET_VIDEO_TS( last->packet.dts );
+			int first_time   = GET_VIDEO_TS( first->packet.dts ); // rst
+			int last_time    = GET_VIDEO_TS( last->packet.dts ); // rest
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
-
-			s->vtime_parsed = (int)((last_time - first_time) / as); // scale by audio_speed
+			s->vtime_parsed = last_time - first_time; // rst
 			if( s->atime_parsed ) {
 				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
 			} else {

@@ -119,7 +119,6 @@ DBG serprintf("stream_subtitle:_output_sub [diff %4d]  ", f->time - t );
 	}
 	// we need to adjust the time the users sees for the delay:
 	f->time += s->subtitle_offset;
-	// s->video_time is rt
 	if( s->subtitle->gfx ) {
 DBG serprintf("stream_subtitle:_output_sub sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", s->video_time, f->time, f->duration, f->window.width, f->window.height );
 	} else {
@@ -272,14 +271,9 @@ void _sub_decode( STREAM *s )
 		}
 	}
 	if( s->subtitle->valid && !s->paused ) {
-		int time = 0; // must be rt
-		VIDEO_TIME_IS_TS {
-			// video_time is ts
-			time = (int)(audio_interface_get_audio_speed() * s->video_time);
-		} else {
-			// video_time is rt
-			time = s->video_time;
-		}
+		int time = 0; // must be rst
+		// video_time is ts
+		time = (int)(audio_interface_get_audio_speed() * s->video_time); // rst
 		DBGS serprintf("stream_subtitle:_sub_decode audio_speed=%f time %d -> %d\n", audio_interface_get_audio_speed(), s->video_time, time);
 		if( time != -1 ) {
 			// apply correction
@@ -292,13 +286,8 @@ void _sub_decode( STREAM *s )
 		} else {
 			// internal sub operates on cdata.time and needs to be scaled back to s->video_time scale otherwise subs are off using audio_speed
 			int time_ts = 0; // must be ts here
-			VIDEO_TIME_IS_TS {
-				// video_time is ts
-				time_ts = s->video_time;
-			} else {
-				// video_time is rt
-				time_ts = (int)(s->video_time / audio_interface_get_audio_speed());
-			}
+			// video_time is ts
+			time_ts = s->video_time;
 			_get_next_int_sub( s, time_ts );
 		}
 	}
@@ -447,7 +436,7 @@ serprintf("SsS: sub_stream already set\n");
 	stream_un_pause( s, was_paused );
 
 	// FIXME: there should be a better way without seek jumping
-	int current_time = stream_get_current_time( s, NULL );
+	int current_time = stream_get_current_time( s, NULL ); // rts
 	if( current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
 		// reseek to current time to get internal subtitle decoder to reinitialize
 		stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );

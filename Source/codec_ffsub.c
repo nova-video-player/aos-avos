@@ -321,7 +321,16 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		frame->window.y = top;
 		frame->window.width = bb_width;
 		frame->window.height = bb_height;
+		// Set frame resolution based on subtitle format if PGS or VobSub
+		if (self->base._subtitle.format == SUB_FORMAT_PGS) {
+			frame->width = 1920;
+			frame->height = 1080;
+		} else if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX) {
+			frame->width = 720;
+			frame->height = 576;
+		}
 		frame->colorspace = AV_IMAGE_BGRA_32;  // Set the colorspace to BGRA
+		DBGS serprintf("codec_ffsub: decoded sub width=%d, height=%d, size=%d, window=%d,%d,%d,%d\n", frame->width, frame->height, frame->size, frame->window.x, frame->window.y, frame->window.width, frame->window.height);
 	}
 
 	DBGS serprintf("codec_ffsub: decoded sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, frame->duration, frame->time);

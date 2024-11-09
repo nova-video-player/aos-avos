@@ -98,8 +98,10 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 	sub = (avos_bitmap_subtitle_t *) msg->data;
 	sub->position = position;
 	sub->duration = duration;
-	sub->orig_width = img->width;
-	sub->orig_height = img->height;
+	sub->left_corner = img->window.x;
+	sub->top_corner = img->window.y;
+	sub->orig_width = img->width; // 1920 pgs or 720 vobsub
+	sub->orig_height = img->height; // 1080 pgs or 480 vobsub
 	sub->bitmap.width = img->window.width;
 	sub->bitmap.height = img->window.height;
 	sub->bitmap.linestep = img->window.width;

@@ -51,6 +51,10 @@ typedef struct avos_bitmap_subtitle {
 	avos_bgra_bitmap_t bitmap;
 	uint32_t position;
 	uint32_t duration;
+	uint32_t frame_width;
+	uint32_t frame_height;
+	uint32_t left_corner;
+	uint32_t top_corner;
 	uint32_t orig_width;
 	uint32_t orig_height;
 	uint8_t data[];

@@ -159,7 +159,7 @@ static int register_libavos(JNIEnv *env)
 
     fields.Subtitle_createTimedBitmapSubtitleMethod =
             (*env)->GetStaticMethodID(env, fields.SubtitleClazz, "createTimedBitmapSubtitle",
-                    "(IIIILandroid/graphics/Bitmap;)"
+                    "(IIIIIILandroid/graphics/Bitmap;)"
                     "Ljava/lang/Object;");
     if (!fields.Subtitle_createTimedBitmapSubtitleMethod)
         return -1;

@@ -284,7 +284,7 @@ DBGSI serprintf(" ok");
 			render_or_drop( frame, NULL );
 			frame_q_put(&p->get_q, frame);
 		} else {
-serprintf("<BLIT %8d >", frame->time);
+DBGSI serprintf("<BLIT %8d >", frame->time);
 			// get frame from Android
 			VIDEO_FRAME *blit_frame = dequeue_blit_frame( p );
 

@@ -104,6 +104,8 @@ static int _close( STREAM_DEC_SUB *dec )
 
 static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_FRAME **pframe)
 {
+	// note that when ffmpeg sub decoding provides 0 rect for pgs it means that the previous subtitle is over
+
 	my_dec_sub *self = (my_dec_sub*)dec;
 	DBG {
 		serprintf("codec_ffsub: ffsub decode\n", data, size);
@@ -133,6 +135,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	memcpy(avdata, data, size);
 	av_packet_from_data(avpkt, avdata, size);
+	DBGS serprintf("codec_ffsub: avpkt->pts=%d, avpkt->dts=%d overridden by time=%d\n", avpkt->pts, avpkt->dts, time);
 	avpkt->pts = time;
 	avpkt->dts = time;
 
@@ -152,7 +155,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	DBGS serprintf("codec_ffsub: decoded subtitle, format %d, start %d, end %d, rects %d, pts %d\n",
-					sub.format,
+					sub.format, // 0 is graphic
 					sub.start_display_time,
 					sub.end_display_time,
 					sub.num_rects,
@@ -174,6 +177,16 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			right = MAX(right, rect->x + rect->w);
 			bottom = MAX(bottom, rect->y + rect->h);
 		}
+	}
+
+	if (sub.format == 0 && sub.num_rects == 0) {
+		// this is to signal a change of subtitles with no rect (seen with pgs without duration timing)
+		DBGS serprintf("codec_ffsub: no rect, reset bitmap\n");
+		has_bitmap = 1;
+		// create small empty bitmap
+		left = 0; top = 0; right = 1, bottom = 1;
+		frame->time = time;
+		frame->duration = 0; // cannot be -1 to get timed subtitle in java world but signal that this is a special end subtitle to SubtitleManager
 	}
 
 	if (has_bitmap) {
@@ -302,32 +315,33 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	if (has_bitmap) {
-		frame->time = sub.pts + sub.start_display_time;
-		frame->duration = sub.end_display_time - sub.start_display_time;
-		if (sub.start_display_time == 0 && sub.end_display_time == -1) {
-			// note that for PGS subtitles there is no start_display_time and end_display_time
-			// so we have to calculate the duration from the avpkt->duration but it is always 0
-			if (avpkt->duration > 0) {
-				frame->duration = avpkt->duration;
-			} else {
-				// TODO MARC fixme
-				frame->duration = 100000;
-			}
-		} else {
-			frame->duration = sub.end_display_time - sub.start_display_time;
+		if (sub.pts > 0 && sub.start_display_time > 0) {
+			frame->time = sub.pts + sub.start_display_time;
 		}
-
+		if (sub.num_rects != 0) {
+			frame->duration = sub.end_display_time - sub.start_display_time;
+			if( sub.start_display_time == 0 && sub.end_display_time == -1 ) {
+				// note that for PGS subtitles there is no start_display_time and end_display_time
+				// so we have to calculate the duration from the avpkt->duration but it is always 0
+				if( avpkt->duration > 0 ) {
+					frame->duration = avpkt->duration;
+				} else {
+					// Note: must fix a duration for PGS subtitles, real duration inferred from next 0 rect subtitle in the android domain
+					frame->duration = 100000;
+				}
+			}
+		}
 		frame->window.x = left;
 		frame->window.y = top;
 		frame->window.width = bb_width;
 		frame->window.height = bb_height;
 		// Set frame resolution based on subtitle format if PGS or VobSub
 		if (self->base._subtitle.format == SUB_FORMAT_PGS) {
-			frame->width = 1920;
-			frame->height = 1080;
+			frame->width = MAX(1920, right); // safer but breaks AR
+			frame->height = MAX(1080, bottom); // safer but breaks AR
 		} else if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX) {
-			frame->width = 720;
-			frame->height = 576;
+			frame->width = MAX(720, right); // safer but breaks AR
+			frame->height = MAX(576, bottom); // safer but breaks AR
 		}
 		frame->colorspace = AV_IMAGE_BGRA_32;  // Set the colorspace to BGRA
 		DBGS serprintf("codec_ffsub: decoded sub width=%d, height=%d, size=%d, window=%d,%d,%d,%d\n", frame->width, frame->height, frame->size, frame->window.x, frame->window.y, frame->window.width, frame->window.height);

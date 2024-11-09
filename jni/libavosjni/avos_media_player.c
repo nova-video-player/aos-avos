@@ -174,7 +174,7 @@ static void *event_thread(void *ctx)
                 if (bitmap) {
                     jextdata = (*env)->CallStaticObjectMethod(env, fields.SubtitleClazz,
                             fields.Subtitle_createTimedBitmapSubtitleMethod,
-                            sub->position, sub->duration, sub->orig_width, sub->orig_height, bitmap);
+                            sub->position, sub->duration, sub->left_corner, sub->top_corner, sub->orig_width, sub->orig_height, bitmap);
                     (*env)->DeleteLocalRef(env, bitmap);
                 }
             }

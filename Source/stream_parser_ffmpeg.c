@@ -561,6 +561,11 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 						if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
 					}
 				}
+				if (sub->gfx) {
+					// add to sub->name "[PGS]" at the end of the string if sub->format == SUB_FORMAT_PGS or "[VOBSUB]" if sub->format == SUB_FORMAT_DVD_GFX
+					int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, sub->format == SUB_FORMAT_PGS ? " [PGS]" : " [VOBSUB]");
+					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN -1] = '\0';
+				}
 				priv->av.subs_max ++;
 				discard = 0;
 			}

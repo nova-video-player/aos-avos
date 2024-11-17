@@ -482,13 +482,14 @@ DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				}
 
 				if (lang) {
+					strnZcpy( audio->lang, lang->value, AV_NAME_LEN );
+					int n;
 					if (title) {
-						int n = snprintf(audio->name, AV_NAME_LEN, "%s (l_%s)", audio->name, lang->value);
-						if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN - 1] = '\0';
+						n = snprintf(audio->name, AV_NAME_LEN, "%s (l_%s)", audio->name, lang->value);
 					} else {
-						int n = snprintf(audio->name, AV_NAME_LEN, "l_%s", lang->value);
-						if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN - 1] = '\0';
+						n = snprintf(audio->name, AV_NAME_LEN, "l_%s", lang->value);
 					}
+					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN - 1] = '\0';
 				}
 
 				if (st->disposition && st->disposition != AV_DISPOSITION_DEFAULT) {
@@ -534,6 +535,7 @@ DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 				sub->valid          = 1;
 				sub->codec_id	    = codecpar->codec_id;
 				strnZcpy( sub->codec_name, desc ? desc->name : "", AV_NAME_LEN );
+				serprintf("sub->codec_name %s\n", sub->codec_name);
 				sub->format         = fmt;
 				sub->gfx            = (sub->format == SUB_FORMAT_DVD_GFX || sub->format == SUB_FORMAT_PGS) ? 1 : 0;
 				sub->stream         = i;
@@ -550,20 +552,17 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 
 				if (lang) {
 					//snprintf(sub->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
+					// copy into sub->lang, lang
+					strnZcpy( sub->lang, lang->value, AV_NAME_LEN );
+					int n;
 					if (title) {
-						int n = snprintf(sub->name, AV_NAME_LEN, "%s (l_%s)", sub->name, lang->value);
-						if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN - 1] = '\0';
+						n = snprintf(sub->name, AV_NAME_LEN, "%s (l_%s)", sub->name, lang->value);
 					} else {
-						int n = snprintf(sub->name, AV_NAME_LEN, "l_%s", lang->value);
-						if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN - 1] = '\0';
+						n = snprintf(sub->name, AV_NAME_LEN, "l_%s", lang->value);
 					}
-				}
-
-				if (sub->gfx) {
-					// add to sub->name "[PGS]" at the end of the string if sub->format == SUB_FORMAT_PGS or "[VOBSUB]" if sub->format == SUB_FORMAT_DVD_GFX
-					int n = snprintf(sub->name, AV_NAME_LEN, "%s%s", sub->name, sub->format == SUB_FORMAT_PGS ? " [PGS]" : " [VOBSUB]");
 					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN - 1] = '\0';
 				}
+
 				priv->av.subs_max ++;
 				discard = 0;
 			}

@@ -618,6 +618,7 @@ typedef struct _audio_props {
 					// 0 == no downmix
 	UINT64  codec_delay;
 	UINT64  seek_preroll;
+	char	lang[AV_NAME_LEN + 1];
 } AUDIO_PROPERTIES;
 
 typedef struct _video_props {
@@ -659,6 +660,7 @@ typedef struct _sub_props {
 	char	path[MAX_NAME_LEN + 1];
 	int	gfx;
 	int	ext;
+	char lang[AV_NAME_LEN + 1];
 } SUB_PROPERTIES;
 
 void show_audio_props( AUDIO_PROPERTIES *audio );

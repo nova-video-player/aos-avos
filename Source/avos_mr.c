@@ -273,6 +273,8 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 
 			ADD_INT(gap_key + AVOS_MR_METADATA_AUDIO_TRACK_VBR, audiop->vbr);
 
+			ADD_STR(gap_key + AVOS_MR_METADATA_AUDIO_TRACK_LANGUAGE, audiop->lang);
+
 			int supported = 0;
 			STREAM_DEC_AUDIO *dec = stream_get_audio_dec( audiop );
 			if( dec ) {
@@ -290,6 +292,10 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 			gap_key = AVOS_MR_METADATA_SUBTITLE_TRACK + i * AVOS_MR_METADATA_SUBTITLE_TRACK_MAX;
 			ADD_STR(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_NAME, av->sub[i].name);
 			ADD_STR(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_PATH, av->sub[i].path);
+			// note: no ADD_BOOL macro, so use ADD_INT
+			ADD_INT(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_IS_GFX, av->sub[i].gfx);
+			ADD_INT(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_FORMAT, av->sub[i].format);
+			ADD_STR(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_LANGUAGE, av->sub[i].lang);
 		}
 	}
 

@@ -486,13 +486,6 @@ DBGP serprintf("arate=%d; ascale=%d\n", audio->rate, audio->scale);
 
 				if (lang) {
 					strnZcpy( audio->lang, lang->value, AV_NAME_LEN );
-					int n;
-					if (title) {
-						n = snprintf(audio->name, AV_NAME_LEN, "%s (l_%s)", audio->name, lang->value);
-					} else {
-						n = snprintf(audio->name, AV_NAME_LEN, "l_%s", lang->value);
-					}
-					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN - 1] = '\0';
 				}
 
 				if (st->disposition && st->disposition != AV_DISPOSITION_DEFAULT) {
@@ -554,16 +547,7 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				}
 
 				if (lang) {
-					//snprintf(sub->name, AV_NAME_LEN, "%s", map_ISO639_code( lang->value ) );
-					// copy into sub->lang, lang
 					strnZcpy( sub->lang, lang->value, AV_NAME_LEN );
-					int n;
-					if (title) {
-						n = snprintf(sub->name, AV_NAME_LEN, "%s (l_%s)", sub->name, lang->value);
-					} else {
-						n = snprintf(sub->name, AV_NAME_LEN, "l_%s", lang->value);
-					}
-					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN - 1] = '\0';
 				}
 
 				priv->av.subs_max ++;

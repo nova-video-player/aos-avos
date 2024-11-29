@@ -78,9 +78,9 @@ static void bgra32_to_argb888(uint8_t *src, uint32_t src_width, uint32_t src_hei
 {
 	// Define the source and destination image planes
 	const uint8_t *src_planes[1] = { src };
-	const int src_stride[1] = { src_linestep };
+	int src_stride[1] = { (int)src_linestep }; // Change to int
 	uint8_t *dst_planes[1] = { (uint8_t *)dst };
-	const int dst_stride[1] = { src_width * 4 };
+	int dst_stride[1] = { (int)(src_width * 4) }; // Change to int
 
 	// Use av_image_copy to copy the data
 	av_image_copy(dst_planes, dst_stride, src_planes, src_stride, AV_PIX_FMT_BGRA, src_width, src_height);

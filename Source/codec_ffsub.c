@@ -244,9 +244,18 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			int start, end;
 			char *pos = rect->ass;
 			// surprisingly start and end are zero out of the ffmpeg decoder: try to infer it from ass txt and if it fails  parse the data
-			// typical format is rect->ass="rect->ass=1,0,Default,,0,0,0,,4704:7998,- Kids?\N- Phil, would you get them?"
+			// typical format for ffmpeg 7.1 is rect->ass="1,0,Default,,0,0,0,,4704:7998,- Kids?\N- Phil, would you get them?"
 			// skip to 9th comma to extract start and end times
-			for (int i = 0; i < 8 && pos != NULL; i++) {
+			// typical format for ffmpeg 4.4 is rect->ass="Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,1217:2956,Ronflement léger"
+			int skipCommas; // number of commas to skip
+			if (strncmp(pos, "Dialogue:", 9) == 0) {
+				// ffmpeg 4.4 decoding format
+				skipCommas = 9;
+			} else {
+				// ffmpeg 7.1 decoding format
+				skipCommas = 8;
+			}
+			for (int i = 0; i < skipCommas && pos != NULL; i++) {
 				pos = strchr(pos, ',');
 				if (pos) pos++;
 			}

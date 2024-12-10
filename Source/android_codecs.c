@@ -44,6 +44,7 @@
 extern JavaVM *myVm;
 static jclass jCodecDiscoveryClass;
 static jmethodID jCodecSupportedMethod;
+static jmethodID jGetCodecForProfileMethod;
 
 void acodecs_init(void) {
     int willDetach = 0;
@@ -74,6 +75,15 @@ void acodecs_init(void) {
 	exception = (*env)->ExceptionOccurred(env);
 	if (exception) {
 		ERR serprintf("!!!EXCEPTION: acodecs_init:isCodecTypeSupported\n");
+		(*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        return;
+    }
+
+	jGetCodecForProfileMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass, "getCodecForProfile", "(Ljava/lang/String;I)Ljava/lang/String;");
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: acodecs_init:getCodecForProfile\n");
 		(*env)->ExceptionDescribe(env);
         (*env)->ExceptionClear(env);
         return;
@@ -116,6 +126,51 @@ int acodecs_is_type_supported(const char *type, int is_sw_allowed)
 		(*myVm)->DetachCurrentThread(myVm);
 
 	return result;
+}
+
+const char* acodecs_get_for_profile(const char *mime_type, int profile)
+{
+	JNIEnv * env = NULL;
+	int i;
+	int willDetach = 0;
+    const char *ret = NULL;
+
+	if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
+		DBG serprintf("ERROR: %s GetEnv failed\n", __FUNCTION__);
+		if(((*myVm)->AttachCurrentThread(myVm, &env, NULL)) != 0 ) {
+			ERR serprintf("ERROR: %s Attach to JVM failed\n", __FUNCTION__);
+                        return 0;
+		}
+		else
+			willDetach = 1;
+	}
+
+	const jstring string = (*env)->NewStringUTF(env, mime_type);
+	jstring result = (*env)->CallStaticObjectMethod(env, jCodecDiscoveryClass, jGetCodecForProfileMethod, string, (jint) profile);
+	jthrowable exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: acodecs_init:acodecs_is_type_supported CallStaticBooleanMethod\n");
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		return NULL;
+	}
+	(*env)->DeleteLocalRef(env, string);
+
+    if (result == NULL) goto end;
+    const char* cResult = (*env)->GetStringUTFChars(env, result, NULL);
+    if (cResult == NULL) goto end;
+    ERR serprintf("Getting %s %s %d returned %s\n", __FUNCTION__, mime_type, profile, cResult);
+
+    // XXX Caller must free me!
+    ret = strdup(cResult);
+    (*env)->ReleaseStringUTFChars(env, result, cResult);
+
+	
+end:
+	if (willDetach)
+		(*myVm)->DetachCurrentThread(myVm);
+
+	return ret;
 }
 
 int acodecs_is_supported(int format, int is_video, int is_sw_allowed)

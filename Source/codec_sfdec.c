@@ -28,6 +28,7 @@
 #include "xdm_utils.h"
 #include "pts_reorder.h"
 #include "sfdec.h"
+#include "android_codec.h"
 
 #include <time.h>
 #ifdef CONFIG_STREAM
@@ -644,7 +645,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			video->duration * 1000, 768 * 1024 /* input_size */,
 			surface_handle,
 			extradata, extradata_size,
-			&pts_reorder);
+			&pts_reorder, NULL);
 
 	if (!p->sfdec) {
 		CLOG("sfdec_new failed");

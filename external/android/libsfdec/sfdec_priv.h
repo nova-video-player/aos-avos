@@ -26,7 +26,7 @@ typedef sfdec_priv_t* (*sfdec_init_t)(sfdec_codec_t codec,
 		    void *surface_handle,
 		    void *extradata, size_t extradata_size,
 		    int *pts_reorder, int sampleSize, int channels, int bitrate,
-		    int64_t codec_delay, int64_t seek_preroll);
+		    int64_t codec_delay, int64_t seek_preroll, const char* codec_name);
 
 typedef void	(*sfdec_destroy_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_start_t)(sfdec_priv_t *);

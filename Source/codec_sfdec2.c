@@ -30,6 +30,7 @@
 #include "pts_reorder.h"
 #include "sfdec.h"
 #include "android_window.h"
+#include "android_codec.h"
 
 #include <time.h>
 #ifdef CONFIG_STREAM
@@ -658,6 +659,20 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	if (sfdec_force_hw == 0)
 		flags |= SFDEC_FLAG_SWDEC;
 
+
+    const char *decoder_name = NULL;
+    if (video->format == VIDEO_FORMAT_DOLBY_VISION) {
+		DBGCV2 serprintf("dovi profile dtr %s\n", acodecs_get_for_profile("video/dolby-vision", 16));
+		DBGCV2 serprintf("dovi profile dth %s\n", acodecs_get_for_profile("video/dolby-vision", 64));
+		DBGCV2 serprintf("dovi profile st %s\n", acodecs_get_for_profile("video/dolby-vision", 256));
+		DBGCV2 serprintf("dovi profile stn %s\n", acodecs_get_for_profile("video/dolby-vision", 32));
+		DBGCV2 serprintf("dovi profile dtb %s\n", acodecs_get_for_profile("video/dolby-vision", 128));
+		DBGCV2 serprintf("dovi profile der %s\n", acodecs_get_for_profile("video/dolby-vision", 4));
+		DBGCV2 serprintf("dovi profile den %s\n", acodecs_get_for_profile("video/dolby-vision", 8));
+		DBGCV serprintf("dovi profile myself %s\n", acodecs_get_for_profile("video/dolby-vision", video->dv_profile));
+        decoder_name = acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+    }
+
 	width = video->width;
 	height = video->height;
 	p->sfdec = sfdec_new(SFDEC_TYPE_MEDIACODEC,
@@ -667,7 +682,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			video->duration * 1000, input_size,
 			p->surface_handle,
 			extradata, extradata_size,
-			&pts_reorder);
+			&pts_reorder, decoder_name);
 	apply_rotation(p, video->rotation, width, height, &width, &height);
 
 	if (!p->sfdec) {

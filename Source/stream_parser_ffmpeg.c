@@ -38,6 +38,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
+#include <libavutil/dovi_meta.h>
 
 #include <string.h>
 
@@ -435,8 +436,42 @@ serprintf("FF: parse H264 SPS\n");
 #else
                     if(sd.type == AV_PKT_DATA_DOVI_CONF) {
 #endif
+                        AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)sd.data;
+                        if (video->format == VIDEO_FORMAT_HEVC) {
+                            switch(dovi_record->dv_profile) {
+                                // Mapping source: Kodi's DVDVideoCodecAndroidMediaCodec.cpp
+                                case 4:
+                                    video->dv_profile = 16; //DolbyVisionProfileDvheDtr
+                                    break;
+                                case 5:
+                                    video->dv_profile = 32; //DolbyVisionProfileDvheStn 
+                                    break;
+                                case 7:
+                                    video->dv_profile = 256; //DolbyVisionProfileDvheSt
+                                    break;
+                                case 8:
+                                    video->dv_profile = 256; //DolbyVisionProfileDvheSt, should be Dtb but Kodi says to use St
+                                    break;
+                                case 9:
+                                    video->dv_profile = 512; //DolbyVisionProfileDvavSe
+                                    break;
+                                default:
+                                    serprintf("Unsupported Dolby HEVC profile %d", dovi_record->dv_profile);
+                                    break;
+                            }
+                        } else if (video->format == VIDEO_FORMAT_AV1) {
+                            if (dovi_record->dv_profile == 10) {
+                                video->dv_profile = 0x400;//DolbyVisionProfileDvav110 
+                            } else {
+                                serprintf("Unsupported Dolby AV1 profile %d", dovi_record->dv_profile);
+                            }
+                        } else {
+                            serprintf("Dolby Vision in an unknown codec %d", video->format);
+                        }
+
                         video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
                         video->format = VIDEO_FORMAT_DOLBY_VISION;
+
                         serprintf("HELLO, This is a dolby vision content!\r\n");
                     }
                 }

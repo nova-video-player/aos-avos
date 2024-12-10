@@ -89,7 +89,7 @@ sfdec_t*	sfdec_new(sfdec_type_t type,
 		    int64_t duration_us, int input_size,
 		    void *surface_handle,
 		    void *extradata, size_t extradata_size,
-		    int *pts_reorder);
+		    int *pts_reorder, const char* codec_name);
 
 void		sfdec_delete(sfdec_t *sfdec);
 int		sfdec_start(sfdec_t *);

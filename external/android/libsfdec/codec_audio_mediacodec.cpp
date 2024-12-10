@@ -95,7 +95,7 @@ static sfdec_priv_t *dec_audio_init(sfdec_codec_t codec,
             void *surface_handle,
             void *extradata, size_t extradata_size,
             int *pts_reorder, int samplesPerSec, int channels, int bitrate,
-            int64_t codec_delay, int64_t seek_preroll)
+            int64_t codec_delay, int64_t seek_preroll, const char *codec_name)
 {
     media_status_t err;
     const char *mime_type;

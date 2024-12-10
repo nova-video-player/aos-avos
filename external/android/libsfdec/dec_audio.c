@@ -50,7 +50,7 @@ sfdec_t* dec_audio_new(	sfdec_codec_t codec,int64_t duration_us, int input_size,
 		    duration_us,input_size,
 		    NULL, extradata, extradata_size,
 		    0, samplesPerSec, channels, bitrate,
-		    codec_delay, seek_preroll);
+		    codec_delay, seek_preroll, NULL);
 	if (!dec_audio->priv) {
 		free(dec_audio);
 		return NULL;

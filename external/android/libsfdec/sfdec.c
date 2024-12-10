@@ -34,7 +34,7 @@ sfdec_t* sfdec_new(sfdec_type_t type,
     int64_t duration_us, int input_size,
     void *surface_handle,
     void *extradata, size_t extradata_size,
-    int *pts_reorder)
+    int *pts_reorder, const char* decoder_name)
 {
 	sfdec_t *sfdec;
 	void *itf = NULL;
@@ -68,7 +68,7 @@ sfdec_t* sfdec_new(sfdec_type_t type,
 			width, height, rotation,
 			duration_us, input_size,
 			surface_handle,
-			extradata, extradata_size, pts_reorder,0,0,0,0,0);
+			extradata, extradata_size, pts_reorder,0,0,0,0,0, decoder_name);
 	if (!sfdec->priv) {
 		free(sfdec);
 		return NULL;

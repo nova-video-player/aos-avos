@@ -652,6 +652,9 @@ typedef struct _video_props {
 	// for MPG4
 	int	vol;
 	int	sprite_usage;
+
+    // for dolby vision
+    int dv_profile;
 } VIDEO_PROPERTIES;
 
 typedef struct _sub_props {

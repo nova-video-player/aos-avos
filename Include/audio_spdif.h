@@ -25,4 +25,6 @@ int spdif_set_passthrough(int on);
 int spdif_is_passthrough_on();
 void set_hdmi_supported_audio_codecs(long flag);
 long get_hdmi_supported_audio_codecs();
+int get_hdmi_supports_iec_8ch192khz(void);
+int get_hdmi_supports_iec(void);
 #endif

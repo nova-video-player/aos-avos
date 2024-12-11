@@ -261,6 +261,16 @@ long get_hdmi_supported_audio_codecs()
 	return hdmi_audio_codecs_flag;
 }
 
+// Supporting one of DTS-HD or TrueHD is a likely indicator for supporting IEC61937 8ch 192khz
+int get_hdmi_supports_iec_8ch192khz() {
+    return CHECK_BIT(get_hdmi_supported_audio_codecs(), ENCODING_DTS_HD) ||
+                CHECK_BIT(get_hdmi_supported_audio_codecs(), ENCODING_DOLBY_TRUEHD);
+}
+
+int get_hdmi_supports_iec() {
+    return CHECK_BIT(get_hdmi_supported_audio_codecs(), ENCODING_IEC61937);
+}
+
 int spdif_init( AUDIO_PROPERTIES *a )
 {
 DBGS serprintf( "spdif_init\n");
@@ -297,12 +307,13 @@ serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
 	}
 
 	char *dtsrate;
-	if ( a->samplesPerSec == 48000 )
-		dtsrate = "dtshd_rate=0";
-	else if ( a->samplesPerSec == 192000 && a->channels == 2 )
-		dtsrate = "dtshd_rate=192000";
-	else
-		dtsrate = "dtshd_rate=768000";
+    if (a->codec_id == WAVE_FORMAT_DTS_HD_MA || a->codec_id == WAVE_FORMAT_DTS_HD) {
+        if (get_hdmi_supports_iec_8ch192khz()) {
+            dtsrate = "dtshd_rate=768000";
+        } else {
+            dtsrate = "dtshd_rate=0";
+        }
+    }
 	if ( av_set_options_string( &fctxt->av_class, dtsrate, "=", ":" ) < 0 )
 		serprintf( "Failed2 setting dtshd rate to %s\n", dtsrate );
 

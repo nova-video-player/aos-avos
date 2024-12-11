@@ -29,6 +29,8 @@
 #include "atime.h"
 #include "util.h"
 
+extern int get_hdmi_supports_iec_8ch192khz(void);
+extern int get_hdmi_supports_iec(void);
 #include "jni.h"
 
 #define DBG  if(0)
@@ -311,7 +313,34 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		default:
 			track_format = 13; // AudioFormat.ENCODING_IEC61937
 		}
-	}
+	} else if(at->passthrough == 1 && device_get_android_api() >= 24 && get_hdmi_supports_iec()) {
+        track_format = 13; // AudioFormat.ENCODING_IEC61937
+        switch(at->format) {
+            case WAVE_FORMAT_AC3:
+            case WAVE_FORMAT_DTS:
+                track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+                rate = 48000;
+                break;
+            case WAVE_FORMAT_EAC3:
+                track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+                rate = 192000;
+                break;
+            case WAVE_FORMAT_DTS_HD_MA:
+            case WAVE_FORMAT_DTS_HD:
+                // Note: the logic to select DTS-core vs DTS-HD needs to be identical with the one selecting dtshd_rate
+                if (get_hdmi_supports_iec_8ch192khz()) {
+                    track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+                    rate = 192000;
+                } else {
+                    track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+                    rate = 48000;
+                }
+            case WAVE_FORMAT_TRUEHD:
+                track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+                rate = 192000;
+                break;
+        }
+    }
 
 	int reinit = 0;
 	if( at->init ) {

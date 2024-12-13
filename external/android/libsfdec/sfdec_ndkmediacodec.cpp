@@ -60,6 +60,10 @@ struct sfdec_mediacodec
 
     int64_t last_off;
     int64_t last_monotonic;
+
+    int64_t last_ts_us;
+    int64_t last_fixed_ts_us;
+    int64_t last_lengths[16];
 };
 
 struct sfbuf
@@ -327,6 +331,9 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
     }
 }
 
+static int64_t _start_ts = 0;
+static int64_t _last_ts = 0;
+
 static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap)
 {
     media_status_t err;
@@ -354,8 +361,69 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 // display first frame there asap
                 asap = 1;
             }
+            if (_start_ts == 0) _start_ts = now_ts;
+
+            // Store the length of the 16 last frames
+            for(int i=14; i >= 0; i--) {
+                sfdec->last_lengths[i+1] = sfdec->last_lengths[i];
+            }
+            sfdec->last_lengths[0] = (sfbuf->timestamp_us - sfdec->last_ts_us);
+            sfdec->last_ts_us = sfbuf->timestamp_us;
+
+            DBG LOG("%lld %lld %lld; %lld %lld %lld; %lld %lld %lld; %lld %lld %lld",
+                    sfdec->last_lengths[0], sfdec->last_lengths[1], sfdec->last_lengths[2],
+                    sfdec->last_lengths[3], sfdec->last_lengths[4], sfdec->last_lengths[5],
+                    sfdec->last_lengths[6], sfdec->last_lengths[7], sfdec->last_lengths[8],
+                    sfdec->last_lengths[9], sfdec->last_lengths[10], sfdec->last_lengths[11]);
+
+            // Using the up-to-date frame lengths, we check if we see a repeating pattern
+            // Note that we compute this at every frame in case there is a pattern that somehow disappears (for instance with varying frame rate)
+
+            // First, if we find that all frames are identically-lengthed, then there is nothing to correct
+            int need_fix = 0;
+            for(int i=1; i < 16; i++) {
+                if ( sfdec->last_lengths[0] != sfdec->last_lengths[i])
+                    need_fix = 1;
+            }
+            if (need_fix) {
+                int64_t replace_length = 0;
+                // We try pattern lengths 2/3/4/5/6/7, and try to look for a repetition
+                // Typical pattern at 1ms frame unit:
+                // 24fps = 42ms 42ms 41ms
+                // 60fps = 17ms 17ms 16ms
+                for(int pattern_length=2; pattern_length < 8; pattern_length++) {
+                    if (memcmp(sfdec->last_lengths, sfdec->last_lengths + pattern_length, pattern_length * sizeof(sfdec->last_lengths[0])) == 0) {
+                        DBG LOG("Found pattern size %d", pattern_length);
+                        // If we indeed found a repetition, we can say that the frame length is the average of them during one loop
+                        int64_t length = 0;
+                        for(int i=0; i<pattern_length; i++) {
+                            length += sfdec->last_lengths[i];
+                        }
+                        length /= pattern_length;
+                        DBG LOG("Gave a frame length of %lld", length);
+                        replace_length = length;
+                        break;
+                    }
+                }
+
+                // If we computed "real" frame length, use that, and replace original timestamps with it
+                if (replace_length) {
+                    if (sfdec->last_fixed_ts_us) {
+                        sfbuf->timestamp_us = sfdec->last_fixed_ts_us + replace_length;
+                    } else {
+                        sfbuf->timestamp_us = sfdec->last_ts_us + replace_length;
+                    }
+                    sfdec->last_fixed_ts_us = sfbuf->timestamp_us;
+                    DBG LOG("Replacing timestamp");
+                }
+            } else {
+                sfdec->last_fixed_ts_us = 0;
+            }
+
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             int64_t ts = sfbuf->timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+            DBG LOG("D %d %lld @%lld ; %lld", asap, ts - _start_ts, ts - now_ts,  ts - _last_ts);
+            _last_ts = ts;
 
             if (asap)
                 DBG LOG("Scheduling frame in a jiffy");

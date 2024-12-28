@@ -308,8 +308,6 @@ serprintf("cannot find codec\r\n");
 	p->actx->bit_rate         = audio->bytesPerSec * 8;
 	p->actx->channels         = audio->channels;
 	p->actx->request_channel_layout = av_get_default_channel_layout(audio->channels);
-	if (p->request_channels == 2)
-		p->actx->request_channel_layout = av_get_default_channel_layout(audio->channels ? MIN(2, audio->channels) : 2);
 
 DBGCA2	serprintf("requested channel layout id %d for %d channel(s)\r\n", p->actx->request_channel_layout, p->actx->channels);
 

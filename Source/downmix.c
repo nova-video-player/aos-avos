@@ -24,6 +24,19 @@
 
 #define DBGCA3 	if(Debug[DBG_CA] > 2 )
 
+// ITU-R BS.775-3 recommended coefficients for downmixing
+// Front Center: 1.0, Subwoofer: 0.5, Rear/Surround: 0.7
+const float downmix_coeff[9] = {
+	1.0f, // CH_FL (Front Left)
+	1.0f, // CH_FR (Front Right)
+	0.7f, // CH_CTR (Center) -3dB
+	0.5f, // CH_SUB (Subwoofer) -4.5dB
+	0.7f, // CH_BL (Back Left) -3dB
+	0.7f, // CH_BR (Back Right) -3dB
+	0.7f, // CH_SL (Side Left) -3dB
+	0.7f  // CH_SR (Side Right) -3dB
+};
+
 static inline int clamp( int v )
 {
 	if( v > 32767 ) {
@@ -73,8 +86,23 @@ DBGCA3 serprintf("dmix: num %5d  ch %d  bits %d\r\n", samples, channels, bits );
 					ch[map[c]] = getS32LE( src ); src += 4;
 				}
 			}
-			*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) >> shift ); // left
-			*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) >> shift ); // right
+			//*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) >> shift ); // left
+			//*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) >> shift ); // right
+			*pcm++ = clamp((int32_t)(
+										downmix_coeff[CH_FL] * ch[CH_FL] +
+										downmix_coeff[CH_CTR] * ch[CH_CTR] +
+										downmix_coeff[CH_SUB] * ch[CH_SUB] +
+										downmix_coeff[CH_BL] * ch[CH_BL] +
+										downmix_coeff[CH_SL] * ch[CH_SL]
+										) >> shift); // left
+
+			*pcm++ = clamp((int32_t)(
+										downmix_coeff[CH_FR] * ch[CH_FR] +
+										downmix_coeff[CH_CTR] * ch[CH_CTR] +
+										downmix_coeff[CH_SUB] * ch[CH_SUB] +
+										downmix_coeff[CH_BR] * ch[CH_BR] +
+										downmix_coeff[CH_SR] * ch[CH_SR]
+										) >> shift); // right
 		}
 	}
 }
@@ -123,8 +151,23 @@ DBGCA3 serprintf("dmixP: num %5d  ch %d  bits %d\r\n", samples, channels, bits )
 					ch[map[c]] = getS32LE( src[c] ); src[c] += 4;
 				}
 			}
-			*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) >> shift ); // left
-			*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) >> shift ); // right
+			//*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) >> shift ); // left
+			//*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) >> shift ); // right
+			*pcm++ = clamp((int32_t)(
+										downmix_coeff[CH_FL] * ch[CH_FL] +
+										downmix_coeff[CH_CTR] * ch[CH_CTR] +
+										downmix_coeff[CH_SUB] * ch[CH_SUB] +
+										downmix_coeff[CH_BL] * ch[CH_BL] +
+										downmix_coeff[CH_SL] * ch[CH_SL]
+										) >> shift); // left
+
+			*pcm++ = clamp((int32_t)(
+										downmix_coeff[CH_FR] * ch[CH_FR] +
+										downmix_coeff[CH_CTR] * ch[CH_CTR] +
+										downmix_coeff[CH_SUB] * ch[CH_SUB] +
+										downmix_coeff[CH_BR] * ch[CH_BR] +
+										downmix_coeff[CH_SR] * ch[CH_SR]
+										) >> shift); // right
 		}
 	}
 }
@@ -156,8 +199,23 @@ DBGCA3 serprintf("dmix_flt: num %5d  ch %d  bits %d\r\n", samples, channels, bit
 					ch[map[c]] = clamp( lrintf( *(double*)src * (1 << 15))); src += 8;
 				}  
 			}
-			*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) ); // left
-			*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) ); // right
+			//*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) ); // left
+			//*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) ); // right
+			*pcm++ = clamp(lrintf(
+				downmix_coeff[CH_FL] * ch[CH_FL] +
+				downmix_coeff[CH_CTR] * ch[CH_CTR] +
+				downmix_coeff[CH_SUB] * ch[CH_SUB] +
+				downmix_coeff[CH_BL] * ch[CH_BL] +
+				downmix_coeff[CH_SL] * ch[CH_SL]
+				)); // left
+
+			*pcm++ = clamp(lrintf(
+				downmix_coeff[CH_FR] * ch[CH_FR] +
+				downmix_coeff[CH_CTR] * ch[CH_CTR] +
+				downmix_coeff[CH_SUB] * ch[CH_SUB] +
+				downmix_coeff[CH_BR] * ch[CH_BR] +
+				downmix_coeff[CH_SR] * ch[CH_SR]
+				)); // right
 		}
 	}
 }
@@ -195,8 +253,23 @@ DBGCA3 serprintf("dmix_fltP: num %5d  ch %d  bits %d\r\n", samples, channels, bi
 					ch[map[c]] = clamp( lrintf( *(double*)src[c] * (1 << 15))); src[c] += 8;
 				}  
 			}
-			*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) ); // left
-			*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) ); // right
+			//*pcm++ = clamp( (ch[CH_FL] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BL] + ch[CH_SL]) ); // left
+			//*pcm++ = clamp( (ch[CH_FR] + ch[CH_CTR] + ch[CH_SUB] + ch[CH_BR] + ch[CH_SR]) ); // right
+			*pcm++ = clamp(lrintf(
+				downmix_coeff[CH_FL] * ch[CH_FL] +
+				downmix_coeff[CH_CTR] * ch[CH_CTR] +
+				downmix_coeff[CH_SUB] * ch[CH_SUB] +
+				downmix_coeff[CH_BL] * ch[CH_BL] +
+				downmix_coeff[CH_SL] * ch[CH_SL]
+				)); // left
+
+			*pcm++ = clamp(lrintf(
+				downmix_coeff[CH_FR] * ch[CH_FR] +
+				downmix_coeff[CH_CTR] * ch[CH_CTR] +
+				downmix_coeff[CH_SUB] * ch[CH_SUB] +
+				downmix_coeff[CH_BR] * ch[CH_BR] +
+				downmix_coeff[CH_SR] * ch[CH_SR]
+				)); // right
 		}
 	}
 }

@@ -451,7 +451,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             void *surface_handle,
             void *extradata, size_t extradata_size,
             int *pts_reorder, int sampleSize, int channels, int bitrate,
-            int64_t codec_delay, int64_t seek_preroll)
+            int64_t codec_delay, int64_t seek_preroll, int _frame_rate_den, int _frame_rate_num)
 {
     status_t err;
     sp<MetaData> meta;

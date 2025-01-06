@@ -682,7 +682,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			video->duration * 1000, input_size,
 			p->surface_handle,
 			extradata, extradata_size,
-			&pts_reorder, decoder_name);
+			&pts_reorder, decoder_name, video->frame_rate_den, video->frame_rate_num);
 	apply_rotation(p, video->rotation, width, height, &width, &height);
 
 	if (!p->sfdec) {

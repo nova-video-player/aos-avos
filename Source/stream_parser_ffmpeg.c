@@ -352,6 +352,10 @@ DBGP serprintf("\tPAR        %d/%d\r\n", codec->sample_aspect_ratio.num, codec->
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
 				video->stream = i;
+                if (st->avg_frame_rate.den && st->r_frame_rate.den && av_q2d(st->avg_frame_rate) == av_q2d(st->r_frame_rate)) {
+                    video->frame_rate_den = st->r_frame_rate.den;
+                    video->frame_rate_num = st->r_frame_rate.num;
+                }
 
 				if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 					video->rate  = st->avg_frame_rate.num;

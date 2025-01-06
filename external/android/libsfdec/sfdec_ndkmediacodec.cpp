@@ -60,6 +60,9 @@ struct sfdec_mediacodec
 
     int64_t last_off;
     int64_t last_monotonic;
+
+    int frame_rate_den;
+    int frame_rate_num;
 };
 
 struct sfbuf
@@ -110,7 +113,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             void *surface_handle,
             void *extradata, size_t extradata_size,
             int *pts_reorder, int sampleSize, int channels, int bitrate,
-            int64_t codec_delay, int64_t seek_preroll, const char* codec_name)
+            int64_t codec_delay, int64_t seek_preroll, const char* codec_name, int video_frame_rate_den, int video_frame_rate_num)
 {
     media_status_t err;
     const char *mime_type;
@@ -136,6 +139,8 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->mNativeWindow = (ANativeWindow *)surface_handle;
     sfdec->start_off = 0;
     sfdec->start_monotonic = 0;
+    sfdec->frame_rate_den = video_frame_rate_den;
+    sfdec->frame_rate_num = video_frame_rate_num;
 
     DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
 
@@ -334,6 +339,23 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         if (asap) {
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
         } else {
+            int64_t timestamp_us = sfbuf->timestamp_us;
+            if (sfdec->frame_rate_den) {
+                int64_t tus = timestamp_us;
+                // Add half a frame, so flooring almost exact match succeeds
+                double frame_length = sfdec->frame_rate_num / ( (double)(sfdec->frame_rate_den));
+                int64_t half_frame = (1/2.0) * 1000.0 * 1000.0 / frame_length;
+                tus += half_frame;
+
+                int n = (float)tus / (1000.0 * 1000.0 / frame_length);
+                LOG("n-th frame %d", n);
+                int64_t tus_new = n * 1000.0 * 1000.0  / frame_length;
+                LOG("After patching %lld", tus_new);
+                LOG("Delta %lld", tus - tus_new - half_frame);
+                timestamp_us = tus_new;
+            }
+
+
             int64_t now_ts;
 
             {
@@ -342,7 +364,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 now_ts = now.tv_sec * 1000000000LL + now.tv_nsec;
             }
 
-            int64_t off_delta = sfbuf->timestamp_us * 1000LL - sfdec->last_off;
+            int64_t off_delta = timestamp_us * 1000LL - sfdec->last_off;
             if (
                     !sfdec->start_off || //Got reset
                     (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL || //If we had no frame since the last 500ms, user did pause/resume
@@ -350,12 +372,12 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                     ) {
                 // We store the first frame (its realtime timestamp -- now & codec timestamp)
                 sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 100ms
-                sfdec->start_off = sfbuf->timestamp_us * 1000LL;
+                sfdec->start_off = timestamp_us * 1000LL;
                 // display first frame there asap
                 asap = 1;
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
-            int64_t ts = sfbuf->timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+            int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
 
             if (asap)
                 DBG LOG("Scheduling frame in a jiffy");
@@ -363,7 +385,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 DBG LOG("Scheduling frame in %lld", ts - now_ts);
 
             sfdec->last_monotonic = now_ts;
-            sfdec->last_off = sfbuf->timestamp_us * 1000LL;
+            sfdec->last_off = timestamp_us * 1000LL;
 
             if (asap)
                 err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);

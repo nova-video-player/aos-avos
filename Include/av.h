@@ -655,6 +655,9 @@ typedef struct _video_props {
 
     // for dolby vision
     int dv_profile;
+
+    int frame_rate_den;
+    int frame_rate_num;
 } VIDEO_PROPERTIES;
 
 typedef struct _sub_props {

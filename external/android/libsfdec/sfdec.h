@@ -101,6 +101,7 @@ int		sfdec_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
 int		sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render, int asap);
 int		sfdec_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf);
 int		sfdec_reset_ts(sfdec_t *sfdec);
+int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num);
 
 #if __cplusplus
 }

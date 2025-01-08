@@ -61,8 +61,11 @@ struct sfdec_mediacodec
     int64_t last_off;
     int64_t last_monotonic;
 
-    int frame_rate_den;
-    int frame_rate_num;
+    int video_frame_rate_den;
+    int video_frame_rate_num;
+    int playback_speed_den;
+    int playback_speed_num;
+    int n_late;
 };
 
 struct sfbuf
@@ -139,8 +142,10 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->mNativeWindow = (ANativeWindow *)surface_handle;
     sfdec->start_off = 0;
     sfdec->start_monotonic = 0;
-    sfdec->frame_rate_den = video_frame_rate_den;
-    sfdec->frame_rate_num = video_frame_rate_num;
+    sfdec->video_frame_rate_den = video_frame_rate_den;
+    sfdec->video_frame_rate_num = video_frame_rate_num;
+    sfdec->playback_speed_den = 1;
+    sfdec->playback_speed_num = 1;
 
     DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
 
@@ -340,18 +345,22 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
         } else {
             int64_t timestamp_us = sfbuf->timestamp_us;
-            if (sfdec->frame_rate_den) {
+            LOG("Received og timestamp %lld", timestamp_us);
+            if (sfdec->video_frame_rate_den) {
+                int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
+                int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
                 int64_t tus = timestamp_us;
+                LOG("Got rendering frame rate %d / %d", rendering_frame_rate_num, rendering_frame_rate_den);
                 // Add half a frame, so flooring almost exact match succeeds
-                double frame_length = sfdec->frame_rate_num / ( (double)(sfdec->frame_rate_den));
+                double frame_length = rendering_frame_rate_num / ( (double)(rendering_frame_rate_den));
                 int64_t half_frame = (1/2.0) * 1000.0 * 1000.0 / frame_length;
                 tus += half_frame;
 
                 int n = (float)tus / (1000.0 * 1000.0 / frame_length);
-                LOG("n-th frame %d", n);
+                //LOG("n-th frame %d", n);
                 int64_t tus_new = n * 1000.0 * 1000.0  / frame_length;
-                LOG("After patching %lld", tus_new);
-                LOG("Delta %lld", tus - tus_new - half_frame);
+                //LOG("After patching %lld", tus_new);
+                //LOG("Delta %lld", tus - tus_new - half_frame);
                 timestamp_us = tus_new;
             }
 
@@ -364,25 +373,37 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 now_ts = now.tv_sec * 1000000000LL + now.tv_nsec;
             }
 
-            int64_t off_delta = timestamp_us * 1000LL - sfdec->last_off;
+            int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+            int64_t delta = ts - now_ts;
             if (
                     !sfdec->start_off || //Got reset
                     (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL || //If we had no frame since the last 500ms, user did pause/resume
-                    (off_delta < -500*1000LL*1000LL || off_delta > 500*1000LL*1000LL) // If distance between two frames is >500ms, that's a seek
+                    (delta < -500*1000LL*1000LL || delta > 500*1000LL*1000LL) // If distance between two frames is >500ms, that's a seek
                     ) {
                 // We store the first frame (its realtime timestamp -- now & codec timestamp)
-                sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 100ms
+                sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 300ms
                 sfdec->start_off = timestamp_us * 1000LL;
                 // display first frame there asap
                 asap = 1;
             }
+            if (delta < 0) {
+                // We're late, schedule frames for later
+                // Note that there is a valid reason to be late (at the start of playback):
+                // It's possible Audio buffer is bigger than our initial 100ms
+                // Adding latency to our display makes us closer to audio
+                //
+                // And then we can be late because video decoder can't render at correct speed
+                // In that case, adding 100ms will make it completely stuttery, but well.
+                sfdec->n_late++;
+                sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
+                LOG("Late (%d), delaying 100ms", sfdec->n_late);
+            }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
-            int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
 
             if (asap)
-                DBG LOG("Scheduling frame in a jiffy");
+                LOG("Scheduling frame in a jiffy");
             else
-                DBG LOG("Scheduling frame in %lld", ts - now_ts);
+                LOG("Scheduling frame in %lld", ts - now_ts);
 
             sfdec->last_monotonic = now_ts;
             sfdec->last_off = timestamp_us * 1000LL;
@@ -417,6 +438,14 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
     return 0;
 }
 
+static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num) {
+    LOG("Setting playbackspeed to %d / %d", num, den);
+    sfdec->playback_speed_den = den;
+    sfdec->playback_speed_num = num;
+    return 0;
+}
+
+
 sfdec_itf_t sfdec_itf_mediacodec = {
     "MediaCodec",
     sfdec_init,
@@ -430,4 +459,5 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_buf_render,
     sfdec_buf_release,
     sfdec_reset_ts,
+    sfdec_set_playback_speed,
 };

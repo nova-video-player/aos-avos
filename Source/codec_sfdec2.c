@@ -930,6 +930,11 @@ static int videodec_destroy(STREAM_DEC_VIDEO *dec)
 	return 0;
 } 
 
+static int videodec_set_playback_speed(struct STREAM_DEC_VIDEO *dec, int den, int num) {
+	priv_t *p = (priv_t*)dec->priv;
+    return sfdec_set_playback_speed(p->sfdec, den, num);
+}
+
 
 static STREAM_DEC_VIDEO *new_dec(void)
 { 
@@ -950,6 +955,7 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	dec->get_rc	= videodec_get_rc;
 	dec->get_sink	= videodec_get_sink;
 	dec->async	= 1;
+    dec->set_playback_speed = videodec_set_playback_speed;
 
 	if (!(dec->priv = acalloc(1, sizeof(priv_t)))) {
 		CLOG("cannot alloc priv");

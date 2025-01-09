@@ -345,12 +345,12 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
         } else {
             int64_t timestamp_us = sfbuf->timestamp_us;
-            LOG("Received og timestamp %lld", timestamp_us);
+            DBG LOG("Received og timestamp %lld", timestamp_us);
             if (sfdec->video_frame_rate_den) {
                 int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
                 int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
                 int64_t tus = timestamp_us;
-                LOG("Got rendering frame rate %d / %d", rendering_frame_rate_num, rendering_frame_rate_den);
+                DBG LOG("Got rendering frame rate %d / %d", rendering_frame_rate_num, rendering_frame_rate_den);
                 // Add half a frame, so flooring almost exact match succeeds
                 double frame_length = rendering_frame_rate_num / ( (double)(rendering_frame_rate_den));
                 int64_t half_frame = (1/2.0) * 1000.0 * 1000.0 / frame_length;
@@ -396,14 +396,14 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 // In that case, adding 100ms will make it completely stuttery, but well.
                 sfdec->n_late++;
                 sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
-                LOG("Late (%d), delaying 100ms", sfdec->n_late);
+                DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
 
             if (asap)
-                LOG("Scheduling frame in a jiffy");
+                DBG LOG("Scheduling frame in a jiffy");
             else
-                LOG("Scheduling frame in %lld", ts - now_ts);
+                DBG LOG("Scheduling frame in %lld", ts - now_ts);
 
             sfdec->last_monotonic = now_ts;
             sfdec->last_off = timestamp_us * 1000LL;
@@ -439,7 +439,7 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
 }
 
 static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num) {
-    LOG("Setting playbackspeed to %d / %d", num, den);
+    DBG LOG("Setting playbackspeed to %d / %d", num, den);
     sfdec->playback_speed_den = den;
     sfdec->playback_speed_num = num;
     return 0;

@@ -246,9 +246,12 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			// surprisingly start and end are zero out of the ffmpeg decoder: try to infer it from ass txt and if it fails  parse the data
 			// typical format for ffmpeg 7.1 is rect->ass="1,0,Default,,0,0,0,,4704:7998,- Kids?\N- Phil, would you get them?"
 			// skip to 9th comma to extract start and end times
-			// typical format for ffmpeg 4.4 is rect->ass="Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,1217:2956,Ronflement léger"
+			// typical format for ffmpeg 4.4 is
+			// rect->ass="Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,1217:2956,Ronflement léger"
+			// but can be without timestamp information
+			// rect->ass="Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,{\fs20}{\1c&HFFFFFF&}{\1a&H00&}there usually aren't\Na lot of taxis in this area,"
 			int skipCommas; // number of commas to skip
-			if (strncmp(pos, "Dialogue:", 9) == 0) {
+			if (strncmp(pos, "Dialogue:", 9) == 0) { // match
 				// ffmpeg 4.4 decoding format
 				skipCommas = 9;
 			} else {
@@ -259,9 +262,11 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 				pos = strchr(pos, ',');
 				if (pos) pos++;
 			}
+			int found_timing = 0;
 			if (pos != NULL && sscanf(pos, "%d:%d,", &start, &end) == 2) {
 				frame->time = start;
 				frame->duration = end - start;
+				found_timing = 1;
 			} else {
 				// parsing error get back to text data parsing
 				if (sub.start_display_time == 0 && sub.end_display_time == 0) {
@@ -271,8 +276,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 					}
 				}
 			}
-			// Continue skipping to the 9th comma to reach the text content
-			if (pos != NULL) {
+			// Continue skipping to the 9th comma to reach the text content only if timing information has been found
+			// otherwise need to not skip an additional comma
+			if (pos != NULL && found_timing) {
 				pos = strchr(pos, ',');
 				if (pos) pos++;
 			}

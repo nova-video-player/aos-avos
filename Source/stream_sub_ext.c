@@ -323,12 +323,20 @@ DBG2 serprintf("sub: out  [%8d] %8d -> %8d TOP[%s] BOT[%s]\r\n", time, start, en
 			int   max = frame->size - 1;
 			char *src = p->out->top;
 			char *dst = frame->data[0];
+			// check if p->out->top is not NULL
+			if( !src ) {
+				src = "";
+			}
 			while( *src && max-- ) {
 				*dst++ = *src++;
 			}
 			if( p->out->bottom && max > 2 ) {
 				*dst++ = '\\';
 				*dst++ = 'n';
+				// check if p->out->bottom is not NULL
+				if( !p->out->bottom ) {
+					p->out->bottom = "";
+				}
 				char *src = p->out->bottom;
 				while( *src && max-- ) {
 					*dst++ = *src++;

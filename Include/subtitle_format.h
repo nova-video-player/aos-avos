@@ -17,7 +17,7 @@
 #ifndef __SUBTITLE_FORMAT_H__
 #define __SUBTITLE_FORMAT_H__
 
-#define LINE_LEN	300
+#define LINE_LEN	600
 #define MS_CURSOR_BEGIN '\r'
 #define NEW_LINE_CH	'\n'
 

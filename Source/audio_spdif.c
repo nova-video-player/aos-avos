@@ -69,6 +69,9 @@
 #define ENCODING_MPEGH_LC_L4            26
 #define ENCODING_DTS_UHD                27
 #define ENCODING_DRA                    28
+#define ENCODING_DTS_HD_MA              29
+#define ENCODING_DTS_UHD_P2             30
+#define ENCODING_DSD                    31
 
 typedef struct {
 	char buf[64*1024];

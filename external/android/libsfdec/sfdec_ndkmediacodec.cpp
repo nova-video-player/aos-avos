@@ -373,6 +373,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 now_ts = now.tv_sec * 1000000000LL + now.tv_nsec;
             }
 
+            // Compute before adjustment the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
             int64_t delta = ts - now_ts;
             if (
@@ -399,6 +400,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
+            ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
 
             if (asap)
                 DBG LOG("Scheduling frame in a jiffy");

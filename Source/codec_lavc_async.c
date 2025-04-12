@@ -300,6 +300,16 @@ DBGCV2 serprintf("<");
         else
             got_picture = 1;
 
+		while( ret >= 0 ) {
+			// drain the decoder, should not be necessary
+			int ret_rx_post = avcodec_receive_frame(vctx, vframe);
+			if( ret_rx_post == 0 ) {
+				serprintf("FFM: got an unexpected additional frame (%s)\n", av_err2str(ret_rx_post ));
+			} else {
+				break;
+			}
+		}
+
 	start = time_update_time() - start;
 DBGCV2 serprintf("> tim %3d  ", start); 
 	if( ret < 0 ) {

@@ -210,6 +210,7 @@ serprintf("cannot find codec\r\n");
 	actx->sample_rate = audio->samplesPerSec;
 	actx->block_align = audio->blockAlign;
 	actx->bit_rate    = audio->bytesPerSec * 8;
+	av_channel_layout_default(&actx->ch_layout, audio->channels);
 	actx->ch_layout.nb_channels    = audio->channels;
 
 	if( audio->extraDataSize2 ) {
@@ -248,7 +249,7 @@ serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUN
 		*channels = actx->ch_layout.nb_channels;
 
 	while ( ret >= 0) {
-		// drain the decoder, should not be necessary
+		// drain the decoder, should not be necessary, reusing aframe since we don't care about the data
 		int ret_rx_post = avcodec_receive_frame(actx, aframe);
 		if (ret_rx_post == 0) {
 serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
@@ -323,14 +324,19 @@ serprintf("cannot find codec\r\n");
 	}
 	
 	p->actx = avcodec_alloc_context3(p->acodec);
+	if( !p->actx ) {
+		serprintf( "cannot allocate codec context\r\n" );
+		goto ErrorExit;
+	}
 	p->request_channels = audio->request_channels;
 	
 	// provide all the data that the decoder might need
 	p->actx->sample_rate      = audio->samplesPerSec;
 	p->actx->block_align      = audio->blockAlign;
 	p->actx->bit_rate         = audio->bytesPerSec * 8;
-	p->actx->ch_layout.nb_channels         = audio->channels;
+
 	av_channel_layout_default(&p->actx->ch_layout, audio->channels);
+	p->actx->ch_layout.nb_channels = audio->channels;
 
 	char layout_desc[256];
 	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
@@ -703,15 +709,17 @@ DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %
 	avos_frame->format        = WAVE_FORMAT_PCM;
 	avos_frame->error         = 0;
 
+	AVFrame *temp_frame = av_frame_alloc();
 	while ( ret_send >= 0) {
 		// drain the decoder, should not be necessary
-		int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
+		int ret_rx_post = avcodec_receive_frame(p->actx, temp_frame);
 		if (ret_rx_post == 0) {
 serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
 		} else {
 			break;
 		}
 	}
+	av_frame_free(&temp_frame);
 
 	if( p->ignore > 0 ) {
 DBGCA2 serprintf("FFMPEG IGNORE!\r\n");
@@ -877,15 +885,17 @@ DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %
 	avos_frame->format        = WAVE_FORMAT_PCM;
 	avos_frame->error         = 0;
 
+	AVFrame *temp_frame = av_frame_alloc();
 	while ( ret_send >= 0) {
 		// drain the decoder, should not be necessary
-		int ret_rx_post = avcodec_receive_frame(p->actx, p->aframe);
+		int ret_rx_post = avcodec_receive_frame(p->actx, temp_frame);
 		if (ret_rx_post == 0) {
 serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
 		} else {
 			break;
 		}
 	}
+	av_frame_free(&temp_frame);
 
 	p->play = 1;
 	
@@ -915,6 +925,11 @@ static int ffmpeg_audio_codec_flush( AUDIO_PROPERTIES *audio  )
 serprintf("Error sending NULL packet for flushing: %s\n", av_err2str(ret));
 	}
 
+	AVFrame *temp_frame = av_frame_alloc();
+	if( !temp_frame ) {
+		serprintf( "%s: failed to allocate memory for temporary audio frame\n", __FUNCTION__ );
+		return 0; // Handle memory allocation failure appropriately
+	}
 	// receive all remaining frames
 	while (ret >= 0) {
 		ret = avcodec_receive_frame(p->actx, p->aframe);
@@ -926,8 +941,9 @@ serprintf("Error receiving frame during flushing: %s\n", av_err2str(ret));
 			break;
 		}
 	}
+	av_frame_free( &temp_frame );
 
-DBGCA serprintf("ffad flush\r\n" );
+	DBGCA serprintf( "ffad flush\r\n" );
 	
 	avcodec_flush_buffers( p->actx );
 	p->inbuf_residual = 0;

@@ -580,9 +580,9 @@ DBGCV2 serprintf("<");
         else
             got_picture = 1;
 		AVFrame *temp_frame = av_frame_alloc();
-		while( ret_send >= 0 ) {
+		while( ret >= 0 ) {
 			// drain the decoder, should not be necessary
-			int ret_rx_post = avcodec_receive_frame(vctx temp_frame);
+			int ret_rx_post = avcodec_receive_frame(vctx, temp_frame);
 			if( ret_rx_post == 0 ) {
 				serprintf( "%s: got an unexpected additional video frame (%s)\n", __FUNCTION__, av_err2str( ret_rx_post ) );
 			} else {

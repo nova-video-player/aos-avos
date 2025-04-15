@@ -296,6 +296,8 @@ DBGS serprintf( "spdif_init\n");
 	AVStream *stream = avformat_new_stream( fctxt, NULL );
 	stream->id = 1;
 	stream->codecpar->codec_id = wave2libav_codecid( codecid );
+	stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+	stream->codecpar->sample_rate = a->samplesPerSec;
 	if ( avformat_write_header( fctxt, NULL ) < 0 )
 		return 0;
 

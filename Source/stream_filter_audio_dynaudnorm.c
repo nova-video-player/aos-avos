@@ -276,17 +276,13 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 {
 	struct ctx *ctx = f->priv;
-
+	// only process if nightmode or audioboost is enabled
 	if( ( ctx->level + 4 * ctx->nightmode ) > 0 ) {
-		// TODO MARC already configured in open!!!!
-		// Setup input frame
-
-		ctx->in_frame->nb_samples = frame->size / ( av_get_bytes_per_sample( ctx->in_frame->format ) *
-													ctx->channels ); // Correct sample calculation
+		// update input frame parameters
+		ctx->in_frame->nb_samples = frame->size / ( av_get_bytes_per_sample( ctx->in_frame->format ) * ctx->channels );
 		ctx->in_frame->data[0] = frame->data;
 		ctx->in_frame->linesize[0] = frame->size;
-
-		// Push frame into filter graph
+		// push frame into filter graph
 		int ret = av_buffersrc_add_frame( ctx->abuffer_ctx, ctx->in_frame );
 		if( ret < 0 ) return ret;
 		if( ret < 0 ) {
@@ -295,8 +291,7 @@ static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 		} else {
 			DBG2 serprintf( "facom filter: frame added to buffer source\n" );
 		}
-
-		// Get filtered frame
+		// get filtered frame
 		ret = av_buffersink_get_frame( ctx->abuffersink_ctx, ctx->out_frame );
 		if( ret < 0 ) {
 			serprintf( "facom filter: error getting frame from buffer sink %s\n", av_err2str( ret ) );
@@ -304,13 +299,10 @@ static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 		} else {
 			DBG2 serprintf( "facom filter: frame retrieved from buffer sink\n" );
 		}
-
-		// Copy processed data back to input frame (ensure size compatibility)
+		// copy processed data back to input frame (ensure size compatibility)
 		memcpy( frame->data, ctx->out_frame->data[0], MIN( frame->size, ctx->out_frame->linesize[0] ) );
-
 		av_frame_unref( ctx->out_frame );
 		if( !ctx->out_frame ) {
-			// Handle allocation failure
 			serprintf( "facom filter: error allocating output frame %s\n", av_err2str( ret ) );
 			return -1;
 		} else {
@@ -423,7 +415,26 @@ static int _flush( STREAM_FILTER_AUDIO *f )
 	return 0;
 }
 
-int _delay( STREAM_FILTER_AUDIO *f ) { return 0; }
+int _delay( STREAM_FILTER_AUDIO *f ) {
+	struct ctx *ctx = f->priv;
+	int64_t delay = 0;
+	if( ctx && ctx->filter_graph ) {
+		// get delay from dynaudnorm filter
+		if( ctx->dynaudnorm_ctx ) {
+			int64_t filter_delay = 0;
+			int ret = av_opt_get_int( ctx->dynaudnorm_ctx, "delay", 0, &filter_delay );
+			if( ret >= 0 ) {
+				delay += filter_delay;
+			}
+		}
+		// convert from samples to milliseconds
+		if( ctx->sample_rate > 0 ) {
+			delay = ( delay * 1000 ) / ctx->sample_rate;
+		}
+	}
+	DBG serprintf( "facomp: delay %lld ms\n", delay );
+	return (int)delay;
+}
 
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void )
 {

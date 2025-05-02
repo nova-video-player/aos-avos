@@ -62,7 +62,6 @@ static const int64_t get_channel_layout_from_channels( int channels )
 	}
 }
 
-// TODO MARC perhaps not correct because dynaudnorm support only AV_SAMPLE_FMT_FLTP check the real sample format displayed in the code
 static const int64_t get_sample_format_from_bits_per_sample( int bits_per_sample )
 {
 	switch( bits_per_sample ) {
@@ -253,9 +252,11 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 	ctx->out_frame = av_frame_alloc();
 	if( !ctx->in_frame || !ctx->out_frame ) {
 		serprintf( "facom open: error allocating frames\n" );
+		if( ctx->in_frame ) av_frame_free( &ctx->in_frame );
+		if( ctx->out_frame ) av_frame_free( &ctx->out_frame );
+		afree( ctx );
 		return 1;
 	}
-
 	// Set frame parameters
 	ctx->in_frame->format = get_sample_format_from_bits_per_sample( audio->bitsPerSample );
 	serprintf( "facom open: in frame format %s for bits_per_sample %d\n",
@@ -271,8 +272,6 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 
 	return 0;
 }
-
-// TODO MARC follow https://ffmpeg.org/doxygen/trunk/doc_2examples_2filtering_audio_8c-example.html
 
 static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 {
@@ -310,8 +309,6 @@ static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 		memcpy( frame->data, ctx->out_frame->data[0], MIN( frame->size, ctx->out_frame->linesize[0] ) );
 
 		av_frame_unref( ctx->out_frame );
-		av_frame_free( &ctx->out_frame );  // Free the frame after using it
-		ctx->out_frame = av_frame_alloc(); // Allocate a new frame for the next iteration
 		if( !ctx->out_frame ) {
 			// Handle allocation failure
 			serprintf( "facom filter: error allocating output frame %s\n", av_err2str( ret ) );
@@ -391,25 +388,38 @@ static int _set_param( STREAM_FILTER_AUDIO *f, void *params, void *night_on )
 	return 0;
 }
 
-static int _close( STREAM_FILTER_AUDIO *f ) { return 0; }
+static int _close( STREAM_FILTER_AUDIO *f ) {
+	if( f && f->priv ){
+		struct ctx *ctx = f->priv;
+		if( ctx->in_frame ) av_frame_free( &ctx->in_frame );
+		if( ctx->out_frame ) av_frame_free( &ctx->out_frame );
+		if( ctx->filter_graph ) avfilter_graph_free( &ctx->filter_graph );
+	}
+	return 0;
+}
 
 int _delete( STREAM_FILTER_AUDIO *f )
 {
-	if( f && f->priv ) {
-		struct ctx *ctx = f->priv;
-
-		av_frame_free( &ctx->in_frame );
-		av_frame_free( &ctx->out_frame );
-		avfilter_graph_free( &ctx->filter_graph );
-		afree( ctx );
+	if( f ) {
+		if( f->priv ) {
+			afree( f->priv );
+		}
+		afree( f );
 	}
-	afree( f );
 	return 0;
 }
 
 static int _flush( STREAM_FILTER_AUDIO *f )
 {
-	DBG2 serprintf("facomp: flush\n" );
+	DBG2 serprintf( "facomp: flush\n" );
+	if( f && f->priv ) {
+		struct ctx *ctx = f->priv;
+		if( ctx->abuffer_ctx && ctx->abuffersink_ctx ) {
+			// Flush the filter graph
+			av_buffersrc_add_frame( ctx->abuffer_ctx, NULL );
+			av_buffersink_get_frame( ctx->abuffersink_ctx, NULL );
+		}
+	}
 	return 0;
 }
 

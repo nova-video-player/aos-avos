@@ -83,6 +83,14 @@ static int setup_filter_graph( struct ctx *ctx )
 	AVDictionary *options_dict = NULL;
 	uint8_t options_str[1024];
 
+	// define channel layout string to be used in filter graph
+	uint8_t ch_layout[64]; // can be cast to char* to get channel layout string
+	ret = av_channel_layout_describe( &ctx->in_frame->ch_layout, ch_layout, sizeof( ch_layout ) );
+	if( ret < 0 ) {
+		serprintf( "facom setup: error describing channel layout %s\n", av_err2str( ret ) );
+		return ret;
+	}
+
 	// Create filter graph
 	ctx->filter_graph = avfilter_graph_alloc();
 	if( !ctx->filter_graph ) {
@@ -90,23 +98,13 @@ static int setup_filter_graph( struct ctx *ctx )
 		return 1;
 	}
 
+	// setup input buffer
 	const AVFilter *abuffer = avfilter_get_by_name( "abuffer" );
-
 	ctx->buffersrc_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, abuffer, "src" );
 	if ( !ctx->buffersrc_ctx ) {
 		serprintf( "facom setup: error allocating buffer source\n" );
 		return -1;
 	}
-
-	// TODO MARC do it another way with snprintf
-	uint8_t ch_layout[64]; // can be cast to char* to get channel layout string
-
-	ret = av_channel_layout_describe( &ctx->in_frame->ch_layout, ch_layout, sizeof( ch_layout ) );
-	if ( ret < 0 ) {
-		serprintf( "facom setup: error describing channel layout %s\n", av_err2str( ret ) );
-		return ret;
-	}
-
 	char abuffer_args[256];
 	snprintf( abuffer_args, sizeof( abuffer_args ), "channel_layout=%s:sample_fmt=%s:time_base=%d/%d:sample_rate=%d",
 			  (char *)ch_layout,
@@ -121,56 +119,28 @@ static int setup_filter_graph( struct ctx *ctx )
 		DBG serprintf( "facom setup: buffer source initialized with args '%s'\n", abuffer_args );
 	}
 
-	/*
-	ret = av_opt_set( ctx->buffersrc_ctx, "channel_layout", ch_layout, AV_OPT_SEARCH_CHILDREN );
-	if ( ret < 0 ) {
-		serprintf( "facom setup: error setting channel layout %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: channel layout set to %s\n", ch_layout );
-	}
-	ret = av_opt_set( ctx->buffersrc_ctx, "sample_fmt", av_get_sample_fmt_name( ctx->in_frame->format ),
-					  AV_OPT_SEARCH_CHILDREN );
-	if ( ret < 0 ) {
-		serprintf( "facom setup: error setting sample format %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: sample format set to %s\n", av_get_sample_fmt_name( ctx->in_frame->format ) );
-	}
-	ret = av_opt_set_q( ctx->buffersrc_ctx, "time_base", (AVRational){ 1, ctx->in_frame->sample_rate }, AV_OPT_SEARCH_CHILDREN );
-	if ( ret < 0 ) {
-		serprintf( "facom setup: error setting time base %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: time base set to %d/%d\n", 1, ctx->in_frame->sample_rate );
-	}
-	ret = av_opt_set_int( ctx->buffersrc_ctx, "sample_rate", ctx->in_frame->sample_rate, AV_OPT_SEARCH_CHILDREN );
-	if ( ret < 0 ) {
-		serprintf( "facom setup: error setting sample rate %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: sample rate set to %d\n", ctx->in_frame->sample_rate );
-	}
-
-	ret = avfilter_init_str( ctx->buffersrc_ctx, NULL );
-	if( ret < 0 ) {
-		serprintf( "facom setup: error in buffer source init %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: buffer source initialized\n" );
-	}
-	*/
-
-	// Setup buffer sink
-	const AVFilter *abuffersink = avfilter_get_by_name( "abuffersink" );
-	ctx->buffersink_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, abuffersink, "sink" );
-	if( !ctx->buffersink_ctx ) {
-		serprintf( "facom setup: error creating buffer sink %s\n", av_err2str( ret ) );
+	// dynaudnorm input needs to be in AV_SAMPLE_FMT_FLTP, use aformat to convert
+	const AVFilter *aformat_in = avfilter_get_by_name( "aformat" );
+	ctx->bufferformat_in_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, aformat_in, "convert_in" );
+	if( !ctx->bufferformat_in_ctx ) {
+		serprintf( "facom setup: error creating buffer aformat_in %s\n", av_err2str( ret ) );
 		return -1;
 	} else {
-		DBG serprintf( "facom setup: buffer sink allocated\n" );
+		DBG serprintf( "facom setup: buffer aformat_in allocated\n" );
+	}
+	char aformat_in_args[256];
+	// snprintf( aformat_in_args, sizeof( aformat_in_args ), "sample_fmts=%s", av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ));
+	snprintf( aformat_in_args, sizeof( aformat_in_args ), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
+			  av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ), ctx->in_frame->sample_rate, (char *)ch_layout );
+	ret = avfilter_init_str( ctx->bufferformat_in_ctx, aformat_in_args );
+	if( ret < 0 ) {
+		serprintf( "Error initializing aformat_in filter: %s with %s\n", av_err2str( ret ), aformat_in_args );
+		return ret;
+	} else {
+		DBG serprintf( "facom setup: aformat_in filter initialized with %s\n", aformat_in_args );
 	}
 
+	// dynaudnorm for audio normalization
 	const AVFilter *dynaudnorm = avfilter_get_by_name( "dynaudnorm" );
 	ctx->buffereffect_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, dynaudnorm, "dynaudnorm" );
 	if( !ctx->buffereffect_ctx ) {
@@ -183,74 +153,44 @@ static int setup_filter_graph( struct ctx *ctx )
 	snprintf( dynaudnorm_args, sizeof( dynaudnorm_args ), "f=150:g=31" );
 	ret = avfilter_init_str( ctx->buffereffect_ctx, dynaudnorm_args );
 	if( ret < 0 ) {
-		serprintf( "facom setup: error initializing dynaudnorm filter with args '%s': %s\n", dynaudnorm_args, av_err2str( ret ) );
+		serprintf( "facom setup: error initializing dynaudnorm filter with args '%s': %s\n", dynaudnorm_args,
+				   av_err2str( ret ) );
 		return ret;
 	} else {
 		DBG serprintf( "facom setup: dynaudnorm filter initialized with args '%s'\n", dynaudnorm_args );
 	}
 
-	/*
-	ret = av_opt_set( ctx->buffereffect_ctx, "f", "150", AV_OPT_SEARCH_CHILDREN );
-	if( ret < 0 ) {
-		serprintf( "facom setup: error setting dynaudnorm f %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: dynaudnorm f set\n" );
-	}
-	ret = av_opt_set( ctx->buffereffect_ctx, "g", "31", AV_OPT_SEARCH_CHILDREN );
-	if ( ret < 0 ) {
-		serprintf( "facom setup: error setting dynaudnorm g %s\n", av_err2str( ret ) );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: dynaudnorm g set\n" );
-	}
-	*/
-
-	// setup converter filter
-	const AVFilter *aformat_in = avfilter_get_by_name( "aformat" );
-	ctx->bufferformat_in_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, aformat_in, "convert_in" );
-	if( !ctx->bufferformat_in_ctx ) {
-		serprintf( "facom setup: error creating buffer aformat_in %s\n", av_err2str( ret ) );
-		return -1;
-	} else {
-		DBG serprintf( "facom setup: buffer aformat_in allocated\n" );
-	}
-
-	// TODO MARC configure
-	char aformat_in_args[128];
-	// dynaudnorm needs to be in AV_SAMPLE_FMT_FLTP
-	//snprintf( aformat_in_args, sizeof( aformat_in_args ), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
-	//		  av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ), ctx->in_frame->sample_rate, (char *)ch_layout );
-	snprintf( aformat_in_args, sizeof( aformat_in_args ), "sample_fmts=%s", av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ));
-	ret = avfilter_init_str( ctx->bufferformat_in_ctx, aformat_in_args );
-	if( ret < 0 ) {
-		serprintf( "Error initializing aformat_in filter: %s with %s\n", av_err2str( ret ), aformat_in_args );
-		return ret;
-	} else {
-		DBG serprintf( "facom setup: aformat_in filter initialized with %s\n", aformat_in_args );
-	}
-
+	// recovert back to original format wit another aformat
 	const AVFilter *aformat_out = avfilter_get_by_name( "aformat" );
 	ctx->bufferformat_out_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, aformat_out, "convert_out" );
 	if( !ctx->bufferformat_out_ctx ) {
 		serprintf( "facom setup: error creating buffer aformat_out %s\n", av_err2str( ret ) );
 		return -1;
 	}
-	// TODO MARC configure
-	char aformat_out_args[128];
-	// reconvert back to orginal format
-	//snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
-	//		  av_get_sample_fmt_name( ctx->in_frame->format ), ctx->in_frame->sample_rate, (char *)ch_layout );
-	snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s", av_get_sample_fmt_name( ctx->in_frame->format ) );
+	char aformat_out_args[256];
+	// snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s", av_get_sample_fmt_name(
+	// ctx->in_frame->format ) );
+	snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
+			  av_get_sample_fmt_name( ctx->in_frame->format ), ctx->in_frame->sample_rate, (char *)ch_layout );
 	ret = avfilter_init_str( ctx->bufferformat_out_ctx, aformat_out_args );
 	if( ret < 0 ) {
-		serprintf( "Error initializing aformat_out filter: %s with %s\n", av_err2str( ret ), aformat_out_args );
+		serprintf( "facom: error initializing aformat_out filter: %s with %s\n", av_err2str( ret ), aformat_out_args );
 		return ret;
 	} else {
 		DBG serprintf( "facom setup: aformat_out filter initialized with %s\n", aformat_out_args );
 	}
 
-	// Connect the filters with dynaudnorm
+	// output buffer sink
+	const AVFilter *abuffersink = avfilter_get_by_name( "abuffersink" );
+	ctx->buffersink_ctx = avfilter_graph_alloc_filter( ctx->filter_graph, abuffersink, "sink" );
+	if( !ctx->buffersink_ctx ) {
+		serprintf( "facom setup: error creating buffer sink %s\n", av_err2str( ret ) );
+		return -1;
+	} else {
+		DBG serprintf( "facom setup: buffer sink allocated\n" );
+	}
+
+	// connect all the filters
 	ret = avfilter_link( ctx->buffersrc_ctx, 0, ctx->bufferformat_in_ctx, 0 );
 	if( ret < 0 ) {
 		serprintf( "facom setup: error linking buffer source to format_in %s\n", av_err2str( ret ) );

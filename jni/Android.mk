@@ -26,6 +26,8 @@ ifeq ($(LIBAV_CONFIG),)
 endif
 LIBAV_CONFIG_DIR := $(LIBAV_DIR)/dist-$(LIBAV_CONFIG)-$(TARGET_ARCH_ABI)
 
+AUDIOCOMPRESS_DIR := $(AVOS_DIR)/../audiocompress
+
 ifeq ($(TARGET_ARCH_ABI),armeabi)
 AVOS_LIBS_SUFFIX := _no_neon
 else
@@ -43,6 +45,10 @@ include  $(LOCAL_PATH)/ndkbuild.mk
 
 LOCAL_PATH := $(AVOS_DIR)
 include  $(LOCAL_PATH)/ndkbuild.mk
+
+### audiocompress ###
+
+include $(AUDIOCOMPRESS_DIR)/ndkbuild.mk
 
 ### libavosjni ###
 

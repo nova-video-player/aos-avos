@@ -65,17 +65,7 @@ ifeq ($(AUDIO),ON)
 
 	ifeq ($(AUDIO_COMPRESS),ON)
 		DEFINES += -DCONFIG_AUDIO_COMPRESS
-		CSRC_AUDIO += stream_filter_audio_compress.c
-		ifeq ($(TGT_BASE),sim)
-			INCLUDES += -I$(LOCAL_PATH)/../audiocompress
-			#static version
-			STATIC_LIBS += ../audiocompress/$(ARCH)/audiocompress.a
-			AVOS_DEPS += audiocompress
-			PHONY_TARGETS += audiocompress
-		else
-			INCLUDES += -I$(AUDIOCOMPRESS_DIR)
-			AVOS_SHARED_LIBS += -laudiocompress
-		endif
+		CSRC_AUDIO += stream_filter_audio_dynaudnorm.c
 	endif
 	ifeq ($(AUDIO_AGC),ON)
 		DEFINES += -DCONFIG_AUDIO_AGC
@@ -124,7 +114,7 @@ ifeq ($(VIDEO),ON)
 		ifneq (,$(LIBAV_CONFIG_DIR))
 			INCLUDES += -I$(LIBAV_CONFIG_DIR)/include
 		endif
-		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter -lswscale
+		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter -lswscale -lswresample
 	endif
 
 	ifeq ($(VIDEO_REALVIDEO),ON)

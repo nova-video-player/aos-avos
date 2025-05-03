@@ -41,10 +41,10 @@ struct ctx {
 	AVFilterContext *abuffersink_ctx;
 	AVFrame *in_frame;
 	AVFrame *out_frame;
-	int sample_rate;
 	int channels;
 	int level;
 	int nightmode;
+	uint8_t channel_layout[64]; // can be cast to char* to get channel layout string
 };
 
 static const int64_t get_channel_layout_from_channels( int channels )
@@ -76,19 +76,7 @@ static const int64_t get_sample_format_from_bits_per_sample( int bits_per_sample
 // Helper function to setup the filter graph
 static int setup_filter_graph( struct ctx *ctx )
 {
-	char args[512];
 	int ret;
-
-	AVDictionary *options_dict = NULL;
-	uint8_t options_str[1024];
-
-	// define channel layout string to be used in filter graph
-	uint8_t ch_layout[64]; // can be cast to char* to get channel layout string
-	ret = av_channel_layout_describe( &ctx->in_frame->ch_layout, ch_layout, sizeof( ch_layout ) );
-	if( ret < 0 ) {
-		serprintf( "facom setup: error describing channel layout %s\n", av_err2str( ret ) );
-		return ret;
-	}
 
 	// Create filter graph
 	ctx->filter_graph = avfilter_graph_alloc();
@@ -106,9 +94,7 @@ static int setup_filter_graph( struct ctx *ctx )
 	}
 	char abuffer_args[256];
 	snprintf( abuffer_args, sizeof( abuffer_args ), "channel_layout=%s:sample_fmt=%s:time_base=%d/%d:sample_rate=%d",
-			  (char *)ch_layout,
-			  av_get_sample_fmt_name( ctx->in_frame->format ),
-			  1, ctx->in_frame->sample_rate,
+			  (char *)ctx->channel_layout, av_get_sample_fmt_name( ctx->in_frame->format ), 1, ctx->in_frame->sample_rate,
 			  ctx->in_frame->sample_rate );
 	ret = avfilter_init_str( ctx->abuffer_ctx, abuffer_args );
 	if( ret < 0 ) {
@@ -128,7 +114,7 @@ static int setup_filter_graph( struct ctx *ctx )
 	char aformat_in_args[256];
 	// snprintf( aformat_in_args, sizeof( aformat_in_args ), "sample_fmts=%s", av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ));
 	snprintf( aformat_in_args, sizeof( aformat_in_args ), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
-			  av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ), ctx->in_frame->sample_rate, (char *)ch_layout );
+			  av_get_sample_fmt_name( AV_SAMPLE_FMT_DBLP ), ctx->in_frame->sample_rate, (char *)ctx->channel_layout );
 	ret = avfilter_init_str( ctx->aformat_in_ctx, aformat_in_args );
 	if( ret < 0 ) {
 		serprintf( "Error initializing aformat_in filter: %s with %s\n", av_err2str( ret ), aformat_in_args );
@@ -146,6 +132,7 @@ static int setup_filter_graph( struct ctx *ctx )
 	}
 	char dynaudnorm_args[128];
 	snprintf( dynaudnorm_args, sizeof( dynaudnorm_args ), "f=150:g=31" );
+	// TODO MARC f=1:g=1 yields 'f=1:g=1': Math result not representable test the various options here at init first before setting them with _set_param
 	ret = avfilter_init_str( ctx->dynaudnorm_ctx, dynaudnorm_args );
 	if( ret < 0 ) {
 		serprintf( "facom setup: error initializing dynaudnorm filter with args '%s': %s\n", dynaudnorm_args, av_err2str( ret ) );
@@ -162,10 +149,9 @@ static int setup_filter_graph( struct ctx *ctx )
 		return -1;
 	}
 	char aformat_out_args[256];
-	// snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s", av_get_sample_fmt_name(
-	// ctx->in_frame->format ) );
+	// snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s", av_get_sample_fmt_name(ctx->in_frame->format ) );
 	snprintf( aformat_out_args, sizeof( aformat_out_args ), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
-			  av_get_sample_fmt_name( ctx->in_frame->format ), ctx->in_frame->sample_rate, (char *)ch_layout );
+			  av_get_sample_fmt_name( ctx->in_frame->format ), ctx->in_frame->sample_rate, (char *)ctx->channel_layout );
 	ret = avfilter_init_str( ctx->aformat_out_ctx, aformat_out_args );
 	if( ret < 0 ) {
 		serprintf( "facom: error initializing aformat_out filter: %s with %s\n", av_err2str( ret ), aformat_out_args );
@@ -232,6 +218,11 @@ static int setup_filter_graph( struct ctx *ctx )
 		return ret;
 	} else {
 		DBG serprintf( "facom setup: filter graph configured\n" );
+		char *graph_desc = avfilter_graph_dump( ctx->filter_graph, NULL );
+		if( graph_desc ) {
+			DBG serprintf( "facom setup: filter graph\n%s\n", graph_desc );
+			av_free( graph_desc );
+		}
 	}
 
 	return 0;
@@ -244,7 +235,6 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 
 	f->priv = ctx;
 
-	ctx->sample_rate = audio->samplesPerSec;
 	ctx->channels = audio->channels;
 
 	// Create input/output frames
@@ -259,10 +249,16 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 	}
 	// Set frame parameters
 	ctx->in_frame->format = get_sample_format_from_bits_per_sample( audio->bitsPerSample );
-	serprintf( "facom open: in frame format %s for bits_per_sample %d\n",
-			   av_get_sample_fmt_name( ctx->in_frame->format ), audio->bitsPerSample );
-	ctx->in_frame->sample_rate = ctx->sample_rate;
+	ctx->in_frame->sample_rate = audio->samplesPerSec;
+	// define channel layout string to be used in filter graph
 	av_channel_layout_default( &ctx->in_frame->ch_layout, ctx->channels );
+	int ret = av_channel_layout_describe( &ctx->in_frame->ch_layout, ctx->channel_layout, sizeof( ctx->channel_layout ) );
+	if( ret < 0 ) {
+		serprintf( "facom open: error describing channel layout %s\n", av_err2str( ret ) );
+		return ret;
+	}
+	serprintf( "facom open: in frame format %s for bits_per_sample %d and ch_layout %s\n", av_get_sample_fmt_name( ctx->in_frame->format ),
+			   audio->bitsPerSample, (char *)ctx->channel_layout );
 
 	// Initialize the filter graph based on nightmode
 	if( setup_filter_graph( ctx ) != 0 ) {
@@ -276,39 +272,32 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 {
 	struct ctx *ctx = f->priv;
+	int ret = 0;
 	// only process if nightmode or audioboost is enabled
-	if( ( ctx->level + 4 * ctx->nightmode ) > 0 ) {
-		// update input frame parameters
-		ctx->in_frame->nb_samples = frame->size / ( av_get_bytes_per_sample( ctx->in_frame->format ) * ctx->channels );
-		ctx->in_frame->data[0] = frame->data;
-		ctx->in_frame->linesize[0] = frame->size;
-		// push frame into filter graph
-		int ret = av_buffersrc_add_frame( ctx->abuffer_ctx, ctx->in_frame );
-		if( ret < 0 ) return ret;
-		if( ret < 0 ) {
-			serprintf( "facom filter: error adding frame to buffer source %s\n", av_err2str( ret ) );
-			return ret;
-		} else {
-			DBG2 serprintf( "facom filter: frame added to buffer source\n" );
-		}
-		// get filtered frame
-		ret = av_buffersink_get_frame( ctx->abuffersink_ctx, ctx->out_frame );
-		if( ret < 0 ) {
-			serprintf( "facom filter: error getting frame from buffer sink %s\n", av_err2str( ret ) );
-			return ret;
-		} else {
-			DBG2 serprintf( "facom filter: frame retrieved from buffer sink\n" );
-		}
-		// copy processed data back to input frame (ensure size compatibility)
-		memcpy( frame->data, ctx->out_frame->data[0], MIN( frame->size, ctx->out_frame->linesize[0] ) );
-		av_frame_unref( ctx->out_frame );
-		if( !ctx->out_frame ) {
-			serprintf( "facom filter: error allocating output frame %s\n", av_err2str( ret ) );
-			return -1;
-		} else {
-			DBG2 serprintf( "facom filter: output frame allocated\n" );
-		}
+	//if( ( ctx->level + 4 * ctx->nightmode ) > 0 ) {
+
+	// update input frame parameters
+	ctx->in_frame->nb_samples = frame->size / ( av_get_bytes_per_sample( ctx->in_frame->format ) * ctx->channels );
+	ctx->in_frame->data[0] = frame->data;
+	ctx->in_frame->linesize[0] = frame->size;
+
+	// push frame into filter graph
+	ret = av_buffersrc_add_frame( ctx->abuffer_ctx, ctx->in_frame );
+	if( ret < 0 ) {
+		serprintf( "facom filter: error adding frame to buffer source %s\n", av_err2str( ret ) );
+		return ret;
 	}
+	// get filtered frame
+	ret = av_buffersink_get_frame( ctx->abuffersink_ctx, ctx->out_frame );
+	if( ret < 0 ) {
+		serprintf( "facom filter: error getting frame from buffer sink %s\n", av_err2str( ret ) );
+		return ret;
+	}
+	// copy processed data back to input frame (ensure size compatibility)
+	memcpy( frame->data, ctx->out_frame->data[0], MIN( frame->size, ctx->out_frame->linesize[0] ) );
+	DBG2 serprintf( "facom filter: copied %d bytes from out_frame to input frame\n", ctx->out_frame->linesize[0] );
+	av_frame_unref( ctx->out_frame );
+	//}
 	return 0;
 }
 
@@ -326,53 +315,52 @@ static int _set_param( STREAM_FILTER_AUDIO *f, void *params, void *night_on )
 	int *nightmode = night_on;
 	struct ctx *ctx = f->priv;
 	int ret = 0;
-
 	if( ( ctx->level != *level ) || ( ctx->nightmode != *nightmode ) ) {
 		ctx->level = *level;
 		ctx->nightmode = *nightmode;
 
+		if( !ctx->filter_graph || !ctx->dynaudnorm_ctx ) {
+			serprintf( "facom: set_param filter graph not initialized\n" );
+			return -1;
+		}
+
 		if( ctx->nightmode ) {
 			// Night mode compression settings
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "framelen", "150", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+			if( ret < 0 ) serprintf( "facom: set_param framelen %s\n", av_err2str( ret ) );
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "gausssize", "11", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+			if( ret < 0 ) serprintf( "facom: set_param gausssize %s\n", av_err2str( ret ) );
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "peak", "0.95", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+			if( ret < 0 ) serprintf( "facom: set_param peak %s\n", av_err2str( ret ) );
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "targetrms", "0.0", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+			if( ret < 0 ) serprintf( "facom: set_param targetrms %s\n", av_err2str( ret ) );
 			if( ctx->level > 0 ) {
 				// Combine night mode with boost
 				ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "maxgain", "16", NULL, 0, 0 );
-				serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+				if( ret < 0 ) serprintf( "facom: set_param maxgain %s\n", av_err2str( ret ) );
 			} else {
 				// Night mode only
 				ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "maxgain", "10", NULL, 0, 0 );
-				serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+				if( ret < 0 ) serprintf( "facom: set_param maxgain %s\n", av_err2str( ret ) );
 			}
 		} else {
 			// disable night mode
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "framelen", "1", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
-
+			if( ret < 0 ) serprintf( "facom: set_param framelen %s\n", av_err2str( ret ) );
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "gausssize", "1", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
-
+			if( ret < 0 ) serprintf( "facom: set_param gausssize %s\n", av_err2str( ret ) );
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "targetrms", "0.0", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
-
+			if( ret < 0 ) serprintf( "facom: set_param targetrms %s\n", av_err2str( ret ) );
 			ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "peak", "1.0", NULL, 0, 0 );
-			serprintf( "facom: set_param %s\n", av_err2str( ret ) );
-
+			if( ret < 0 ) serprintf( "facom: set_param peak %s\n", av_err2str( ret ) );
 			//avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "compress", "0", NULL, 0, 0 );
 			if( ctx->level > 0 ) {
 				// Boost only (no compression)
 				ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "maxgain", "6", NULL, 0, 0 );
-				serprintf( "facom: set_param %s\n", av_err2str( ret ) );
-
+				if( ret < 0 ) serprintf( "facom: set_param maxgain %s\n", av_err2str( ret ) );
 			} else {
 				ret = avfilter_graph_send_command( ctx->filter_graph, "dynaudnorm", "maxgain", "0", NULL, 0, 0 );
-				serprintf( "facom: set_param %s\n", av_err2str( ret ) );
+				if( ret < 0 ) serprintf( "facom: set_param maxgain %s\n", av_err2str( ret ) );
 			}
 		}
 	}
@@ -381,6 +369,7 @@ static int _set_param( STREAM_FILTER_AUDIO *f, void *params, void *night_on )
 }
 
 static int _close( STREAM_FILTER_AUDIO *f ) {
+	DBG serprintf( "facomp: close\n" );
 	if( f && f->priv ){
 		struct ctx *ctx = f->priv;
 		if( ctx->in_frame ) av_frame_free( &ctx->in_frame );
@@ -392,8 +381,15 @@ static int _close( STREAM_FILTER_AUDIO *f ) {
 
 int _delete( STREAM_FILTER_AUDIO *f )
 {
+	DBG serprintf( "facomp: delete\n" );
 	if( f ) {
 		if( f->priv ) {
+			struct ctx *ctx = f->priv;
+			if( ctx->abuffer_ctx && ctx->abuffersink_ctx ) {
+				// Flush the filter graph (DO NOT do the flushing in _flush since it yields to have to recreate the filter graph by ffmpeg design)
+				av_buffersrc_add_frame( ctx->abuffer_ctx, NULL );
+				av_buffersink_get_frame( ctx->abuffersink_ctx, NULL );
+			}
 			afree( f->priv );
 		}
 		afree( f );
@@ -403,37 +399,35 @@ int _delete( STREAM_FILTER_AUDIO *f )
 
 static int _flush( STREAM_FILTER_AUDIO *f )
 {
-	DBG2 serprintf( "facomp: flush\n" );
-	if( f && f->priv ) {
-		struct ctx *ctx = f->priv;
-		if( ctx->abuffer_ctx && ctx->abuffersink_ctx ) {
-			// Flush the filter graph
-			av_buffersrc_add_frame( ctx->abuffer_ctx, NULL );
-			av_buffersink_get_frame( ctx->abuffersink_ctx, NULL );
-		}
-	}
+	// note: no real fitler graph flushing is done here, it is done in _delete since otherwise we need to recreate the filter graph
+	DBG serprintf( "facomp: flush\n" );
 	return 0;
 }
 
 int _delay( STREAM_FILTER_AUDIO *f ) {
 	struct ctx *ctx = f->priv;
-	int64_t delay = 0;
-	if( ctx && ctx->filter_graph ) {
-		// get delay from dynaudnorm filter
-		if( ctx->dynaudnorm_ctx ) {
-			int64_t filter_delay = 0;
-			int ret = av_opt_get_int( ctx->dynaudnorm_ctx, "delay", 0, &filter_delay );
-			if( ret >= 0 ) {
-				delay += filter_delay;
+	if( ( ctx->level + 4 * ctx->nightmode ) > 0 ) {
+		int64_t delay = 0;
+		if( ctx && ctx->filter_graph ) {
+			// get delay from dynaudnorm filter
+			if( ctx->dynaudnorm_ctx ) {
+				int64_t filter_delay = 0;
+				int ret = av_opt_get_int( ctx->dynaudnorm_ctx, "delay", 0, &filter_delay );
+				if( ret >= 0 ) {
+					delay += filter_delay;
+				}
+			}
+			// convert from samples to milliseconds
+			if( ctx->in_frame->sample_rate > 0 ) {
+				delay = ( delay * 1000 ) / ctx->in_frame->sample_rate;
 			}
 		}
-		// convert from samples to milliseconds
-		if( ctx->sample_rate > 0 ) {
-			delay = ( delay * 1000 ) / ctx->sample_rate;
-		}
+		DBG serprintf( "facomp: delay %lld ms\n", delay );
+		return (int)delay;
+	} else {
+		DBG serprintf( "facomp: no delay\n" );
+		return 0;
 	}
-	DBG serprintf( "facomp: delay %lld ms\n", delay );
-	return (int)delay;
 }
 
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void )

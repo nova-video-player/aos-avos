@@ -25,6 +25,7 @@ ifeq ($(LIBAV_CONFIG),)
 	LIBAV_CONFIG := base
 endif
 LIBAV_CONFIG_DIR := $(LIBAV_DIR)/dist-$(LIBAV_CONFIG)-$(TARGET_ARCH_ABI)
+ONNXRUNTIME_DIR := $(AVOS_DIR)/../onnxruntime-android-builder
 
 AUDIOCOMPRESS_DIR := $(AVOS_DIR)/../audiocompress
 

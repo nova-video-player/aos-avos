@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#ifdef __aarch64__
+#include <onnxruntime/onnxruntime_c_api.h>
+#include <fftw3.h>
+#endif
 #include "global.h"
 #include "stream_filter_audio.h"
 #include "debug.h"

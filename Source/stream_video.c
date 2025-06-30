@@ -198,6 +198,7 @@ static inline STREAM_CPU get_cpu_priority( STREAM *s )
 
 STREAM_FILTER_AUDIO *stream_filter_audio_agc_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_onnx_new( void );
 
 // *****************************************************************************
 //
@@ -402,7 +403,11 @@ static int stream_open_audio_filter( STREAM *s )
 {
 	if( s->audio_filter_enabled ) {
 #ifdef CONFIG_AUDIO_COMPRESS
+#ifdef __aarch64__
+		s->audio_filter = stream_filter_audio_onnx_new();
+#else
 		s->audio_filter = stream_filter_audio_compress_new();
+#endif
 #endif
 #ifdef CONFIG_AUDIO_AGC
 		s->audio_filter = stream_filter_audio_agc_new();

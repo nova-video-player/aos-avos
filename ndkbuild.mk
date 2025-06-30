@@ -68,7 +68,17 @@ LOCAL_STATIC_LIBRARIES := $(sort $(addsuffix $(AVOS_LIBS_SUFFIX), $(AVOS_STATIC_
 LOCAL_MODULE := libavos$(AVOS_LIBS_SUFFIX)
 
 LOCAL_MODULE_TAGS := optional
+LOCAL_CPP_FEATURES += exceptions
 
+ifeq ($(TARGET_ARCH),arm64)
+ONNXRUNTIME_DIR := ../onnxruntime-android-builder
+LOCAL_C_INCLUDES += $(ONNXRUNTIME_DIR)/include
+LOCAL_LDLIBS += -L$(ONNXRUNTIME_DIR)/lib/arm64-v8a/ -lonnxruntime
+
+FFTW_DIR := ../fftw3-android-builder/build/arm64-v8a/
+LOCAL_C_INCLUDES += $(FFTW_DIR)/install/include
+LOCAL_LDLIBS += -L$(FFTW_DIR)/install/lib -lfftw3
+endif
 ifeq ($(TARGET_ARCH),arm)
 LOCAL_ARM_MODE := arm
 ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)

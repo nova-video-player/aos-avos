@@ -63,6 +63,7 @@ ifeq ($(AUDIO),ON)
 		DEFINES += -DCONFIG_FF_WMA_PRO
 	endif	
 
+	CSRC_AUDIO += stream_filter_audio_onnx.c
 	ifeq ($(AUDIO_COMPRESS),ON)
 		DEFINES += -DCONFIG_AUDIO_COMPRESS
 		CSRC_AUDIO += stream_filter_audio_compress.c

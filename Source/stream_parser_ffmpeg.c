@@ -380,10 +380,21 @@ DBGP serprintf("\tPAR        %d/%d\r\n", codecpar->sample_aspect_ratio.num, code
 				}
 				
 				if( codecpar->extradata_size ) {
+					// libavformat used to skip the first 4 bytes in av1 private data but not anymore
+					// for AV1 both sfdec android hw codecs and dav1d do not want this thus skip it
+					int offset = ( video->format == VIDEO_FORMAT_AV1 ) ? 4 : 0;
 					if( codecpar->extradata_size <= sizeof( video->extraData ) ) {
-						// libavformat used to skip the first 4 bytes in av1 private data
-						// hw codecs and our implementation using libavcodec still want this
-						int offset = ( video->format == VIDEO_FORMAT_AV1 ) ? 4 : 0 ;
+						// Add debug output to investigate the extradata
+						DBGP {
+							serprintf( "AV1 extraData[%d]=[", codecpar->extradata_size );
+							if( codecpar->extradata_size >= 8 ) {
+								serprintf( "4 first bytes: " );
+								for( int i = 0; i < 4; i++ ) {
+									serprintf( "%02X,", codecpar->extradata[i] );
+								}
+								serprintf( "]\n" );
+							}
+						}
 						video->extraDataSize = codecpar->extradata_size - offset ;
 						memcpy( video->extraData, codecpar->extradata + offset , video->extraDataSize );
 						if( video->format == VIDEO_FORMAT_H264 && video->extraData[0] == 0x00 ) {

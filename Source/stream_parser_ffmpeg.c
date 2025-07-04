@@ -399,8 +399,8 @@ serprintf("FF: parse H264 SPS\n");
 						}
 					} else {
 						video->extraDataSize  = 0;
-						video->extraDataSize2 = codecpar->extradata_size;
-						video->extraData2     = codecpar->extradata;
+						video->extraDataSize2 = codecpar->extradata_size - offset;
+						video->extraData2     = codecpar->extradata + offset;
 					}
 				} 
 				

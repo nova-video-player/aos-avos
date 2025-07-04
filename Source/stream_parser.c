@@ -909,6 +909,10 @@ void stream_parser_send_video_extra( VIDEO_PROPERTIES *video, CBE *cbe, int *siz
 		return;
 	}
 #endif
+	if( video->format == VIDEO_FORMAT_AV1 ) {
+		// do not send extradata inline
+		return;
+	}
 
 	if( video->extraDataSize && !video->extra_sent ) {
 DBGCV serprintf("add extra: %d\r\n", video->extraDataSize );

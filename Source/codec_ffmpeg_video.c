@@ -389,7 +389,7 @@ serprintf("ffvd not open!\r\n");
 	PRIV *p = (PRIV*)dec->priv;
 
  	// free the YUV frame
-	av_free( p->vframe );
+	av_frame_free( &p->vframe );
 
 	if( p->mt_ctx ) {
 		codec_convert_mt_exit( p->mt_ctx );

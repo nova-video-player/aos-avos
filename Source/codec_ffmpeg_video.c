@@ -589,7 +589,7 @@ DBGCV2 serprintf("<");
 				break;
 			}
 		}
-
+		av_frame_free( &temp_frame );
 	} else {
 		got_picture = 1;
 		vframe->opaque = (void*)(intptr_t)(p->reorder_pts ? avos_frame->time : avos_frame->user_ID);

@@ -298,8 +298,11 @@ DBG serprintf("sub: no 1st\r\n");
 			}
 DBG3 serprintf("sub: skip [%8d] %8d -> %8d [%s][%s]\r\n", time, start, end, p->sub->top, p->sub->bottom );
 			p->sub = p->sub->next;
+			if( !p->sub ) {
+				break;
+			}
 			start = scale_time( s, p->sub->start );
-			end   = scale_time( s, p->sub->end );
+			end = scale_time( s, p->sub->end );
 		}
 		if( !p->sub ) {
 			return 1;

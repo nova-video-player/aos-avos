@@ -147,10 +147,10 @@ end:
 // *************************
 int stream_sub_ext_check( STREAM *s )
 {
-	if( !s )
+	if( !s || !s->sub_url )
 		return 1;
 
-DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] );
+DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] : "(null)" );
 
 	subtitle_files *files = get_subtitle_files( s );
 	if (!files)

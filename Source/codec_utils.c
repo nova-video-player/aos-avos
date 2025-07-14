@@ -1149,12 +1149,21 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
                 }
 		break;
 	}
-	if (convert_libyuv)
-                       convert_libyuv(src_data[0] + start * src_linesize[0], src_linesize[0],
-                                  src_data[1] + start / 2 * src_linesize[1], src_linesize[1],
-                                  src_data[2] + start / 2 * src_linesize[2], src_linesize[2],
-                                  frame->data[0] + start * frame->linestep[0]*4, frame->linestep[0]*4,
-                                  width, height);
+	if (convert_libyuv) {
+		// Validate parameters to prevent buffer overflows and segfaults
+		if (!src_data[0] || !src_data[1] || !src_data[2] || !frame->data[0] ||
+		    width <= 0 || height <= 0 || start < 0 ||
+		    src_linesize[0] <= 0 || src_linesize[1] <= 0 || src_linesize[2] <= 0 ||
+		    frame->linestep[0] <= 0) {
+			return;
+		}
+		
+		convert_libyuv(src_data[0] + start * src_linesize[0], src_linesize[0],
+		               src_data[1] + start / 2 * src_linesize[1], src_linesize[1],
+		               src_data[2] + start / 2 * src_linesize[2], src_linesize[2],
+		               frame->data[0] + start * frame->linestep[0]*4, frame->linestep[0]*4,
+		               width, height);
+	}
 #else
         switch( frame->colorspace ) {
 	case AV_IMAGE_YUV_422:

@@ -376,6 +376,10 @@ static int get_info_subtitle(const char *full_path, FILE_INFO *info)
 // ************************************************
 int get_url_info( STREAM_URL *src, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
 {
+	if( !src ) {
+		return 1;
+	}
+
 DBG serprintf("get_url_info: %s %d/%d\r\n", src->url, type, etype );
 
 	clear_info( info );

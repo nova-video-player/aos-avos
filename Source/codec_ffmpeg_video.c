@@ -389,7 +389,9 @@ serprintf("ffvd not open!\r\n");
 	PRIV *p = (PRIV*)dec->priv;
 
  	// free the YUV frame
-	av_frame_free( &p->vframe );
+	if (p->vframe) {
+		av_frame_free( &p->vframe );
+	}
 
 	if( p->mt_ctx ) {
 		codec_convert_mt_exit( p->mt_ctx );
@@ -430,7 +432,10 @@ serprintf("ffmpeg_video_codec_cleanup\n");
 	int i;
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
-		av_frame_free((AVFrame**)&f->priv);
+		if (f && f->priv) {
+			av_frame_free((AVFrame**)&f->priv);
+			f->priv = NULL;
+		}
 	}
 
 	return 0;

@@ -147,7 +147,7 @@ end:
 // *************************
 int stream_sub_ext_check( STREAM *s )
 {
-	if( !s || !s->sub_url )
+	if( !s )
 		return 1;
 
 DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] : "(null)" );

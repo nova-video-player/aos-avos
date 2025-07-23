@@ -1118,7 +1118,9 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 		if( new_pos > s->size ) {
 			// pos is beyond end of file - what do we do now?
 			DBGP serprintf("at end %lld %llu\r\n", new_pos, s->size);
-			// TODO MARC this is we go 1MB before end... for seek
+			// eof reached, stop playback
+			s->video_parse_end = 1;
+			s->audio_parse_end = 1;
 			if ( s->size > 1024 * 1024ul ) {
 				new_pos = s->size - 1024 * 1024ul; // 1MB before end
 			} else {

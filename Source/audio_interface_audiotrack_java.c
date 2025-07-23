@@ -37,8 +37,6 @@ extern int get_hdmi_supports_iec(void);
 #define DBG2 if(0)
 #define ERR  if(1)
 
-#define AUDIO_SPEED_LATENCY_SHIFT 260 // 260ms for a 6x buffer, should be calculated
-
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
 
 typedef unsigned char bool;
@@ -452,7 +450,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
 	// scaling with audio_speed is required to avoid variable delay with different audio_speed
 	if(is_audio_speed_enabled) {
-		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / as;
+		int min_buf_size = call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I", sampleRateInHz, channelConfig, audioFormat);
+		int min_frame_count = min_buf_size / at->frame_size;
+		int min_buffer_latency_ms = (1000 * min_frame_count) / at->rate;
+		at->latency = (at->latency + min_buffer_latency_ms) / as;
 	} else {
 		at->latency += (1000 * at->frame_count) / at->rate;
 	}
@@ -662,8 +663,11 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency=%d\n", at->latency);
 		// scaling with audio_speed is required to avoid variable delay with different audio_speed
-		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / speed;
-		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
+        int min_buf_size = call_int_method_current_vm(myEnv, at->audiotrackClass, "getMinBufferSize", "(III)I", at->rate, at->channel_count, at->format);
+        int min_frame_count = min_buf_size / at->frame_size;
+        int min_buffer_latency_ms = (1000 * min_frame_count) / at->rate;
+        at->latency = (at->latency + min_buffer_latency_ms) / speed;
+        DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
 
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");

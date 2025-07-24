@@ -812,8 +812,8 @@ serprintf("video format %.4s not allowed\r\n", &s->video->fourcc);
 	} else {
 		// calculating msPerFrame from scale/rate -> scale/(as*rate)
 		// if we have scale and rate (mostly for AVI)
-		s->video->msPerFrame   = 1000 * (UINT64)s->video->scale / (UINT64)( as * s->video->rate);
-		s->video->framesPerSec = (UINT64) (as * s->video->rate) / (UINT64)s->video->scale;
+		s->video->msPerFrame   = 1000 * (UINT64)s->video->scale / (UINT64)s->video->rate;
+		s->video->framesPerSec = (UINT64)s->video->rate / (UINT64)s->video->scale;
 		DBG2 serprintf("calculated msPerFrame msPerFrame=%d, video->scale=%d, video->rate=%d\n", s->video->msPerFrame, s->video->scale, s->video->rate);
 	} 
 
@@ -2593,7 +2593,7 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	// a sink might want that info
 	frame->aspect_n = s->video->aspect_n,
 	frame->aspect_d = s->video->aspect_d;
-	frame->duration = s->video->msPerFrame; // ts
+	frame->duration = (int)(s->video->msPerFrame / as); // ts
 				
 	pthread_mutex_lock( &s->video_sink_mutex );
 	s->sink_delay = frame->blit_time - s->video_sink->put( s->video_sink, frame ); 	

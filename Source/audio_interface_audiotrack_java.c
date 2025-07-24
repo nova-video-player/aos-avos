@@ -366,7 +366,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 4x buffer" );
-		buffer_scale = 6; // TODO 3x instead of 4x seems to work as well on speakers. Note that with bluetooth headsets >4x avoids AudioTrack error
+		buffer_scale = 3; // Reduced buffer scale due to improved timing accuracy
 	} else {
 		buffer_scale = 1;
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 1x buffer" );
@@ -593,6 +593,9 @@ DBG	LOG();
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 {
 	int ret = 0;
+	int failed = 0;
+	int status = 0; // Declare status here
+
 	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
 
@@ -612,43 +615,66 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 									->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
 											   "()Landroid/media/PlaybackParams;" ) );
 
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed playbackparams fetched" );
-
-		// change that audioparam's speed
-		( *myEnv )
-			->CallObjectMethod(
-				myEnv, playbackParams,
-				( *myEnv )
-					->GetMethodID( myEnv, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
-				speed );
-
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed setspeed done" );
-
 		int failed = 0;
 		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
 		if( exception ) {
-			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setSpeed call" );
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during getPlaybackParams call" );
 			( *myEnv )->ExceptionDescribe( myEnv );
 			( *myEnv )->ExceptionClear( myEnv );
 			failed = 1;
 		}
 
-		// set audiotrack's audioparams
-		( *myEnv )
-			->CallVoidMethod( myEnv, audioTrack,
-							  ( *myEnv )
-								  ->GetMethodID( myEnv, at->audiotrackClass, "setPlaybackParams",
-											 "(Landroid/media/PlaybackParams;)V" ),
-							  playbackParams );
+		if (!failed) {
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed playbackparams fetched" );
 
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
+			// change that audioparam's speed
+			( *myEnv )
+				->CallObjectMethod(
+					myEnv, playbackParams,
+					( *myEnv )
+						->GetMethodID( myEnv, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
+					speed );
 
-		int status =
-			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
-								   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
-		if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
-			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed AudioTrack not in initialized state after setPlaybackParams. Status: %d", status);
-			failed = 1;
+			exception = ( *myEnv )->ExceptionOccurred( myEnv );
+			if( exception ) {
+				ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setSpeed call" );
+				( *myEnv )->ExceptionDescribe( myEnv );
+				( *myEnv )->ExceptionClear( myEnv );
+				failed = 1;
+			}
+		}
+
+		if (!failed) {
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed setspeed done" );
+
+			// set audiotrack's audioparams
+			( *myEnv )
+				->CallVoidMethod( myEnv, audioTrack,
+								  ( *myEnv )
+									  ->GetMethodID( myEnv, at->audiotrackClass, "setPlaybackParams",
+												 "(Landroid/media/PlaybackParams;)V" ),
+								  playbackParams );
+
+			exception = ( *myEnv )->ExceptionOccurred( myEnv );
+			if( exception ) {
+				ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setPlaybackParams call" );
+				( *myEnv )->ExceptionDescribe( myEnv );
+				( *myEnv )->ExceptionClear( myEnv );
+				failed = 1;
+			}
+		}
+
+		if (!failed) {
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
+
+			status =
+				( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
+									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
+			if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
+				ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed AudioTrack not in initialized state after setPlaybackParams. Status: %d", status);
+				failed = 1;
+			}
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getstate %d",status );
 		}
 
 	 	DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getstate %d",status );

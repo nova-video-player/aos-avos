@@ -80,22 +80,24 @@ VIDEO_FRAME *frame_q_get_unlocked( FRAME_Q *q )
 
 VIDEO_FRAME *frame_q_get_index( FRAME_Q *q, int index )
 {
-	VIDEO_FRAME **prev = NULL;
-	VIDEO_FRAME *frame = q->head;
-	
-	while( frame ) {
-		if( frame->index == index ) {
-			if( prev )
-				*prev = frame->next;
-			else
-				q->head = frame->next;
-				
-			return frame;
+	VIDEO_FRAME *i = q->head;
+	while( i ) {
+		if( i->index == index ) {
+			return i;
 		}
-		prev = &frame->next;
-		frame = frame->next;
+		i = i->next;
 	}
 	return NULL;
+}
+
+void frame_q_rescale_timestamps(FRAME_Q *q, float old_speed, float new_speed)
+{
+	VIDEO_FRAME *i = q->head;
+	while (i)
+	{
+		i->blit_time = (int)((float)i->blit_time * old_speed / new_speed);
+		i = i->next;
+	}
 }
 
 VIDEO_FRAME *frame_q_peek( FRAME_Q *q )

@@ -67,13 +67,16 @@ typedef struct STREAM_SINK_VIDEO {
 	SINK_VIDEO_CLEAR   clear;
 	SINK_VIDEO_RESIZE  resize;
 	SINK_VIDEO_DUMP    dump;
-	int                is_open;
-	int		   allocates_frames;
-	int                output;
+	int (*rescale_timestamps)(struct STREAM_SINK_VIDEO *sink, float old_speed, float new_speed);
+
+	int output;
 	STREAM_SCREEN_PARAMS primary;
 	STREAM_SCREEN_PARAMS secondary;
-	void		   *ctx;
-	void               *priv;
+	int allocates_frames;
+	int is_open;
+	void *ctx;
+
+	void *priv;
 } STREAM_SINK_VIDEO;
 
 #define STREAM_SINK_DEFAULT_SCREEN ((STREAM_SCREEN_PARAMS){ { 0, 0, 320, 240 }, 1, 1, 0, 1.0f, DISPFMT_ORIGINAL_PICTURE })

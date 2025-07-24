@@ -36,5 +36,6 @@ VIDEO_FRAME *frame_q_peek( FRAME_Q *q );
 VIDEO_FRAME *frame_q_get ( FRAME_Q *q );
 VIDEO_FRAME *frame_q_get_unlocked( FRAME_Q *q );
 VIDEO_FRAME *frame_q_get_index( FRAME_Q *q, int index );
+void frame_q_rescale_timestamps(FRAME_Q *q, float old_speed, float new_speed);
 
 #endif

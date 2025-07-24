@@ -703,6 +703,18 @@ static int sink_dump(STREAM_SINK_VIDEO *sink)
 	return 0;
 }
 
+static int sink_rescale_timestamps(STREAM_SINK_VIDEO *sink, float old_speed, float new_speed)
+{
+	priv_t *p = sink->priv;
+
+	pthread_mutex_lock(&p->venc_mutex);
+	frame_q_rescale_timestamps(&p->venc_q, old_speed, new_speed);
+	p->venc_put_time = (int)((float)p->venc_put_time * old_speed / new_speed);
+	pthread_mutex_unlock(&p->venc_mutex);
+
+	return 0;
+}
+
 STREAM_SINK_VIDEO *stream_sink_video_android3_new(void *surface_handle) 
 {
 	STREAM_SINK_VIDEO *sink = (STREAM_SINK_VIDEO *) acalloc(1, sizeof(STREAM_SINK_VIDEO));
@@ -727,6 +739,7 @@ STREAM_SINK_VIDEO *stream_sink_video_android3_new(void *surface_handle)
 	sink->clear	= sink_clear;
 	sink->resize	= sink_resize;
 	sink->dump	= sink_dump;
+	sink->rescale_timestamps = sink_rescale_timestamps;
 
 	sink->primary	= STREAM_SINK_DEFAULT_SCREEN;
 

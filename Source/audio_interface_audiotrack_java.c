@@ -592,11 +592,12 @@ DBG	LOG();
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 {
+	int ret = 0;
 	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
 
 		JNIEnv *myEnv = attach_thread_current_vm();
-		if (*myEnv == NULL) return 0;
+		if (*myEnv == NULL) return 1; // Indicate failure if JNI environment is not available
 
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed attached to current thread" );
 
@@ -607,9 +608,9 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		jobject playbackParams =
 			( *myEnv )
 				->CallObjectMethod( myEnv, audioTrack,
-									( *myEnv )
-										->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
-													   "()Landroid/media/PlaybackParams;" ) );
+								( *myEnv )
+									->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
+											   "()Landroid/media/PlaybackParams;" ) );
 
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed playbackparams fetched" );
 
@@ -637,27 +638,29 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			->CallVoidMethod( myEnv, audioTrack,
 							  ( *myEnv )
 								  ->GetMethodID( myEnv, at->audiotrackClass, "setPlaybackParams",
-												 "(Landroid/media/PlaybackParams;)V" ),
+											 "(Landroid/media/PlaybackParams;)V" ),
 							  playbackParams );
 
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
 
 		int status =
 			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
-									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
+								   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
 		if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed AudioTrack not in initialized state after setPlaybackParams. Status: %d", status);
 			failed = 1;
 		}
 
 	 	DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getstate %d",status );
 
 		if( failed ) {
-			// TODO MARC check fallback at 1.0x if it fails (soundbar?)
 			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed: reverting to 1x" );
 			audio_interface_set_audio_speed(1.0f);
+			ret = 1; // Indicate failure
 		} else {
 			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
 			audio_interface_set_audio_speed(speed);
+			ret = 0; // Indicate success
 		}
 
 		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
@@ -671,8 +674,9 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
+		ret = 0; // No change, so success
 	}
-	return 0;
+	return ret;
 }
 
 const audio_interface_impl_t audio_interface_impl_audiotrack_java = {

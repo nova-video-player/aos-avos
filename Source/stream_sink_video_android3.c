@@ -103,8 +103,9 @@ static inline int align(int x, int y)
 
 static int _get_time( priv_t *p )
 {
+	float as = audio_interface_get_audio_speed();
 	int diff = atime() - p->venc_ref_time;
-	p->venc_time = p->venc_put_time + diff;
+	p->venc_time = p->venc_put_time + (int)(diff / as);
 //serprintf("get %8d + %8d = %8d\n", p->venc_put_time, diff, p->venc_time );	
 	
 	return p->venc_time;
@@ -237,11 +238,13 @@ static void *venc_thread(void *ctx)
 
 		int venc_time = _get_time(p);
 		
-		p->venc_flushing = 0;
+p->venc_flushing = 0;
 
+		float as = audio_interface_get_audio_speed();
 		int delay = 4 * 40;	// assume 4 frames at 25fps
+		int delay_ts = (int)(delay / as);
 
-		int blit_duration = force_blit ? 0 : frame->blit_time - venc_time - delay;
+		int blit_duration = force_blit ? 0 : frame->blit_time - venc_time - delay_ts;
 
 DBGSI serprintf("[%2d]%3d[%2d|%4d](%3d)", frame_q_count( &p->venc_q ), blit_duration, frame->index, frame->decode_time, frame->blit_time - p->out_time );
 		if( s && s->paused ) {
@@ -252,13 +255,13 @@ DBGSI serprintf(" paused\n");
 				if( blit_duration > frame->duration + 100 ) {
 DBGSI serprintf(" wait");
 					blit_duration = frame->duration + 100;
-				} 
-			} 
+				}
+			}
 //DBGLOG("wait %3d  f %08d  v %08d", blit_duration, frame->blit_time, venc_time);
 			struct timespec ts;
 			clock_gettime(CLOCK_REALTIME, &ts);
-			timespec_add_ms(&ts, blit_duration - 10);
-			
+			timespec_add_ms(&ts, (int)((blit_duration - 10) * as));
+
 			int rc = 0;
 			while (p->venc_run && rc == 0 && !p->venc_flushing) {
 				rc = pthread_cond_timedwait(&p->venc_cond, &p->venc_mutex, &ts);

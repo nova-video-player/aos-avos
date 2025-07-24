@@ -336,7 +336,7 @@ serprintf(" ae! ");
 			} 
 		} else {
 			if( !s->audio->vbr && s->audio->bytesPerSec ) {
-				_add_audio_time( s, decoded * 1000 / s->audio->bytesPerSec );
+				_add_audio_time( s, (int)((decoded * 1000 / s->audio->bytesPerSec) / audio_interface_get_audio_speed()) );
 			}
 		}
 		
@@ -368,7 +368,7 @@ serprintf(" ae! ");
 						if( s->audio->samplesPerSec ) {
 							s->audio_samples += ((passthrough == 2)?audio_frame.fakeSize : size_written) / s->audio->bytesPerFrame;
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
-							_set_audio_time( s, s->audio_ref_time + delta );
+							_set_audio_time( s, s->audio_ref_time + (int)(delta / audio_interface_get_audio_speed()) );
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}

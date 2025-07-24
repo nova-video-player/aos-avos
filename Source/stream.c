@@ -527,22 +527,35 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
 	float old_speed = audio_interface_get_audio_speed();
+
 	if( audio_interface_is_audio_speed_enabled() && old_speed != av_speed ) {
 		int was_paused = stream_pause(s);
 		thread_state_set(&s->engine_tstate, THREAD_IDLE);
 		while(thread_state_get(&s->engine_tstate) != THREAD_IDLE)
 			msec_sleep(1);
 
+		// Attempt to change audio speed first
+		int audio_change_status = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
+
+		// If audio speed change failed, revert av_speed to 1.0f for all subsequent calculations
+		// to ensure video and internal clocks stay in sync with the actual audio speed.
+		if (audio_change_status != 0) {
+			av_speed = 1.0f; // Effective speed is 1.0f
+			// The global audio_speed is already set to 1.0f by audiotrack_change_audio_speed on failure
+		}
+
+		// Rescale internal stream clocks based on the actual speed change
 		s->video_time = (int)((float)s->video_time * old_speed / av_speed);
 		s->audio_time = (int)((float)s->audio_time * old_speed / av_speed);
 		s->sync_v_time = (int)((float)s->sync_v_time * old_speed / av_speed);
 		s->sync_a_time = (int)((float)s->sync_a_time * old_speed / av_speed);
 
-		if (s->video_sink->rescale_timestamps)
+		// Rescale timestamps in the video sink if supported
+		if (s->video_sink && s->video_sink->rescale_timestamps)
 			s->video_sink->rescale_timestamps(s->video_sink, old_speed, av_speed);
 
-		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
-		s->video_dec->set_playback_speed(s->video_dec, 100, (av_speed * 100 + 0.5));
+		// Inform video decoder of the actual playback speed
+        s->video_dec->set_playback_speed(s->video_dec, 100, (av_speed * 100 + 0.5));
 
 		thread_state_set(&s->engine_tstate, THREAD_RUNNING);
 		stream_un_pause(s, was_paused);

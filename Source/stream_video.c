@@ -2578,6 +2578,7 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 // ************************************************************
 static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
+	float as = audio_interface_get_audio_speed();
 	if( s->video_sink->put_time ) {
 		DBGS serprintf("_put_frame_in_sink: time=%d=%02d:%02d, frame->time=%d=%02d:%02d\n",
 				   time, time / 60000, (time % 60000) / 1000,

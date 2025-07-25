@@ -554,8 +554,10 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		if (s->video_sink && s->video_sink->rescale_timestamps)
 			s->video_sink->rescale_timestamps(s->video_sink, old_speed, av_speed);
 
-		// Inform video decoder of the actual playback speed
-        s->video_dec->set_playback_speed(s->video_dec, 100, (av_speed * 100 + 0.5));
+		// Only inform video decoder if audio speed change succeeded
+		if (audio_change_status == 0) {
+			s->video_dec->set_playback_speed(s->video_dec, 100, (av_speed * 100 + 0.5));
+		}
 
 		thread_state_set(&s->engine_tstate, THREAD_RUNNING);
 		stream_un_pause(s, was_paused);

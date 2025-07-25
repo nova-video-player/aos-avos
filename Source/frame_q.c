@@ -95,7 +95,7 @@ void frame_q_rescale_timestamps(FRAME_Q *q, float old_speed, float new_speed)
 	VIDEO_FRAME *i = q->head;
 	while (i)
 	{
-		i->blit_time = (int)((float)i->blit_time * old_speed / new_speed);
+		i->blit_time = (int)((float)i->blit_time * new_speed / old_speed);
 		i = i->next;
 	}
 }

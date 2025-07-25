@@ -916,7 +916,7 @@ static int sink_rescale_timestamps(STREAM_SINK_VIDEO *sink, float old_speed, flo
 
 	pthread_mutex_lock(&p->venc_mutex);
 	frame_q_rescale_timestamps(&p->venc_q, old_speed, new_speed);
-	p->venc_put_time = (int)((float)p->venc_put_time * old_speed / new_speed);
+	p->venc_put_time = (int)((float)p->venc_put_time * new_speed / old_speed);
 	pthread_mutex_unlock(&p->venc_mutex);
 
 	return 0;

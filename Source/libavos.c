@@ -155,7 +155,6 @@ void libavos_set_hdmi_supported_audio_codecs(long flag)
 
 void libavos_set_audio_speed(float speed)
 {
-	serprintf("MARC libavos:libavos_set_audio_speed %f\n", speed);
 	audio_interface_set_audio_speed(speed);
 }
 

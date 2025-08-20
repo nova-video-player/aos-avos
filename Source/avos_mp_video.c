@@ -483,7 +483,6 @@ int avos_mp_video_setavdelay(avos_mp_t *mp, avos_mp_video_t *video, int delay)
 
 int avos_mp_video_setavspeed(avos_mp_t *mp, avos_mp_video_t *video, float speed)
 {
-	serprintf("MARC avos_mp_video:avos_mp_video_setavspeed to %f\n", speed);
 	stream_set_av_speed(video->s, speed);
 	return AVOS_ERR_OK;
 }

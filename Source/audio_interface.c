@@ -153,7 +153,6 @@ int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length
 
 int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format)
 {
-	serprintf("MARC audio_interface:audio_interface_set_output_params calls impl->set_output_params\n");
 	return impl->set_output_params(ctx, freq, channels, bits, format);
 }
 
@@ -209,12 +208,7 @@ int audio_interface_get_passthrough(audio_ctx_t *ctx)
 
 void audio_interface_set_audio_speed(float speed)
 {
-	if (audio_speed != speed) { // speed changed
-		serprintf("MARC audio_interface:audio_interface_set_audio_speed changed to %f\n", speed);
-		audio_speed = speed;
-	} else {
-		serprintf("MARC audio_interface:audio_interface_set_audio_speed already at speed %f\n", speed);
-	}
+	audio_speed = speed;
 }
 
 float audio_interface_get_audio_speed()
@@ -223,7 +217,6 @@ float audio_interface_get_audio_speed()
 }
 
 int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed) {
-	serprintf("MARC audio_interface:audio_interface_change_audio_speed to %f\n", speed);
 	return impl->change_audio_speed ? impl->change_audio_speed(ctx, speed) : -1;
 }
 

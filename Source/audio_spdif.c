@@ -246,7 +246,6 @@ DBGS serprintf( "spdif_check, check codecid %d, force %d\n", codecid, passthroug
 static int spdif_check(int codecid) 
 {
 DBGS serprintf( "spdif_check, force %d\n", passthrough_on);
-	av_register_all();
 	return (passthrough_on == 1);
 }
 #endif
@@ -270,7 +269,7 @@ DBGS serprintf( "spdif_init\n");
 	if ( !spdif_check( codecid ) )
 		return 0;
 
-	AVOutputFormat *fmt = av_guess_format( "spdif", NULL, NULL );
+	const AVOutputFormat *fmt = av_guess_format( "spdif", NULL, NULL );
 	if ( !fmt ) {
 		serprintf( "No spdif avformat...\n" );
 		return 0;

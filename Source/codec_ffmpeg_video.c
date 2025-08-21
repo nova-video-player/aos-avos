@@ -64,13 +64,13 @@ DECLARE_DEBUG_PARAM("ffdel", _ff_deinterlacing_max_height );
 #ifndef CONFIG_RELEASE
 static void show_formats( void )
 {
-	avcodec_register_all(  );
-	av_register_all(  );
-
-	AVInputFormat *ifmt  = NULL;
-	AVOutputFormat *ofmt = NULL;
+	const AVInputFormat *ifmt  = NULL;
+	const AVOutputFormat *ofmt = NULL;
+	void *ifmt_opaque = NULL;
+	void *ofmt_opaque = NULL;
 	AVCodec *p           = NULL, *p2;
-	AVCodecParser *cp    = NULL;
+	const AVCodecParser *cp    = NULL;
+	void *cp_opaque = NULL;
 	
 	const char *last_name;
 
@@ -82,14 +82,14 @@ static void show_formats( void )
 		const char *name = NULL;
 		const char *long_name = NULL;
 
-		while ( ( ofmt = av_oformat_next( ofmt ) ) ) {
+		while ( ( ofmt = av_muxer_iterate( &ofmt_opaque ) ) ) {
 			if ( ( name == NULL || strcmp( ofmt->name, name ) < 0 ) && strcmp( ofmt->name, last_name ) > 0 ) {
 				name = ofmt->name;
 				long_name = ofmt->long_name;
 				encode = 1;
 			}
 		}
-		while ( ( ifmt = av_iformat_next( ifmt ) ) ) {
+		while ( ( ifmt = av_demuxer_iterate( &ifmt_opaque ) ) ) {
 			if ( ( name == NULL || strcmp( ifmt->name, name ) < 0 ) && strcmp( ifmt->name, last_name ) > 0 ) {
 				name = ifmt->name;
 				long_name = ifmt->long_name;
@@ -116,7 +116,7 @@ static void show_formats( void )
 	serprintf( "\n" );
 
 	serprintf( "Supported parsers:\n" );
-	while ( ( cp = av_parser_next( cp ) ) ) {
+	while ( ( cp = av_parser_iterate( &cp_opaque ) ) ) {
 		const AVCodecDescriptor *desc = avcodec_descriptor_get(cp->codec_ids[0]);
 		serprintf( "  %5X  %s\n", cp->codec_ids[0], desc ? desc->name : "?" );
 	}
@@ -151,7 +151,7 @@ void av_log_cb(void*, int, const char*, va_list);
 
 typedef struct PRIV {
 	AVCodecContext 	*vctx;
-	AVCodec 	*vcodec;
+	const AVCodec 	*vcodec;
 	AVFrame		*vframe;
 	void		*mt_ctx;
 	int		reorder_pts;
@@ -164,8 +164,6 @@ static int ffmpeg_video_codec_open( STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *vid
 {
 DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 	PRIV *p = (PRIV*)dec->priv;
-
-   	avcodec_register_all();
 
 #ifdef CONFIG_SINK_VIDEO_ANDROID
 	video->colorspace = android_get_av_color(BUFFER_TYPE_SW);
@@ -298,7 +296,7 @@ serprintf( "stream_dec_video_open_FFMPEG: unknown format: %d\n", dec->video->for
 	
 	// Find the decoder for the video stream
 	p->vcodec = avcodec_find_decoder( codec_id );
-	AVCodec *vcodec = p->vcodec;
+	const AVCodec *vcodec = p->vcodec;
 
 	if( !vcodec ) {
 serprintf("cannot find codec\r\n");

@@ -141,7 +141,7 @@ static int	do_core;
 static const char *stream_force_codec = NULL;
 
 static void _output_frame_no_resize  ( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME **qframe );
-static void rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor );
+static int rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor );
 
 #define MAX_VIDEO_FRAME_WIDTH		848
 #define MAX_VIDEO_FRAME_HEIGHT		576
@@ -3330,10 +3330,11 @@ DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), fram
 //	video_rescale_frames
 //
 // *****************************************************************************
-static void rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor )
+static int rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor )
 {
-	if( !q ) return;
+	if( !q ) return 0;
 
+	int rescaled_count = 0;
 	pthread_mutex_lock( &q->mutex );
 	VIDEO_FRAME *f = q->head;
 	while( f ) {
@@ -3343,10 +3344,12 @@ static void rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor
 			if (f->time < old_time) {
 				DBG serprintf("WARNING: video_rescale_frames: frame time jumped into the past! q=%s, index=%d, old=%d, new=%d\n", q->name, f->index, old_time, f->time);
 			}
+			rescaled_count++;
 		}
 		f = f->next;
 	}
 	pthread_mutex_unlock( &q->mutex );
+	return rescaled_count;
 }
 
 void video_rescale_frames( STREAM *s, float old_speed, float new_speed)
@@ -3358,19 +3361,22 @@ void video_rescale_frames( STREAM *s, float old_speed, float new_speed)
 	double rescale_factor = (double)old_speed / (double)new_speed;
 	int current_time = s->video_time;
 
-	DBG serprintf("VIDEO_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
+	DBG serprintf("VIDEO_RESCALE_START: current_time=%d, factor=%.3f, old_speed=%.2f, new_speed=%.2f\n", 
+				current_time, rescale_factor, old_speed, new_speed);
+
+	int total_frames_rescaled = 0;
 
 	// Rescale frames in the display queue
-	rescale_frame_q(&s->disp_q, current_time, rescale_factor);
+	total_frames_rescaled += rescale_frame_q(&s->disp_q, current_time, rescale_factor);
 
 	// Rescale frames in the decode queue
-	rescale_frame_q(&s->decode_q, current_time, rescale_factor);
+	total_frames_rescaled += rescale_frame_q(&s->decode_q, current_time, rescale_factor);
 
 	// Rescale frames in the locked queue
-	rescale_frame_q(&s->locked_q, current_time, rescale_factor);
+	total_frames_rescaled += rescale_frame_q(&s->locked_q, current_time, rescale_factor);
 
 	// Rescale frames in the codec queue
-	rescale_frame_q(&s->codec_q, current_time, rescale_factor);
+	total_frames_rescaled += rescale_frame_q(&s->codec_q, current_time, rescale_factor);
 
 	// Rescale frames currently being processed
 	if (s->decode_frame && s->decode_frame->time != -1) {
@@ -3382,6 +3388,8 @@ void video_rescale_frames( STREAM *s, float old_speed, float new_speed)
 	if (s->current_out_frame && s->current_out_frame->time != -1) {
 		s->current_out_frame->time = current_time + (int)((s->current_out_frame->time - current_time) * rescale_factor);
 	}
+	
+	DBG serprintf("VIDEO_RESCALE_COMPLETE: %d total frames rescaled\n", total_frames_rescaled);
 }
 
 // *****************************************************************************

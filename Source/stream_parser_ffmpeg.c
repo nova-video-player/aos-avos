@@ -1634,7 +1634,7 @@ void ffmpeg_rescale_buffered_packets(STREAM *s, float old_speed, float new_speed
 	double rescale_factor = (double)old_speed / (double)new_speed;
 	int current_time = s->video_time;
 
-	serprintf("FFMPEG_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
+	DBG serprintf("FFMPEG_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
 
 	_rescale_packet_queue(&ff_p->aq, current_time, rescale_factor);
 	_rescale_packet_queue(&ff_p->vq, current_time, rescale_factor);

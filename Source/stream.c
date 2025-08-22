@@ -534,7 +534,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		int old_video_time = s->video_time;
 		int old_sink_delay = s->sink_delay;
 
-		serprintf("SPEED_CHANGE_BEFORE: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n", 
+		DBG serprintf("SPEED_CHANGE_BEFORE: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n", 
 					old_speed, old_video_time, old_sink_delay, old_sink_ref_time, old_vid_ref_time);
 
 		// 1. Set the new speed globally. This also updates the "previous_audio_speed".
@@ -566,9 +566,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		int new_video_time = s->video_time;
 		int delta = new_video_time - old_video_time;
 		if (abs(delta) > 100) { // Threshold of 100ms for a warning
-			serprintf("WARNING: AUDIO_SPEED_CHANGE: large jump in video_time. delta=%d ms\n", delta);
+			DBG serprintf("WARNING: AUDIO_SPEED_CHANGE: large jump in video_time. delta=%d ms\n", delta);
 		}
-		serprintf("SPEED_CHANGE_AFTER: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n",
+		DBG serprintf("SPEED_CHANGE_AFTER: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n",
 					av_speed, s->video_time, s->sink_delay, s->sink_ref_time, s->vid_ref_time);
 	}
 	return 0;

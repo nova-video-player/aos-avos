@@ -2327,7 +2327,7 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 // ************************************************************
 void _stream_resync( STREAM *s ) 
 {
-	serprintf("WALLCLOCK_RESET: by _stream_resync\n");
+	DBG serprintf("WALLCLOCK_RESET: by _stream_resync\n");
 	s->sink_ref_time = -1;
 
 	stream_sync_restart( s );
@@ -2568,7 +2568,7 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	}
 
 	if (last_blit_time != -1 && frame->blit_time < last_blit_time) {
-		serprintf("WARNING: blit_time jumped into the past! last=%d, new=%d, frame_time=%d\n", last_blit_time, frame->blit_time, time);
+		DBG serprintf("WARNING: blit_time jumped into the past! last=%d, new=%d, frame_time=%d\n", last_blit_time, frame->blit_time, time);
 	}
 	last_blit_time = frame->blit_time;
 
@@ -2608,7 +2608,7 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 	if( s->sink_delay < 0 ) {
 		s->sink_delay_count ++;
 		if( s->sink_delay_count > 2 || s->sink_delay < (-1 * stream_sink_max_delay) ) {
-			serprintf("WALLCLOCK_RESET: by _check_sink_delay: delay=%d, count=%d\n", s->sink_delay, s->sink_delay_count);
+			DBG serprintf("WALLCLOCK_RESET: by _check_sink_delay: delay=%d, count=%d\n", s->sink_delay, s->sink_delay_count);
 			s->sink_ref_time = -1;
 			s->sink_delay_count = 0;
 		}
@@ -3339,7 +3339,7 @@ static void rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor
 			int old_time = f->time;
 			f->time = current_time + (int)((f->time - current_time) * rescale_factor);
 			if (f->time < old_time) {
-				serprintf("WARNING: video_rescale_frames: frame time jumped into the past! q=%s, index=%d, old=%d, new=%d\n", q->name, f->index, old_time, f->time);
+				DBG serprintf("WARNING: video_rescale_frames: frame time jumped into the past! q=%s, index=%d, old=%d, new=%d\n", q->name, f->index, old_time, f->time);
 			}
 		}
 		f = f->next;
@@ -3356,7 +3356,7 @@ void video_rescale_frames( STREAM *s, float old_speed, float new_speed)
 	double rescale_factor = (double)old_speed / (double)new_speed;
 	int current_time = s->video_time;
 
-	serprintf("VIDEO_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
+	DBG serprintf("VIDEO_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
 
 	// Rescale frames in the display queue
 	rescale_frame_q(&s->disp_q, current_time, rescale_factor);

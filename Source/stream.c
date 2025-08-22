@@ -558,10 +558,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		// 5. Change audio hardware speed
 		audio_interface_change_audio_speed(s->audio_ctx, av_speed);
 
-		// 6. Reset sync
-		s->sink_ref_time = -1;
-		stream_sync_restart(s);
-
 		// 7. Log after changes and check for discontinuities
 		int new_video_time = s->video_time;
 		int delta = new_video_time - old_video_time;
@@ -570,6 +566,10 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		}
 		DBG serprintf("SPEED_CHANGE_AFTER: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n",
 					av_speed, s->video_time, s->sink_delay, s->sink_ref_time, s->vid_ref_time);
+
+		// 6. Reset sync
+		s->sink_ref_time = -1;
+		stream_sync_restart(s);
 	}
 	s->last_speed_change_time = atime();
 	return 0;

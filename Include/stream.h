@@ -280,6 +280,7 @@ typedef struct STREAM_PARSER_STATS *
             (*PARSER_GET_STATS)      ( struct STREAM *s, struct STREAM_PARSER_STATS *stats );
 typedef int (*PARSER_GET_TIME)       ( struct STREAM *s, int *total );
 typedef int (*PARSER_GET_TIME_FOR_POS)( struct STREAM *s, UINT64 for_pos );
+typedef void (*PARSER_RESCALE_PACKETS)( struct STREAM *s, float old_speed, float new_speed );
 
 typedef struct stream_parser_str {
 	const char		*name;
@@ -304,6 +305,7 @@ typedef struct stream_parser_str {
 	PARSER_GET_STATS	get_stats;
 	PARSER_GET_TIME		get_time;
 	PARSER_GET_TIME_FOR_POS	get_time_for_pos;
+	PARSER_RESCALE_PACKETS	rescale_packets;
 } STREAM_PARSER;
 
 //
@@ -829,6 +831,7 @@ STREAM_SINK_VIDEO *stream_get_video_sink( STREAM *s );
 STREAM_SINK_AUDIO *stream_get_audio_sink( STREAM *s );
 
 int 	stream_get_index( STREAM *s, int *time, void **data, int *size );
+void    video_rescale_frames(STREAM *s, float old_speed, float new_speed);
 
 void	stream_get_part_name( char *part_name, const char *full_path, int part_num );
 int	stream_is_part_name ( const char *full_path, const char *ext );

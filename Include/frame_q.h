@@ -18,11 +18,14 @@
 #define _FRAME_Q_
 
 #include "av.h"
+#include <pthread.h>
 
 // generic video frame queue
 typedef struct FRAME_Q {
 	char tag[16];
+	char *name;
 	VIDEO_FRAME *head;
+	pthread_mutex_t mutex;
 } FRAME_Q;
 
 int  frame_q_init ( FRAME_Q *q, char *tag );

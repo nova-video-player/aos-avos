@@ -782,6 +782,7 @@ static STREAM_DEC_VIDEO *_new( void )
 	dec->flush   = ffmpeg_video_codec_flush;
 	dec->get_rc  = ffmpeg_video_codec_get_rc;
 	dec->render  = ffmpeg_video_codec_render;
+	dec->rescale_frames = video_rescale_frames;
 	
 	if( !(dec->priv = acalloc( 1, sizeof( PRIV ) ) ) ) {
 serprintf("FFM: cannot alloc priv\n");

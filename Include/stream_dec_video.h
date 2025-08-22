@@ -46,6 +46,7 @@ typedef int (*DEC_VIDEO_RENDER) ( struct STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst
 typedef int (*DEC_VIDEO_NEED_REALLOC) ( struct STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, int *num_frames );
 typedef int (*DEC_VIDEO_SET_PLAYBACK_SPEED) ( struct STREAM_DEC_VIDEO *dec, int den, int num);
 typedef struct STREAM_SINK_VIDEO *(*DEC_VIDEO_GET_SINK) ( struct STREAM_DEC_VIDEO *dec );
+typedef void (*DEC_VIDEO_RESCALE_FRAMES)( struct STREAM *s, float old_speed, float new_speed );
 
 typedef struct STREAM_DEC_VIDEO {
 	const char	  *name;
@@ -66,6 +67,7 @@ typedef struct STREAM_DEC_VIDEO {
 	DEC_VIDEO_NEED_REALLOC need_realloc;
 	DEC_VIDEO_GET_SINK get_sink;
     DEC_VIDEO_SET_PLAYBACK_SPEED set_playback_speed;
+	DEC_VIDEO_RESCALE_FRAMES rescale_frames;
 	
 	// members
 	VIDEO_PROPERTIES _video;

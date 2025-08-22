@@ -275,6 +275,11 @@ DBGP serprintf("size     %lld\r\n", priv->size );
 	
 	if (fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
 		priv->duration = 1000 * (INT64)fmt->duration / AV_TIME_BASE;
+		if (audio_interface_is_audio_speed_enabled()) {
+			float speed = audio_interface_get_audio_speed();
+			if (speed > 0 && speed != 1.0f)
+				priv->duration /= speed;
+		}
 DBGP serprintf("duration %d\r\n", priv->duration );
 	} else {
 		if( priv->s )
@@ -285,6 +290,11 @@ DBGP serprintf("duration ---\r\n" );
 	if (fmt->start_time != AV_NOPTS_VALUE) {
 DBGP serprintf("FFMPEG start    %lld\r\n",  fmt->start_time);
 		priv->start_time = 1000 * (INT64)fmt->start_time / AV_TIME_BASE;
+		if (audio_interface_is_audio_speed_enabled()) {
+			float speed = audio_interface_get_audio_speed();
+			if (speed > 0 && speed != 1.0f)
+				priv->start_time /= speed;
+		}
 DBGP serprintf("start    %d\r\n", priv->start_time );
 	}
 DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
@@ -970,7 +980,19 @@ DBGP serprintf("FFMPEG: end\r\n");
 			s->audio_parse_end = 1;
 		}
 		return 1;
-	}	
+	}
+
+	if (audio_interface_is_audio_speed_enabled()) {
+		float speed = audio_interface_get_audio_speed();
+		if (speed > 0 && speed != 1.0f) {
+			if (packet.pts != AV_NOPTS_VALUE)
+				packet.pts /= speed;
+			if (packet.dts != AV_NOPTS_VALUE)
+				packet.dts /= speed;
+			if (packet.duration > 0)
+				packet.duration /= speed;
+		}
+	}
 	
 	int stream = packet.stream_index;
 DBGP3 serprintf("%8d/%8d/%8d  %4d/%4d/%4d  ", 
@@ -1580,6 +1602,46 @@ static STREAM_PARSER_STATS *_get_stats( STREAM *s, STREAM_PARSER_STATS *stats )
 	return stats;
 }
 
+static void _rescale_packet_queue(AVQueue *q, int current_time, double rescale_factor)
+{
+	if (!q) return;
+
+	pthread_mutex_lock(&q->mutex);
+
+	LinkedListNode *node = q->list.first;
+	while (node) {
+		PacketNode *p_node = (PacketNode *)node;
+		if (p_node) {
+			if (p_node->packet.pts != AV_NOPTS_VALUE)
+				p_node->packet.pts = current_time + (int64_t)(((double)p_node->packet.pts - current_time) * rescale_factor);
+			if (p_node->packet.dts != AV_NOPTS_VALUE)
+				p_node->packet.dts = current_time + (int64_t)(((double)p_node->packet.dts - current_time) * rescale_factor);
+			if (p_node->packet.duration > 0)
+				p_node->packet.duration = (int64_t)((double)p_node->packet.duration * rescale_factor);
+		}
+		node = node->next;
+	}
+
+	pthread_mutex_unlock(&q->mutex);
+}
+
+void ffmpeg_rescale_buffered_packets(STREAM *s, float old_speed, float new_speed)
+{
+	if (!s || !s->parser_priv) return;
+
+	if (new_speed <= 0) return; // Avoid division by zero or invalid speed
+
+	double rescale_factor = (double)old_speed / (double)new_speed;
+	int current_time = s->video_time;
+
+	serprintf("FFMPEG_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
+
+	_rescale_packet_queue(&ff_p->aq, current_time, rescale_factor);
+	_rescale_packet_queue(&ff_p->vq, current_time, rescale_factor);
+	_rescale_packet_queue(&ff_p->sq, current_time, rescale_factor);
+}
+
+
 static STREAM_PARSER stream_parser_FFMPEG = {
 	"FFMPEG",
 	_open,
@@ -1601,6 +1663,9 @@ static STREAM_PARSER stream_parser_FFMPEG = {
 	_get_index,
 	NULL,		// start_next
 	_get_stats,
+	NULL,
+	NULL,
+	ffmpeg_rescale_buffered_packets,
 };
 
 #ifndef CONFIG_LIVE555_RTSP

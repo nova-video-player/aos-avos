@@ -526,18 +526,50 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
+
 	if( audio_interface_is_audio_speed_enabled() && audio_interface_get_audio_speed() != av_speed ) {
-		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
-		// read current time (before setting the audio_speed scaling since it impacts the result
-		int stream_current_time = stream_get_current_time( s, NULL ); // returns real time
-		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
-        s->video_dec->set_playback_speed(s->video_dec, 100, (av_speed * 100 + 0.5));
-		// seek to current time to flush and avoid any weird video catchup / timestamps in the past/future
-		if( stream_current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) stream_seek_time( s, stream_current_time, STREAM_SEEK_BACKWARD, 0 );
-		else serprintf( "stream:stream_set_av_speed DO NOT SEEK stream_current_time=%d<=0\n", stream_current_time );
-		DBG serprintf( "stream:stream_set_av_speed current_time_before=%d current_time_now=%d\n", stream_current_time, stream_get_current_time( s, NULL ) );
-	} else {
-		DBG serprintf( "stream:stream_set_av_speed do nothing same speed %f\n", av_speed );
+		float old_speed = audio_interface_get_audio_speed();
+		int old_vid_ref_time = s->vid_ref_time;
+		int old_sink_ref_time = s->sink_ref_time;
+		int old_video_time = s->video_time;
+		int old_sink_delay = s->sink_delay;
+
+		serprintf("SPEED_CHANGE_BEFORE: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n", 
+					old_speed, old_video_time, old_sink_delay, old_sink_ref_time, old_vid_ref_time);
+
+		// 1. Set the new speed globally. This also updates the "previous_audio_speed".
+		audio_interface_set_audio_speed(av_speed);
+
+		// 2. Rescale in-flight packets in the parser
+		if (s->parser && s->parser->rescale_packets) {
+			s->parser->rescale_packets(s, old_speed, av_speed);
+		}
+
+		// 3. Rescale decoded video frames in the frame queues
+		if( s->video_dec && s->video_dec->rescale_frames ) {
+			s->video_dec->rescale_frames(s, old_speed, av_speed);
+		}
+
+		// 4. Notify the video decoder of the speed change
+		if( s->video_dec && s->video_dec->set_playback_speed ) {
+			s->video_dec->set_playback_speed(s->video_dec, 100, (int)(av_speed * 100 + 0.5));
+		}
+
+		// 5. Change audio hardware speed
+		audio_interface_change_audio_speed(s->audio_ctx, av_speed);
+
+		// 6. Reset sync
+		s->sink_ref_time = -1;
+		stream_sync_restart(s);
+
+		// 7. Log after changes and check for discontinuities
+		int new_video_time = s->video_time;
+		int delta = new_video_time - old_video_time;
+		if (abs(delta) > 100) { // Threshold of 100ms for a warning
+			serprintf("WARNING: AUDIO_SPEED_CHANGE: large jump in video_time. delta=%d ms\n", delta);
+		}
+		serprintf("SPEED_CHANGE_AFTER: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n",
+					av_speed, s->video_time, s->sink_delay, s->sink_ref_time, s->vid_ref_time);
 	}
 	return 0;
 }

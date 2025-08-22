@@ -132,10 +132,14 @@ static int 	codec_max = 100;
 
 static int 	ignore_first_unpause = 0;
 
+static int last_video_time = -1;
+static int last_blit_time = -1;
+
 static int	do_core;
 static const char *stream_force_codec = NULL;
 
 static void _output_frame_no_resize  ( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME **qframe );
+static void rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor );
 
 #define MAX_VIDEO_FRAME_WIDTH		848
 #define MAX_VIDEO_FRAME_HEIGHT		576
@@ -231,6 +235,8 @@ static void _video_init( STREAM *s, int time )
 	clear_avg( &v_avg );
 	clear_avg( &a_avg );
 	clear_avg( &aud_avg );
+	last_video_time = -1;
+	last_blit_time = -1;
 }
 
 // *****************************************************************************
@@ -2321,7 +2327,9 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 // ************************************************************
 void _stream_resync( STREAM *s ) 
 {
+	serprintf("WALLCLOCK_RESET: by _stream_resync\n");
 	s->sink_ref_time = -1;
+
 	stream_sync_restart( s );
 }
 
@@ -2558,6 +2566,12 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 		// while we do the call!
 		frame->blit_time = _real_time( s, time ) + s->sink_ref_time + stream_sink_preroll;
 	}
+
+	if (last_blit_time != -1 && frame->blit_time < last_blit_time) {
+		serprintf("WARNING: blit_time jumped into the past! last=%d, new=%d, frame_time=%d\n", last_blit_time, frame->blit_time, time);
+	}
+	last_blit_time = frame->blit_time;
+
 //serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), s->sink_ref_time, frame->blit_time );
 	frame->time = time;
 	// a sink might want that info
@@ -2594,6 +2608,7 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 	if( s->sink_delay < 0 ) {
 		s->sink_delay_count ++;
 		if( s->sink_delay_count > 2 || s->sink_delay < (-1 * stream_sink_max_delay) ) {
+			serprintf("WALLCLOCK_RESET: by _check_sink_delay: delay=%d, count=%d\n", s->sink_delay, s->sink_delay_count);
 			s->sink_ref_time = -1;
 			s->sink_delay_count = 0;
 		}
@@ -3310,10 +3325,71 @@ DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), fram
 
 // *****************************************************************************
 //
+//	video_rescale_frames
+//
+// *****************************************************************************
+static void rescale_frame_q( FRAME_Q *q, int current_time, double rescale_factor )
+{
+	if( !q ) return;
+
+	pthread_mutex_lock( &q->mutex );
+	VIDEO_FRAME *f = q->head;
+	while( f ) {
+		if( f->time != -1 ) {
+			int old_time = f->time;
+			f->time = current_time + (int)((f->time - current_time) * rescale_factor);
+			if (f->time < old_time) {
+				serprintf("WARNING: video_rescale_frames: frame time jumped into the past! q=%s, index=%d, old=%d, new=%d\n", q->name, f->index, old_time, f->time);
+			}
+		}
+		f = f->next;
+	}
+	pthread_mutex_unlock( &q->mutex );
+}
+
+void video_rescale_frames( STREAM *s, float old_speed, float new_speed)
+{
+	if (!s) return;
+
+	if (new_speed <= 0) return;
+
+	double rescale_factor = (double)old_speed / (double)new_speed;
+	int current_time = s->video_time;
+
+	serprintf("VIDEO_RESCALE: current_time=%d, factor=%.3f\n", current_time, rescale_factor);
+
+	// Rescale frames in the display queue
+	rescale_frame_q(&s->disp_q, current_time, rescale_factor);
+
+	// Rescale frames in the decode queue
+	rescale_frame_q(&s->decode_q, current_time, rescale_factor);
+
+	// Rescale frames in the locked queue
+	rescale_frame_q(&s->locked_q, current_time, rescale_factor);
+
+	// Rescale frames in the codec queue
+	rescale_frame_q(&s->codec_q, current_time, rescale_factor);
+
+	// Rescale frames currently being processed
+	if (s->decode_frame && s->decode_frame->time != -1) {
+		s->decode_frame->time = current_time + (int)((s->decode_frame->time - current_time) * rescale_factor);
+	}
+	if (s->current_frame && s->current_frame->time != -1) {
+		s->current_frame->time = current_time + (int)((s->current_frame->time - current_time) * rescale_factor);
+	}
+	if (s->current_out_frame && s->current_out_frame->time != -1) {
+		s->current_out_frame->time = current_time + (int)((s->current_out_frame->time - current_time) * rescale_factor);
+	}
+}
+
+// *****************************************************************************
+//
 //	_stream_player_sync (kilroy was here)
 //
 // *****************************************************************************
 static void _stream_player_sync( STREAM *s )
+
+
 {
 DECODE_AGAIN:
 	if( s->video->valid && s->use_sink_frames ) {
@@ -4433,7 +4509,7 @@ int stream_get_time_default( STREAM *s, int *total )
 	
 	if( total )
 		*total = s->duration;
-	return time;
+	return s->video_time;
 }
 
 // *****************************************************************************

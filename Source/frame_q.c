@@ -29,6 +29,8 @@ int frame_q_init( FRAME_Q *q, char *tag )
 	if( !q )
 		return 1;
 	strnZcpy( q->tag, tag, sizeof( q->tag ) - 1 );
+	q->name = q->tag;
+	pthread_mutex_init( &q->mutex, NULL );
 	frame_q_flush( q );
 
 	return 0;

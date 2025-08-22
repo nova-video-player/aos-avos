@@ -571,6 +571,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf("SPEED_CHANGE_AFTER: speed=%.2f, video_time=%d, sink_delay=%d, sink_ref_time=%d, vid_ref_time=%d\n",
 					av_speed, s->video_time, s->sink_delay, s->sink_ref_time, s->vid_ref_time);
 	}
+	s->last_speed_change_time = atime();
 	return 0;
 }
 

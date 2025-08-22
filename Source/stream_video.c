@@ -60,6 +60,8 @@
 #define DBGCV1 	if(Debug[DBG_CV] > 1)
 #define DBGP 	if(Debug[DBG_PARSER])
 
+#define DBG if(0)
+
 int 		stream_zero_fill   = 1;
 
 int 		stream_max_delay   = 1;

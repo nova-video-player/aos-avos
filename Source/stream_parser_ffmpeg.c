@@ -53,6 +53,8 @@
 #define DBGC8   if((Debug[DBG_CHU]&8) == 8)
 #define DBGC32  if((Debug[DBG_CHU]&32) == 32)
 
+#define DBG if(0)
+
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -1252,8 +1254,14 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 	
 	if( cdata->time != STREAM_NO_PTS_VALUE ) {
 		if( ff_p->last_audio_time && abs(cdata->time - ff_p->last_audio_time) > 1000 ) {
-serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
-			cdata->audio_skip = 1;
+			int current_time = atime();
+			if( (current_time - s->last_speed_change_time) < 500 ) {  // 500ms grace period
+				DBG serprintf("FF: audio_skip DISABLED after recent speed change! delta=%d\n",
+										  cdata->time - ff_p->last_audio_time );
+			} else {
+				DBG serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
+				cdata->audio_skip = 1;
+			}
 		}
 		ff_p->last_audio_time = cdata->time;
 	}

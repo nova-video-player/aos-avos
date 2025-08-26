@@ -27,6 +27,7 @@
 #include "stream_subtitle.h"
 #include "stream_avg.h"
 #include "atime.h"
+#include "audio_interface.h"
 #include "color.h"
 #include "astdlib.h"
 #include "stream_sync.h"
@@ -209,6 +210,9 @@ STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 // *****************************************************************************
 static void _video_init( STREAM *s, int time )
 {
+	char hms_buf[32];
+	DBG serprintf("_video_init(time = %d (%s))\n", time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)));
+
 	if( s->video_dec && !s->video_dec->async ) {
 		_free_all_frames( s );
 	}
@@ -4177,10 +4181,33 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 	_seek_init( s );
 
 	if( time != -1 ) {
-		// seek by time
-		if( (err = s->parser->seek_time ? s->parser->seek_time( s, time, dir, flags, force_reload, &sc ) : 1) ) {
-serprintf("stream_seek time err!\n");
-		}
+			// IMPORTANT TIME DOMAIN NOTE:
+			// - Input 'time' parameter is in RST domain (user-perceived real stream time)
+			// - FFmpeg parser applies packet-level scaling in _parse_once() that divides 
+			//   packet timestamps by audio_speed, effectively compressing FFmpeg's timeline
+			// - This timeline compression means to seek to RST position X, we must seek 
+			//   to position (X * speed) in FFmpeg's compressed timeline
+			// - The multiplication by speed compensates for this timeline compression
+			// - FFmpeg finds keyframe and returns timestamps that get scaled down again
+			//   by the packet-level processing
+			float speed = audio_interface_get_audio_speed();
+			int rst_ms = time;
+			int seek_rst = (int)(rst_ms * speed);  // Compensate for FFmpeg timeline compression
+			char hms_buf1[32];
+			char hms_buf2[32];
+
+			DBG serprintf("SEEK: rst_input = %d (%s), speed = %.2f, seek_rst = %d (%s)\n", 
+				rst_ms, ms_to_hms_string(rst_ms, hms_buf1, sizeof(hms_buf1)), 
+				speed, 
+				seek_rst, ms_to_hms_string(seek_rst, hms_buf2, sizeof(hms_buf2)));
+
+			if( (err = s->parser->seek_time ? s->parser->seek_time( s, seek_rst, dir, flags, force_reload, &sc ) : 1) ) {
+				serprintf("stream_seek time err!\n");
+			} else {
+				int final_rst = sc.time;  // Parser returns RST position
+				DBG serprintf("SEEK_RESULT: final_rst = %d (%s)\n", 
+					final_rst, ms_to_hms_string(final_rst, hms_buf1, sizeof(hms_buf1)));
+			}
 	} else {
 		// seek by pos
 		if( (err = s->parser->seek_pos ? s->parser->seek_pos( s, pos, dir, flags, force_reload, &sc ) : 1) ) {
@@ -4321,6 +4348,9 @@ serprintf("SFR: not open!\r\n");
 // *****************************************************************************
 static void _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 {
+	char hms_buf[32];
+	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
+
 	int timeout = atime() + 1000; // 1 second before we stop waiting
 serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
 	

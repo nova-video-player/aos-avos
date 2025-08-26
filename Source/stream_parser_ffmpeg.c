@@ -621,6 +621,16 @@ DBGP serprintf("chapters:\r\n");
 			AVChapter *ch = fmt->chapters[i];
 			UINT64 start = 1000 * ch->start * ch->time_base.num / ch->time_base.den; 
 			UINT64 end   = 1000 * ch->end   * ch->time_base.num / ch->time_base.den; 
+			
+			// Scale chapter timestamps for audio speed (same as duration/start_time)
+			if (audio_interface_is_audio_speed_enabled()) {
+				float speed = audio_interface_get_audio_speed();
+				if (speed > 0 && speed != 1.0f) {
+					start /= speed;
+					end /= speed;
+				}
+			}
+			
         		AVDictionaryEntry *t = av_dict_get(ch->metadata, "title", NULL, 0);
  DBGP serprintf("[%2d] id %08X  start/end %8lld/%8lld  [%s]\r\n", i, ch->id, start, end, t ? t->value : "(no title)" );
 			if( priv->s ) {
@@ -1540,7 +1550,10 @@ static int _calc_rate( STREAM *s )
 
 			s->atime_parsed = last_time - first_time;
 			if( s->atime_parsed ) {
-				s->acurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
+				// Compensate for compressed timeline in bitrate calculation
+				float speed = audio_interface_is_audio_speed_enabled() ? audio_interface_get_audio_speed() : 1.0f;
+				UINT64 real_time_diff = (UINT64)(s->atime_parsed * speed);
+				s->acurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / real_time_diff;
 			} else {
 				s->acurrent_rate = 0;
 			}
@@ -1561,7 +1574,11 @@ static int _calc_rate( STREAM *s )
 
 			s->vtime_parsed = last_time - first_time;
 			if( s->atime_parsed ) {
-				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
+				// Compensate for compressed timeline in bitrate calculation
+				// Note: intentionally uses s->atime_parsed for consistency with audio timeline
+				float speed = audio_interface_is_audio_speed_enabled() ? audio_interface_get_audio_speed() : 1.0f;
+				UINT64 real_time_diff = (UINT64)(s->atime_parsed * speed);
+				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / real_time_diff;
 			} else {
 				s->vcurrent_rate = 0;
 			}

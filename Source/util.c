@@ -474,6 +474,17 @@ void sec_to_hms( int *hour, int *min, int *sec )
 	*min  = *min % 60;
 }
 
+char *ms_to_hms_string(int ms, char *buffer, int buffer_size)
+{
+	if (!buffer || buffer_size < 9) return "";
+	int sec = ms / 1000;
+	int h = sec / 3600;
+	int m = (sec / 60) % 60;
+	int s = sec % 60;
+	snprintf(buffer, buffer_size, "%02d:%02d:%02d", h, m, s);
+	return buffer;
+}
+
 // For this to work you need a linux kernel running this patch:
 // http://lwn.net/Articles/104180/
 //

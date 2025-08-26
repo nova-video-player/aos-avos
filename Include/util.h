@@ -71,6 +71,7 @@ void memset16(uint16_t *dst, uint16_t value, int count);
 void memset32(uint32_t *dst, uint32_t value, int count);
 
 void sec_to_hms( int *hour, int *min, int *sec );
+char *ms_to_hms_string(int ms, char *buffer, int buffer_size);
 
 int adjust_oom(pid_t pid, int value);
 

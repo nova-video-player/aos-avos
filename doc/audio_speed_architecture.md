@@ -24,6 +24,36 @@ The core of the seamless speed change mechanism lies in rescaling all in-flight 
 
 The process is orchestrated by `stream_set_av_speed` in `Source/stream.c`.
 
+### FFmpeg Parser Timeline Compression
+
+**Important architectural detail:** The FFmpeg parser implements packet-level scaling that creates a "compressed timeline" within FFmpeg's domain. This is implemented in `Source/stream_parser_ffmpeg.c` in the `_parse_once()` function:
+
+```c
+if (audio_interface_is_audio_speed_enabled()) {
+    float speed = audio_interface_get_audio_speed();
+    if (speed > 0 && speed != 1.0f) {
+        if (packet.pts != AV_NOPTS_VALUE)
+            packet.pts /= speed;        // Timeline compression
+        if (packet.dts != AV_NOPTS_VALUE)
+            packet.dts /= speed;
+        if (packet.duration > 0)
+            packet.duration /= speed;
+    }
+}
+```
+
+**Key implications:**
+
+1. **FFmpeg operates on compressed time:** When audio speed is 1.5x, FFmpeg's internal timeline runs 1.5x slower than RST. A 1-hour video appears as ~40 minutes in FFmpeg's domain.
+
+2. **Compensation required for FFmpeg interface:** Operations that interact directly with FFmpeg's timeline (seeking, chapters, duration) require compensation by multiplying by audio_speed to account for the compression.
+
+3. **Automatic conversion to RST:** The packet-level scaling automatically converts timestamps back to RST domain via the `GET_*_TS` macros, so most AVOS components work in proper RST time.
+
+4. **Seek compensation:** In `stream_video.c`, seeking requires `seek_rst = (int)(rst_ms * speed)` to compensate for FFmpeg's compressed timeline when providing seek targets.
+
+This compressed timeline approach enables seamless speed changes without requiring complex domain conversions throughout the codebase, but requires awareness when interfacing with FFmpeg directly.
+
 ### Reset Strategy on Speed Change
 
 When `stream_set_av_speed` is called, the following sequence of operations occurs:

@@ -527,7 +527,15 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
 
+	// Prevent concurrent speed changes
+	if( s->audio_speed_changing ) {
+		DBG serprintf("SPEED_CHANGE_BLOCKED: audio speed change already in progress\n");
+		return 1;
+	}
+
 	if( audio_interface_is_audio_speed_enabled() && audio_interface_get_audio_speed() != av_speed ) {
+		// Set flag to prevent concurrent changes
+		s->audio_speed_changing = 1;
 		float old_speed = audio_interface_get_audio_speed();
 		int old_vid_ref_time = s->vid_ref_time;
 		int old_sink_ref_time = s->sink_ref_time;
@@ -572,6 +580,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		// 6. Reset sync
 		s->sink_ref_time = -1;
 		stream_sync_restart(s);
+		
+		// Clear the flag to allow future speed changes
+		s->audio_speed_changing = 0;
 	}
 	s->last_speed_change_time = atime();
 	return 0;

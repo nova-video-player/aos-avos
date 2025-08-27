@@ -486,6 +486,7 @@ typedef struct STREAM {
 
 		int	sink_ref_time;
 	int	last_speed_change_time;
+	int	audio_speed_changing;		// flag to prevent concurrent speed changes
 	int		vid_ref_time;
 	int 		drop;
 	int 		drop_count;

@@ -31,6 +31,8 @@
 #define DBGV2  	if(Debug[DBG_VID] > 1)
 #define DBGV3 	if(Debug[DBG_VID] > 2)
 
+#define DBG if( 0 )
+
 extern int stream_max_delay;
 extern int stream_no_sync;
 extern int stream_video_paused;

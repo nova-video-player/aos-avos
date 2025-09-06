@@ -4433,6 +4433,8 @@ int stream_get_time_default( STREAM *s, int *total )
 	
 	if( total )
 		*total = s->duration;
+	int time = s->video->valid ? s->video_time : s->audio_time;
+DBGT serprintf( "sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
 	return time;
 }
 

@@ -283,7 +283,7 @@ DBGS serprintf("stream_sink_video: alloc_frames(%d)\r\n", p->num_frames);
 
 	int max = p->num_frames ? p->num_frames : STREAM_MAX_FRAMES;
 	for( i = 0; i < max; i++ ) {
-		if( !(p->frames[i] = frame_alloc_with_cs_and_mem( p->width, p->height, p->colorspace, _sink_force_single_frame ? STREAM_MEM_BYO : STREAM_MEM_NRM ) ) ) {
+		if( !(p->frames[i] = frame_alloc_with_cs_and_mem( p->width, p->height, p->colorspace, _sink_force_single_frame ? STREAM_MEM_BYO : STREAM_MEM_NRM, 1 ) ) ) {
 			if( p->num_frames ) {
 				// we were asked for num_frames
 serprintf("stream_sink_video: OOM\r\n");

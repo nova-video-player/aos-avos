@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <math.h>
 
 #include "global.h"
 #include "debug.h"
@@ -36,8 +37,6 @@ extern int get_hdmi_supports_iec(void);
 #define DBG  if(0)
 #define DBG2 if(0)
 #define ERR  if(1)
-
-#define AUDIO_SPEED_LATENCY_SHIFT 260 // 260ms for a 6x buffer, should be calculated
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
 
@@ -367,12 +366,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	// NOTE than buffer_scale != 1 makes video stutters for some cf. #726, enable audio_speed only if experimental feature set
 	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
 		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 4x buffer" );
-		buffer_scale = 6; // TODO 3x instead of 4x seems to work as well on speakers. Note that with bluetooth headsets >4x avoids AudioTrack error
+		buffer_scale = 4;
 	} else {
 		buffer_scale = 1;
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params 1x buffer" );
 	}
+	DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params buffer_scale=%d", buffer_scale );
 
 	at->buf_size = (at->passthrough == 2) ? 32768 : buffer_scale * call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
@@ -395,7 +393,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	jobject playbackParams;
 
-	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23 && as != 1.0) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
+	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23 && fabsf(as - 1.0f) > 1e-6f) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", as);
 		// get current audioparams
 		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
@@ -450,12 +448,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	at->latency = call_static_int_method(at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
-	// scaling with audio_speed is required to avoid variable delay with different audio_speed
-	if(is_audio_speed_enabled) {
-		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / as;
-	} else {
-		at->latency += (1000 * at->frame_count) / at->rate;
-	}
+
+	uint32_t base_latency = (uint32_t)lrint( ( 1000.0 * (double)at->frame_count ) / (double)at->rate );
+	at->latency += RST_TO_TS( base_latency, uint32_t );
+	// TODO MARC before check if not to be converted (I think current formula is ok) but on F1 little shift...
+	//at->latency = RST_TO_TS( SHIFT + at->latency + base_latency, uint32_t );
 	at->init = 1;
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency_norm=%d\n", at->latency);
 	DBG LOG("track created");
@@ -651,7 +648,6 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 	 	DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getstate %d",status );
 
 		if( failed ) {
-			// TODO MARC check fallback at 1.0x if it fails (soundbar?)
 			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed: reverting to 1x" );
 			audio_interface_set_audio_speed(1.0f);
 		} else {
@@ -662,7 +658,7 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency=%d\n", at->latency);
 		// scaling with audio_speed is required to avoid variable delay with different audio_speed
-		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / speed;
+		at->latency += (uint32_t)lrint( ( 1000.0 * (double)at->frame_count ) / ( (double)at->rate * (double)speed ) );
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
 
 	} else {

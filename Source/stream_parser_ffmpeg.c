@@ -30,6 +30,7 @@
 #include "file_info_priv.h"
 #include "iso639.h"
 #include "android_codec.h"
+#include "util.h"
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
@@ -41,6 +42,7 @@
 #include <libavutil/dovi_meta.h>
 
 #include <string.h>
+#include <math.h>
 
 #define DBGS 	if(Debug[DBG_STREAM])
 #define DBGP 	if(Debug[DBG_PARSER])
@@ -52,6 +54,8 @@
 #define DBGC4   if((Debug[DBG_CHU]&4) == 4)
 #define DBGC8   if((Debug[DBG_CHU]&8) == 8)
 #define DBGC32  if((Debug[DBG_CHU]&32) == 32)
+
+#define DBG if(0)
 
 #include <stdlib.h>
 #include <string.h>
@@ -272,10 +276,9 @@ DBGP serprintf("format   [%s]\r\n", fmt->iformat->name );
 		priv->size = avio_size(fmt->pb);
 DBGP serprintf("size     %lld\r\n", priv->size );
 	}
-	
-	if (fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
-		priv->duration = 1000 * (INT64)fmt->duration / AV_TIME_BASE;
-DBGP serprintf("duration %d\r\n", priv->duration );
+	if( fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
+		priv->duration = RST_TO_TS( 1000 * (INT64)fmt->duration / AV_TIME_BASE, int );
+		DBGP serprintf( "duration %d\r\n", priv->duration );
 	} else {
 		if( priv->s )
 			priv->s->no_duration = 1;
@@ -284,8 +287,8 @@ DBGP serprintf("duration ---\r\n" );
 
 	if (fmt->start_time != AV_NOPTS_VALUE) {
 DBGP serprintf("FFMPEG start    %lld\r\n",  fmt->start_time);
-		priv->start_time = 1000 * (INT64)fmt->start_time / AV_TIME_BASE;
-DBGP serprintf("start    %d\r\n", priv->start_time );
+		priv->start_time = RST_TO_TS( 1000 * (INT64)fmt->start_time / AV_TIME_BASE, int);
+DBGP serprintf( "start    %d\r\n", priv->start_time );
 	}
 DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
 
@@ -609,8 +612,14 @@ DBGP serprintf("chapters:\r\n");
 			AVChapter *ch = fmt->chapters[i];
 			UINT64 start = 1000 * ch->start * ch->time_base.num / ch->time_base.den; 
 			UINT64 end   = 1000 * ch->end   * ch->time_base.num / ch->time_base.den; 
-        		AVDictionaryEntry *t = av_dict_get(ch->metadata, "title", NULL, 0);
- DBGP serprintf("[%2d] id %08X  start/end %8lld/%8lld  [%s]\r\n", i, ch->id, start, end, t ? t->value : "(no title)" );
+
+			// Scale chapter timestamps for audio speed (same as duration/start_time)
+			start = RST_TO_TS( start, UINT64 );
+			end = RST_TO_TS( end, UINT64 );
+
+			AVDictionaryEntry *t = av_dict_get( ch->metadata, "title", NULL, 0 );
+			DBGP serprintf( "[%2d] id %08X  start/end %8lld/%8lld  [%s]\r\n", i, ch->id, start, end,
+							t ? t->value : "(no title)" );
 			if( priv->s ) {
 				stream_add_chapter( priv->s, start, end, t ? t->value : "s_unknown" );
 			}
@@ -970,8 +979,12 @@ DBGP serprintf("FFMPEG: end\r\n");
 			s->audio_parse_end = 1;
 		}
 		return 1;
-	}	
-	
+	}
+
+	if( packet.pts != AV_NOPTS_VALUE ) packet.pts = RST_TO_TS( packet.pts, int64_t );
+	if( packet.dts != AV_NOPTS_VALUE ) packet.dts = RST_TO_TS( packet.dts, int64_t );
+	if( packet.duration > 0 ) packet.duration = RST_TO_TS( packet.duration, int64_t );
+
 	int stream = packet.stream_index;
 DBGP3 serprintf("%8d/%8d/%8d  %4d/%4d/%4d  ", 
 			ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, 
@@ -1230,7 +1243,7 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 	
 	if( cdata->time != STREAM_NO_PTS_VALUE ) {
 		if( ff_p->last_audio_time && abs(cdata->time - ff_p->last_audio_time) > 1000 ) {
-serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
+			DBG serprintf("FF: audio_skip! %d\n", cdata->time - ff_p->last_audio_time );
 			cdata->audio_skip = 1;
 		}
 		ff_p->last_audio_time = cdata->time;
@@ -1510,7 +1523,8 @@ static int _calc_rate( STREAM *s )
 
 			s->atime_parsed = last_time - first_time;
 			if( s->atime_parsed ) {
-				s->acurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
+				UINT64 real_time_diff = TS_TO_RST( (UINT64)s->atime_parsed, UINT64 );
+				s->acurrent_rate = (UINT64)( last_pos - first_pos ) * (UINT64)1000 / real_time_diff;
 			} else {
 				s->acurrent_rate = 0;
 			}
@@ -1531,7 +1545,10 @@ static int _calc_rate( STREAM *s )
 
 			s->vtime_parsed = last_time - first_time;
 			if( s->atime_parsed ) {
-				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / (UINT64)s->atime_parsed;
+				// Compensate for compressed timeline in bitrate calculation
+				// Note: intentionally uses s->atime_parsed for consistency with audio timeline
+				UINT64 real_time_diff = TS_TO_RST( s->atime_parsed, UINT64 );
+				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / real_time_diff;
 			} else {
 				s->vcurrent_rate = 0;
 			}

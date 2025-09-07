@@ -21,6 +21,7 @@
 #include "awchar.h"
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <sys/types.h>
 
 #ifndef ABS
@@ -71,7 +72,31 @@ void memset16(uint16_t *dst, uint16_t value, int count);
 void memset32(uint32_t *dst, uint32_t value, int count);
 
 void sec_to_hms( int *hour, int *min, int *sec );
+char *ms_to_hms_string(int ms, char *buffer, int buffer_size);
 
 int adjust_oom(pid_t pid, int value);
+
+//TODO MARC
+#define RST_TO_TS( value, return_type ) ( (return_type)_rst_to_ts( (double)( value ) ) )
+#define TS_TO_RST( value, return_type ) ( (return_type)_ts_to_rst( (double)( value ) ) )
+
+/*
+#define RST_TO_TS( value, return_type )                                                                                \
+	( ( {                                                                                                              \
+		float audiospeed = get_effective_audio_speed();                                                                \
+		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) / audiospeed : ( value );                                   \
+	} ) )
+
+#define TS_TO_RST( value, return_type )                                                                                \
+	( ( {                                                                                                              \
+		float audiospeed = get_effective_audio_speed();                                                                \
+		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) * audiospeed : ( value );                                   \
+	} ) )
+*/
+
+float get_effective_audio_speed( void );
+double _rst_to_ts( double time_ms );
+double _ts_to_rst( double time_ms );
+int is_audio_speed_changed( float target_speed );
 
 #endif

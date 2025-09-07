@@ -25,10 +25,13 @@
 
 #include "astdlib.h"
 
+#include "audio_interface.h"
+
 #include <ctype.h>
 #include <stdio.h>
 #include <signal.h>
 #include <errno.h>
+#include <math.h>
 
 #define ERR	if (0)
 #define DBG	if (0)
@@ -474,6 +477,17 @@ void sec_to_hms( int *hour, int *min, int *sec )
 	*min  = *min % 60;
 }
 
+char *ms_to_hms_string(int ms, char *buffer, int buffer_size)
+{
+	if (!buffer || buffer_size < 9) return "";
+	int sec = ms / 1000;
+	int h = sec / 3600;
+	int m = (sec / 60) % 60;
+	int s = sec % 60;
+	snprintf(buffer, buffer_size, "%02d:%02d:%02d", h, m, s);
+	return buffer;
+}
+
 // For this to work you need a linux kernel running this patch:
 // http://lwn.net/Articles/104180/
 //
@@ -533,3 +547,33 @@ int alog2( unsigned int v )
 	return n;
 }
 
+float get_effective_audio_speed( void )
+{
+	return audio_interface_is_audio_speed_enabled() ? audio_interface_get_audio_speed() : 1.0f;
+}
+
+// Scale RST time to TS time (RST -> TS: divide by speed)
+double _rst_to_ts( double time_ms )
+{
+	float speed = get_effective_audio_speed();
+	if( fabsf( speed - 1.0f ) > 1e-6f ) {
+		return time_ms / (double)speed;
+	}
+	return time_ms;
+}
+
+// Scale TS time to RST time (TS -> RST: multiply by speed)
+double _ts_to_rst( double time_ms )
+{
+	float speed = get_effective_audio_speed();
+	if( fabsf( speed - 1.0f ) > 1e-6f ) {
+		return time_ms * (double)speed;
+	}
+	return time_ms;
+}
+
+int is_audio_speed_changed( float target_speed )
+{
+	float current_speed = get_effective_audio_speed();
+	return fabsf( current_speed - target_speed ) > 1e-6f;
+}

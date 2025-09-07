@@ -27,6 +27,7 @@
 #include "stream_subtitle.h"
 #include "stream_avg.h"
 #include "atime.h"
+#include "audio_interface.h"
 #include "color.h"
 #include "astdlib.h"
 #include "stream_sync.h"
@@ -41,6 +42,7 @@
 #include "fb.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <signal.h>
 
@@ -59,6 +61,9 @@
 #define DBGMNG 	if(Debug[DBG_MANGLER])
 #define DBGCV1 	if(Debug[DBG_CV] > 1)
 #define DBGP 	if(Debug[DBG_PARSER])
+
+#define DBG if(0)
+#define DBG2 if(0)
 
 int 		stream_zero_fill   = 1;
 
@@ -203,6 +208,9 @@ STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 // *****************************************************************************
 static void _video_init( STREAM *s, int time )
 {
+	char hms_buf[32];
+	DBG serprintf("_video_init(time = %d (%s))\n", time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)));
+
 	if( s->video_dec && !s->video_dec->async ) {
 		_free_all_frames( s );
 	}
@@ -216,7 +224,7 @@ static void _video_init( STREAM *s, int time )
 	
 	//clear also error state, so we can skip over "broken" files
 	s->error = 0;
-	
+
 	// is there a mangler, init it!
 	if( s->video_mangler ) {
 		s->video_mangler->init( s, time );
@@ -801,12 +809,16 @@ serprintf("video format %.4s not allowed\r\n", &s->video->fourcc);
 		// we need to roughly know the frame rate
 		s->video->msPerFrame   = stream_parser_guess_msPerFrame(s);
 		s->video->framesPerSec = 1000 / s->video->msPerFrame;
+		DBG serprintf("MSPERFRAME_SET: msPerFrame=%d, framesPerSec=%d, speed=%.2fx\n", 
+			s->video->msPerFrame, s->video->framesPerSec, audio_interface_get_audio_speed());
 		s->video->scale        = 1;
 		s->video->rate         = s->video->framesPerSec;
 	} else {
 		// if we have scale and rate (mostly for AVI)
 		s->video->msPerFrame   = 1000 * (UINT64)s->video->scale / (UINT64)s->video->rate;		
 		s->video->framesPerSec = (UINT64)s->video->rate / (UINT64)s->video->scale;
+		DBG serprintf("MSPERFRAME_CALC: scale=%d, rate=%d, msPerFrame=%d, speed=%.2fx\n", 
+			s->video->scale, s->video->rate, s->video->msPerFrame, audio_interface_get_audio_speed());
 	} 
 
 	if( s->video->format == VIDEO_FORMAT_MPG4 && !s->video->vol ) {
@@ -2037,8 +2049,9 @@ serprintf("cannot start audio!\n");
 			// we sample before the sink, so the video frames have to pass through the sink
 		  	vsink_delay = ( s->video_sink && s->video_sink->delay ) ? s->video_sink->delay( s->video_sink ) : 0;
  		}
- 
- 		s->delay_fb = 900;
+
+		// delay_fb is used in stream_sync as averaging weight s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000;
+		s->delay_fb = 900; // unnormalized exponential moving average window memory factor (no unit)
 DBGS serprintf("\r\nAUDIO DELAY(ms): adec %d  asink %d  vsink %d  tot %d  delay_fb %d  smode %s  vtime %s\r\n", 
 				adec_delay, asink_delay, vsink_delay, stream_sync_av_delay( s ), s->delay_fb,
 				s->sync_mode == STREAM_SYNC_SAMPLES ? "SAMPLES" : "CDATA",
@@ -2321,6 +2334,7 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 // ************************************************************
 void _stream_resync( STREAM *s ) 
 {
+	DBG serprintf("WALLCLOCK_RESET: by _stream_resync\n");
 	s->sink_ref_time = -1;
 	stream_sync_restart( s );
 }
@@ -2470,27 +2484,48 @@ serprintf("PAU: not_open\r\n");
 
 // ************************************************************
 //
-//	_real_time
+//	_real_time - Convert RST domain frame timestamp to wall clock domain for display
+//
+//	Purpose: Maps media timestamps (RST domain) to wall clock presentation times
+//	Input: frame_time (RST domain in ms) 
+//	Output: wall clock time (WC domain in ms) when frame should be displayed
+//
+//	Time Domain Flow: RST -> WC
+//	- Takes frame timestamp in real stream time (RST)
+//	- Applies reference time mapping to convert to wall clock domain
+//	- Legacy discrete speed modes (STREAM_SPEED_*) are unused - modern audio speed
+//	  uses continuous range 0.25-2.0x via audio_interface_get_audio_speed()
+//	- STREAM_SPEED_NORMAL now handles all audio speeds including variable speeds
 //
 // ************************************************************
 static int _real_time( STREAM *s, int frame_time )
 {
 	int mul = 1;
 	int div = 1;
-	
+
 	switch( s->speed ) {
-		case STREAM_SPEED_NORMAL:
-			return s->vid_ref_time + (frame_time - s->vid_ref_time);
-			
+		case STREAM_SPEED_NORMAL: {
+			// Calculate RST delta from reference point
+			int rst_delta = frame_time - s->vid_ref_time;
+
+			// Convert RST delta to WC delta by applying speed scaling
+			// At higher speeds, RST intervals represent shorter WC intervals
+			int ts_delta = RST_TO_TS( rst_delta, double );
+
+			// Map to wall clock time using WC reference
+			return s->vid_ref_time + ts_delta;
+		} break;
+
 		case STREAM_SPEED_SLOW_2: mul = 2; break;
 		case STREAM_SPEED_SLOW_4: mul = 4; break;
 		case STREAM_SPEED_SLOW_8: mul = 8; break;
-		
+
 		case STREAM_SPEED_FAST_2: div = 2; break;
 		case STREAM_SPEED_FAST_4: div = 4; break;
 		case STREAM_SPEED_FAST_8: div = 8; break;
 	}
 
+	// Legacy path for discrete speeds (not used with modern audio speed)
 	return s->vid_ref_time + (frame_time - s->vid_ref_time) * mul / div;
 }
 
@@ -2525,22 +2560,41 @@ serprintf("_engine_abort!\r\n");
 static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 {
 	if( s->sink_ref_time == -1 ) {			
-		if( s->video_sink->put_time ) {
-			s->sink_ref_time = frame->time; 
+		// Seek-based approach: no frame rescaling needed
 
-			if( s->audio->valid ) {
-				// set the time to 0 to prevent video from playing and let the audio thread update it
-				s->video_sink->put_time(s->video_sink, 1 ); 
-			}else {
-				s->video_sink->put_time(s->video_sink, frame->time ); 
-			}
-DBGV2 serprintf("  <NSR %d>", frame->time );
+		if( s->video_sink->put_time ) {
+			// For Android sinks: establish reference that matches sink's timing model
+			// Android sink does: venc_time = venc_put_time + (atime() - venc_ref_time)
+			// We set sink_ref_time to match what we pass to put_time for consistent timing
+			// Calculate proper sink_ref_time to maintain timing relationship
+			// Use small reference time with audio, frame time without audio
+
+			// Establish a new anchor point between the Wall Clock (WC) and Real Stream Time (RST) domains.
+			// This is not a direct assignment between different time domains, but a *declaration*.
+			// It defines the WC reference (`s->sink_ref_time`) to be numerically equal to the first
+			// frame's RST (`frame->time`). All subsequent blit_time values will be calculated
+			// relative to this new, consistent frame of reference.
+			// TODO for seamless audio speed: this strategy is not valid for a seamless audio speed change without the seek reset
+			s->sink_ref_time = frame->time;
+			s->vid_ref_time  = frame->time;
+			// set the time to 0 to prevent video from playing and let the audio thread update it
+			s->video_sink->put_time( s->video_sink, s->audio->valid ? 1 : frame->time );
+
+			DBG serprintf(
+				"SINK_REF_ESTABLISHED: sink_ref_time=%d, vid_ref_time=%d, frame_time=%d, put_time=%d (put_time mode)\n",
+				s->sink_ref_time, s->vid_ref_time, frame->time, s->sink_ref_time );
+			DBGV2 serprintf( "  <NSR %d>", frame->time );
 		} else {
 			s->vid_ref_time = frame->time;
 			int reftime = s->video_sink->get_time( s->video_sink );
 			s->sink_ref_time = reftime - s->vid_ref_time;
+			DBG serprintf("SINK_REF_ESTABLISHED: vid_ref=%d, sink_time=%d, sink_ref=%d (get_time mode)\n", 
+				s->vid_ref_time, reftime, s->sink_ref_time);
 DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 		}
+
+		DBG serprintf("NEW_REF_TIME: sink_ref_time established with frame=%d (video_time=%d)\n", 
+			frame->time, s->video_time);
 	}
 }
 
@@ -2549,15 +2603,26 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 //	_put_frame_in_sink
 //
 // ************************************************************
+
 static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
+	int real_time_calc = _real_time( s, time );
 	if( s->video_sink->put_time ) {
-		frame->blit_time = _real_time( s, time );
+		// Android put_time mode: _real_time() now returns WC domain for blit_duration calculations
+		// Android sinks calculate: blit_duration = frame->blit_time(WC) - venc_time(WC) - delay
+		// This ensures both values are in wall clock domain for proper timing
+		frame->blit_time = real_time_calc;
+		DBG2 serprintf("BLIT_CALC_PUT_TIME: frame_time=%d(RST), real_time=%d(WC), blit_time=%d(WC)\n", 
+			time, real_time_calc, frame->blit_time);
 	} else {
+		// Legacy mode: WC conversion with preroll compensation
 		// we add "stream_sink_preroll" here because the sink might switch to it's next frame
 		// while we do the call!
-		frame->blit_time = _real_time( s, time ) + s->sink_ref_time + stream_sink_preroll;
+		frame->blit_time = real_time_calc + s->sink_ref_time + stream_sink_preroll;
+		DBG2 serprintf("BLIT_CALC_WITH_REF: frame_time=%d(RST), real_time=%d(WC), preroll=%d, blit_time=%d(WC)\n", 
+			time, real_time_calc, stream_sink_preroll, frame->blit_time);
 	}
+
 //serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), s->sink_ref_time, frame->blit_time );
 	frame->time = time;
 	// a sink might want that info
@@ -2590,10 +2655,11 @@ static void _check_sink_delay( STREAM *s )
 	int at = atime();
 DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count );
 	vt = at;
-				
+
 	if( s->sink_delay < 0 ) {
 		s->sink_delay_count ++;
 		if( s->sink_delay_count > 2 || s->sink_delay < (-1 * stream_sink_max_delay) ) {
+			DBG serprintf("WALLCLOCK_RESET: by _check_sink_delay: delay=%d, count=%d\n", s->sink_delay, s->sink_delay_count);
 			s->sink_ref_time = -1;
 			s->sink_delay_count = 0;
 		}
@@ -2647,6 +2713,8 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 				s->drop --;
 				s->sink_ref_time -= s->video->msPerFrame;
 				frames_dropped ++;
+				DBG serprintf("FRAME_DROP: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
+					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
@@ -2657,6 +2725,8 @@ DBGY serprintf("[-%8d] ", frame->time );
 				s->drop ++;
 				s->sink_ref_time += s->video->msPerFrame;
 				frames_doubled ++;
+				DBG serprintf("FRAME_DOUBLE: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
+					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
 					s->video_time -= s->video->msPerFrame;
@@ -3321,7 +3391,7 @@ DECODE_AGAIN:
 		_queue_sink_frames( s );
 		pthread_mutex_unlock( &s->video_sink_mutex );
 	}
-	
+
 	_do_stuff( s );
 
 	if( !s->play_n_video_frames ) {
@@ -3755,7 +3825,6 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 		VIDEO_FRAME *out_frame = NULL;
 		s->video_dec->get_out( s->video_dec, &out_frame );
 		if( out_frame ) {
-
 			// is there a post mangler, then call it!
 			if( s->video_mangler ) {
 				s->video_mangler->post( s, &out_frame );
@@ -4091,9 +4160,35 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 	_seek_init( s );
 
 	if( time != -1 ) {
-		// seek by time
-		if( (err = s->parser->seek_time ? s->parser->seek_time( s, time, dir, flags, force_reload, &sc ) : 1) ) {
-serprintf("stream_seek time err!\n");
+		// IMPORTANT TIME DOMAIN NOTE:
+		// - Input 'time' parameter is in RST domain (user-perceived real stream time)
+		// - FFmpeg parser applies packet-level scaling in _parse_once() that divides 
+		//   packet timestamps by audio_speed, effectively compressing FFmpeg's timeline
+		// - This timeline compression means to seek to RST position X, we must seek 
+		//   to position (X * speed) in FFmpeg's compressed timeline
+		// - The multiplication by speed compensates for this timeline compression
+		// - FFmpeg finds keyframe and returns timestamps that get scaled down again
+		//   by the packet-level processing
+		int rst_ms = time;
+		// The internal pipeline operates in a Time-Scaled (TS) domain. To make the internal
+		// video_time (TS) numerically match the user's requested seek time (RST), we must
+		// seek in the source file to (RST * speed). The parser will then read the packet
+		// from that position and scale its timestamp down by dividing by speed, resulting
+		// in a TS value that is numerically equal to the original RST request.
+		int seek_target_rst = TS_TO_RST( rst_ms, int );
+		char hms_buf1[32];
+		char hms_buf2[32];
+
+		DBG serprintf( "SEEK: rst_input = %d (%s), speed = %.2f, seek_target_rst = %d (%s)\n", rst_ms,
+						ms_to_hms_string( rst_ms, hms_buf1, sizeof( hms_buf1 ) ), audio_interface_get_audio_speed(),
+						seek_target_rst, ms_to_hms_string( seek_target_rst, hms_buf2, sizeof( hms_buf2 ) ) );
+
+		if( (err = s->parser->seek_time ? s->parser->seek_time( s, seek_target_rst, dir, flags, force_reload, &sc ) : 1) ) {
+			serprintf("stream_seek time err!\n");
+		} else {
+			int final_rst = sc.time;  // Parser returns RST position
+			DBG serprintf("SEEK_RESULT: final_rst = %d (%s)\n", 
+				final_rst, ms_to_hms_string(final_rst, hms_buf1, sizeof(hms_buf1)));
 		}
 	} else {
 		// seek by pos
@@ -4235,6 +4330,9 @@ serprintf("SFR: not open!\r\n");
 // *****************************************************************************
 static void _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 {
+	char hms_buf[32];
+	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
+
 	int timeout = atime() + 1000; // 1 second before we stop waiting
 serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
 	
@@ -4409,6 +4507,7 @@ ErrorExit:
 	return 0;
 }
 
+
 // *****************************************************************************
 //
 //	stream_get_current_frame
@@ -4564,6 +4663,7 @@ int stream_get_current_speed( STREAM *s )
 // *****************************************************************************
 static int _stream_get_real_time( STREAM *s, int time )
 {	
+	// sanitization function that requires no audio speed scaling
 	if( time < 0 )
 		time = 0;
 	return time;

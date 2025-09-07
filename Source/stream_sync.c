@@ -31,6 +31,8 @@
 #define DBGV2  	if(Debug[DBG_VID] > 1)
 #define DBGV3 	if(Debug[DBG_VID] > 2)
 
+#define DBG if( 0 )
+
 extern int stream_max_delay;
 extern int stream_no_sync;
 extern int stream_video_paused;
@@ -63,6 +65,9 @@ int stream_sync_restart( STREAM *s )
 // ************************************************************
 int stream_sync_init( STREAM *s, int time )
 {
+	char hms_buf[32];
+	DBG serprintf("stream_sync_init(time = %d (%s))\n", time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)));
+
 	s->video_time     = -1;
 	s->audio_time     = -1;
 	s->audio_ref_time = -1;
@@ -237,6 +242,7 @@ DBGY serprintf("{{V %d}} ", diff );
 void stream_sync( STREAM *s )
 {
 	// if we have audio ...
+
 	if ( !s->audio->valid || !s->video->valid )
 		goto EXIT;
 		
@@ -278,15 +284,17 @@ DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 	}
 		 
 	s->drop_B = 0;
+	int pdrop_threshold = RST_TO_TS( stream_pdrop_threshold, int ); // requires scaling because absolute time in ms
+	int ms_per_frame = RST_TO_TS( s->video->msPerFrame, int );
 
-	if ( s->delay > stream_max_delay * s->video->msPerFrame ) {
+	if( s->delay > stream_max_delay * ms_per_frame ) {
 		// video is too fast, we have to slow down
 		s->drop = -1;
 		s->delay -= stream_max_delay * s->video->msPerFrame;
 DBGVY serprintf("_S(%3d)_", s->delay );
-	} else if ( s->delay < (-1 * stream_max_delay * s->video->msPerFrame)  ) {
-		
-		if ( stream_pdrop_threshold && rdiff < (-1 * stream_pdrop_threshold) ) {
+	} else if( s->delay < ( -1 * stream_max_delay * ms_per_frame ) ) {
+
+		if( stream_pdrop_threshold && rdiff < ( -1 * pdrop_threshold ) ) {
 			// we are totally late, see if we can skip to next key frame
 			int max_time = s->video_time - rdiff + 500;
 			int key_time;
@@ -301,14 +309,14 @@ DBGVY serprintf("XX(%d %d %d) ", num, key_time, dropped );
 		}
 
 		// video is late, we have to hurry up
-		if( stream_bdrop_threshold && s->delay < (-1 * stream_bdrop_threshold  * s->video->msPerFrame) ) {
+		if( stream_bdrop_threshold && s->delay < ( -1 * stream_bdrop_threshold * ms_per_frame ) ) { // bdrop_threshold does not need scaling since it is frame-count multiplier and the scaling is done on ms_per_frame
 			s->drop_B = 1;
 		}
 		s->drop = 1;
 		s->delay += stream_max_delay * s->video->msPerFrame;
 DBGVY serprintf("_%s(%3d)_", s->drop_B ? "B" : "F", s->delay );
 	} else {
-DBGVY serprintf("  (   ) " );
+		DBGVY serprintf( "  (   ) " );
 	}
 	return;
 EXIT:

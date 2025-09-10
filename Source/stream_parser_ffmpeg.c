@@ -932,7 +932,8 @@ extern int stream_drive_wake_sleep;
 // ************************************************************
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
-	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts )) - RST_TO_TS(ff_p->start_time, int); // ts domain
+	int t = ( use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
+	return (t == -1) ? -1 : t - RST_TO_TS(ff_p->start_time, int); // ts domain
 }
 
 // ************************************************************
@@ -957,7 +958,7 @@ static int _get_audio_time( STREAM *s, AVPacket *packet )
 static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_SUB_TS( packet->pts );
-	return ( t == STREAM_NO_PTS_VALUE ) ? STREAM_NO_PTS_VALUE : t - RST_TO_TS(ff_p->start_time, int); // ts domain
+	return ( t == -1 ) ? -1 : t - RST_TO_TS(ff_p->start_time, int); // ts domain
 }
 
 // ************************************************************

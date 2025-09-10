@@ -4500,7 +4500,7 @@ int stream_get_time_default( STREAM *s, int *total )
 	if( total )
 		*total = s->duration;
 
-	int time_rst = TS_TO_RST( s->video->valid ? s->video_time : s->audio_time ); // ts->rst domain
+	int time_rst = TS_TO_RST( s->video->valid ? s->video_time : s->audio_time, int ); // ts->rst domain
 	DBGT serprintf( "sgct  pos: %8d  tot %d\r\n", time_rst, total ? *total : -1 );
 	return time_rst;
 }

@@ -267,6 +267,7 @@ static int get_ff_format( int id, UINT32 *fourcc )
 //	_parse_format
 //
 // ************************************************************
+// REMARK: cannot use scaling by audio speed there because task is performed once
 static int _parse_format( int etype, FF_PRIV *priv ) 
 {
 	AVFormatContext *fmt = priv->fmt;
@@ -278,8 +279,7 @@ DBGP serprintf("format   [%s]\r\n", fmt->iformat->name );
 DBGP serprintf("size     %lld\r\n", priv->size );
 	}
 	if( fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
-		// TODO could combine to get more accuracy
-		priv->duration = RST_TO_TS( 1000 * (INT64)fmt->duration / AV_TIME_BASE, int );
+		priv->duration = 1000 * (INT64)fmt->duration / AV_TIME_BASE; // rst domain
 		DBGP serprintf( "duration %d\r\n", priv->duration );
 	} else {
 		if( priv->s )
@@ -289,8 +289,7 @@ DBGP serprintf("duration ---\r\n" );
 
 	if (fmt->start_time != AV_NOPTS_VALUE) {
 DBGP serprintf("FFMPEG start    %lld\r\n",  fmt->start_time);
-		// TODO could combine to get more accuracy
-		priv->start_time = RST_TO_TS( 1000 * (INT64)fmt->start_time / AV_TIME_BASE, int ); // ts domain
+		priv->start_time = 1000 * (INT64)fmt->start_time / AV_TIME_BASE; // rst domain
 DBGP serprintf( "start    %d\r\n", priv->start_time );
 	}
 DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
@@ -615,15 +614,10 @@ DBGP serprintf("\r\n");
 	if( fmt->nb_chapters ) {
 DBGP serprintf("chapters:\r\n");	
 		for( i =0; i < fmt->nb_chapters; i++ ) {
+			// chapters stays in rst domain
 			AVChapter *ch = fmt->chapters[i];
 			UINT64 start = 1000 * ch->start * ch->time_base.num / ch->time_base.den; 
 			UINT64 end   = 1000 * ch->end   * ch->time_base.num / ch->time_base.den; 
-
-			// TODO could combine to get more accuracy
-			// Scale chapter timestamps for audio speed (same as duration/start_time)
-			start = RST_TO_TS( start, UINT64 );
-			end = RST_TO_TS( end, UINT64 );
-
 			AVDictionaryEntry *t = av_dict_get( ch->metadata, "title", NULL, 0 );
 			DBGP serprintf( "[%2d] id %08X  start/end %8lld/%8lld  [%s]\r\n", i, ch->id, start, end,
 							t ? t->value : "(no title)" );
@@ -938,7 +932,7 @@ extern int stream_drive_wake_sleep;
 // ************************************************************
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
-	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts )) - ff_p->start_time; // ts domain
+	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts )) - RST_TO_TS(ff_p->start_time, int); // ts domain
 }
 
 // ************************************************************
@@ -950,7 +944,7 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_AUDIO_TS( packet->pts );
-	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time; // ts domain
+	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - RST_TO_TS(ff_p->start_time, int); // ts domain
 }
 
 // ************************************************************
@@ -963,7 +957,7 @@ static int _get_audio_time( STREAM *s, AVPacket *packet )
 static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_SUB_TS( packet->pts );
-	return ( t == STREAM_NO_PTS_VALUE ) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time; // ts domain
+	return ( t == STREAM_NO_PTS_VALUE ) ? STREAM_NO_PTS_VALUE : t - RST_TO_TS(ff_p->start_time, int); // ts domain
 }
 
 // ************************************************************
@@ -1136,9 +1130,7 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 	} else {
 		// TODO: start_time is ts: bug mixing time domains
-		new_pos = (INT64)( time + TS_TO_RST(ff_p->start_time, int) ) * AV_TIME_BASE / 1000;
-		//new_pos = (INT64)( time + ff_p->start_time ) * AV_TIME_BASE / 1000;
-		//new_pos = (INT64)time * AV_TIME_BASE / 1000;
+		new_pos = (INT64)( time + ff_p->start_time ) * AV_TIME_BASE / 1000;
 		DBGP serprintf( "FFMPEG: new time: %lld\r\n", new_pos );
 	}
 

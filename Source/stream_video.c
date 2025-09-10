@@ -4117,6 +4117,7 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 // *****************************************************************************
 static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, int force_reload )
 {
+	// time is in rst domain
 	int err = 1;
 	STREAM_CHUNK sc = { 0 };
 	int was_paused;
@@ -4146,35 +4147,13 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 	_seek_init( s );
 
 	if( time != -1 ) {
-		// IMPORTANT TIME DOMAIN NOTE:
-		// - Input 'time' parameter is in RST domain (user-perceived real stream time)
-		// - FFmpeg parser applies packet-level scaling in _parse_once() that divides 
-		//   packet timestamps by audio_speed, effectively compressing FFmpeg's timeline
-		// - This timeline compression means to seek to RST position X, we must seek 
-		//   to position (X * speed) in FFmpeg's compressed timeline
-		// - The multiplication by speed compensates for this timeline compression
-		// - FFmpeg finds keyframe and returns timestamps that get scaled down again
-		//   by the packet-level processing
-		int rst_ms = time;
-		// The internal pipeline operates in a Time-Scaled (TS) domain. To make the internal
-		// video_time (TS) numerically match the user's requested seek time (RST), we must
-		// seek in the source file to (RST * speed). The parser will then read the packet
-		// from that position and scale its timestamp down by dividing by speed, resulting
-		// in a TS value that is numerically equal to the original RST request.
-		int seek_target_rst = TS_TO_RST( rst_ms, int );
-		char hms_buf1[32];
-		char hms_buf2[32];
-
-		DBG serprintf( "SEEK: rst_input = %d (%s), speed = %.2f, seek_target_rst = %d (%s)\n", rst_ms,
-						ms_to_hms_string( rst_ms, hms_buf1, sizeof( hms_buf1 ) ), audio_interface_get_audio_speed(),
-						seek_target_rst, ms_to_hms_string( seek_target_rst, hms_buf2, sizeof( hms_buf2 ) ) );
-
-		if( (err = s->parser->seek_time ? s->parser->seek_time( s, seek_target_rst, dir, flags, force_reload, &sc ) : 1) ) {
+		char hms_buf[32];
+		DBG serprintf( "SEEK: target_rst = %d (%s), speed = %.2f\n", time, ms_to_hms_string( time, hms_buf, sizeof( hms_buf ) ), audio_interface_get_audio_speed() );
+		if( ( err = s->parser->seek_time ? s->parser->seek_time( s, time, dir, flags, force_reload, &sc ) : 1 ) ) {
 			serprintf("stream_seek time err!\n");
 		} else {
 			int final_rst = sc.time;  // Parser returns RST position
-			DBG serprintf("SEEK_RESULT: final_rst = %d (%s)\n", 
-				final_rst, ms_to_hms_string(final_rst, hms_buf1, sizeof(hms_buf1)));
+			DBG serprintf("SEEK_RESULT: final_rst = %d (%s)\n", final_rst, ms_to_hms_string(final_rst, hms_buf, sizeof(hms_buf)));
 		}
 	} else {
 		// seek by pos
@@ -4509,18 +4488,21 @@ VIDEO_FRAME *stream_get_current_frame( STREAM *s )
 // *****************************************************************************
 //
 //	stream_get_time_default
+//	acts as the bridge between the stream rst time and the audio/video ts time
+//	it converts internal ts engine based to UI rst time domain
 //
 // *****************************************************************************
 int stream_get_time_default( STREAM *s, int *total )
 {
 	if ( !s )
 		return 0;
-	
+
 	if( total )
 		*total = s->duration;
-	int time = s->video->valid ? s->video_time : s->audio_time;
-DBGT serprintf( "sgct  pos: %8d  tot %d\r\n", time, total ? *total : -1 );
-	return time;
+
+	int time_rst = TS_TO_RST( s->video->valid ? s->video_time : s->audio_time ); // ts->rst domain
+	DBGT serprintf( "sgct  pos: %8d  tot %d\r\n", time_rst, total ? *total : -1 );
+	return time_rst;
 }
 
 // *****************************************************************************

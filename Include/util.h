@@ -76,21 +76,20 @@ char *ms_to_hms_string(int ms, char *buffer, int buffer_size);
 
 int adjust_oom(pid_t pid, int value);
 
-//TODO MARC
 #define RST_TO_TS( value, return_type ) ( (return_type)_rst_to_ts( (double)( value ) ) )
 #define TS_TO_RST( value, return_type ) ( (return_type)_ts_to_rst( (double)( value ) ) )
 
 /*
-#define RST_TO_TS( value, return_type )                                                                                \
-	( ( {                                                                                                              \
-		float audiospeed = get_effective_audio_speed();                                                                \
-		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) / audiospeed : ( value );                                   \
+#define RST_TO_TS( value, return_type ) \
+	( ( { \
+		float audiospeed = get_effective_audio_speed(); \
+		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) / audiospeed : ( value ); \
 	} ) )
 
-#define TS_TO_RST( value, return_type )                                                                                \
-	( ( {                                                                                                              \
-		float audiospeed = get_effective_audio_speed();                                                                \
-		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) * audiospeed : ( value );                                   \
+#define TS_TO_RST( value, return_type ) \
+	( ( { \
+		float audiospeed = get_effective_audio_speed(); \
+		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) * audiospeed : ( value ); \
 	} ) )
 */
 

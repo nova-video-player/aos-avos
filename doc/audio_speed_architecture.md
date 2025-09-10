@@ -68,7 +68,81 @@ When `stream_set_av_speed` is called, the following sequence of operations occur
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
     // Read current time before speed change affects calculations
-    int stream_current_time = stream_get_current_time( s, NULL ); // RST domain
+    # Audio Speed Change Architecture
+
+## Overview
+
+This document details the architecture for audio speed changes in the AVOS player. The implementation uses a seek-based approach that ensures clean state transitions by flushing buffers and reinitializing the media pipeline when speed changes occur.
+
+The core of the architecture relies on three distinct time domains and a clear set of rules for converting between them at the boundaries of different components.
+
+## Time Domains
+
+There are three fundamental time domains in the implementation:
+
+-   **`wc` (Wall Clock):** This is the system's monotonic clock (`atime()` or `clock_gettime()`). It progresses linearly and is independent of playback speed. It is the ground truth for all real-world timing, such as scheduling a frame for display.
+
+-   **`rst` (Real Stream Time):** This is the playback time as perceived by the user, representing the actual position within the media file. For example, if a video is 10 minutes long, the `rst` will go from 0 to 10 minutes, regardless of the playback speed. It is primarily used for UI display and seeking.
+
+-   **`ts` (Time-Scaled):** This is the primary internal time domain for the core player logic. The parser creates a "compressed" or "expanded" timeline where timestamps are scaled by the playback speed. At 2.0x speed, a frame at 60s (`rst`) will have a timestamp of 30s (`ts`). This allows the sync and decoding logic to operate without needing to know the current speed, but requires careful conversions at the boundaries.
+
+### Key Relationship
+
+`ts = rst / audio_speed` and `rst = ts * audio_speed`. The `RST_TO_TS` and `TS_TO_RST` macros are used for these conversions.
+
+## Core Architecture
+
+### Parser Interaction (Creating the `ts` Domain)
+
+The `ts` domain is created at the earliest possible stage: the parser. In `_parse_once()` in `Source/stream_parser_ffmpeg.c`, every packet's timestamp (`pts`, `dts`) and `duration` is immediately scaled after being read from the source file:
+
+```c
+// Simplified from _parse_once()
+packet.pts = RST_TO_TS(packet.pts, int64_t);
+packet.dts = RST_TO_TS(packet.dts, int64_t);
+packet.duration = RST_TO_TS(packet.duration, int64_t);
+```
+
+This means that any component that receives data from the parser (e.g., `cdata->time`, `frame->time`, `s->video_time`) operates in the `ts` domain.
+
+### A/V Synchronization (`stream_sync.c`)
+
+The A/V sync logic operates almost entirely in the `ts` domain.
+
+-   The core clock variables, `s->video_time` and `s->audio_time`, are both `ts` timestamps.
+-   The calculated difference, `s->delay`, is a `ts` duration.
+-   **Boundary Conversions:**
+    -   When comparing the internal `ts` delay against a fixed, real-world threshold (e.g., to decide if a frame should be dropped), the `ts` delay is converted to `rst`: `if (TS_TO_RST(s->delay, int) > threshold_rst)`.
+    -   When accounting for physical buffer delays (like the audio sink's buffer depth, which is an `rst` value), the `rst` delay is converted to `ts` before being used in calculations with other `ts` variables: `delta_ts + RST_TO_TS(delay_rst, int)`.
+
+### Video Rendering and Pacing (`stream_sink_video_android.c`)
+
+This is the most subtle part of the architecture. The final conversion from the internal `ts` domain to a `wc` presentation time happens inside the video sink.
+
+1.  **`blit_time` is `ts`:** The core engine does **not** calculate a final wall-clock time. It sets `frame->blit_time` to the frame's `ts` timestamp.
+2.  **The Sink's Internal Clock (`venc_time`):** The video sink maintains its own internal stopwatch, `venc_time`. This is a `wc` duration, representing the real time elapsed since the last seek.
+3.  **Pacing by Clock Subtraction:** The sink paces video by calculating a `blit_duration = frame->blit_time - venc_time`. This looks like a domain error (`ts - wc`), but it's a deliberate mechanism. The *change* in this value from frame to frame correctly paces the video.
+    -   The change in `blit_duration` is `delta_ts - delta_wc`.
+    -   At 2.0x speed, `delta_wc` is twice `delta_ts`, so the result is negative. This causes the sleep time between frames to decrease, correctly accelerating the video.
+
+## Time Domain Variable Reference
+
+| Variable | Domain | Use and Explanation |
+| :--- | :--- | :--- |
+| `s->video_time` | `ts` | The current video playback time in the time-scaled domain. |
+| `s->audio_time` | `ts` | The current audio playback time in the time-scaled domain. |
+| `frame->time` | `ts` | The timestamp of a video frame in the time-scaled domain. |
+| `cdata->time` | `ts` | Timestamp of a data chunk from the parser in the time-scaled domain. |
+| `frame->blit_time` | `ts` | The frame's `ts` timestamp, passed to the video sink for pacing. **Not a `wc` value.** |
+| `s->delay` | `ts` | The smoothed A/V difference, calculated and stored as a `ts` duration. |
+| `s->av_delay` | `rst` | A user-configured A/V offset, in real-world milliseconds. |
+| `stream_get_current_time()` | `rst` | **Returns** the current playback position in `rst` for UI purposes (converts from `s->video_time`). |
+| `stream_seek_time()` | `rst` | **Accepts** a seek position in `rst` from the UI. |
+| `s->stop_time` | `rst` | The user-defined stop time in `rst`. Must be converted to `ts` for comparison with `s->video_time`. |
+| `venc_time` | `wc` | The video sink's internal clock; a wall-clock duration since the last flush/seek. |
+| `s->sink_ref_time` | `wc` | Wall-clock anchor time, used for calculating `blit_time`. |
+| `s->vid_ref_time` | `ts` | Time-scaled anchor time, used for calculating `blit_time`. |
+
     
     // Change audio hardware speed
     audio_interface_change_audio_speed( s->audio_ctx, av_speed );
@@ -126,21 +200,21 @@ The seek-based approach naturally handles hardware decoder buffer artifacts by:
 
 | Variable                  | Domain | Use and Explanation                                                                                                                            |
 | ------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `s->video_time`           | `rst`  | The current playback time in real stream time domain. Primary reference for current position in the stream.                                   |
-| `s->audio_time`           | `rst`  | The current audio playback time in real stream time domain. Used for A/V synchronization.                                                     |
-| `frame->time`             | `rst`  | The timestamp of a video frame in real stream time. Scaled by FFmpeg parser according to current audio speed.                                 |
-| `frame->blit_time`        | `wc`   | The wall clock time at which a video frame should be displayed. Calculated from frame timing + wall clock references.                         |
-| `cdata->time`             | `rst`  | Timestamp of a subtitle chunk in real stream time.                                                                                             |
-| `s->sink_ref_time`        | `wc`   | Wall clock reference time for display timing calculations. Set during initialization and seek operations.                                      |
-| `s->vid_ref_time`         | `rst`  | RST reference timestamp used for delta calculations. Must be in same domain as `frame->time` for proper timing.                               |
-| `s->audio_ref_time`       | `wc`   | A wall clock reference time for audio. Used to map audio `rst` to `wc` for hardware audio timing.                                            |
-| `s->sync_delay`           | `wc`   | The measured delay in the video sink, in wall clock time. Hardware presentation latency measurement.                                           |
-| `s->av_delay`             | `rst`  | The calculated delay between audio and video in real stream time domain. Used by the sync logic.                                              |
-| `s->wc_base_time`         | `wc`   | The wall clock time at the start of playback.                                                                                                  |
-| `s->wc_current_time`      | `wc`   | The current wall clock time.                                                                                                                   |
-| `stream_get_time_default` | `rst`  | Returns `s->video_time`, which is in the real stream time domain.                                                                              |
-| `_get_audio_time`         | `rst`  | Returns the time of the last played audio sample, in real stream time domain.                                                                  |
-| `_get_video_time`         | `rst`  | Returns the time of the last displayed video frame, in real stream time domain.                                                                |
+| `s->video_time`           | `ts` | The current video playback time in the time-scaled domain. |
+| `s->audio_time`           | `ts` | The current audio playback time in the time-scaled domain. |
+| `frame->time`             | `ts` | The timestamp of a video frame in the time-scaled domain. |
+| `cdata->time`             | `ts` | Timestamp of a data chunk from the parser in the time-scaled domain. |
+| `sc->time` | `ts` | Timestamp of the target seek chunk in the parser, used to drop audio packets before the new video frame. |
+| `frame->blit_time`        | `ts` | The frame's `ts` timestamp, passed to the video sink for pacing. **Not a `wc` value.** |
+| `s->delay` | `ts` | The smoothed A/V difference, calculated and stored as a `ts` duration. |
+| `s->av_delay`             | `rst` | A user-configured A/V offset, in real-world milliseconds. |
+| `stream_get_current_time()` | `rst` | **Returns** the current playback position in `rst` for UI purposes (converts from `s->video_time`). |
+| `stream_seek_time()` | `rst` | **Accepts** a seek position in `rst` from the UI. |
+| `s->stop_time` | `rst` | The user-defined stop time in `rst`. Must be converted to `ts` for comparison with `s->video_time`. |
+| `_real_time()` | `ts` | **Returns** the frame's `ts` timestamp, which is then assigned to `blit_time`. |
+| `s->audio_ref_time` | `ts` | A `ts` reference time for sample-based audio sync, set from `cdata->time`. |
+| `p->venc_ref_time` | `wc` | The video sink's private wall-clock anchor, set on flush. Used to calculate `venc_time`. |
+| `venc_time` | `wc` | The video sink's internal clock; a wall-clock duration since the last flush/seek. |
 
 ## Design Philosophy
 

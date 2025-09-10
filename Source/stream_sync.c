@@ -25,13 +25,13 @@
 
 #define DBGS	if(Debug[DBG_STREAM])
 #define DBGV   	if(Debug[DBG_VID])
-#define DBGVY	if(Debug[DBG_VID]||Debug[DBG_SYNC])
-#define DBGY	if(Debug[DBG_SYNC])
+#define DBGVY	if(1||Debug[DBG_VID]||Debug[DBG_SYNC])
+#define DBGY	if(1||Debug[DBG_SYNC])
 #define DBGV1  	if(Debug[DBG_VID] == 1)
 #define DBGV2  	if(Debug[DBG_VID] > 1)
 #define DBGV3 	if(Debug[DBG_VID] > 2)
 
-#define DBG if( 0 )
+#define DBG if( 1 )
 
 extern int stream_max_delay;
 extern int stream_no_sync;
@@ -130,7 +130,7 @@ int stream_sync_av_delay( STREAM *s )
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
-	return video_time - audio_time + (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay);
+	return video_time - audio_time + RST_TO_TS( (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay), int); // ts domain
 }
 
 // ************************************************************
@@ -142,7 +142,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 {
 	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) { 
-			s->video_sink->put_time( s->video_sink, audio_time - (stream_sync_av_delay(s) +  s->av_delay + stream_dbg_delay) );
+			s->video_sink->put_time( s->video_sink, audio_time - RST_TO_TS( (stream_sync_av_delay(s) +  s->av_delay + stream_dbg_delay), int ) );
 		}
 	}
 
@@ -221,13 +221,13 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	// if video is in the future, delay it
 	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
 	// if we sample post sink, allow us to start 500ms early
-	int max = s->vtime_post_sink ? 500 : 0;
-	if ( diff > max ) {
-DBGY serprintf("{{V %d}} ", diff );
+	int max_rst = s->vtime_post_sink ? 500 : 0;
+	if( diff > RST_TO_TS( max_rst, int ) ) {
+DBGY serprintf( "{{V %d}} ", diff );
 		s->sync_audio = 0;
 		return 1;
 	}
-	
+
 	// allow video to play from now on
 	s->sync_video = 0;
 	
@@ -267,12 +267,14 @@ void stream_sync( STREAM *s )
 	// ... we calc the delay between audio and video frames and
 	// try adjust it to zero
 	int rdiff = _stream_av_diff( s, s->video_time, s->audio_time );
-	int diff  = MAX( MIN( rdiff,  250 ), -250 );
+	int clamp_ts = RST_TO_TS( 250, int );
+	int diff  = MAX( MIN( rdiff,  clamp_ts ), -clamp_ts );
 	
  	if( !s->delay_valid ) {
 //serprintf("(D %d)", diff );	
 		s->delay = diff;
 	} else {
+		// 900 s->delay_fb is used for a exponential moving average window and thus has no scale
 		s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000;
 	}
 	s->delay_valid = 1;
@@ -284,17 +286,30 @@ DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 	}
 		 
 	s->drop_B = 0;
-	int pdrop_threshold = RST_TO_TS( stream_pdrop_threshold, int ); // requires scaling because absolute time in ms
-	int ms_per_frame = RST_TO_TS( s->video->msPerFrame, int );
 
-	if( s->delay > stream_max_delay * ms_per_frame ) {
+	// --- A/V Sync Correction Logic ---
+	// The decision to drop/double frames is made by comparing the A/V delay in the RST (real-world ms) domain
+	// to ensure the sync window tolerance is constant regardless of playback speed.
+	// The internal state variable s->delay remains in the TS (Time-Scaled) domain, and adjustments to it
+	// must also be in the TS domain.
+
+	// 1. Define the threshold in the RST domain for making decisions.
+	int threshold_rst = stream_max_delay * s->video->msPerFrame;
+	int pdrop_threshold_rst = stream_pdrop_threshold;
+
+	// 2. Define the adjustment value in the TS domain for modifying the state variable.
+	int adjustment_ts = RST_TO_TS(threshold_rst, int);
+
+	// 3. Perform comparisons in the RST domain.
+	if( TS_TO_RST(s->delay, int) > threshold_rst ) {
 		// video is too fast, we have to slow down
 		s->drop = -1;
-		s->delay -= stream_max_delay * s->video->msPerFrame;
+		// Adjust the TS-domain state variable by a TS-domain value.
+		s->delay -= adjustment_ts;
 DBGVY serprintf("_S(%3d)_", s->delay );
-	} else if( s->delay < ( -1 * stream_max_delay * ms_per_frame ) ) {
-
-		if( stream_pdrop_threshold && rdiff < ( -1 * pdrop_threshold ) ) {
+	} else if( TS_TO_RST(s->delay, int) < (-1 * threshold_rst) ) {
+		// video is late, check for P-frame drop condition
+		if( stream_pdrop_threshold && TS_TO_RST(rdiff, int) < (-1 * pdrop_threshold_rst) ) {
 			// we are totally late, see if we can skip to next key frame
 			int max_time = s->video_time - rdiff + 500;
 			int key_time;
@@ -308,12 +323,15 @@ DBGVY serprintf("XX(%d %d %d) ", num, key_time, dropped );
 			}
 		}
 
-		// video is late, we have to hurry up
-		if( stream_bdrop_threshold && s->delay < ( -1 * stream_bdrop_threshold * ms_per_frame ) ) { // bdrop_threshold does not need scaling since it is frame-count multiplier and the scaling is done on ms_per_frame
+		// video is late, hurry up (B-frame or P-frame drop)
+		// Note: stream_bdrop_threshold is a frame-count multiplier, not a time duration.
+		// The comparison uses s->delay (TS) and a threshold based on the frame duration converted to TS.
+		if( stream_bdrop_threshold && s->delay < ( -1 * stream_bdrop_threshold * RST_TO_TS(s->video->msPerFrame, int) ) ) {
 			s->drop_B = 1;
 		}
 		s->drop = 1;
-		s->delay += stream_max_delay * s->video->msPerFrame;
+		// Adjust the TS-domain state variable by a TS-domain value.
+		s->delay += adjustment_ts;
 DBGVY serprintf("_%s(%3d)_", s->drop_B ? "B" : "F", s->delay );
 	} else {
 		DBGVY serprintf( "  (   ) " );

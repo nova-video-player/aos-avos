@@ -34,7 +34,7 @@ extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
 #include "jni.h"
 
-#define DBG  if(0)
+#define DBG  if(1)
 #define DBG2 if(0)
 #define ERR  if(1)
 
@@ -233,20 +233,35 @@ static int audiotrack_close(audio_ctx_t **pat)
 	return 0;
 }
 
+static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
+{
+	if (!at || !env) return;
+
+	float speed = get_effective_audio_speed();
+	// System latency from Android framework (considered a fixed, unscaled value).
+	uint32_t system_latency = call_int_method_current_vm(env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
+	// Latency from our application's buffer, scaled by playback speed.
+	// avoid any rounding issue reminder at->frame_count = ( double ) at->buf_size / (double)at->frame_size, we combine here
+	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed) );
+	at->latency = system_latency + app_latency; 
+
+	DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d", speed, system_latency, app_latency, at->latency );
+}
+
 static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int bits, int format)
 {
 	uint32_t track_chanmask;
 	audio_format_t track_format;
 	int status = 0;
 
-	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d", rate, channels, bits, format,
-			 at->passthrough );
+	float as = get_effective_audio_speed();
+	int is_audio_speed_enabled = audio_interface_is_audio_speed_enabled();
+
+	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
 
 	attach_thread( at );
 
 	audio_rate = rate;
-	float as = audio_interface_get_audio_speed();
-	int is_audio_speed_enabled = audio_interface_is_audio_speed_enabled();
 
 	at->rate = rate;
 	at->channel_count = channels;
@@ -363,10 +378,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int audioFormat = track_format;
 	mode = 1; /*MODE_STREAM*/
 
-	// NOTE than buffer_scale != 1 makes video stutters for some cf. #726, enable audio_speed only if experimental feature set
-	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) { // 4x buffer size to enable audio_speed
-		// need to scale buffer to capture max_audio_speed = 2 but need 4x for stability (TODO: investigate)
-		buffer_scale = 4;
+	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) {
+		buffer_scale = 2; // for 2.0x max audio speed
 	} else {
 		buffer_scale = 1;
 	}
@@ -446,15 +459,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if(failed)
 		return -1;
 
-	at->latency = call_static_int_method(at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
-	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
+	audiotrack_update_latency(at, at->env);
 
-	uint32_t base_latency = (uint32_t)lrint( ( 1000.0 * (double)at->frame_count ) / (double)at->rate );
-	at->latency += RST_TO_TS( base_latency, uint32_t );
-	// TODO MARC before check if not to be converted (I think current formula is ok) but on F1 little shift...
-	//at->latency = RST_TO_TS( SHIFT + at->latency + base_latency, uint32_t );
 	at->init = 1;
-	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency_norm=%d\n", at->latency);
 	DBG LOG("track created");
 
 	return 0;
@@ -563,7 +570,9 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
+	// since at->frame_count = at->buf_size / at->frame_size; simplify
+	// original: len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
+	len = at->buf_size * ( ( at->passthrough == 2 ) ? 4 : at->channel_count );
 
 	if ((buffer = (unsigned char *)malloc(len)) == NULL)
 		return -1;
@@ -655,12 +664,7 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			audio_interface_set_audio_speed(speed);
 		}
 
-		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
-		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency=%d\n", at->latency);
-		// scaling with audio_speed is required to avoid variable delay with different audio_speed
-		at->latency += (uint32_t)lrint( ( 1000.0 * (double)at->frame_count ) / ( (double)at->rate * (double)speed ) );
-		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
-
+		audiotrack_update_latency(at, myEnv);
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
 	}

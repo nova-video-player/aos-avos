@@ -62,7 +62,7 @@
 #define DBGCV1 	if(Debug[DBG_CV] > 1)
 #define DBGP 	if(Debug[DBG_PARSER])
 
-#define DBG if(0)
+#define DBG if(1)
 #define DBG2 if(0)
 
 int 		stream_zero_fill   = 1;
@@ -2484,45 +2484,31 @@ serprintf("PAU: not_open\r\n");
 
 // ************************************************************
 //
-//	_real_time - Convert RST domain frame timestamp to wall clock domain for display
-//
-//	Purpose: Maps media timestamps (RST domain) to wall clock presentation times
-//	Input: frame_time (RST domain in ms) 
-//	Output: wall clock time (WC domain in ms) when frame should be displayed
-//
-//	Time Domain Flow: RST -> WC
-//	- Takes frame timestamp in real stream time (RST)
-//	- Applies reference time mapping to convert to wall clock domain
-//	- Legacy discrete speed modes (STREAM_SPEED_*) are unused - modern audio speed
-//	  uses continuous range 0.25-2.0x via audio_interface_get_audio_speed()
-//	- STREAM_SPEED_NORMAL now handles all audio speeds including variable speeds
+//	_real_time - frame timestamp conversion
 //
 // ************************************************************
 static int _real_time( STREAM *s, int frame_time )
 {
+	// This function returns the frame's TS timestamp.
+	// This TS value is passed to the video sink as the blit_time, and the
+	// sink uses it along with its own wall-clock to pace the video.
 	int mul = 1;
 	int div = 1;
 
 	switch( s->speed ) {
-		case STREAM_SPEED_NORMAL: {
-			// Calculate RST delta from reference point
-			int rst_delta = frame_time - s->vid_ref_time;
+	case STREAM_SPEED_NORMAL: {
+		// For variable speed, we pass the TS value directly to the sink.
+		// `s->vid_ref_time + (frame_time - s->vid_ref_time)` simplifies to `frame_time`.
+		return frame_time;
+	} break;
 
-			// Convert RST delta to WC delta by applying speed scaling
-			// At higher speeds, RST intervals represent shorter WC intervals
-			int ts_delta = RST_TO_TS( rst_delta, double );
+	case STREAM_SPEED_SLOW_2: mul = 2; break;
+	case STREAM_SPEED_SLOW_4: mul = 4; break;
+	case STREAM_SPEED_SLOW_8: mul = 8; break;
 
-			// Map to wall clock time using WC reference
-			return s->vid_ref_time + ts_delta;
-		} break;
-
-		case STREAM_SPEED_SLOW_2: mul = 2; break;
-		case STREAM_SPEED_SLOW_4: mul = 4; break;
-		case STREAM_SPEED_SLOW_8: mul = 8; break;
-
-		case STREAM_SPEED_FAST_2: div = 2; break;
-		case STREAM_SPEED_FAST_4: div = 4; break;
-		case STREAM_SPEED_FAST_8: div = 8; break;
+	case STREAM_SPEED_FAST_2: div = 2; break;
+	case STREAM_SPEED_FAST_4: div = 4; break;
+	case STREAM_SPEED_FAST_8: div = 8; break;
 	}
 
 	// Legacy path for discrete speeds (not used with modern audio speed)
@@ -3172,9 +3158,9 @@ static int _handle_video_codec_error( STREAM *s );
 // *****************************************************************************
 static int _check_end( STREAM *s )
 {
-	if( s->stop_time && 	((s->video->valid && s->video_time > s->stop_time) || 
-				(!s->video->valid && s->audio_time > s->stop_time) ) 
-	) {
+	int stop_time_ts = RST_TO_TS( s->stop_time, int ); // stop_time is external and set in rst
+	if( s->stop_time && ( ( s->video->valid && s->video_time > stop_time_ts ) ||
+						  ( !s->video->valid && s->audio_time > stop_time_ts ) ) ) {
 		if( !s->stream_end ) {
 DBGS serprintf("stop_time reached %d  v %d  a%d\r\n", s->stop_time, s->video_time, s->audio_time );
 DBGS if( s->buffer ) {
@@ -3185,7 +3171,7 @@ serprintf("____%d %lld\r\n", s->buffer->buf_scan, s->buffer->buf_scan_pos );
 			goto FORCE_STOP;
 		}
 	}
-	
+
 	if( s->video_error ) {
 		if( stream_handle_codec_error && !stream_force_prio && s->video_error == VE_VIDEO_CODEC_ERROR ) {
 			if( !_handle_video_codec_error( s ) ) {

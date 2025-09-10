@@ -55,7 +55,8 @@
 #define DBGC8   if((Debug[DBG_CHU]&8) == 8)
 #define DBGC32  if((Debug[DBG_CHU]&32) == 32)
 
-#define DBG if(0)
+#define DBG if(1)
+#define DBG2 if( 1 )
 
 #include <stdlib.h>
 #include <string.h>
@@ -277,6 +278,7 @@ DBGP serprintf("format   [%s]\r\n", fmt->iformat->name );
 DBGP serprintf("size     %lld\r\n", priv->size );
 	}
 	if( fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
+		// TODO could combine to get more accuracy
 		priv->duration = RST_TO_TS( 1000 * (INT64)fmt->duration / AV_TIME_BASE, int );
 		DBGP serprintf( "duration %d\r\n", priv->duration );
 	} else {
@@ -287,7 +289,8 @@ DBGP serprintf("duration ---\r\n" );
 
 	if (fmt->start_time != AV_NOPTS_VALUE) {
 DBGP serprintf("FFMPEG start    %lld\r\n",  fmt->start_time);
-		priv->start_time = RST_TO_TS( 1000 * (INT64)fmt->start_time / AV_TIME_BASE, int);
+		// TODO could combine to get more accuracy
+		priv->start_time = RST_TO_TS( 1000 * (INT64)fmt->start_time / AV_TIME_BASE, int ); // ts domain
 DBGP serprintf( "start    %d\r\n", priv->start_time );
 	}
 DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
@@ -359,11 +362,13 @@ DBGP serprintf("\tPAR        %d/%d\r\n", codecpar->sample_aspect_ratio.num, code
 				if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 					video->rate  = st->avg_frame_rate.num;
 					video->scale = st->avg_frame_rate.den;
+DBGP serprintf( "vrate=%d; vscale=%d\n", video->rate, video->scale );
 				} else {
 					//video->scale  = st->time_base.num;
 					//video->rate   = st->time_base.den;
+serprintf( "untouched (!?) vrate=%d; vscale=%d\n", video->rate, video->scale );
 				}
-				
+
 				priv->time_base_num = st->time_base.num/gcd;
 				priv->time_base_den = st->time_base.den/gcd;
 				video->frames = 0;
@@ -513,6 +518,7 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 				audio->stream        = i;
 				audio->scale         = st->time_base.num/gcd;
 				audio->rate          = st->time_base.den/gcd;
+DBGP serprintf( "arate=%d; ascale=%d\n", audio->rate, audio->scale );
 				audio->frames        = 0;
 				audio->channels      = codecpar->ch_layout.nb_channels;
 				audio->samplesPerSec = codecpar->sample_rate;
@@ -613,6 +619,7 @@ DBGP serprintf("chapters:\r\n");
 			UINT64 start = 1000 * ch->start * ch->time_base.num / ch->time_base.den; 
 			UINT64 end   = 1000 * ch->end   * ch->time_base.num / ch->time_base.den; 
 
+			// TODO could combine to get more accuracy
 			// Scale chapter timestamps for audio speed (same as duration/start_time)
 			start = RST_TO_TS( start, UINT64 );
 			end = RST_TO_TS( end, UINT64 );
@@ -914,29 +921,49 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 
 extern int stream_drive_wake_sleep;
 
-#define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale     / s->audio->rate )
+// audio_speed > 1 means that parsers are outputting audio/video quicker with smaller time units yielding smaller timestamps
+// this means that real stream time = timestamps * audio_speed or rst = ts * as
+// conversely timestamp = real stream time / audio_speed or ts = rst / as
+// ts = rst/as: i.e. ts<rst when as>1
+
+#define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale / s->audio->rate )
 #define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
-#define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale  / s->subtitle->rate )
+#define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale / s->subtitle->rate )
 
 // ************************************************************
 //
 //	_get_video_time
+//	returns the video timestamp in milliseconds in ts domain
 //
 // ************************************************************
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
-	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts )) - ff_p->start_time;
+	return ( (use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts )) - ff_p->start_time; // ts domain
 }
 
 // ************************************************************
 //
 //	_get_audio_time
+//	returns the audio timestamp in milliseconds in ts domain
 //
 // ************************************************************
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_AUDIO_TS( packet->pts );
-	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time;
+	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time; // ts domain
+}
+
+// ************************************************************
+//
+//     _get_subtitle_time
+//	returns the subtitle timestamp in milliseconds in ts domain
+//
+// ************************************************************
+// _get_subtitle_time returns ts = rst / as
+static int _get_subtitle_time( STREAM *s, AVPacket *packet )
+{
+	int t = GET_SUB_TS( packet->pts );
+	return ( t == STREAM_NO_PTS_VALUE ) ? STREAM_NO_PTS_VALUE : t - ff_p->start_time; // ts domain
 }
 
 // ************************************************************
@@ -1023,7 +1050,7 @@ DBGP2 serprintf("\r\n");
 
 	// discard packet
 	av_packet_unref(&packet);
-			
+
 	return 0;
 }
 
@@ -1068,7 +1095,7 @@ static int _seekable( STREAM *s )
 	if( s->size == (UINT64)0xFFFFFFFFFFFFFFFull ) {
 		return 0;
 	}
-	
+
 	return 1;
 }
 
@@ -1079,6 +1106,7 @@ static int _seekable( STREAM *s )
 // ************************************************************
 static int _seek( STREAM *s, int time, int pos, int dir, int flags, int force_reload, STREAM_CHUNK *sc )
 {
+	// time argument is rst
 DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir); 
 	AVFormatContext *fmt = ff_p->fmt;
 	int start = atime();
@@ -1107,8 +1135,11 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 		}
 DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 	} else {
-		new_pos = (INT64)(time + ff_p->start_time) * AV_TIME_BASE / 1000;
-DBGP serprintf("FFMPEG: new time: %lld\r\n", new_pos );
+		// TODO: start_time is ts: bug mixing time domains
+		new_pos = (INT64)( time + TS_TO_RST(ff_p->start_time, int) ) * AV_TIME_BASE / 1000;
+		//new_pos = (INT64)( time + ff_p->start_time ) * AV_TIME_BASE / 1000;
+		//new_pos = (INT64)time * AV_TIME_BASE / 1000;
+		DBGP serprintf( "FFMPEG: new time: %lld\r\n", new_pos );
 	}
 
 	__attribute__((unused))	
@@ -1152,14 +1183,15 @@ serprintf("FFMPEG: seek error\r\n");
 		AVPacket _packet;
 		AVPacket *packet = _peek_packet( &ff_p->vq, &_packet, 0 );
 		if( packet ) {
-			int ts = _get_video_time( s, packet );
+			int ts = _get_video_time( s, packet ); // returns ts
+			DBG2 serprintf( "stream_parser_ffmpeg:_seek time %d, pos %d, rt=%d -> ts=%d\n", time, pos, (int)( audio_interface_get_audio_speed() * ts ), ts );
 
 			if( packet->flags & AV_PKT_FLAG_KEY ) {
 				if( ignore_first ) {
 DBGP serprintf("ignore! %d\n", ts);
 					ignore_first--;
 				} else if( ts != -1 ) {
-					sc->time = ts;
+					sc->time = ts; // stream chunk is ts
 					break;
 				}
 			} else {
@@ -1174,12 +1206,12 @@ DBGP serprintf("FFMPEG: seek to time %8d  pos %5d  dir %d -> %d/%lld  (took %d)\
 		while( 1 ) {
 			AVPacket _packet;
 			AVPacket *packet = _peek_packet( &ff_p->aq, &_packet, 0 );
-		
+
 			if( !packet )
 				break;
-			
+
 			int ts = _get_audio_time( s, packet );
-			if( ts >= sc->time ) {
+			if( ts >= sc->time ) { // comparison made in ts domain
 				break;
 			}
 DBGP serprintf("audio!  %d\n", ts);
@@ -1188,12 +1220,12 @@ DBGP serprintf("audio!  %d\n", ts);
 		}
 	}
 	
-	
 	return 0;
 }
 
 static int _seek_time( STREAM *s, int time, int dir, int flags, int force_reload, STREAM_CHUNK *sc )
 {
+	// time is rst
 	return _seek( s, time, -1, dir, flags, force_reload, sc );
 }
 
@@ -1254,7 +1286,7 @@ DBGC2  serprintf(" A   siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 	
 	cdata->valid = CHUNK_VALID;
 
-	_dispose_packet( packet );			
+	_dispose_packet( packet );
 	return 0;
 }
 
@@ -1347,8 +1379,8 @@ DBGC8  serprintf("V    siz %6d  pos %8lld %d tim %8d  pkt %6d  %8d\r\n", packet-
 	
 	cdata->valid  = CHUNK_VALID;
 ErrorExit:	
-	_dispose_packet( packet );			
-	
+	_dispose_packet( packet );
+
 	return 0;
 }
 
@@ -1428,7 +1460,7 @@ static int _get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_CDA
 	if( cdata->valid != 0 ) {
 		return 0;
 	}
-	
+
 	AVPacket _packet;
 	AVPacket *packet = _get_packet( &ff_p->sq, &_packet );
 	if( !packet ) {
@@ -1449,7 +1481,7 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 	cdata->type 	  = 0;
 	cdata->key   	  = 1;
 	cdata->size       = packet->size;
-	cdata->time       = (GET_SUB_TS( packet->pts) == -1) ? -1 : GET_SUB_TS(packet->pts) - ff_p->start_time;
+	cdata->time       = _get_subtitle_time( s, packet ); // ts domain
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
@@ -1516,14 +1548,14 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->aq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
-			int first_time   = GET_AUDIO_TS( first->packet.dts );
-			int last_time    = GET_AUDIO_TS( last->packet.dts );
+			int first_time   = GET_AUDIO_TS( first->packet.dts ); // ts domain
+			int last_time    = GET_AUDIO_TS( last->packet.dts ); // ts domain
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
-			s->atime_parsed = last_time - first_time;
+			s->atime_parsed = last_time - first_time; // ts domain
 			if( s->atime_parsed ) {
-				UINT64 real_time_diff = TS_TO_RST( (UINT64)s->atime_parsed, UINT64 );
+				UINT64 real_time_diff = TS_TO_RST( (UINT64)s->atime_parsed, UINT64 ); // rst domain
 				s->acurrent_rate = (UINT64)( last_pos - first_pos ) * (UINT64)1000 / real_time_diff;
 			} else {
 				s->acurrent_rate = 0;
@@ -1538,16 +1570,16 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			int first_time   = GET_VIDEO_TS( first->packet.dts );
-			int last_time    = GET_VIDEO_TS( last->packet.dts );
+			int first_time   = GET_VIDEO_TS( first->packet.dts ); // ts domain
+			int last_time    = GET_VIDEO_TS( last->packet.dts ); // ts domain
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
-			s->vtime_parsed = last_time - first_time;
+			s->vtime_parsed = last_time - first_time; // ts domain
 			if( s->atime_parsed ) {
 				// Compensate for compressed timeline in bitrate calculation
 				// Note: intentionally uses s->atime_parsed for consistency with audio timeline
-				UINT64 real_time_diff = TS_TO_RST( s->atime_parsed, UINT64 );
+				UINT64 real_time_diff = TS_TO_RST( s->atime_parsed, UINT64 ); // rst domain
 				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / real_time_diff;
 			} else {
 				s->vcurrent_rate = 0;
@@ -1569,7 +1601,7 @@ static int _calc_rate( STREAM *s )
 		s->current_rate = s->vcurrent_rate;
 	}
 //DBGS2 serprintf("time %5d  rate %8d \r\n", s->time_parsed, s->current_rate );
-	
+
 	return 0;
 }
 

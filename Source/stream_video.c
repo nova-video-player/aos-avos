@@ -2499,6 +2499,7 @@ static int _real_time( STREAM *s, int frame_time )
 	case STREAM_SPEED_NORMAL: {
 		// For variable speed, we pass the TS value directly to the sink.
 		// `s->vid_ref_time + (frame_time - s->vid_ref_time)` simplifies to `frame_time`.
+		// return s->vid_ref_time + RST_TO_TS( frame_time - s->vid_ref_time, int );
 		return frame_time;
 	} break;
 
@@ -3463,6 +3464,7 @@ serprintf("really cannot get DECODE_FRAME!\r\n");
 	}
 	
 	if( !s->paused && s->audio_sink && s->audio_sink->syncable(s ) && s->video_sink && s->video_sink->syncable( s->video_sink ) ) {
+		DBG serprintf("SYNC_STATE: v_time=%d, a_time=%d, av_delay=%d | ", s->video_time, s->audio_time, stream_sync_av_delay(s));
 		stream_sync( s );
 	
 		if( s->drop_P ) {

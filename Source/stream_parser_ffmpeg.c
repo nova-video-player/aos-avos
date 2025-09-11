@@ -933,7 +933,9 @@ extern int stream_drive_wake_sleep;
 static int _get_video_time( STREAM *s, AVPacket *packet )
 {
 	int t = ( use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
-	return (t == -1) ? -1 : t - RST_TO_TS(ff_p->start_time, int); // ts domain
+	if (t == -1) return -1;
+	t -= ff_p->start_time;
+	return RST_TO_TS(t, int);
 }
 
 // ************************************************************
@@ -945,7 +947,9 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 static int _get_audio_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_AUDIO_TS( packet->pts );
-	return (t == STREAM_NO_PTS_VALUE) ? STREAM_NO_PTS_VALUE : t - RST_TO_TS(ff_p->start_time, int); // ts domain
+	if (t == STREAM_NO_PTS_VALUE) return STREAM_NO_PTS_VALUE;
+	t -= ff_p->start_time;
+	return RST_TO_TS(t, int);
 }
 
 // ************************************************************
@@ -958,7 +962,9 @@ static int _get_audio_time( STREAM *s, AVPacket *packet )
 static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 {
 	int t = GET_SUB_TS( packet->pts );
-	return ( t == -1 ) ? -1 : t - RST_TO_TS(ff_p->start_time, int); // ts domain
+	if (t == -1) return -1;
+	t -= ff_p->start_time;
+	return RST_TO_TS(t, int);
 }
 
 // ************************************************************
@@ -1002,10 +1008,6 @@ DBGP serprintf("FFMPEG: end\r\n");
 		}
 		return 1;
 	}
-
-	if( packet.pts != AV_NOPTS_VALUE ) packet.pts = RST_TO_TS( packet.pts, int64_t );
-	if( packet.dts != AV_NOPTS_VALUE ) packet.dts = RST_TO_TS( packet.dts, int64_t );
-	if( packet.duration > 0 ) packet.duration = RST_TO_TS( packet.duration, int64_t );
 
 	int stream = packet.stream_index;
 DBGP3 serprintf("%8d/%8d/%8d  %4d/%4d/%4d  ", 
@@ -1480,11 +1482,12 @@ serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->sq.packets, ff_p->sq.mem_used );
 
 	
-	int duration = GET_SUB_TS( packet->duration );
+	int duration_rst = GET_SUB_TS( packet->duration );
+	int duration_ts = RST_TO_TS(duration_rst, int);
 	if( s->subtitle->format == SUB_FORMAT_SSA ) {
-		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
+		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
-		cdata->size = msk_fixup_srt( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration );
+		cdata->size = msk_fixup_srt( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
 	} else {
 		memcpy( sub_buffer->data, packet->data, packet->size );
 	}
@@ -1534,22 +1537,20 @@ static int _set_audio_stream( STREAM *s, int audio_stream )
 //	_calc_rate
 //
 // ************************************************************
-static int _calc_rate( STREAM *s )
-{
+static int _calc_rate( STREAM *s ) {
 	if( s->audio->valid ) {
 		pthread_mutex_lock( &ff_p->aq.mutex );
 		PacketNode *first = (PacketNode*)ff_p->aq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->aq.list.last;
 		if( first && last ) {
-			int first_time   = GET_AUDIO_TS( first->packet.dts ); // ts domain
-			int last_time    = GET_AUDIO_TS( last->packet.dts ); // ts domain
+			int first_time   = GET_AUDIO_TS( first->packet.dts ); // rst domain
+			int last_time    = GET_AUDIO_TS( last->packet.dts ); // rst domain
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
-			s->atime_parsed = last_time - first_time; // ts domain
+			s->atime_parsed = last_time - first_time; // rst domain
 			if( s->atime_parsed ) {
-				UINT64 real_time_diff = TS_TO_RST( (UINT64)s->atime_parsed, UINT64 ); // rst domain
-				s->acurrent_rate = (UINT64)( last_pos - first_pos ) * (UINT64)1000 / real_time_diff;
+				s->acurrent_rate = (UINT64)( last_pos - first_pos ) * (UINT64)1000 / s->atime_parsed;
 			} else {
 				s->acurrent_rate = 0;
 			}
@@ -1563,17 +1564,16 @@ static int _calc_rate( STREAM *s )
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			int first_time   = GET_VIDEO_TS( first->packet.dts ); // ts domain
-			int last_time    = GET_VIDEO_TS( last->packet.dts ); // ts domain
+			int first_time   = GET_VIDEO_TS( first->packet.dts ); // rst domain
+			int last_time    = GET_VIDEO_TS( last->packet.dts ); // rst domain
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 
-			s->vtime_parsed = last_time - first_time; // ts domain
+			s->vtime_parsed = last_time - first_time; // rst domain
 			if( s->atime_parsed ) {
 				// Compensate for compressed timeline in bitrate calculation
 				// Note: intentionally uses s->atime_parsed for consistency with audio timeline
-				UINT64 real_time_diff = TS_TO_RST( s->atime_parsed, UINT64 ); // rst domain
-				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / real_time_diff;
+				s->vcurrent_rate = (UINT64)(last_pos - first_pos) * (UINT64)1000 / s->atime_parsed;
 			} else {
 				s->vcurrent_rate = 0;
 			}
@@ -1582,6 +1582,7 @@ static int _calc_rate( STREAM *s )
 		
 		pthread_mutex_unlock( &ff_p->vq.mutex );
 	}
+
 	
 	if ( s->audio->valid && s->video->valid ) {
 		s->time_parsed  = MIN( s->vtime_parsed,  s->atime_parsed  ); 

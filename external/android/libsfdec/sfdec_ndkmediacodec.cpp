@@ -30,7 +30,7 @@
 typedef struct sfdec_mediacodec sfdec_priv_t;
 #include "sfdec_priv.h"
 
-#define DBG if (0)
+#define DBG if (1)
 
 #undef LOG
 #define LOG(fmt, ...) do { \

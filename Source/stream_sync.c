@@ -130,7 +130,9 @@ int stream_sync_av_delay( STREAM *s )
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
-	return video_time - audio_time + RST_TO_TS( (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay), int); // ts domain
+	// do not double count the audio latency resulting in a bias in the sync
+	// return video_time - audio_time + RST_TO_TS( (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay), int);
+	return video_time - audio_time + RST_TO_TS( (s->av_delay + stream_dbg_delay), int); // ts domain
 }
 
 // ************************************************************

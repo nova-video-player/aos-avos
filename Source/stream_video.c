@@ -62,7 +62,7 @@
 #define DBGCV1 	if(Debug[DBG_CV] > 1)
 #define DBGP 	if(Debug[DBG_PARSER])
 
-#define DBG if(1)
+#define DBG if(0)
 #define DBG2 if(0)
 
 int 		stream_zero_fill   = 1;

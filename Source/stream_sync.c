@@ -25,8 +25,8 @@
 
 #define DBGS	if(Debug[DBG_STREAM])
 #define DBGV   	if(Debug[DBG_VID])
-#define DBGVY	if(1||Debug[DBG_VID]||Debug[DBG_SYNC])
-#define DBGY	if(1||Debug[DBG_SYNC])
+#define DBGVY	if(Debug[DBG_VID]||Debug[DBG_SYNC])
+#define DBGY	if(Debug[DBG_SYNC])
 #define DBGV1  	if(Debug[DBG_VID] == 1)
 #define DBGV2  	if(Debug[DBG_VID] > 1)
 #define DBGV3 	if(Debug[DBG_VID] > 2)

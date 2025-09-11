@@ -34,7 +34,7 @@ extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
 #include "jni.h"
 
-#define DBG  if(1)
+#define DBG  if(0)
 #define DBG2 if(0)
 #define ERR  if(1)
 

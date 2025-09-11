@@ -55,8 +55,8 @@
 #define DBGC8   if((Debug[DBG_CHU]&8) == 8)
 #define DBGC32  if((Debug[DBG_CHU]&32) == 32)
 
-#define DBG if(1)
-#define DBG2 if( 1 )
+#define DBG if(0)
+#define DBG2 if(0)
 
 #include <stdlib.h>
 #include <string.h>

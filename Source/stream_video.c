@@ -4453,6 +4453,14 @@ serprintf("SAS: audio_stream already set\n");
 		// no audio, disable it
 		stream_drop_audio( s );
 	} else {
+		// Re-evaluate sync mode for the new audio track
+		int default_sync_mode = stream_parser_get_sync_mode();
+		if (s->audio->valid && s->audio->format == WAVE_FORMAT_FLAC) {
+			s->sync_mode = STREAM_SYNC_SAMPLES;
+		} else {
+			s->sync_mode = default_sync_mode;
+		}
+		
 		if( s->audio_sink ) {
 			if( s->audio_sink->start( s ) ) {
 				// no audio, close the codec

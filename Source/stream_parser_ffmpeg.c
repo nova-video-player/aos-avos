@@ -756,6 +756,11 @@ printf("FFMPEG: cannot find stream info\r\n");
 	//s->sync_mode = STREAM_SYNC_SAMPLES;
 	//s->sync_mode = STREAM_SYNC_CDATA; // current default one
 	s->sync_mode = stream_parser_get_sync_mode();
+	
+	// Force sample-based sync for FLAC audio tracks to avoid sync issues
+	if (s->audio->valid && s->audio->format == WAVE_FORMAT_FLAC) {
+		s->sync_mode = STREAM_SYNC_SAMPLES;
+	}
 
 	s->parser_open = 1;
 

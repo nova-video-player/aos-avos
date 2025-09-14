@@ -128,9 +128,32 @@ int stream_sync_av_delay( STREAM *s )
 //	_stream_av_diff
 //
 // ************************************************************
+// ************************************************************
+//
+//	_stream_av_diff
+//
+// ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
-	return video_time - audio_time + RST_TO_TS( (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay), int); // ts domain
+	// This function calculates the difference between the predicted presentation times of audio and video.
+	// A positive result means video is presented before audio (i.e., video is ahead).
+	// The surrounding sync logic expects a positive value to mean "video is ahead", so it can slow it down.
+	//
+	// The formula is:
+	//   Result = Audio Presentation Time - Video Presentation Time
+	//
+	// Where:
+	//   Audio Presentation Time = audio_time + audio_pipeline_delay
+	//   Video Presentation Time = video_time + video_pipeline_delay
+	//
+	// Substituting gives:
+	//   Result = (audio_time + audio_pipeline_delay) - (video_time + video_pipeline_delay)
+	//   Result = (audio_time - video_time) + (audio_pipeline_delay - video_pipeline_delay)
+	//
+	// The function stream_sync_av_delay(s) calculates (audio_pipeline_delay - video_pipeline_delay).
+	// Therefore, we use (audio_time - video_time) and add the result of stream_sync_av_delay(s).
+
+	return (audio_time - video_time) + RST_TO_TS( (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay), int);
 }
 
 // ************************************************************

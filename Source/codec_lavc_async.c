@@ -179,8 +179,7 @@ DBGS serprintf("LAVC_A: drop extra\r\n");
 ErrorExit:
 	// Close the codec
 	if( vctx ) {
-		avcodec_close( vctx );
-		av_free( vctx );
+		avcodec_free_context( &vctx );
 	}
 	vctx = NULL;
 
@@ -203,8 +202,7 @@ serprintf("ffvd not open!\r\n");
 
 	// Close the codec
 	if( p->vctx ) {
-		avcodec_close( p->vctx );
-		av_free( p->vctx );
+		avcodec_free_context( &p->vctx );
 		p->vctx = NULL;
 	}
 	
@@ -350,8 +348,8 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->valid           = 1;
 		avos_frame->error           = 0;
 		avos_frame->type            = vframe->pict_type - 1;
-		avos_frame->interlaced      = vframe->interlaced_frame;
-		avos_frame->top_field_first = vframe->top_field_first;
+		avos_frame->interlaced      = (vframe->flags & AV_FRAME_FLAG_INTERLACED);
+		avos_frame->top_field_first = (vframe->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
 		avos_frame->pts             = vframe->pts;
 
 		avos_frame->width           = vctx->width;

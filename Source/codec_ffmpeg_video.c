@@ -363,8 +363,7 @@ DBGS serprintf("FFMPEG: drop extra\r\n");
 ErrorExit:
 	// Close the codec
 	if ( vctx ) {
-		avcodec_close( vctx );
-		av_free( vctx );
+		avcodec_free_context( &vctx );
 	}
 	vctx = NULL;
 
@@ -404,8 +403,7 @@ serprintf("ffvd not open!\r\n");
 
 	// Close the codec
 	if( p->vctx ) {
-		avcodec_close( p->vctx );
-		av_free( p->vctx );
+		avcodec_free_context( &p->vctx );
 		p->vctx = NULL;
 	}
 	
@@ -600,7 +598,7 @@ DBGCV2 serprintf("<");
 		vframe->opaque = (void*)(intptr_t)(p->reorder_pts ? avos_frame->time : avos_frame->user_ID);
 		vctx->width  = dec->video->width;
 		vctx->height = dec->video->height;
-		vframe->interlaced_frame = 0;
+		vframe->flags &= ~AV_FRAME_FLAG_INTERLACED;
 	}
 	start = time_update_time() - start;
 DBGCV2 serprintf("> tim %3d  ", start); 
@@ -628,7 +626,7 @@ DBGCV3 serprintf("[line %4d %3d %3d  px %d -> %d]",
 			// render it into the buffer
 DBGCV2 serprintf("[");
 			int start = time_update_time();
-			avos_frame->interlaced  = vframe->interlaced_frame;
+			avos_frame->interlaced  = (vframe->flags & AV_FRAME_FLAG_INTERLACED);
 			avos_frame->deinterlace = 0;
 			if (avos_frame->interlaced != VIDEO_PROGRESSIVE && _ff_deinterlace) {
 				int deinterlacing_limit = (avos_frame->interlaced == VIDEO_INTERLACED_ONE_FIELD) ? _ff_deinterlacing_max_height / 2 : _ff_deinterlacing_max_height;
@@ -664,8 +662,8 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->valid           = 1;
 		avos_frame->error           = 0;
 		avos_frame->type            = vframe->pict_type - 1;
-		avos_frame->interlaced      = vframe->interlaced_frame;
-		avos_frame->top_field_first = vframe->top_field_first;
+		avos_frame->interlaced      = (vframe->flags & AV_FRAME_FLAG_INTERLACED);
+		avos_frame->top_field_first = (vframe->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
 		avos_frame->pts             = vframe->pts;
 
 		avos_frame->width           = vctx->width;

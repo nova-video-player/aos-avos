@@ -400,14 +400,14 @@ printf("cannot open audio codec\r\n");
 #ifdef DECODE_VIDEO
 	// Close the codec
 	if( vCodec ) {
-		avcodec_close( vCodecCtx );
+                avcodec_free_context( &vCodecCtx );
 		if( vFrame )
 			av_free(vFrame);
 	}
 #endif	
 #ifdef DECODE_AUDIO
 	if( aCodec ) {
-		avcodec_close( aCodecCtx );
+                avcodec_free_context( &aCodecCtx );
 		if( aFrame )
 			av_free(aFrame);
 	}

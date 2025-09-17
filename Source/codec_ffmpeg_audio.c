@@ -270,8 +270,7 @@ ErrorExit2:
 ErrorExit:
 	// Close the codec
 	if ( actx ) {
-		avcodec_close( actx );
-		av_free( actx );
+                avcodec_free_context( &actx );
 	}
 	
 	return 1;
@@ -410,8 +409,7 @@ serprintf("downmix to stereo S16\r\n");
 ErrorExit:	
 	// Close the codec
 	if ( p->actx ) {
-		avcodec_close( p->actx );
-		av_free( p->actx );
+                avcodec_free_context( &p->actx );
 	}
 	if( p->aparser )
 		av_parser_close( p->aparser );
@@ -431,8 +429,7 @@ serprintf("ffad not open!\r\n");
  
 	// Close the codec
 	if( p->actx ) {
-		avcodec_close( p->actx );
-		av_free( p->actx );
+                avcodec_free_context( &p->actx );
 	}
 	if( p->aparser )
 		av_parser_close( p->aparser );

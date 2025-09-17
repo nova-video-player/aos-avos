@@ -2593,21 +2593,21 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 
 static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
-	int real_time_calc = _real_time( s, time );
+	int real_time_calc = _real_time( s, time ); // should be ts
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: _real_time() now returns WC domain for blit_duration calculations
 		// Android sinks calculate: blit_duration = frame->blit_time(WC) - venc_time(WC) - delay
 		// This ensures both values are in wall clock domain for proper timing
 		frame->blit_time = real_time_calc;
-		DBG2 serprintf("BLIT_CALC_PUT_TIME: frame_time=%d(RST), real_time=%d(WC), blit_time=%d(WC)\n", 
-			time, real_time_calc, frame->blit_time);
+		DBG2 serprintf( "_put_frame_in_sink: frame_time=%d(RST), real_time=%d(WC), blit_time=%d(WC)\n", time,
+						real_time_calc, frame->blit_time );
 	} else {
 		// Legacy mode: WC conversion with preroll compensation
 		// we add "stream_sink_preroll" here because the sink might switch to it's next frame
 		// while we do the call!
 		frame->blit_time = real_time_calc + s->sink_ref_time + stream_sink_preroll;
-		DBG2 serprintf("BLIT_CALC_WITH_REF: frame_time=%d(RST), real_time=%d(WC), preroll=%d, blit_time=%d(WC)\n", 
-			time, real_time_calc, stream_sink_preroll, frame->blit_time);
+		DBG2 serprintf( "_put_frame_in_sink: frame_time=%d(RST), real_time=%d(WC), preroll=%d, blit_time=%d(WC)\n",
+						time, real_time_calc, stream_sink_preroll, frame->blit_time );
 	}
 
 //serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), s->sink_ref_time, frame->blit_time );
@@ -2615,7 +2615,7 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	// a sink might want that info
 	frame->aspect_n = s->video->aspect_n,
 	frame->aspect_d = s->video->aspect_d;
-	frame->duration = s->video->msPerFrame;
+	frame->duration = RST_TO_TS(s->video->msPerFrame, int);
 				
 	pthread_mutex_lock( &s->video_sink_mutex );
 	s->sink_delay = frame->blit_time - s->video_sink->put( s->video_sink, frame ); 	
@@ -2646,7 +2646,8 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 	if( s->sink_delay < 0 ) {
 		s->sink_delay_count ++;
 		if( s->sink_delay_count > 2 || s->sink_delay < (-1 * stream_sink_max_delay) ) {
-			DBG serprintf("WALLCLOCK_RESET: by _check_sink_delay: delay=%d, count=%d\n", s->sink_delay, s->sink_delay_count);
+			DBG serprintf( "_check_sink_delay: wallclock reset delay=%d, count=%d\n",
+						   s->sink_delay, s->sink_delay_count );
 			s->sink_ref_time = -1;
 			s->sink_delay_count = 0;
 		}
@@ -2698,25 +2699,25 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 			if( s->drop > 0 ) {
 				// drop one frame
 				s->drop --;
-				s->sink_ref_time -= s->video->msPerFrame;
+				s->sink_ref_time -= RST_TO_TS(s->video->msPerFrame, int);
 				frames_dropped ++;
 				DBG serprintf("FRAME_DROP: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
-					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
+					RST_TO_TS(s->video->msPerFrame, int), audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
-					s->video_time += s->video->msPerFrame;
+					s->video_time += RST_TO_TS(s->video->msPerFrame, int);
 				}
 			} else if( s->drop < 0 ) {
 				// double one frame
 				s->drop ++;
-				s->sink_ref_time += s->video->msPerFrame;
+				s->sink_ref_time += RST_TO_TS(s->video->msPerFrame, int);
 				frames_doubled ++;
 				DBG serprintf("FRAME_DOUBLE: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
 					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
-					s->video_time -= s->video->msPerFrame;
+					s->video_time -= RST_TO_TS(s->video->msPerFrame, int);
 				}
 			} else {	
 DBGY serprintf("[ %8d] ", frame->time );

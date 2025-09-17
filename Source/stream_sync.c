@@ -94,6 +94,8 @@ DBGS serprintf("sync_init\r\n");
 // *****************************************************************************
 //
 //	_stream_sync_av_delay
+//	returns delay in ms in real world domain unscaled by audio speed
+//	it contains all hardware delays in the audio and video chain
 //
 // *****************************************************************************
 int stream_sync_av_delay( STREAM *s )
@@ -104,9 +106,11 @@ int stream_sync_av_delay( STREAM *s )
 	} 
 	
 	// audio data passes through decoder and sink
+	// world time audio decoder delay not dependant on audio speed
 	int codec_delay  = s->audio_dec    ? s->audio_dec->delay( s->audio ) : 0;
+	// world time audio sink delay (audiotrack system_delay on android) not dependant on audio speed
 	int sink_delay   = s->audio_sink   ? s->audio_sink->delay( s ) : 0;
-		
+	// wold time video sink delay not dependant on audio speed
 	int video_delay;
 	if( s->vtime_post_sink ) {
 		// we sample after the sink, so the time stamps are the one we get out of the sink
@@ -115,8 +119,10 @@ int stream_sync_av_delay( STREAM *s )
 		// we sample before the sink, so the video frames have to pass through the sink
 	  	video_delay = ( s->video_sink && s->video_sink->delay )  ? s->video_sink->delay( s->video_sink ) : 0;
  	}
-	
 	if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
+		// In sample-based sync, the audio sink's sample counter is the master clock.
+		// The codec_delay is upstream from the sink and not part of this clock,
+		// so it's excluded to prevent an incorrect sync bias.
 		return /*codec_delay +*/ sink_delay - video_delay;
 	} else {
 		return codec_delay + sink_delay - video_delay;
@@ -126,11 +132,10 @@ int stream_sync_av_delay( STREAM *s )
 // ************************************************************
 //
 //	_stream_av_diff
-//
-// ************************************************************
-// ************************************************************
-//
-//	_stream_av_diff
+//	returns diff in ms in real world domain: i.e. uses ts 
+//	scaled timestamps when audio_speed != 1.0 and adding real
+//	world delay between audio and video	(based on ts timestamps)
+//	and real world hardware delays
 //
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
@@ -152,8 +157,10 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	//
 	// The function stream_sync_av_delay(s) calculates (audio_pipeline_delay - video_pipeline_delay).
 	// Therefore, we use (audio_time - video_time) and add the result of stream_sync_av_delay(s).
+	// This function returns ts diff value and stream_sync_av_delay( s ) must not be scaled since already in ts domain.
+	// av_delay are rst domain and must be scaled to ts domain to account for audio/video speed changes.
 
-	return (audio_time - video_time) + RST_TO_TS( (stream_sync_av_delay( s ) + s->av_delay + stream_dbg_delay), int);
+	return (audio_time - video_time) + stream_sync_av_delay( s ) + RST_TO_TS( s->av_delay + stream_dbg_delay, int);
 }
 
 // ************************************************************
@@ -164,8 +171,8 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 int stream_sync_audio( STREAM *s, int audio_time )
 {
 	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
-		if( !stream_no_sync || s->sync_a_time == -1 ) { 
-			s->video_sink->put_time( s->video_sink, audio_time - RST_TO_TS( (stream_sync_av_delay(s) +  s->av_delay + stream_dbg_delay), int ) );
+		if( !stream_no_sync || s->sync_a_time == -1 ) {
+			s->video_sink->put_time( s->video_sink, audio_time - stream_sync_av_delay( s ) - RST_TO_TS( s->av_delay + stream_dbg_delay, int ) );
 		}
 	}
 
@@ -241,14 +248,25 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	if( s->sync_v_time == -1 || s->sync_a_time == -1 )
 		return 1;
 
-	// if video is in the future, delay it
-	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
-	// if we sample post sink, allow us to start 500ms early
+	// Reworked initial sync logic to fix video freeze (deadlock) on high-latency audio hardware.
+	// The goal is to wait while the video frame's presentation time is too far in the future
+	// compared to the current live audio presentation time.
+
+	// Use the live audio clock if it's valid, otherwise fall back to the first audio frame's timestamp.
+	int audio_ref_time = (s->audio_time != -1) ? s->audio_time : s->sync_a_time;
+
+	// Calculate the wait difference based on the hybrid scaling model. Both sync_X_time and audio_ref_time are ts domain.
+	int diff = _stream_av_diff(s, s->sync_v_time, audio_ref_time);
+
+	// The wait condition is when video is too far in the future (i.e. its presentation time is much later than audio's).
+	// In our _stream_av_diff, a positive value means video is ahead (earlier), so we must wait if the value is very negative.
 	int max_rst = s->vtime_post_sink ? 500 : 0;
-	if( diff > RST_TO_TS( max_rst, int ) ) {
+
+	// Wait if video is LATE by more than the threshold.
+	if (diff < -RST_TO_TS(max_rst, int)) {
 DBGY serprintf( "{{V %d}} ", diff );
 		s->sync_audio = 0;
-		return 1;
+		return 1; // Wait
 	}
 
 	// allow video to play from now on
@@ -290,13 +308,15 @@ void stream_sync( STREAM *s )
 	// ... we calc the delay between audio and video frames and
 	// try adjust it to zero
 	int rdiff = _stream_av_diff( s, s->video_time, s->audio_time );
+	// let's clamp to avoid big correction visual effect to the user and grant stability
 	int clamp_ts = RST_TO_TS( 250, int );
 	int diff  = MAX( MIN( rdiff,  clamp_ts ), -clamp_ts );
 	
  	if( !s->delay_valid ) {
-//serprintf("(D %d)", diff );	
+DBGVY serprintf("(D %d)", diff );
 		s->delay = diff;
 	} else {
+		// to avoid oscillations, we use moving average to allow convergence and grant stability
 		// 900 s->delay_fb is used for a exponential moving average window and thus has no scale
 		s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000;
 	}
@@ -316,22 +336,22 @@ DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 	// The internal state variable s->delay remains in the TS (Time-Scaled) domain, and adjustments to it
 	// must also be in the TS domain.
 
-	// 1. Define the threshold in the RST domain for making decisions.
+	// 1. Define the threshold in the RST domain for making decisions. stream_max_delay default value is 1 i.e. threshold is one frame duration.
 	int threshold_rst = stream_max_delay * s->video->msPerFrame;
-	int pdrop_threshold_rst = stream_pdrop_threshold;
+	int pdrop_threshold_rst = stream_pdrop_threshold; // default value is 0
 
 	// 2. Define the adjustment value in the TS domain for modifying the state variable.
 	int adjustment_ts = RST_TO_TS(threshold_rst, int);
 
-	// 3. Perform comparisons in the RST domain.
-	if( TS_TO_RST(s->delay, int) > threshold_rst ) {
+	// 3. Perform comparisons in the TS domain to avoid accumulating rounding errors from TS->RST conversion at variable speeds.
+	if( s->delay > adjustment_ts ) {
 		// video is too fast, we have to slow down
 		s->drop = -1;
-		// Adjust the TS-domain state variable by a TS-domain value.
+		// Adjust the TS-domain state variable by a TS-domain value for reactivity and do not go through the averaging smoothering
 		s->delay -= adjustment_ts;
-DBGVY serprintf("_S(%3d)_", s->delay );
-	} else if( TS_TO_RST(s->delay, int) < (-1 * threshold_rst) ) {
-		// video is late, check for P-frame drop condition
+DBGVY serprintf( "_S(%3d)_", s->delay );
+	} else if( s->delay < (-1 * adjustment_ts) ) {
+		// video is late, check for P-frame drop condition (note that this is disabled by default	)
 		if( stream_pdrop_threshold && TS_TO_RST(rdiff, int) < (-1 * pdrop_threshold_rst) ) {
 			// we are totally late, see if we can skip to next key frame
 			int max_time = s->video_time - rdiff + 500;
@@ -353,7 +373,7 @@ DBGVY serprintf("XX(%d %d %d) ", num, key_time, dropped );
 			s->drop_B = 1;
 		}
 		s->drop = 1;
-		// Adjust the TS-domain state variable by a TS-domain value.
+		// Adjust the TS-domain state variable by a TS-domain value for reactivity and do not go through the averaging smoothering
 		s->delay += adjustment_ts;
 DBGVY serprintf("_%s(%3d)_", s->drop_B ? "B" : "F", s->delay );
 	} else {

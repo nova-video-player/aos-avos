@@ -10,9 +10,11 @@ There are three fundamental time domains in the implementation:
 
 -   **`wc` (Wall Clock):** The system's monotonic clock (`clock_gettime()`). It progresses linearly and is independent of playback speed. It is the ground truth for real-world time.
 
--   **`rst` (Real Stream Time):** The playback time as perceived by the user, representing the actual position within the media file (e.g., 0 to 10 minutes). It is primarily used for UI display and for seeking.
+-   **`rst` (Real Stream Time):** The original media stream's own timeline, representing the actual position within the media file (e.g., 0 to 10 minutes). It is primarily used for UI display and for seeking.
 
 -   **`ts` (Time-Scaled):** This is the **primary internal time domain** for the core player logic. The parser creates a "compressed" or "expanded" timeline where all timestamps are scaled by the `audio_speed`. At 2.0x speed, a frame at 60s (`rst`) will have a timestamp of 30s (`ts`). All core variables like `s->video_time` and `frame->time` are in this domain.
+
+It is important to understand that wall clock progresses at ts rate: `delta_wc = delta_ts` thus adding ts domain increments to wc domain is intended and does not result into a mismatch.
 
 ### Key Relationship
 
@@ -62,13 +64,29 @@ Container-level metadata like `duration` and `start_time` are read in their orig
 | `s->audio_time` | `ts` | The current audio playback time in the time-scaled domain. |
 | `frame->time` | `ts` | The timestamp of a video frame in the time-scaled domain. |
 | `cdata->time` | `ts` | Timestamp of a data chunk from the parser in the time-scaled domain. |
-| `frame->blit_time` | `ts` | The frame's `ts` timestamp, passed to the video sink for pacing. |
+| `s->cdata_now.time`| `ts` | The timestamp of the current data chunk being processed. |
+| `sc.time` | `ts` | Timestamp of a `STREAM_CHUNK`, typically set during parsing or seeking. |
+| `frame->duration` | `ts` | The scaled duration of a single video frame. |
+| `frame->blit_time`| `wc` | The target wall-clock presentation time for a video frame, sent to the sink. |
 | `venc_time` | `wc` | The video sink's internal wall-clock timer, used for pacing against `blit_time`. |
 | `s->delay` | `ts` | The smoothed A/V difference, calculated and stored as a `ts` duration. |
 | `s->av_delay` | `rst` | A user-configured A/V offset, in real-world milliseconds. |
+| `s->video->msPerFrame` | `rst` | The unscaled, real-world duration of a single video frame. |
+| `s->audio->bytesPerSec` | N/A | Unscaled property: The data rate of the audio stream in bytes per second. |
+| `s->video->bytesPerSec` | N/A | Unscaled property: The data rate of the video stream in bytes per second. |
+| `s->audio->bytesPerFrame`| N/A | Unscaled property: The size of a single audio frame in bytes. |
+| `s->sink_ref_time`| `wc` | A wall-clock anchor time, used to align the `ts` and `wc` timelines. Note: usage is inconsistent in the code. |
+| `s->vid_ref_time` | `ts` | A time-scaled anchor timestamp, used to align the `ts` and `wc` timelines. |
 | `stream_get_current_time()` | `rst` | **Returns** the current playback position in `rst` for UI purposes (converts from `s->video_time`). |
 | `stream_seek_time()` | `rst` | **Accepts** a seek position in `rst` from the UI. |
 | `s->duration` | `rst` | The total duration of the media, stored in `rst`. |
+| `_get_audio_time` | `ts` | Stream function performs `rst` to `ts` domain conversion. |
+| `_get_video_time` | `ts` | Stream function performs `rst` to `ts` domain conversion. |
+
+**Notes:**
+*   Functions that run once at startup, like metadata parsing (`_parse_format`), operate in the `rst` domain before any speed scaling is applied.
+*   `stream_parser_guess_msPerFrame` is a fallback called during initialization when speed is 1.0, so it calculates `msPerFrame` in the `rst` domain.
+*   Sync delays like `codec_delay` or audiotrack `system_delay` are constant hardware chain delays (`rst`) that are invariant with audio speed.
 
 ## Design Philosophy
 

@@ -240,10 +240,11 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	float speed = get_effective_audio_speed();
 	// System latency from Android framework (considered a fixed, unscaled value).
 	uint32_t system_latency = call_int_method_current_vm(env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
-	// Latency from our application's buffer, scaled by playback speed.
-	// avoid any rounding issue reminder at->frame_count = ( double ) at->buf_size / (double)at->frame_size, we combine here
-	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed) );
-	at->latency = system_latency + app_latency; 
+	// The app_latency should not be added here. The getOutputLatency() call is documented
+	// to return the latency from the application's write() call to the actual presentation.
+	// Adding our own buffer's duration results in double-counting the latency and causes desync.
+	uint32_t app_latency = 0;
+	at->latency = system_latency;
 
 	DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d", speed, system_latency, app_latency, at->latency );
 }

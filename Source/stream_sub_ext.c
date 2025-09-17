@@ -254,6 +254,7 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 // *************************
 int stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 {
+	int rst_time = TS_TO_RST(time, int);
 	SUB_PRIV *p = s->subtitle_priv;
 	if( s->subtitle->stream != p->stream ) {
 		p->stream = s->subtitle->stream;
@@ -263,7 +264,7 @@ DBG serprintf("sub: stream now %d\r\n", p->stream );
 	}
 	
 	// over the end, give up
-	if( time > scale_time( s, p->subs->converted[p->stream]->last->end ) ) {
+	if( rst_time > scale_time( s, p->subs->converted[p->stream]->last->end ) ) {
 		return 1;
 	} else if( p->sub_time == -1 || time < p->sub_time ) {
 		p->sub = NULL;
@@ -287,13 +288,13 @@ DBG serprintf("sub: no 1st\r\n");
 	}
 	
 	// no current or current is done?
-	if( !p->out || scale_time( s, p->out->end ) < time ) {
+	if( !p->out || scale_time( s, p->out->end ) < rst_time ) {
 		int start = scale_time( s, p->sub->start );
 		int end   = scale_time( s, p->sub->end );
 		
 		// drop all subs in the past
 		while( p->sub ) {
-			if( end > time ) {
+			if( end > rst_time ) {
 				break;
 			}
 DBG3 serprintf("sub: skip [%8d] %8d -> %8d [%s][%s]\r\n", time, start, end, p->sub->top, p->sub->bottom );
@@ -309,7 +310,7 @@ DBG3 serprintf("sub: skip [%8d] %8d -> %8d [%s][%s]\r\n", time, start, end, p->s
 		}		
 	
 		// check if this one is due?
-		if( start > time ) {
+		if( start > rst_time ) {
 DBG3 serprintf("sub: wait [%8d] %8d -> %8d [%s][%s]\r\n", time, start, end, p->sub->top, p->sub->bottom );
 			return 1;
 		}	
@@ -348,8 +349,8 @@ DBG2 serprintf("sub: out  [%8d] %8d -> %8d TOP[%s] BOT[%s]\r\n", time, start, en
 			*dst = '\0';
 		}
 			
-		frame->time      = start;
-		frame->duration  = end - start; 
+		frame->time      = RST_TO_TS(start, int);
+		frame->duration  = RST_TO_TS(end - start, int);
 
 		p->sub = p->sub->next;
 		return 0;

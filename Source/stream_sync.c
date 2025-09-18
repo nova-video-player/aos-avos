@@ -100,6 +100,7 @@ DBGS serprintf("sync_init\r\n");
 // *****************************************************************************
 int stream_sync_av_delay( STREAM *s )
 {
+	// this returns delta(audio_delay - video_delay) in ms in real world domain (i.e. ts delta)
 	if ( !s->audio->valid || !s->video->valid ) {
 		// if we have no audio & video
 		return 0;
@@ -107,9 +108,9 @@ int stream_sync_av_delay( STREAM *s )
 	
 	// audio data passes through decoder and sink
 	// world time audio decoder delay not dependant on audio speed
-	int codec_delay  = s->audio_dec    ? s->audio_dec->delay( s->audio ) : 0;
+	int codec_delay = s->audio_dec ? s->audio_dec->delay( s->audio ) : 0;
 	// world time audio sink delay (audiotrack system_delay on android) not dependant on audio speed
-	int sink_delay   = s->audio_sink   ? s->audio_sink->delay( s ) : 0;
+	int sink_delay = s->audio_sink ? s->audio_sink->delay( s ) : 0;
 	// wold time video sink delay not dependant on audio speed
 	int video_delay;
 	if( s->vtime_post_sink ) {
@@ -141,7 +142,7 @@ int stream_sync_av_delay( STREAM *s )
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
 	// This function calculates the difference between the predicted presentation times of audio and video.
-	// A positive result means video is presented before audio (i.e., video is ahead).
+	// A positive result means video is presented before audio (i.e., video is ahead). i.e. >0 frame drop, <0 frame double?
 	// The surrounding sync logic expects a positive value to mean "video is ahead", so it can slow it down.
 	//
 	// The formula is:
@@ -202,9 +203,12 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	if( s->sync_v_time == -1 || s->sync_a_time == -1 )
 		return 1;
 	
-	// if audio is in the future, delay it
+	// if audio is in the future, delay it (but only if significantly ahead)
 	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
-	if ( diff < 0 ) {
+	int max_rst = s->vtime_post_sink ? 500 : 0;
+
+	// Only block audio if it's significantly ahead (more than threshold)
+	if ( diff < -RST_TO_TS(max_rst, int) ) {
 DBGY serprintf("{{A %d}} ", diff );
 		s->sync_video = 0;
 		return 1;
@@ -325,6 +329,7 @@ DBGVY serprintf("(D %d)", diff );
 DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 		
 	if ( stream_no_sync || s->video_sink->put_time ) {
+		// ANDROID: this is the android mode with a put_time function in the video sink which basically disables the sync logic
 		goto EXIT;
 	}
 		 

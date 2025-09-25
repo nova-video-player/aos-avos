@@ -48,7 +48,8 @@
 
 static int sleep_arm = 0;
 
-static int channel_map[8] = { CH_FL, CH_FR, CH_CTR, CH_SUB, CH_BL, CH_BR, CH_SL, CH_SR };
+// Channel map built in convert_to_stereo()
+static int channel_map[8] = { CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED };
 
 //
 //	AUDIO
@@ -57,6 +58,7 @@ typedef struct PRIV {
 	AVCodecContext 	*actx;
 	const AVCodec 	*acodec;
 	AVCodecParserContext *aparser;
+	uint64_t last_channel_layout;
 	AVFrame         *aframe;
 	SHORT		*asamples;
 	SHORT		*bsamples;
@@ -461,6 +463,25 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 	int samples = frame->nb_samples;
 	UCHAR *data = frame->data[0];
 	
+	// Rebuild channel_map on layout change
+	if (p->actx->channel_layout != p->last_channel_layout) {
+			p->last_channel_layout = p->actx->channel_layout;
+			for (int i = 0; i < p->actx->channels; i++) {
+					uint64_t ch = av_channel_layout_extract_channel(p->actx->channel_layout, i);
+					switch (ch) {
+							case AV_CH_FRONT_LEFT:    channel_map[i] = CH_FL;  break;
+							case AV_CH_FRONT_RIGHT:   channel_map[i] = CH_FR;  break;
+							case AV_CH_FRONT_CENTER:  channel_map[i] = CH_CTR; break;
+							case AV_CH_LOW_FREQUENCY: channel_map[i] = CH_SUB; break;
+							case AV_CH_BACK_LEFT:     channel_map[i] = CH_BL;  break;
+							case AV_CH_BACK_RIGHT:    channel_map[i] = CH_BR;  break;
+							case AV_CH_SIDE_LEFT:     channel_map[i] = CH_SL;  break;
+							case AV_CH_SIDE_RIGHT:    channel_map[i] = CH_SR;  break;
+							default:                  channel_map[i] = CH_UNMAPPED; break;
+					}
+			}
+	}
+
 	// convert all to stereo S16!
 	// fixme: use the actx->channel_layout to crate a correct channel_map
 	switch( p->actx->sample_fmt ) {	

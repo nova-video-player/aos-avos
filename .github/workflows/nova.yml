@@ -2,9 +2,9 @@
 name: NOVA CI
 on:
   push:
-    branches: [ nova ]
+    branches: [ ffmpeg_n7_1_migration ]
   pull_request:
-    branches: [ nova ]
+    branches: [ ffmpeg_n7_1_migration ]
 jobs:
   build:
     runs-on: ubuntu-latest

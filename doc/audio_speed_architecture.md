@@ -97,3 +97,30 @@ The seek-based approach for applying speed changes prioritizes:
 3. **Hardware Compatibility:** Works reliably by using standard seek/flush mechanisms.
 
 This architecture ensures robust audio speed changes while maintaining clear separation between time domains.
+
+### Time Domain Equivalence: `ts` vs `wc`
+
+A key aspect of the architecture is the numerical equivalence between `ts` (Time-Scaled) and `wc` (Wall-Clock) **durations**. This is proven as follows:
+
+1.  By definition of playback speed, the Wall-Clock time elapsed for a given Real Stream Time duration is: `Δwc = Δrst / audio_speed`.
+2.  By definition of the parser's scaling, the Time-Scaled duration for a given Real Stream Time duration is: `Δts = Δrst / audio_speed`.
+3.  Therefore, it is unequivocally true that **`Δts = Δwc`**.
+
+This equivalence is crucial. It means that a duration of 100ms in `ts` is numerically equal to a duration of 100ms in `wc`. This confirms that the video sink's clock estimator logic is mathematically sound:
+
+`venc_time = venc_put_time + (atime() - venc_ref_time)`
+
+This correctly estimates the current `ts` by adding the elapsed `wc` duration to the last reference `ts` timestamp. The error calculation `blit_duration = frame->blit_time - venc_time` is also sound, as it compares two values in the same, correct `ts` domain.
+
+#### The `android_sync = 1` Strategy
+
+When the `android_sync` flag is enabled, the synchronization strategy changes completely, bypassing the sink's internal wait/drop logic and delegating frame pacing directly to the Android `MediaCodec` framework.
+
+1.  **Delegation:** The `videosink_thread` applies a `-200ms` bias to `blit_duration`. This is likely intended to ensure the result is always negative, thus bypassing the `blit_duration > 0` wait condition. The thread then calls `sfdec_buf_render` and passes the responsibility of scheduling the frame to the `sfdec` library.
+
+2.  **`sfdec` Timestamp Calculation:** The logic within `sfdec_ndkmediacodec.cpp` calculates a target presentation `WallTime` to be passed to the Android API `AMediaCodec_releaseOutputBufferAtTime()`. The core formula is:
+    `TargetWallTime_ns = (FrameMediaTime_ns - FirstFrameMediaTime_ns) + StartWallTime_ns`
+
+3.  **The Flaw:** This calculation is fundamentally flawed because it **does not account for playback speed `S`**. It assumes a 1-to-1 relationship between the passage of `MediaTime` and `WallTime`. At any speed other than 1.0, the calculated `TargetWallTime` will be incorrect, leading to stuttering or incorrect pacing.
+
+4.  **Irrelevant `blit_time`:** In this mode, the entire `blit_duration` calculation in `videosink_thread` becomes irrelevant. It is calculated, biased, and then ignored, as the `sfdec` layer performs its own, separate (and incorrect) scheduling calculation. The `-200ms` bias only serves to ensure this delegation path is taken.

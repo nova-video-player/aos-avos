@@ -58,7 +58,7 @@ typedef struct PRIV {
 	AVCodecContext 	*actx;
 	const AVCodec 	*acodec;
 	AVCodecParserContext *aparser;
-	uint64_t last_channel_layout;
+	AVChannelLayout last_channel_layout;
 	AVFrame         *aframe;
 	SHORT		*asamples;
 	SHORT		*bsamples;
@@ -290,6 +290,9 @@ DBGS serprintf( "stream_dec_audio_open_FFMPEG: ");
 		return 1;
 	memset( p, 0, sizeof( PRIV ) );
 
+	// Initialize channel layout
+	av_channel_layout_default(&p->last_channel_layout, 0);
+
 	int need_parser = 0;
 
 	if (!device_config_is_audio_format_supported(audio->format)) {
@@ -447,6 +450,10 @@ serprintf("ffad not open!\r\n");
 	if( p->bsamples ) {
 		afree( p->bsamples );
 	}
+
+	// Clean up channel layout
+	av_channel_layout_uninit(&p->last_channel_layout);
+
 	p->open = 0;
 
 	return 0;
@@ -464,20 +471,20 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 	UCHAR *data = frame->data[0];
 	
 	// Rebuild channel_map on layout change
-	if (p->actx->channel_layout != p->last_channel_layout) {
-			p->last_channel_layout = p->actx->channel_layout;
-			for (int i = 0; i < p->actx->channels; i++) {
-					uint64_t ch = av_channel_layout_extract_channel(p->actx->channel_layout, i);
+	if (av_channel_layout_compare(&p->actx->ch_layout, &p->last_channel_layout) != 0) {
+			av_channel_layout_copy(&p->last_channel_layout, &p->actx->ch_layout);
+			for (int i = 0; i < p->actx->ch_layout.nb_channels; i++) {
+					enum AVChannel ch = av_channel_layout_channel_from_index(&p->actx->ch_layout, i);
 					switch (ch) {
-							case AV_CH_FRONT_LEFT:    channel_map[i] = CH_FL;  break;
-							case AV_CH_FRONT_RIGHT:   channel_map[i] = CH_FR;  break;
-							case AV_CH_FRONT_CENTER:  channel_map[i] = CH_CTR; break;
-							case AV_CH_LOW_FREQUENCY: channel_map[i] = CH_SUB; break;
-							case AV_CH_BACK_LEFT:     channel_map[i] = CH_BL;  break;
-							case AV_CH_BACK_RIGHT:    channel_map[i] = CH_BR;  break;
-							case AV_CH_SIDE_LEFT:     channel_map[i] = CH_SL;  break;
-							case AV_CH_SIDE_RIGHT:    channel_map[i] = CH_SR;  break;
-							default:                  channel_map[i] = CH_UNMAPPED; break;
+							case AV_CHAN_FRONT_LEFT:    channel_map[i] = CH_FL;  break;
+							case AV_CHAN_FRONT_RIGHT:   channel_map[i] = CH_FR;  break;
+							case AV_CHAN_FRONT_CENTER:  channel_map[i] = CH_CTR; break;
+							case AV_CHAN_LOW_FREQUENCY: channel_map[i] = CH_SUB; break;
+							case AV_CHAN_BACK_LEFT:     channel_map[i] = CH_BL;  break;
+							case AV_CHAN_BACK_RIGHT:    channel_map[i] = CH_BR;  break;
+							case AV_CHAN_SIDE_LEFT:     channel_map[i] = CH_SL;  break;
+							case AV_CHAN_SIDE_RIGHT:    channel_map[i] = CH_SR;  break;
+							default:                    channel_map[i] = CH_UNMAPPED; break;
 					}
 			}
 	}

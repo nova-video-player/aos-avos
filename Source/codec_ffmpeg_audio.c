@@ -476,15 +476,17 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 			for (int i = 0; i < p->actx->ch_layout.nb_channels; i++) {
 					enum AVChannel ch = av_channel_layout_channel_from_index(&p->actx->ch_layout, i);
 					switch (ch) {
-							case AV_CHAN_FRONT_LEFT:    channel_map[i] = CH_FL;  break;
-							case AV_CHAN_FRONT_RIGHT:   channel_map[i] = CH_FR;  break;
-							case AV_CHAN_FRONT_CENTER:  channel_map[i] = CH_CTR; break;
-							case AV_CHAN_LOW_FREQUENCY: channel_map[i] = CH_SUB; break;
-							case AV_CHAN_BACK_LEFT:     channel_map[i] = CH_BL;  break;
-							case AV_CHAN_BACK_RIGHT:    channel_map[i] = CH_BR;  break;
-							case AV_CHAN_SIDE_LEFT:     channel_map[i] = CH_SL;  break;
-							case AV_CHAN_SIDE_RIGHT:    channel_map[i] = CH_SR;  break;
-							default:                    channel_map[i] = CH_UNMAPPED; break;
+							case AV_CHAN_FRONT_LEFT:        channel_map[i] = CH_FL;  break;
+							case AV_CHAN_FRONT_RIGHT:       channel_map[i] = CH_FR;  break;
+							case AV_CHAN_FRONT_CENTER:      channel_map[i] = CH_CTR; break;
+							case AV_CHAN_LOW_FREQUENCY:     channel_map[i] = CH_SUB; break;
+							case AV_CHAN_BACK_LEFT:         channel_map[i] = CH_BL;  break;
+							case AV_CHAN_BACK_RIGHT:        channel_map[i] = CH_BR;  break;
+							case AV_CHAN_SIDE_LEFT:         channel_map[i] = CH_SL;  break;
+							case AV_CHAN_SIDE_RIGHT:        channel_map[i] = CH_SR;  break;
+							case AV_CHAN_SIDE_SURROUND_LEFT:  channel_map[i] = CH_SL;  break;
+							case AV_CHAN_SIDE_SURROUND_RIGHT: channel_map[i] = CH_SR;  break;
+							default:                        channel_map[i] = CH_UNMAPPED; break;
 					}
 			}
 	}

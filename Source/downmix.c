@@ -68,11 +68,11 @@ DBGCA3 serprintf("dmix: num %5d  ch %d  bits %d\r\n", samples, channels, bits );
 		if( channels == 1 ) {
 			if( map && map[0] >= 0 && map[0] <= CH_SR ) {
 				if( bits == 16 ) {
-					ch[map[0]] = getS16LE( src ); src += 2;
+					ch[map[0]] += getS16LE( src ); src += 2;
 				} else if( bits == 24 ) {
-					ch[map[0]] = getS24LE( src ); src += 3;
+					ch[map[0]] += getS24LE( src ); src += 3;
 				} else if( bits == 32 ) {
-					ch[map[0]] = getS32LE( src ); src += 4;
+					ch[map[0]] += getS32LE( src ); src += 4;
 				}
 			} else {
 				// Skip invalid channel mapping, just advance pointer
@@ -91,11 +91,11 @@ DBGCA3 serprintf("dmix: num %5d  ch %d  bits %d\r\n", samples, channels, bits );
 			for( c = 0; c < channels; c++ ) {
 				if( map && map[c] >= 0 && map[c] <= CH_SR ) {
 					if( bits == 16 ) {
-						ch[map[c]] = getS16LE( src ); src += 2;
+						ch[map[c]] += getS16LE( src ); src += 2;
 					} else if( bits == 24 ) {
-						ch[map[c]] = getS24LE( src ); src += 3;
+						ch[map[c]] += getS24LE( src ); src += 3;
 					} else if( bits == 32 ) {
-						ch[map[c]] = getS32LE( src ); src += 4;
+						ch[map[c]] += getS32LE( src ); src += 4;
 					}
 				} else {
 					// Skip invalid channel mapping, just advance pointer
@@ -155,11 +155,11 @@ DBGCA3 serprintf("dmixP: num %5d  ch %d  bits %d\r\n", samples, channels, bits )
 		if( channels == 1 ) {
 			if( map && map[0] >= 0 && map[0] <= CH_SR ) {
 				if( bits == 16 ) {
-					ch[map[0]] = getS16LE( src[0] ); src[0] += 2;
+					ch[map[0]] += getS16LE( src[0] ); src[0] += 2;
 				} else if( bits == 24 ) {
-					ch[map[0]] = getS24LE( src[0] ); src[0] += 3;
+					ch[map[0]] += getS24LE( src[0] ); src[0] += 3;
 				} else if( bits == 32 ) {
-					ch[map[0]] = getS32LE( src[0] ); src[0] += 4;
+					ch[map[0]] += getS32LE( src[0] ); src[0] += 4;
 				}
 			} else {
 				// Skip invalid channel mapping, just advance pointer
@@ -178,11 +178,11 @@ DBGCA3 serprintf("dmixP: num %5d  ch %d  bits %d\r\n", samples, channels, bits )
 			for( c = 0; c < channels; c++ ) {
 				if( map && map[c] >= 0 && map[c] <= CH_SR ) {
 					if( bits == 16 ) {
-						ch[map[c]] = getS16LE( src[c] ); src[c] += 2;
+						ch[map[c]] += getS16LE( src[c] ); src[c] += 2;
 					} else if( bits == 24 ) {
-						ch[map[c]] = getS24LE( src[c] ); src[c] += 3;
+						ch[map[c]] += getS24LE( src[c] ); src[c] += 3;
 					} else if( bits == 32 ) {
-						ch[map[c]] = getS32LE( src[c] ); src[c] += 4;
+						ch[map[c]] += getS32LE( src[c] ); src[c] += 4;
 					}
 				} else {
 					// Skip invalid channel mapping, just advance pointer
@@ -229,9 +229,9 @@ DBGCA3 serprintf("dmix_flt: num %5d  ch %d  bits %d\r\n", samples, channels, bit
 		if( channels == 1 ) {
 			if( map && map[0] >= 0 && map[0] <= CH_SR ) {
 				if( bits == 32 ) {
-					ch[map[0]] = clamp( lrintf( *(float*)src * (1 << 15))); src += 4;
+					ch[map[0]] += clamp( lrintf( *(float*)src * (1 << 15))); src += 4;
 				} else if ( bits == 64 ) {
-					ch[map[0]] = clamp( lrintf( *(double*)src * (1 << 15))); src += 8;
+					ch[map[0]] += clamp( lrintf( *(double*)src * (1 << 15))); src += 8;
 				}
 			} else {
 				// Skip invalid channel mapping, just advance pointer
@@ -248,9 +248,9 @@ DBGCA3 serprintf("dmix_flt: num %5d  ch %d  bits %d\r\n", samples, channels, bit
 			for( c = 0; c < channels; c++ ) {
 				if( map && map[c] >= 0 && map[c] <= CH_SR ) {
 					if( bits == 32 ) {
-						ch[map[c]] = clamp( lrintf( *(float*)src * (1 << 15))); src += 4;
+						ch[map[c]] += clamp( lrintf( *(float*)src * (1 << 15))); src += 4;
 					} else if( bits == 64 ) {
-						ch[map[c]] = clamp( lrintf( *(double*)src * (1 << 15))); src += 8;
+						ch[map[c]] += clamp( lrintf( *(double*)src * (1 << 15))); src += 8;
 					}
 				} else {
 					// Skip invalid channel mapping, just advance pointer
@@ -301,9 +301,9 @@ DBGCA3 serprintf("dmix_fltP: num %5d  ch %d  bits %d\r\n", samples, channels, bi
 		if( channels == 1 ) {
 			if( map && map[0] >= 0 && map[0] <= CH_SR ) {
 				if( bits == 32 ) {
-					ch[map[0]] = clamp( lrintf( *(float*)src[0] * (1 << 15))); src[0] += 4;
+					ch[map[0]] += clamp( lrintf( *(float*)src[0] * (1 << 15))); src[0] += 4;
 				} else if ( bits == 64 ) {
-					ch[map[0]] = clamp( lrintf( *(double*)src[0] * (1 << 15))); src[0] += 8;
+					ch[map[0]] += clamp( lrintf( *(double*)src[0] * (1 << 15))); src[0] += 8;
 				}
 			} else {
 				// Skip invalid channel mapping, just advance pointer
@@ -320,10 +320,10 @@ DBGCA3 serprintf("dmix_fltP: num %5d  ch %d  bits %d\r\n", samples, channels, bi
 			for( c = 0; c < channels; c++ ) {
 				if( map && map[c] >= 0 && map[c] <= CH_SR ) {
 					if( bits == 32 ) {
-						ch[map[c]] = clamp( lrintf( *(float*)src[c] * (1 << 15))); src[c] += 4; 
+						ch[map[c]] += clamp( lrintf( *(float*)src[c] * (1 << 15))); src[c] += 4;
 					} else if( bits == 64 ) {
-						ch[map[c]] = clamp( lrintf( *(double*)src[c] * (1 << 15))); src[c] += 8;
-					}  
+						ch[map[c]] += clamp( lrintf( *(double*)src[c] * (1 << 15))); src[c] += 8;
+					}
 				} else {
 					// Skip invalid channel mapping, just advance pointer
 					if( bits == 32 ) {

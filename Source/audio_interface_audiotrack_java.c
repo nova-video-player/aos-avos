@@ -238,21 +238,13 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	if (!at || !env) return;
 
 	float speed = get_effective_audio_speed();
+	// System latency from Android framework (considered a fixed, unscaled value).
+	uint32_t system_latency = call_int_method_current_vm(env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
+	// Application latency from AudioTrack buffer size (scaled with playback speed).
+	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
+	at->latency = system_latency + app_latency;
 
-	// Try AudioTrack.getLatency() first (includes buffer + system latency)
-	uint32_t track_latency = call_int_method(at, "getLatency", "()I");
-
-	if (track_latency > 0) {
-		// AudioTrack.getLatency() already includes buffer latency
-		at->latency = track_latency;
-		DBG LOG( "audiotrack_update_latency: speed=%.2f, track_latency=%d (using AudioTrack.getLatency)", speed, at->latency );
-	} else {
-		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation
-		uint32_t system_latency = call_int_method_current_vm(env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
-		uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
-		at->latency = system_latency + app_latency;
-		DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d (fallback)", speed, system_latency, app_latency, at->latency );
-	}
+	DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d", speed, system_latency, app_latency, at->latency );
 }
 
 static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int bits, int format)

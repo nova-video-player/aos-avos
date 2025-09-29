@@ -20,7 +20,7 @@
 #include <stdint.h>
 
 enum {
-	CH_UNMAPPED = 0,
+	CH_UNMAPPED = -1,
 	CH_FL,
 	CH_FR,
 	CH_CTR,

@@ -25,7 +25,7 @@
 #include "downmix.h"
 #include "device_config.h"
 #include <libavutil/channel_layout.h>
-
+#include <stdbool.h>
 
 #ifdef CONFIG_FFMPEG_AUDIO
 #ifdef CONFIG_STREAM
@@ -469,15 +469,20 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 	int bps     = av_get_bytes_per_sample(p->actx->sample_fmt) * 8;
 	int samples = frame->nb_samples;
 	UCHAR *data = frame->data[0];
-	
+	bool channels_set = false;
+
 	// Rebuild channel_map on layout change
 	if (av_channel_layout_compare(&p->actx->ch_layout, &p->last_channel_layout) != 0) {
 			av_channel_layout_copy(&p->last_channel_layout, &p->actx->ch_layout);
 			for (int i = 0; i < p->actx->ch_layout.nb_channels; i++) {
 					enum AVChannel ch = av_channel_layout_channel_from_index(&p->actx->ch_layout, i);
 					switch (ch) {
-							case AV_CHAN_FRONT_LEFT:           channel_map[i] = CH_FL;  break;
-							case AV_CHAN_FRONT_RIGHT:          channel_map[i] = CH_FR;  break;
+							case AV_CHAN_FRONT_LEFT:           channel_map[i] = CH_FL;  
+								channels_set = true;	
+								break;
+							case AV_CHAN_FRONT_RIGHT:          channel_map[i] = CH_FR; 
+								channels_set = true;		
+								break;
 							case AV_CHAN_FRONT_CENTER:         channel_map[i] = CH_CTR; break;
 							case AV_CHAN_LOW_FREQUENCY:        channel_map[i] = CH_SUB; break;
 							case AV_CHAN_BACK_LEFT:            channel_map[i] = CH_BL;  break;
@@ -497,6 +502,18 @@ static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *ou
 							default:                           channel_map[i] = CH_UNMAPPED; break;
 					}
 			}
+	}
+
+	//Fallback for if no channels found...
+	if (!channels_set) {
+		channel_map[0] = CH_FL;
+		channel_map[1] = CH_FR;
+		channel_map[2] = CH_CTR;
+		channel_map[3] = CH_SUB;
+		channel_map[4] = CH_BL;
+		channel_map[5] = CH_BR;
+		channel_map[6] = CH_SL;
+		channel_map[7] = CH_SR;
 	}
 
 	// convert all to stereo S16!

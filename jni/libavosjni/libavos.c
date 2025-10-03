@@ -42,6 +42,7 @@ void libavos_set_output_sample_rate(int sample_rate);
 void libavos_set_passthrough(int force_passthrough);
 void libavos_set_downmix(int downmix);
 void libavos_set_hdmi_supported_audio_codecs(long flag);
+void libavos_set_audio_transform(int (*transformer)(float* buf, int nsamples));
 
 fields_t fields;
 extern JavaVM *myVm;
@@ -190,6 +191,11 @@ static int unregister_libavos(JNIEnv *env)
     (*env)->DeleteGlobalRef(env, fields.AvosMediaPlayerClazz);
     (*env)->DeleteGlobalRef(env, fields.AvosBitmapHelperClazz);
     (*env)->DeleteGlobalRef(env, fields.SubtitleClazz);
+    if (fields.AudioTransformerObj) {
+        (*env)->DeleteGlobalRef(env, fields.AudioTransformerObj);
+        fields.AudioTransformerObj = NULL;
+        fields.AudioTransformer_transformAudioMethod = NULL;
+    }
 
     if (unregister_avosmediaplayer(env) == -1)
         return -1;
@@ -401,6 +407,52 @@ Java_com_archos_medialib_LibAvos_nativeSetStreamBufferSize(JNIEnv *env, jobject 
 	pthread_mutex_lock(&libavos.mtx);
 	libavos_set_default_stream_buffer_size(size);
 	pthread_mutex_unlock(&libavos.mtx);
+}
+
+int libavos_transform_audio_impl(float* samples, int size)
+{
+    if (!fields.AudioTransformerObj || !fields.AudioTransformer_transformAudioMethod) {
+        return 0;
+    }
+    JNIEnv* env;
+    if ((*myVm)->AttachCurrentThread(myVm, &env, NULL) != JNI_OK) {
+        return 0;
+    }
+    jfloatArray input = (*env)->NewFloatArray(env, size);
+    if (!input) {
+        (*myVm)->DetachCurrentThread(myVm);
+        return 0;
+    }
+    (*env)->SetFloatArrayRegion(env, input, 0, size, samples);
+    jfloatArray output = (jfloatArray)(*env)->CallObjectMethod(env, fields.AudioTransformerObj, fields.AudioTransformer_transformAudioMethod, input);
+    (*env)->DeleteLocalRef(env, input);
+    if (output) {
+        int len = (*env)->GetArrayLength(env, output);
+        if (len == size) {
+            (*env)->GetFloatArrayRegion(env, output, 0, size, samples);
+        }
+        (*env)->DeleteLocalRef(env, output);
+    }
+    (*myVm)->DetachCurrentThread(myVm);
+    return 1;
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetAudioTransformer(JNIEnv *env, jobject thiz, jobject transformer)
+{
+    if (fields.AudioTransformerObj) {
+        (*env)->DeleteGlobalRef(env, fields.AudioTransformerObj);
+        fields.AudioTransformerObj = NULL;
+        fields.AudioTransformer_transformAudioMethod = NULL;
+    }
+    if (transformer) {
+        fields.AudioTransformerObj = (*env)->NewGlobalRef(env, transformer);
+        jclass clazz = (*env)->GetObjectClass(env, transformer);
+        fields.AudioTransformer_transformAudioMethod = (*env)->GetMethodID(env, clazz, "transformAudio", "([F)[F");
+	libavos_set_audio_transform(libavos_transform_audio_impl);
+    } else {
+	libavos_set_audio_transform(NULL);
+    }
 }
 
 jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out_width, uint32_t out_height)

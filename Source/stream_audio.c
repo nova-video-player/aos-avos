@@ -370,6 +370,8 @@ serprintf(" ae! ");
 					DBG serprintf("stream_audio: applying AC3 encoding filter\n");
 					s->audio_filter->filter( s->audio_filter, &audio_frame );
 				}
+				s->audio_filter_jni->filter( s->audio_filter_jni, &audio_frame );
+
 				DBG serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
 					audio_frame.format, audio_frame.size);
 

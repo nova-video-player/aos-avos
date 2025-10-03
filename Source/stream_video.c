@@ -199,6 +199,7 @@ static inline STREAM_CPU get_cpu_priority( STREAM *s )
 }
 
 STREAM_FILTER_AUDIO *stream_filter_audio_agc_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_jni_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_ac3_new( void );
 
@@ -408,6 +409,8 @@ serprintf("no audio dec found!\r\n");
 // *****************************************************************************
 static int stream_open_audio_filter( STREAM *s )
 {
+	s->audio_filter_jni = stream_filter_audio_jni_new();
+
 #ifdef CONFIG_AUDIO_AC3
 	// Force enable audio filter if AC3 recoding is enabled (passthrough mode 3)
 	if( libavos_get_ac3_recoding_enabled() ) {

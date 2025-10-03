@@ -65,6 +65,7 @@ ifeq ($(AUDIO),ON)
 
 	ifeq ($(AUDIO_COMPRESS),ON)
 		DEFINES += -DCONFIG_AUDIO_COMPRESS
+		CSRC_AUDIO += stream_filter_audio_jni.c
 		CSRC_AUDIO += stream_filter_audio_compress.c
 		ifeq ($(TGT_BASE),sim)
 			INCLUDES += -I$(LOCAL_PATH)/../audiocompress

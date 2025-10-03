@@ -45,6 +45,9 @@ typedef struct fields_t {
 	jobject myClassLoader;
 	jmethodID FindClassMethod;
 
+	jobject AudioTransformerObj;
+	jmethodID AudioTransformer_transformAudioMethod;
+
 } fields_t;
 
 extern fields_t fields;

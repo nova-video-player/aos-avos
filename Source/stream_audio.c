@@ -349,6 +349,7 @@ serprintf(" ae! ");
 				if( s->audio_filter && !passthrough) {
 					s->audio_filter->filter( s->audio_filter, &audio_frame );
 				}
+				s->audio_filter_jni->filter(s->audio_filter_jni, &audio_frame );
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
 				while( size > 0 ) {

@@ -197,6 +197,7 @@ static inline STREAM_CPU get_cpu_priority( STREAM *s )
 }
 
 STREAM_FILTER_AUDIO *stream_filter_audio_agc_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_jni_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 
 // *****************************************************************************
@@ -400,6 +401,7 @@ serprintf("no audio dec found!\r\n");
 // *****************************************************************************
 static int stream_open_audio_filter( STREAM *s )
 {
+	s->audio_filter_jni = stream_filter_audio_jni_new();
 	if( s->audio_filter_enabled ) {
 #ifdef CONFIG_AUDIO_COMPRESS
 		s->audio_filter = stream_filter_audio_compress_new();

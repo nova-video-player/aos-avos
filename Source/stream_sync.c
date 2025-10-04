@@ -120,13 +120,21 @@ int stream_sync_av_delay( STREAM *s )
 	if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 		return /*codec_delay +*/ sink_delay - video_delay; // ts
 	} else { // note default sync mode currently
-		return (int)(codec_delay / as) + sink_delay - video_delay;
+		return codec_delay + sink_delay - video_delay;
 	}
 }
 
 // ************************************************************
 //
 //	_stream_av_diff
+//
+// Computes video presentation time - audio presentation time
+// Positive value means video is ahead of audio, negative means audio is ahead
+// Formula accounts for buffering delays: audio/video timestamps represent generation time,
+// but actual presentation happens later after passing through decoder/sink pipelines
+// So the formula is actually: 
+// ( video_time - video_delay ) - ( audio_time - ( codec_delay + sink_delay ) ) =
+//	video_time - audio_time + codec_delay + sink_delay - video_delay
 //
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time ) // XXX_time is ts

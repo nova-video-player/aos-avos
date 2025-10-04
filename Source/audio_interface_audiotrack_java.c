@@ -111,6 +111,25 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 	return result;
 }
 
+static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const char * name, const char * signature, ...)
+{
+	DBG2 LOG();
+	jmethodID method = (*env)->GetMethodID(env, at->audiotrackClass, name, signature);
+	va_list args;
+	va_start(args, signature);
+	jint result = (*env)->CallIntMethodV(env, at->obj, method, args);
+	va_end(args);
+
+	jthrowable exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR LOG("!!!EXCEPTION: call_int_method_with_env");
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+	}
+
+	return result;
+}
+
 static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const char * name, const char * signature, ...)
 {
 	DBG2 LOG();
@@ -213,11 +232,12 @@ static int audiotrack_close(audio_ctx_t **pat)
 {
 	audio_ctx_t *at = *pat;
 
-    int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
-    if (underrun_count > 0)
-        ERR LOG("Underrun count: %d", underrun_count);
-
 	if (at->init) {
+		attach_thread(at);
+		int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
+		if (underrun_count > 0)
+			ERR LOG("Underrun count: %d", underrun_count);
+
 		call_void_method(at, "release", "()V");
 		(*at->env)->DeleteGlobalRef(at->env, at->obj);
 		(*at->env)->DeleteGlobalRef(at->env, at->jbuffer);
@@ -239,19 +259,24 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 
 	float speed = get_effective_audio_speed();
 
-	// Try AudioTrack.getLatency() first (includes buffer + system latency)
-	uint32_t track_latency = call_int_method(at, "getLatency", "()I");
+	// AudioTrack.getLatency() includes buffer + system latency
+	uint32_t track_latency = call_int_method_with_env(at, env, "getLatency", "()I");
 
-	if (track_latency > 0) {
-		// AudioTrack.getLatency() already includes buffer latency
+	// Otherwise AudioSystem.getOutputLatency() + manual buffer calculation (deemed less accurate)
+	uint32_t system_latency = call_int_method_current_vm( env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType );
+	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
+
+	DBG LOG( "audiotrack_update_latency: speed=%.2f, track_latency=%d, system_latency=%d, app_latency=%d, total_latency=%d, use track latency=%d",
+			 speed, track_latency, system_latency, app_latency, system_latency + app_latency , track_latency > 0);
+	//DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d",
+	//		 speed, system_latency, app_latency, system_latency + app_latency);
+
+	if( track_latency > 0 ) {
+		// AudioTrack.getLatency() by default
 		at->latency = track_latency;
-		DBG LOG( "audiotrack_update_latency: speed=%.2f, track_latency=%d (using AudioTrack.getLatency)", speed, at->latency );
 	} else {
 		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation
-		uint32_t system_latency = call_int_method_current_vm(env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
-		uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
 		at->latency = system_latency + app_latency;
-		DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d (fallback)", speed, system_latency, app_latency, at->latency );
 	}
 }
 

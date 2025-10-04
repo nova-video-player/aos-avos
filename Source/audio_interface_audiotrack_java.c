@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <math.h>
 
 #include "global.h"
 #include "debug.h"
@@ -36,8 +37,6 @@ extern int get_hdmi_supports_iec(void);
 #define DBG  if(0)
 #define DBG2 if(0)
 #define ERR  if(1)
-
-#define AUDIO_SPEED_LATENCY_SHIFT 260 // 260ms for a 6x buffer, should be calculated
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
 
@@ -91,6 +90,25 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
+}
+
+static inline int call_int_method_with_env( audio_ctx_t *at, JNIEnv *env, const char *name, const char *signature, ... )
+{
+	DBG2 LOG();
+	jmethodID method = ( *env )->GetMethodID( env, at->audiotrackClass, name, signature );
+	va_list args;
+	va_start( args, signature );
+	jint result = ( *env )->CallIntMethodV( env, at->obj, method, args );
+	va_end( args );
+
+	jthrowable exception = ( *env )->ExceptionOccurred( env );
+	if( exception ) {
+		ERR LOG( "!!!EXCEPTION: call_int_method_with_env" );
+		( *env )->ExceptionDescribe( env );
+		( *env )->ExceptionClear( env );
+	}
+
+	return result;
 }
 
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
@@ -448,16 +466,13 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if(failed)
 		return -1;
 
-	at->latency = call_static_int_method(at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
+	// latency is sytem_latency + app_latency, app_latency is scaled by audio speed
+	//at->latency =
+	// 	call_static_int_method( at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType ) +
+	// 	(uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * as ) );
+	at->latency = call_int_method_with_env( at, at->env, "getLatency", "()I" );
 	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency=%d\n", at->latency);
-	// scaling with audio_speed is required to avoid variable delay with different audio_speed
-	if(is_audio_speed_enabled) {
-		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / as;
-	} else {
-		at->latency += (1000 * at->frame_count) / at->rate;
-	}
 	at->init = 1;
-	DBG LOG("audio_interface_audiotrack_java:audiotrack_set_output_params latency_norm=%d\n", at->latency);
 	DBG LOG("track created");
 
 	return 0;
@@ -659,11 +674,13 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			audio_interface_set_audio_speed(speed);
 		}
 
-		at->latency = call_int_method_current_vm(myEnv, at->audiosystemClass, "getOutputLatency", "(I)I", streamType);
+		// latency is sytem_latency + app_latency, app_latency is scaled by audio speed
+		//at->latency = call_static_int_method( at, at->audiosystemClass, "getOutputLatency", "(I)I", streamType ) +
+		// 			  (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) /
+		// 							   ( (double)at->frame_size * (double)at->rate * speed ) );
+		at->latency = call_int_method_with_env( at, myEnv, "getLatency", "()I" );
+
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency=%d\n", at->latency);
-		// scaling with audio_speed is required to avoid variable delay with different audio_speed
-		at->latency = (-AUDIO_SPEED_LATENCY_SHIFT + at->latency + (1000 * at->frame_count) / at->rate) / speed;
-		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed latency_norm=%d\n", at->latency);
 
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");

@@ -141,27 +141,14 @@ int stream_sync_av_delay( STREAM *s )
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
-	// This function calculates the difference between the predicted presentation times of audio and video.
-	// A positive result means video is presented before audio (i.e., video is ahead). i.e. >0 frame drop, <0 frame double?
-	// The surrounding sync logic expects a positive value to mean "video is ahead", so it can slow it down.
-	//
-	// The formula is:
-	//   Result = Audio Presentation Time - Video Presentation Time
-	//
-	// Where:
-	//   Audio Presentation Time = audio_time + audio_pipeline_delay
-	//   Video Presentation Time = video_time + video_pipeline_delay
-	//
-	// Substituting gives:
-	//   Result = (audio_time + audio_pipeline_delay) - (video_time + video_pipeline_delay)
-	//   Result = (audio_time - video_time) + (audio_pipeline_delay - video_pipeline_delay)
-	//
-	// The function stream_sync_av_delay(s) calculates (audio_pipeline_delay - video_pipeline_delay).
-	// Therefore, we use (audio_time - video_time) and add the result of stream_sync_av_delay(s).
-	// This function returns ts diff value and stream_sync_av_delay( s ) must not be scaled since already in ts domain.
-	// av_delay are rst domain and must be scaled to ts domain to account for audio/video speed changes.
-
-	return (audio_time - video_time) + stream_sync_av_delay( s ) + RST_TO_TS( s->av_delay + stream_dbg_delay, int);
+	// Computes video presentation time - audio presentation time
+	// Positive value means video is ahead of audio, negative means audio is ahead
+	// Formula accounts for buffering delays: audio/video timestamps represent generation time,
+	// but actual presentation happens later after passing through decoder/sink pipelines
+	// So the formula is actually: ( video_time - video_delay ) - ( audio_time - ( codec_delay + sink_delay ) ) = video_time - audio_time + codec_delay + sink_delay - video_delay
+	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
+	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
+	return ( video_time - audio_time ) + stream_sync_av_delay( s ) + RST_TO_TS( s->av_delay + stream_dbg_delay, int );
 }
 
 // ************************************************************

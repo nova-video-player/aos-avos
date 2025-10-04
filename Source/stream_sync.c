@@ -192,15 +192,13 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	
 	// if audio is in the future, delay it (but only if significantly ahead)
 	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
-	int max_rst = s->vtime_post_sink ? 500 : 0;
 
 	// Only block audio if it's significantly ahead (more than threshold)
-	if ( diff < -RST_TO_TS(max_rst, int) ) {
+	if( diff < 0 ) {
 DBGY serprintf("{{A %d}} ", diff );
 		s->sync_video = 0;
 		return 1;
 	}
-	
 	// allow audio to play from now on
 	s->sync_audio = 0;
 	
@@ -239,22 +237,13 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	if( s->sync_v_time == -1 || s->sync_a_time == -1 )
 		return 1;
 
-	// Reworked initial sync logic to fix video freeze (deadlock) on high-latency audio hardware.
-	// The goal is to wait while the video frame's presentation time is too far in the future
-	// compared to the current live audio presentation time.
-
-	// Use the live audio clock if it's valid, otherwise fall back to the first audio frame's timestamp.
-	int audio_ref_time = (s->audio_time != -1) ? s->audio_time : s->sync_a_time;
-
-	// Calculate the wait difference based on the hybrid scaling model. Both sync_X_time and audio_ref_time are ts domain.
-	int diff = _stream_av_diff(s, s->sync_v_time, audio_ref_time);
-
-	// The wait condition is when video is too far in the future (i.e. its presentation time is much later than audio's).
-	// In our _stream_av_diff, a positive value means video is ahead (earlier), so we must wait if the value is very negative.
+	// if video is in the future, delay it
+	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
+	// if we sample post sink, allow us to start 500ms early
 	int max_rst = s->vtime_post_sink ? 500 : 0;
 
 	// Wait if video is LATE by more than the threshold.
-	if (diff < -RST_TO_TS(max_rst, int)) {
+	if( diff > RST_TO_TS( max_rst, int ) ) {
 DBGY serprintf( "{{V %d}} ", diff );
 		s->sync_audio = 0;
 		return 1; // Wait

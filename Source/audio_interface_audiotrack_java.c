@@ -48,10 +48,6 @@ extern int get_hdmi_supports_iec(void);
 #define AUDIO_CONTENT_TYPE_MUSIC 2
 #endif
 
-#ifndef FLAG_HW_AV_SYNC
-#define FLAG_HW_AV_SYNC 0x10  // AudioAttributes.FLAG_HW_AV_SYNC (bit 4)
-#endif
-
 typedef unsigned char bool;
 
 #define NO_ERROR 0
@@ -542,19 +538,6 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		exception = (*at->env)->ExceptionOccurred(at->env);
 		if (exception) {
 			ERR LOG("exception during AudioAttributes.Builder.setContentType");
-			(*at->env)->ExceptionDescribe(at->env);
-			(*at->env)->ExceptionClear(at->env);
-			failed = 1;
-		}
-	}
-
-	// Add FLAG_HW_AV_SYNC for passthrough audio (compressed formats)
-	if (!failed && at->passthrough > 0) {
-		jmethodID setFlagsMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setFlags", "(I)Landroid/media/AudioAttributes$Builder;");
-		(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setFlagsMethod, FLAG_HW_AV_SYNC);
-		exception = (*at->env)->ExceptionOccurred(at->env);
-		if (exception) {
-			ERR LOG("exception during AudioAttributes.Builder.setFlags");
 			(*at->env)->ExceptionDescribe(at->env);
 			(*at->env)->ExceptionClear(at->env);
 			failed = 1;

@@ -40,6 +40,18 @@ extern int get_hdmi_supports_iec(void);
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
 
+#ifndef AUDIO_USAGE_MEDIA
+#define AUDIO_USAGE_MEDIA 1
+#endif
+
+#ifndef AUDIO_CONTENT_TYPE_MUSIC
+#define AUDIO_CONTENT_TYPE_MUSIC 2
+#endif
+
+#ifndef FLAG_HW_AV_SYNC
+#define FLAG_HW_AV_SYNC 0x10  // AudioAttributes.FLAG_HW_AV_SYNC (bit 4)
+#endif
+
 typedef unsigned char bool;
 
 #define NO_ERROR 0
@@ -65,11 +77,16 @@ struct audio_ctx {
 	jclass audiotrackClass;
 	jclass audiosystemClass;
 	jclass playbackParamsClass;
+	jclass audioAttributesBuilderClass;
+	jclass audioFormatBuilderClass;
+	uint64_t i_samples_written; // Total samples written to AudioTrack (for buffer fullness tracking)
 };
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
 static char * PLAYBACKPARAMS_CLASS_NAME = "android/media/PlaybackParams";
+static char * AUDIOATTRIBUTES_BUILDER_CLASS_NAME = "android/media/AudioAttributes$Builder";
+static char * AUDIOFORMAT_BUILDER_CLASS_NAME = "android/media/AudioFormat$Builder";
 
 static int buffer_scale = 1;
 
@@ -82,6 +99,16 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 {
 	DBG2 LOG();
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
+
+	// Check if method exists - if not, clear exception and return
+	if (method == NULL || (*at->env)->ExceptionCheck(at->env)) {
+		if ((*at->env)->ExceptionCheck(at->env)) {
+			(*at->env)->ExceptionClear(at->env);
+		}
+		DBG2 LOG("method '%s' not found", name);
+		return;
+	}
+
 	(*at->env)->CallVoidMethod(at->env, at->obj, method);
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
@@ -96,6 +123,16 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 {
 	DBG2 LOG();
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
+
+	// Check if method exists - if not, clear exception and return 0
+	if (method == NULL || (*at->env)->ExceptionCheck(at->env)) {
+		if ((*at->env)->ExceptionCheck(at->env)) {
+			(*at->env)->ExceptionClear(at->env);
+		}
+		DBG2 LOG("method '%s' not found", name);
+		return 0;
+	}
+
 	va_list args;
 	va_start(args, signature);
 	jint result = (*at->env)->CallIntMethodV(at->env, at->obj, method, args);
@@ -103,7 +140,7 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
 	if (exception) {
-		ERR LOG("!!!EXCEPTION: call_void_method");
+		ERR LOG("!!!EXCEPTION: call_int_method");
 		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
@@ -115,6 +152,16 @@ static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const c
 {
 	DBG2 LOG();
 	jmethodID method = (*env)->GetMethodID(env, at->audiotrackClass, name, signature);
+
+	// Check if method exists - if not, clear exception and return 0
+	if (method == NULL || (*env)->ExceptionCheck(env)) {
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionClear(env);
+		}
+		DBG2 LOG("method '%s' not found", name);
+		return 0;
+	}
+
 	va_list args;
 	va_start(args, signature);
 	jint result = (*env)->CallIntMethodV(env, at->obj, method, args);
@@ -134,6 +181,16 @@ static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const cha
 {
 	DBG2 LOG();
 	jmethodID method = (*at->env)->GetStaticMethodID(at->env, clas, name, signature);
+
+	// Check if method exists - if not, clear exception and return 0
+	if (method == NULL || (*at->env)->ExceptionCheck(at->env)) {
+		if ((*at->env)->ExceptionCheck(at->env)) {
+			(*at->env)->ExceptionClear(at->env);
+		}
+		DBG2 LOG("static method '%s' not found", name);
+		return 0;
+	}
+
 	va_list args;
 	va_start(args, signature);
 	jint result = (*at->env)->CallStaticIntMethodV(at->env, clas, method, args);
@@ -141,7 +198,7 @@ static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const cha
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
 	if (exception) {
-		ERR LOG("!!!EXCEPTION: call_int_method");
+		ERR LOG("!!!EXCEPTION: call_static_int_method");
 		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
@@ -152,6 +209,16 @@ static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const cha
 static inline int call_int_method_current_vm(JNIEnv *jni_env, jclass clas, const char * name, const char * signature, ...)
 {
 	jmethodID method = (*jni_env)->GetStaticMethodID(jni_env, clas, name, signature);
+
+	// Check if method exists - if not, clear exception and return 0
+	if (method == NULL || (*jni_env)->ExceptionCheck(jni_env)) {
+		if ((*jni_env)->ExceptionCheck(jni_env)) {
+			(*jni_env)->ExceptionClear(jni_env);
+		}
+		DBG2 serprintf("static method '%s' not found\n", name);
+		return 0;
+	}
+
 	va_list args;
 	va_start(args, signature);
 	jint result = (*jni_env)->CallStaticIntMethodV(jni_env, clas, method, args);
@@ -159,7 +226,7 @@ static inline int call_int_method_current_vm(JNIEnv *jni_env, jclass clas, const
 
 	jthrowable exception = (*jni_env)->ExceptionOccurred(jni_env);
 	if (exception) {
-		ERR serprintf("!!!EXCEPTION: call_static_int_method_current_vm\n");
+		ERR serprintf("!!!EXCEPTION: call_int_method_current_vm\n");
 		(*jni_env)->ExceptionDescribe(jni_env);
 		(*jni_env)->ExceptionClear(jni_env);
 	}
@@ -224,6 +291,8 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->audiotrackClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOTRACK_CLASS_NAME));
 	at->audiosystemClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOSYSTEM_CLASS_NAME));
 	at->playbackParamsClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, PLAYBACKPARAMS_CLASS_NAME));
+	at->audioAttributesBuilderClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOATTRIBUTES_BUILDER_CLASS_NAME));
+	at->audioFormatBuilderClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOFORMAT_BUILDER_CLASS_NAME));
 
 	return at;
 }
@@ -244,6 +313,8 @@ static int audiotrack_close(audio_ctx_t **pat)
 		(*at->env)->DeleteGlobalRef(at->env, at->audiotrackClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audiosystemClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->playbackParamsClass);
+		(*at->env)->DeleteGlobalRef(at->env, at->audioAttributesBuilderClass);
+		(*at->env)->DeleteGlobalRef(at->env, at->audioFormatBuilderClass);
 		//if (at->willDetach)
 		//	(*myVm)->DetachCurrentThread(myVm);
 		at->init = 0;
@@ -259,20 +330,18 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 
 	float speed = get_effective_audio_speed();
 
-	// AudioTrack.getLatency() includes buffer + system latency
+	// AudioTrack.getLatency() available on API 29+ (returns 0 if method doesn't exist)
 	uint32_t track_latency = call_int_method_with_env(at, env, "getLatency", "()I");
 
-	// Otherwise AudioSystem.getOutputLatency() + manual buffer calculation (deemed less accurate)
+	// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation
 	uint32_t system_latency = call_int_method_current_vm( env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType );
 	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
 
 	DBG LOG( "audiotrack_update_latency: speed=%.2f, track_latency=%d, system_latency=%d, app_latency=%d, total_latency=%d, use track latency=%d",
 			 speed, track_latency, system_latency, app_latency, system_latency + app_latency , track_latency > 0);
-	//DBG LOG( "audiotrack_update_latency: speed=%.2f, system_latency=%d, app_latency=%d, total_latency=%d",
-	//		 speed, system_latency, app_latency, system_latency + app_latency);
 
 	if( track_latency > 0 ) {
-		// AudioTrack.getLatency() by default
+		// AudioTrack.getLatency() by default (API 29+)
 		at->latency = track_latency;
 	} else {
 		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation
@@ -417,36 +486,195 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	}
 	DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params buffer_scale=%d", buffer_scale );
 
-	at->buf_size = (at->passthrough == 2) ? 32768 : buffer_scale * call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
+	int min_buffer_size = call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
-	DBG LOG ( "audio_interface_audiotrack_java:audiotrack_set_output_params getMinBufferSize=%d\n", call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
-										 sampleRateInHz, channelConfig, audioFormat) );
 
-	// audioTrack will be saved in at->obj if create correctly
-	jobject audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass,
-		(*at->env)->GetMethodID(at->env, at->audiotrackClass, "<init>", "(IIIIII)V"),
-		streamType, sampleRateInHz, channelConfig,
-		audioFormat, at->buf_size, mode);
+	if (at->passthrough == 2) {
+		// For compressed passthrough, use getMinBufferSize() with a safety margin
+		// Different formats have varying frame sizes (AC3 ~6KB, DTS ~2KB, TrueHD ~20KB)
+		// Ensure minimum of 32KB for compatibility, but respect larger system requirements
+		at->buf_size = (min_buffer_size > 32768) ? min_buffer_size : 32768;
+	} else {
+		// Use scaled minimum (buffer_scale=2 for audio speed support)
+		// Let Android's getMinBufferSize() determine the requirements
+		at->buf_size = buffer_scale * min_buffer_size;
+	}
+
+	DBG LOG ( "audio_interface_audiotrack_java:audiotrack_set_output_params getMinBufferSize=%d, final buf_size=%d\n",
+		min_buffer_size, at->buf_size);
+
 	int failed = 0;
-	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
-	if (exception) {
-		ERR LOG("exception during audioTrack constructor call");
-		(*at->env)->ExceptionDescribe(at->env);
-		(*at->env)->ExceptionClear(at->env);
-		failed = 1;
+	jobject audioTrack = NULL;
+	jobject audioAttributesBuilder = NULL;
+	jobject audioFormatBuilder = NULL;
+	jobject audioAttributes = NULL;
+	jobject audioFormatObj = NULL;
+	jthrowable exception = NULL;
+
+	// Build AudioAttributes with usage/content type matching legacy STREAM_MUSIC
+	if (!failed) {
+		jmethodID audioAttributesBuilderCtor = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "<init>", "()V");
+		audioAttributesBuilder = (*at->env)->NewObject(at->env, at->audioAttributesBuilderClass, audioAttributesBuilderCtor);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception creating AudioAttributes.Builder");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID setUsageMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setUsage", "(I)Landroid/media/AudioAttributes$Builder;");
+		(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setUsageMethod, AUDIO_USAGE_MEDIA);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioAttributes.Builder.setUsage");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID setContentTypeMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setContentType", "(I)Landroid/media/AudioAttributes$Builder;");
+		(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setContentTypeMethod, AUDIO_CONTENT_TYPE_MUSIC);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioAttributes.Builder.setContentType");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	// Add FLAG_HW_AV_SYNC for passthrough audio (compressed formats)
+	if (!failed && at->passthrough > 0) {
+		jmethodID setFlagsMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setFlags", "(I)Landroid/media/AudioAttributes$Builder;");
+		(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setFlagsMethod, FLAG_HW_AV_SYNC);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioAttributes.Builder.setFlags");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID buildAttributesMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "build", "()Landroid/media/AudioAttributes;");
+		audioAttributes = (*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, buildAttributesMethod);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioAttributes.Builder.build");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	// Build AudioFormat describing the PCM/compressed stream
+	if (!failed) {
+		jmethodID audioFormatBuilderCtor = (*at->env)->GetMethodID(at->env, at->audioFormatBuilderClass, "<init>", "()V");
+		audioFormatBuilder = (*at->env)->NewObject(at->env, at->audioFormatBuilderClass, audioFormatBuilderCtor);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception creating AudioFormat.Builder");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID setSampleRateMethod = (*at->env)->GetMethodID(at->env, at->audioFormatBuilderClass, "setSampleRate", "(I)Landroid/media/AudioFormat$Builder;");
+		(*at->env)->CallObjectMethod(at->env, audioFormatBuilder, setSampleRateMethod, sampleRateInHz);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioFormat.Builder.setSampleRate");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID setChannelMaskMethod = (*at->env)->GetMethodID(at->env, at->audioFormatBuilderClass, "setChannelMask", "(I)Landroid/media/AudioFormat$Builder;");
+		(*at->env)->CallObjectMethod(at->env, audioFormatBuilder, setChannelMaskMethod, channelConfig);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioFormat.Builder.setChannelMask");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID setEncodingMethod = (*at->env)->GetMethodID(at->env, at->audioFormatBuilderClass, "setEncoding", "(I)Landroid/media/AudioFormat$Builder;");
+		(*at->env)->CallObjectMethod(at->env, audioFormatBuilder, setEncodingMethod, audioFormat);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioFormat.Builder.setEncoding");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (!failed) {
+		jmethodID buildFormatMethod = (*at->env)->GetMethodID(at->env, at->audioFormatBuilderClass, "build", "()Landroid/media/AudioFormat;");
+		audioFormatObj = (*at->env)->CallObjectMethod(at->env, audioFormatBuilder, buildFormatMethod);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioFormat.Builder.build");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	// audioTrack will be saved in at->obj if created correctly
+	if (!failed) {
+		jmethodID audioTrackCtor = (*at->env)->GetMethodID(at->env, at->audiotrackClass, "<init>", "(Landroid/media/AudioAttributes;Landroid/media/AudioFormat;III)V");
+		audioTrack = (*at->env)->NewObject(at->env, at->audiotrackClass, audioTrackCtor,
+			audioAttributes, audioFormatObj, at->buf_size, mode, 0);
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during AudioTrack(AudioAttributes, AudioFormat, bufferSize, mode, session) constructor call");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+		}
+	}
+
+	if (audioAttributesBuilder) {
+		(*at->env)->DeleteLocalRef(at->env, audioAttributesBuilder);
+	}
+	if (audioFormatBuilder) {
+		(*at->env)->DeleteLocalRef(at->env, audioFormatBuilder);
+	}
+	if (audioAttributes) {
+		(*at->env)->DeleteLocalRef(at->env, audioAttributes);
+	}
+	if (audioFormatObj) {
+		(*at->env)->DeleteLocalRef(at->env, audioFormatObj);
 	}
 
 	jobject playbackParams;
 
-	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23 && fabsf(as - 1.0f) > 1e-6f) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f", as);
+	if(!failed && is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23 && fabsf(as - 1.0f) > 1e-6f) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f (ENTERING speed set block)", as);
 		// get current audioparams
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params calling getPlaybackParams");
 		playbackParams = (*at->env)->CallObjectMethod(at->env, audioTrack,
 			(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params getPlaybackParams returned, calling setSpeed");
 
 		// change that audioparam's speed
 		(*at->env)->CallObjectMethod(at->env, playbackParams,
 				(*at->env)->GetMethodID(at->env, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), as);
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params setSpeed completed");
 
 		exception = (*at->env)->ExceptionOccurred(at->env);
 		if (exception) { // not failing
@@ -457,10 +685,25 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		}
 
 		// set audiotrack's audioparams
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params calling setPlaybackParams");
 		(*at->env)->CallVoidMethod(at->env, audioTrack,
 				(*at->env)->GetMethodID(at->env, at->audiotrackClass, "setPlaybackParams", "(Landroid/media/PlaybackParams;)V"), playbackParams);
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params setPlaybackParams completed");
+
+		// Check for exception after setPlaybackParams
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			ERR LOG("exception during setPlaybackParams - buffer may be too small for requested speed");
+			(*at->env)->ExceptionDescribe(at->env);
+			(*at->env)->ExceptionClear(at->env);
+			failed = 1;
+			audio_interface_set_audio_speed(1.0f); // revert to 1x ratio
+		} else {
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params setPlaybackParams SUCCESS - audio speed should be %.2fx", as);
+		}
 	} else {
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params not applying setSpeed on AudioTrack PlaybackParams" );
+		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params not applying setSpeed on AudioTrack PlaybackParams (failed=%d, is_enabled=%d, passthrough=%d, api=%d, speed_diff=%.3f)",
+			failed, is_audio_speed_enabled, at->passthrough, device_get_android_api(), fabsf(as - 1.0f));
 	}
 
 	if (!failed) {

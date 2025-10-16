@@ -76,26 +76,24 @@ char *ms_to_hms_string(int ms, char *buffer, int buffer_size);
 
 int adjust_oom(pid_t pid, int value);
 
-#define RST_TO_TS( value, return_type ) ( (return_type)_rst_to_ts( (double)( value ) ) )
-#define TS_TO_RST( value, return_type ) ( (return_type)_ts_to_rst( (double)( value ) ) )
-
-/*
-#define RST_TO_TS( value, return_type ) \
-	( ( { \
-		float audiospeed = get_effective_audio_speed(); \
-		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) / audiospeed : ( value ); \
-	} ) )
-
-#define TS_TO_RST( value, return_type ) \
-	( ( { \
-		float audiospeed = get_effective_audio_speed(); \
-		( fabsf( audiospeed - 1.0f ) > 1e-6f ) ? ( value ) * audiospeed : ( value ); \
-	} ) )
-*/
-
 float get_effective_audio_speed( void );
-double _rst_to_ts( double time_ms );
-double _ts_to_rst( double time_ms );
+
+double rst_to_ts_time( double time_ms );
+double rst_to_ts_delta( double time_ms );
+double ts_to_rst_time( double time_ms );
+double ts_to_rst_delta( double time_ms );
+
+// *_TIME helpers are for absolute timestamps: convert between rst↔ts while keeping
+// continuity via the current anchor pair.
+#define RST_TO_TS_TIME( value, return_type ) ( (return_type)rst_to_ts_time( (double)( value ) ) )
+#define TS_TO_RST_TIME( value, return_type ) ( (return_type)ts_to_rst_time( (double)( value ) ) )
+
+// *_DELTA helpers are for durations/intervals only: rescale a delta without touching anchors.
+#define RST_TO_TS_DELTA( value, return_type ) ( (return_type)rst_to_ts_delta( (double)( value ) ) )
+#define TS_TO_RST_DELTA( value, return_type ) ( (return_type)ts_to_rst_delta( (double)( value ) ) )
+
+void timeline_map_apply( double rst_anchor_ms, double ts_anchor_ms, float speed );
+
 int is_audio_speed_changed( float target_speed );
 
 #endif

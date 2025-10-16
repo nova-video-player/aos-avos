@@ -133,7 +133,7 @@ static void _wait( STREAM *s, int wait )
 				}
 				stream_yield_RT();
 			}
-			_add_audio_time( s, RST_TO_TS(to_wait, int) );
+			_add_audio_time( s, RST_TO_TS_DELTA(to_wait, int) );
 
 			s->audio_sink->write( s, &frame );
 			wait -= to_wait;
@@ -336,7 +336,7 @@ serprintf(" ae! ");
 			} 
 		} else {
 							if( !s->audio->vbr && s->audio->bytesPerSec ) {
-					_add_audio_time( s, RST_TO_TS(decoded * 1000 / s->audio->bytesPerSec, int) );
+					_add_audio_time( s, RST_TO_TS_DELTA(decoded * 1000 / s->audio->bytesPerSec, int) );
 				}
 		}
 		
@@ -368,7 +368,7 @@ serprintf(" ae! ");
 						if( s->audio->samplesPerSec ) {
 							s->audio_samples += ((passthrough == 2)?audio_frame.fakeSize : size_written) / s->audio->bytesPerFrame;
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
-							_set_audio_time( s, s->audio_ref_time + RST_TO_TS(delta, int) );
+							_set_audio_time( s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int) );
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}

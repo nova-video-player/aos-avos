@@ -32,6 +32,7 @@
 #include <stdlib.h>
 
 #include <signal.h>
+#include <math.h>
 
 #ifdef CONFIG_STREAM
 #define DBGV if(Debug[DBG_VID])
@@ -549,30 +550,30 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( is_audio_speed_changed( av_speed ) ) {
 		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
 
-		// Save current time in TIMESTAMP domain (media timeline) - NOT affected by speed scaling
-		// stream_get_current_time() returns RST which changes with speed, causing backward seeks
-		// Use s->video_time or s->audio_time directly (in TS domain)
 		int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
-
-		// Convert TS to RST using OLD speed to get the seek target
-		int stream_current_time_rst = TS_TO_RST( current_time_ts, int );
+		if( current_time_ts < 0 ) {
+			current_time_ts = 0;
+		}
+		int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+		if( stream_current_time_rst < 0 ) {
+			stream_current_time_rst = 0;
+		}
 
 		DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d\n", current_time_ts, stream_current_time_rst );
 
-		// Change audio hardware speed
-		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
+		int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
+		float applied_speed = audio_interface_get_audio_speed();
 
-		// Seek to current time to flush and realign to keyframes
-		// Use the RST value calculated with OLD speed before we changed it
-		if( stream_current_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
-			stream_seek_time( s, stream_current_time_rst, STREAM_SEEK_BACKWARD, 0 );
-		} else {
-			serprintf( "stream:stream_set_av_speed DO NOT SEEK stream_current_time=%d<=0\n", stream_current_time_rst );
+		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
+
+		DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
+					   stream_current_time_rst, current_time_ts, applied_speed, rc );
+
+		if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
+			serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
+					   av_speed, applied_speed, rc );
 		}
-
-		DBG serprintf( "stream:stream_set_av_speed time_before=%d time_after=%d\n", stream_current_time_rst, stream_get_current_time( s, NULL ) );
-	}
-	else {
+	} else {
 		DBG serprintf( "stream:stream_set_av_speed no audio speed change, ensured video speed %f\n", av_speed );
 	}
 

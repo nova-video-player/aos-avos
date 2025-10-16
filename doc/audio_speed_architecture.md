@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock and a unique video synchronization mechanism in the sink. For speed changes themselves, a seek-based approach is used to ensure clean state transitions by flushing buffers.
+This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a unique video synchronization mechanism in the sink. Speed changes are now applied seamlessly by retargeting the timeline mapping instead of issuing a self-seek.
 
 ## Time Domains
 
@@ -18,7 +18,7 @@ It is important to understand that wall clock progresses at ts rate: `delta_wc =
 
 ### Key Relationship
 
-`ts = rst / audio_speed` and `rst = ts * audio_speed`. The `RST_TO_TS` and `TS_TO_RST` macros are used for these conversions.
+`ts = rst / audio_speed` and `rst = ts * audio_speed`. Absolute conversions use the `RST_TO_TS_TIME` / `TS_TO_RST_TIME` helpers, while durations use the `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA` helpers so anchors are only applied when needed.
 
 ## Core Architecture
 
@@ -28,12 +28,22 @@ The `ts` domain is created at the earliest possible stage: the parser. In `strea
 
 ```c
 // Simplified from the parser
-packet.pts = RST_TO_TS(packet.pts, int64_t);
-packet.dts = RST_TO_TS(packet.dts, int64_t);
-packet.duration = RST_TO_TS(packet.duration, int64_t);
+packet.pts = RST_TO_TS_TIME(packet.pts, int64_t);
+packet.dts = RST_TO_TS_TIME(packet.dts, int64_t);
+packet.duration = RST_TO_TS_DELTA(packet.duration, int64_t);
 ```
 
 This means that any component that receives data from the parser (e.g., `cdata->time`, `frame->time`, `s->video_time`) operates in the `ts` domain.
+
+### Timeline Mapping (Anchors)
+
+Speed changes no longer flush the pipeline. Instead, the player maintains an anchored mapping between `rst` and `ts`:
+
+- `timeline_map_apply(rst_anchor, ts_anchor, speed)` installs a new piecewise-linear mapping that preserves continuity at the current playback position.
+- `rst_to_ts_time` / `ts_to_rst_time` convert absolute timestamps using the anchors.
+- `rst_to_ts_delta` / `ts_to_rst_delta` rescale pure durations without touching the anchors.
+
+Whenever `stream_set_av_speed` succeeds (or the audio hardware reports a quantised ratio), the current playback position is captured and used as the new anchor so in-flight buffers keep their ordering.
 
 ### A/V Synchronization and Video Pacing
 
@@ -75,7 +85,7 @@ Container-level metadata like `duration` and `start_time` are read in their orig
 | `s->audio->bytesPerSec` | N/A | Unscaled property: The data rate of the audio stream in bytes per second. |
 | `s->video->bytesPerSec` | N/A | Unscaled property: The data rate of the video stream in bytes per second. |
 | `s->audio->bytesPerFrame`| N/A | Unscaled property: The size of a single audio frame in bytes. |
-| `s->sink_ref_time`| `wc` | A wall-clock anchor time, used to align the `ts` and `wc` timelines. Note: usage is inconsistent in the code. |
+| `s->sink_ref_time`| `wc` | A wall-clock anchor time, used to align the `ts` and `wc` timelines. |
 | `s->vid_ref_time` | `ts` | A time-scaled anchor timestamp, used to align the `ts` and `wc` timelines. |
 | `stream_get_current_time()` | `rst` | **Returns** the current playback position in `rst` for UI purposes (converts from `s->video_time`). |
 | `stream_seek_time()` | `rst` | **Accepts** a seek position in `rst` from the UI. |
@@ -90,13 +100,13 @@ Container-level metadata like `duration` and `start_time` are read in their orig
 
 ## Design Philosophy
 
-The seek-based approach for applying speed changes prioritizes:
+The seamless approach for applying speed changes prioritizes:
 
-1. **Reliability over Seamlessness:** Clean state transitions prevent timing artifacts.
-2. **Simplicity over Complexity:** Reduces maintenance burden.
-3. **Hardware Compatibility:** Works reliably by using standard seek/flush mechanisms.
+1. **Continuity of buffered data:** Anchors guarantee that timestamps never jump backwards, so decoder and renderer queues stay valid without flushing.
+2. **Simplicity of call sites:** Every conversion goes through the same helpers, eliminating special cases for “speed == 1.0”.
+3. **Hardware compatibility:** The actual ratio reported by the audio hardware (even if quantised) is fed back into the mapping so MediaCodec pacing continues to match.
 
-This architecture ensures robust audio speed changes while maintaining clear separation between time domains.
+This architecture delivers seamless speed changes while maintaining clear separation between time domains.
 
 ### Time Domain Equivalence: `ts` vs `wc`
 

@@ -1584,6 +1584,12 @@ serprintf("error in stream_init\r\n");
 
 	s->open = 1;
 
+	// Align timeline mapping with the currently effective audio speed at stream start.
+	if( audio_interface_is_audio_speed_enabled() ) {
+		float current_speed = audio_interface_get_audio_speed();
+		timeline_map_apply( 0.0, 0.0, current_speed );
+	}
+
 	if( src )
 		stream_url_cpy( &s->src, src );
 	else
@@ -2622,7 +2628,7 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	// a sink might want that info
 	frame->aspect_n = s->video->aspect_n,
 	frame->aspect_d = s->video->aspect_d;
-	frame->duration = RST_TO_TS(s->video->msPerFrame, int);
+	frame->duration = RST_TO_TS_DELTA(s->video->msPerFrame, int);
 				
 	pthread_mutex_lock( &s->video_sink_mutex );
 	s->sink_delay = frame->blit_time - s->video_sink->put( s->video_sink, frame ); 	
@@ -2706,25 +2712,25 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 			if( s->drop > 0 ) {
 				// drop one frame
 				s->drop --;
-				s->sink_ref_time -= RST_TO_TS(s->video->msPerFrame, int);
+				s->sink_ref_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
 				frames_dropped ++;
 				DBG serprintf("FRAME_DROP: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
-					RST_TO_TS(s->video->msPerFrame, int), audio_interface_get_audio_speed(), s->sink_ref_time);
+					RST_TO_TS_DELTA(s->video->msPerFrame, int), audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
-					s->video_time += RST_TO_TS(s->video->msPerFrame, int);
+					s->video_time += RST_TO_TS_DELTA(s->video->msPerFrame, int);
 				}
 			} else if( s->drop < 0 ) {
 				// double one frame
 				s->drop ++;
-				s->sink_ref_time += RST_TO_TS(s->video->msPerFrame, int);
+				s->sink_ref_time += RST_TO_TS_DELTA(s->video->msPerFrame, int);
 				frames_doubled ++;
 				DBG serprintf("FRAME_DOUBLE: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
 					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
-					s->video_time -= RST_TO_TS(s->video->msPerFrame, int);
+					s->video_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
 				}
 			} else {	
 DBGY serprintf("[ %8d] ", frame->time );
@@ -3167,7 +3173,7 @@ static int _handle_video_codec_error( STREAM *s );
 // *****************************************************************************
 static int _check_end( STREAM *s )
 {
-	int stop_time_ts = RST_TO_TS( s->stop_time, int ); // stop_time is external and set in rst
+	int stop_time_ts = RST_TO_TS_TIME( s->stop_time, int ); // stop_time is external and set in rst
 	if( s->stop_time && ( ( s->video->valid && s->video_time > stop_time_ts ) ||
 						  ( !s->video->valid && s->audio_time > stop_time_ts ) ) ) {
 		if( !s->stream_end ) {
@@ -4518,7 +4524,7 @@ int stream_get_time_default( STREAM *s, int *total )
 	if( total )
 		*total = s->duration;
 
-	int time_rst = TS_TO_RST( s->video->valid ? s->video_time : s->audio_time, int ); // ts->rst domain
+	int time_rst = TS_TO_RST_TIME( s->video->valid ? s->video_time : s->audio_time, int ); // ts->rst domain
 	DBGT serprintf( "sgct  pos: %8d  tot %d\r\n", time_rst, total ? *total : -1 );
 	return time_rst;
 }

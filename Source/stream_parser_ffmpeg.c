@@ -940,7 +940,7 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 	int t = ( use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
 	if (t == -1) return -1;
 	t -= ff_p->start_time;
-	return RST_TO_TS(t, int);
+	return RST_TO_TS_TIME(t, int);
 }
 
 // ************************************************************
@@ -954,7 +954,7 @@ static int _get_audio_time( STREAM *s, AVPacket *packet )
 	int t = GET_AUDIO_TS( packet->pts );
 	if (t == STREAM_NO_PTS_VALUE) return STREAM_NO_PTS_VALUE;
 	t -= ff_p->start_time;
-	return RST_TO_TS(t, int);
+	return RST_TO_TS_TIME(t, int);
 }
 
 // ************************************************************
@@ -969,7 +969,7 @@ static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 	int t = GET_SUB_TS( packet->pts );
 	if (t == -1) return -1;
 	t -= ff_p->start_time;
-	return RST_TO_TS(t, int);
+	return RST_TO_TS_TIME(t, int);
 }
 
 // ************************************************************
@@ -1488,7 +1488,7 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 
 	
 	int duration_rst = GET_SUB_TS( packet->duration );
-	int duration_ts = RST_TO_TS(duration_rst, int);
+	int duration_ts = RST_TO_TS_DELTA(duration_rst, int);
 	if( s->subtitle->format == SUB_FORMAT_SSA ) {
 		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {

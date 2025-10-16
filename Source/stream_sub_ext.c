@@ -254,7 +254,7 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 // *************************
 int stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 {
-	int rst_time = TS_TO_RST(time, int);
+	int rst_time = TS_TO_RST_TIME(time, int);
 	SUB_PRIV *p = s->subtitle_priv;
 	if( s->subtitle->stream != p->stream ) {
 		p->stream = s->subtitle->stream;
@@ -349,8 +349,8 @@ DBG2 serprintf("sub: out  [%8d] %8d -> %8d TOP[%s] BOT[%s]\r\n", time, start, en
 			*dst = '\0';
 		}
 			
-		frame->time      = RST_TO_TS(start, int);
-		frame->duration  = RST_TO_TS(end - start, int);
+		frame->time      = RST_TO_TS_TIME(start, int);
+		frame->duration  = RST_TO_TS_DELTA(end - start, int);
 
 		p->sub = p->sub->next;
 		return 0;

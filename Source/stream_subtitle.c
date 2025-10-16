@@ -119,7 +119,7 @@ DBG serprintf("[diff %4d]  ", f->time - t );
 	}
 	
 	// we need to adjust the time the users sees for the delay:
-	f->time += RST_TO_TS(s->subtitle_offset, int);
+	f->time += RST_TO_TS_DELTA(s->subtitle_offset, int);
 	
 	if( s->subtitle->gfx ) {
 DBG serprintf("sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", s->video_time, f->time, f->duration, f->window.width, f->window.height );

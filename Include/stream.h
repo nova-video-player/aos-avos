@@ -611,6 +611,8 @@ typedef struct STREAM {
 	
 	STREAM_DEC_VIDEO *video_dec;
 	int		video_dec_open;
+	int		video_speed_num;
+	int		video_speed_den;
 	STREAM_RC 	video_rc;
 	
 	STREAM_VIDEO_MANGLER   *video_mangler;

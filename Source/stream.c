@@ -199,6 +199,8 @@ static void _stream_reset( STREAM *s )
 	memset( s, 0, sizeof( STREAM ) );
 	s->vol_l = s->vol_r = AUDIO_VOLUME_MAX;
 	s->cpu_prio = STREAM_CPU_ANY;
+	s->video_speed_num = 100;
+	s->video_speed_den = 100;
 	
 	// set pointer for "audio"/"video"
 	av_init_props( s );
@@ -528,8 +530,23 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
 
-	if( audio_interface_is_audio_speed_enabled() && is_audio_speed_changed( av_speed ))
-	{
+	if( !audio_interface_is_audio_speed_enabled() ) {
+		DBG serprintf( "stream:stream_set_av_speed audio speed disabled %f\n", av_speed );
+		return 0;
+	}
+
+	int target_num = (int)( av_speed * 100 + 0.5f );
+	int target_den = 100;
+	target_num = MAX( 1, target_num );
+
+	s->video_speed_num = target_num;
+	s->video_speed_den = target_den;
+
+	if( s->video_dec && s->video_dec->set_playback_speed ) {
+		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
+	}
+
+	if( is_audio_speed_changed( av_speed ) ) {
 		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
 
 		// Save current time in TIMESTAMP domain (media timeline) - NOT affected by speed scaling
@@ -545,11 +562,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		// Change audio hardware speed
 		audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 
-		// Notify the video decoder of the speed change
-		if( s->video_dec && s->video_dec->set_playback_speed ) {
-			s->video_dec->set_playback_speed( s->video_dec, 100, (int)( av_speed * 100 + 0.5 ) );
-		}
-
 		// Seek to current time to flush and realign to keyframes
 		// Use the RST value calculated with OLD speed before we changed it
 		if( stream_current_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
@@ -561,7 +573,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed time_before=%d time_after=%d\n", stream_current_time_rst, stream_get_current_time( s, NULL ) );
 	}
 	else {
-		DBG serprintf( "stream:stream_set_av_speed do nothing same speed %f\n", av_speed );
+		DBG serprintf( "stream:stream_set_av_speed no audio speed change, ensured video speed %f\n", av_speed );
 	}
 
 	return 0;

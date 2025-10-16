@@ -635,6 +635,13 @@ serprintf("error, could not prepare video dec!\r\n");
 		}
 DBGS serprintf("stream_open_video_dec: %s/%d/%d done!\r\n", s->video_dec->name, s->video_dec->cpu, s->video->no_extra);
 
+		if( audio_interface_is_audio_speed_enabled() && s->video_dec->set_playback_speed ) {
+			int speed_num = s->video_speed_num ? s->video_speed_num : 100;
+			int speed_den = s->video_speed_den ? s->video_speed_den : 100;
+			DBG serprintf( "stream_open_video_dec: apply cached video speed %d/%d\n", speed_num, speed_den );
+			s->video_dec->set_playback_speed( s->video_dec, speed_den, speed_num );
+		}
+
 		return 0;
 next:
 		if (s->video_dec) {

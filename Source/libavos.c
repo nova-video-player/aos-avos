@@ -46,7 +46,9 @@ void device_config_set_subtitlepath(const char *path);
 void device_config_set_decoder(int decoder);
 void device_config_set_audio_interface(int audio_interface);
 void device_config_set_output_sample_rate(int sample_rate);
+#ifdef CONFIG_ANDROID
 void set_android_sync(int enable);
+#endif
 
 static pthread_t mainloop_thread;
 
@@ -163,7 +165,11 @@ void libavos_set_audio_speed(float speed)
 
 void libavos_set_android_frame_timing(int enable)
 {
+#ifdef CONFIG_ANDROID
 	set_android_sync(enable);
+#else
+	(void)enable;
+#endif
 }
 
 void libavos_enable_audio_speed(int enable)

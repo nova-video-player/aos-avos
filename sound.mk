@@ -27,6 +27,10 @@ else ifeq ($(AUDIO_INTERFACE),TINYALSA)
 CSRC += audio_interface_tinyalsa.c
 SHARED_LIBS += -ltinyalsa
 
+else ifeq ($(AUDIO_INTERFACE),SDL)
+CSRC += audio_interface_sdl.c
+SHARED_LIBS += -lSDL2
+
 else ifeq ($(AUDIO_INTERFACE),ANDROID)
 CSRC += audio_interface_opensles.c
 CSRC += audio_interface_audiotrack.c

@@ -348,8 +348,8 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->valid           = 1;
 		avos_frame->error           = 0;
 		avos_frame->type            = vframe->pict_type - 1;
-		avos_frame->interlaced      = (vframe->flags & AV_FRAME_FLAG_INTERLACED);
-		avos_frame->top_field_first = (vframe->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
+		avos_frame->interlaced      = !!(vframe->flags & AV_FRAME_FLAG_INTERLACED);
+		avos_frame->top_field_first = !!(vframe->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
 		avos_frame->pts             = vframe->pts;
 
 		avos_frame->width           = vctx->width;

@@ -70,31 +70,82 @@ struct ctx {
 	int64_t pts;                  // Presentation timestamp
 };
 
+static void ctx_free(struct ctx *ctx)
+{
+	if (!ctx) {
+		return;
+	}
+
+	if (ctx->swr_ctx) {
+		swr_free(&ctx->swr_ctx);
+	}
+	if (ctx->frame) {
+		av_frame_free(&ctx->frame);
+	}
+	if (ctx->pkt) {
+		av_packet_free(&ctx->pkt);
+	}
+	if (ctx->fifo) {
+		av_audio_fifo_free(ctx->fifo);
+	}
+	if (ctx->enc_ctx) {
+		avcodec_free_context(&ctx->enc_ctx);
+	}
+	if (ctx->encode_buffer) {
+		afree(ctx->encode_buffer);
+	}
+
+	afree(ctx);
+}
+
+static int init_channel_layout(AVChannelLayout *layout, int channels)
+{
+	if (!layout || channels <= 0) {
+		return -1;
+	}
+
+	int ret = -1;
+
+	switch (channels) {
+	case 1:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_MONO);
+		break;
+	case 2:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_STEREO);
+		break;
+	case 3:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_SURROUND);
+		break;
+	case 4:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_QUAD);
+		break;
+	case 5:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_5POINT0);
+		break;
+	default:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_5POINT1);
+		break;
+	}
+
+	if (ret < 0) {
+		int fallback_channels = MIN(channels, 6);
+		av_channel_layout_default(layout, fallback_channels);
+		if (layout->nb_channels != fallback_channels) {
+			serprintf("faac3: failed to init channel layout fallback (channels=%d)\n", fallback_channels);
+			return -1;
+		}
+		serprintf("faac3: using default channel layout fallback (%d channels)\n", fallback_channels);
+	}
+
+	return 0;
+}
+
 static int _delete(STREAM_FILTER_AUDIO *f)
 {
 	serprintf("faac3: delete\n");
 	if (f && f->priv) {
-		struct ctx *ctx = f->priv;
-
-		if (ctx->swr_ctx) {
-			swr_free(&ctx->swr_ctx);
-		}
-		if (ctx->frame) {
-			av_frame_free(&ctx->frame);
-		}
-		if (ctx->pkt) {
-			av_packet_free(&ctx->pkt);
-		}
-		if (ctx->fifo) {
-			av_audio_fifo_free(ctx->fifo);
-		}
-		if (ctx->enc_ctx) {
-			avcodec_free_context(&ctx->enc_ctx);
-		}
-		if (ctx->encode_buffer) {
-			afree(ctx->encode_buffer);
-		}
-		afree(f->priv);
+		ctx_free(f->priv);
+		f->priv = NULL;
 	}
 	if (f) {
 		afree(f);
@@ -139,13 +190,10 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	ctx->enc_ctx->bit_rate = AC3_BITRATE;
 	ctx->enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;  // AC3 encoder uses planar float
 
-	// Set channel layout based on input channels
-	if (audio->channels >= 6) {
-		av_channel_layout_from_mask(&ctx->enc_ctx->ch_layout, AV_CH_LAYOUT_5POINT1);
-	} else if (audio->channels == 2) {
-		av_channel_layout_from_mask(&ctx->enc_ctx->ch_layout, AV_CH_LAYOUT_STEREO);
-	} else {
-		av_channel_layout_from_mask(&ctx->enc_ctx->ch_layout, AV_CH_LAYOUT_MONO);
+	// Set encoder channel layout based on input channels
+	if (init_channel_layout(&ctx->enc_ctx->ch_layout, audio->channels) < 0) {
+		serprintf("faac3: failed to select encoder channel layout (%d channels)\n", audio->channels);
+		goto error;
 	}
 
 	// Open encoder - if this fails, we might still be in passthrough mode
@@ -163,13 +211,10 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	}
 
 	// Allocate resampler if sample rate or format conversion needed
-	AVChannelLayout in_ch_layout;
-	if (audio->channels >= 6) {
-		av_channel_layout_from_mask(&in_ch_layout, AV_CH_LAYOUT_5POINT1);
-	} else if (audio->channels == 2) {
-		av_channel_layout_from_mask(&in_ch_layout, AV_CH_LAYOUT_STEREO);
-	} else {
-		av_channel_layout_from_mask(&in_ch_layout, AV_CH_LAYOUT_MONO);
+	AVChannelLayout in_ch_layout = { 0 };
+	if (init_channel_layout(&in_ch_layout, audio->channels) < 0) {
+		serprintf("faac3: failed to select input channel layout (%d channels)\n", audio->channels);
+		goto error;
 	}
 
 	if (swr_alloc_set_opts2(&ctx->swr_ctx,
@@ -177,8 +222,10 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 			&in_ch_layout, AV_SAMPLE_FMT_S16, audio->samplesPerSec,
 			0, NULL) < 0) {
 		serprintf("faac3: failed to allocate resampler\n");
+		av_channel_layout_uninit(&in_ch_layout);
 		goto error;
 	}
+	av_channel_layout_uninit(&in_ch_layout);
 
 	if (swr_init(ctx->swr_ctx) < 0) {
 		serprintf("faac3: failed to initialize resampler\n");
@@ -228,7 +275,8 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	return 0;
 
 error:
-	_delete(f);
+	ctx_free(ctx);
+	f->priv = NULL;
 	return -1;
 }
 

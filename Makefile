@@ -73,7 +73,7 @@ INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/
 INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/freetype2
 INCLUDES += -I/opt/homebrew/include
 
-SHARED_LIBS += -lzip -pthread -lm -lSDL2
+SHARED_LIBS += -lzip -pthread -lm
 
 LDFLAGS += -rdynamic
 

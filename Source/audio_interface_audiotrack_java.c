@@ -75,7 +75,14 @@ struct audio_ctx {
 	jclass playbackParamsClass;
 	jclass audioAttributesBuilderClass;
 	jclass audioFormatBuilderClass;
-	uint64_t i_samples_written; // Total samples written to AudioTrack (for buffer fullness tracking)
+	uint64_t i_samples_written; // Total samples written to AudioTrack (for dynamic latency tracking)
+	jclass audioTimestampClass;
+	jobject audioTimestamp;
+	int64_t last_timestamp_ns;
+	uint64_t last_timestamp_frames;
+	jmethodID getTimestampMethodID;
+	jfieldID framePositionFieldID;
+	jfieldID nanoTimeFieldID;
 };
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
@@ -83,6 +90,7 @@ static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
 static char * PLAYBACKPARAMS_CLASS_NAME = "android/media/PlaybackParams";
 static char * AUDIOATTRIBUTES_BUILDER_CLASS_NAME = "android/media/AudioAttributes$Builder";
 static char * AUDIOFORMAT_BUILDER_CLASS_NAME = "android/media/AudioFormat$Builder";
+static char * AUDIOTIMESTAMP_CLASS_NAME = "android/media/AudioTimestamp";
 
 static int buffer_scale = 1;
 
@@ -242,7 +250,7 @@ static inline JNIEnv * attach_thread_current_vm() {
 			ERR serprintf("ERROR: audio_interface_audiotrack_java:attach_thread_current_vm Attach to JVM failed\n");
 			return NULL;
 		} else {
-			return NULL;
+			return myEnv;
 		}
 	} else {
 		return myEnv;
@@ -289,6 +297,50 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->playbackParamsClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, PLAYBACKPARAMS_CLASS_NAME));
 	at->audioAttributesBuilderClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOATTRIBUTES_BUILDER_CLASS_NAME));
 	at->audioFormatBuilderClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOFORMAT_BUILDER_CLASS_NAME));
+	at->audioTimestampClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOTIMESTAMP_CLASS_NAME));
+
+	// Create AudioTimestamp object for getTimestamp() calls (API 19+)
+	// and cache method/field IDs for later use
+	at->getTimestampMethodID = NULL;
+	at->framePositionFieldID = NULL;
+	at->nanoTimeFieldID = NULL;
+	at->audioTimestamp = NULL;
+
+	if (at->audioTimestampClass) {
+		// Cache the getTimestamp method ID
+		at->getTimestampMethodID = (*at->env)->GetMethodID(at->env, at->audiotrackClass,
+			"getTimestamp", "(Landroid/media/AudioTimestamp;)Z");
+		if ((*at->env)->ExceptionCheck(at->env)) {
+			(*at->env)->ExceptionClear(at->env);
+			at->getTimestampMethodID = NULL;
+		}
+
+		// Cache field IDs for AudioTimestamp
+		at->framePositionFieldID = (*at->env)->GetFieldID(at->env, at->audioTimestampClass, "framePosition", "J");
+		if ((*at->env)->ExceptionCheck(at->env)) {
+			(*at->env)->ExceptionClear(at->env);
+			at->framePositionFieldID = NULL;
+		}
+
+		at->nanoTimeFieldID = (*at->env)->GetFieldID(at->env, at->audioTimestampClass, "nanoTime", "J");
+		if ((*at->env)->ExceptionCheck(at->env)) {
+			(*at->env)->ExceptionClear(at->env);
+			at->nanoTimeFieldID = NULL;
+		}
+
+		// Create AudioTimestamp instance if we have all the required IDs
+		if (at->getTimestampMethodID && at->framePositionFieldID && at->nanoTimeFieldID) {
+			jmethodID audioTimestampCtor = (*at->env)->GetMethodID(at->env, at->audioTimestampClass, "<init>", "()V");
+			if (audioTimestampCtor) {
+				jobject localTimestamp = (*at->env)->NewObject(at->env, at->audioTimestampClass, audioTimestampCtor);
+				if (localTimestamp) {
+					at->audioTimestamp = (*at->env)->NewGlobalRef(at->env, localTimestamp);
+					(*at->env)->DeleteLocalRef(at->env, localTimestamp);
+					DBG LOG("AudioTimestamp support initialized successfully");
+				}
+			}
+		}
+	}
 
 	return at;
 }
@@ -311,6 +363,10 @@ static int audiotrack_close(audio_ctx_t **pat)
 		(*at->env)->DeleteGlobalRef(at->env, at->playbackParamsClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audioAttributesBuilderClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audioFormatBuilderClass);
+		if (at->audioTimestamp)
+			(*at->env)->DeleteGlobalRef(at->env, at->audioTimestamp);
+		if (at->audioTimestampClass)
+			(*at->env)->DeleteGlobalRef(at->env, at->audioTimestampClass);
 		//if (at->willDetach)
 		//	(*myVm)->DetachCurrentThread(myVm);
 		at->init = 0;
@@ -720,6 +776,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	audiotrack_update_latency(at, at->env);
 
 	at->init = 1;
+	// Initialize timestamp tracking for dynamic latency calculation
+	at->i_samples_written = 0;
+	at->last_timestamp_ns = 0;
+	at->last_timestamp_frames = 0;
 	DBG LOG("track created");
 
 	return 0;
@@ -786,6 +846,11 @@ ERR		LOG("track not valid, error");
 	ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
 DBG2	LOG("wrote %d out of %d", ret, len);
 
+	// Track samples written for dynamic latency calculation
+	if (ret > 0) {
+		at->i_samples_written += (uint64_t)(ret / at->frame_size);
+	}
+
 	if (at->passthrough && ret == -6 /* ERROR_DEAD_OBJECT */) {
 ERR		LOG("audiotrack_interface_audiotrack_java:audiotrack_write dead object -> call audiotrack_set_output_params");
 		audiotrack_set_passthrough(at, at->passthrough);
@@ -799,8 +864,66 @@ static int audiotrack_get_delay(audio_ctx_t *at)
 ERR		LOG("track not valid, error");
 		return -1;
 	}
-DBG2	LOG("%d:", at->latency);
-	return at->latency;
+
+	// Use AudioTrack.getTimestamp() for dynamic latency calculation (API 19+)
+	// This automatically accounts for Bluetooth and other output latencies
+	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
+		// Fallback to static latency if AudioTimestamp not available
+DBG2		LOG("Using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
+	// IMPORTANT: Get the JNIEnv for the CURRENT thread, not the cached one
+	// audiotrack_get_delay() is called from the audio thread, which is different
+	// from the thread that created at->env
+	JNIEnv *env = attach_thread_current_vm();
+	if (!env) {
+		// Can't attach to current thread, fallback to static latency
+DBG2		LOG("Failed to attach to current thread, using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
+	// Call AudioTrack.getTimestamp(AudioTimestamp)
+	jboolean success = (*env)->CallBooleanMethod(env, at->obj, at->getTimestampMethodID, at->audioTimestamp);
+
+	// Check for exceptions
+	if ((*env)->ExceptionCheck(env)) {
+		(*env)->ExceptionClear(env);
+		DBG2 LOG("Exception in getTimestamp, using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
+	if (!success) {
+		// getTimestamp failed (can happen during warmup or if not supported), use static latency
+DBG2		LOG("getTimestamp returned false, using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
+	// Extract framePosition and nanoTime from AudioTimestamp using cached field IDs
+	int64_t framePosition = (*env)->GetLongField(env, at->audioTimestamp, at->framePositionFieldID);
+	int64_t nanoTime = (*env)->GetLongField(env, at->audioTimestamp, at->nanoTimeFieldID);
+
+	// Calculate delay: (samples_written - samples_presented) / sample_rate * 1000
+	// Note: framePosition is the last frame that was presented
+	uint64_t frames_presented = (uint64_t)framePosition;
+	int64_t frames_pending = (int64_t)at->i_samples_written - (int64_t)frames_presented;
+
+	if (frames_pending < 0) {
+		// This can happen if framePosition wraps around (32-bit) or during initialization
+		frames_pending = 0;
+	}
+
+	// Convert frames to milliseconds: frames / (rate / 1000) = frames * 1000 / rate
+	int delay_ms = (int)((frames_pending * 1000) / at->rate);
+
+	// Cache the timestamp for debugging/monitoring
+	at->last_timestamp_ns = nanoTime;
+	at->last_timestamp_frames = frames_presented;
+
+DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
+		delay_ms, (unsigned long long)at->i_samples_written, (unsigned long long)frames_presented, (long long)frames_pending);
+
+	return delay_ms;
 }
 
 static void audiotrack_flush_output(audio_ctx_t *at)
@@ -814,6 +937,11 @@ ERR		LOG("track not valid, error");
 	attach_thread(at);
 	call_void_method(at, "pause", "()V");
 	call_void_method(at, "flush", "()V");
+
+	// Reset timestamp tracking after flush
+	at->i_samples_written = 0;
+	at->last_timestamp_ns = 0;
+	at->last_timestamp_frames = 0;
 }
 
 static int audiotrack_preload(audio_ctx_t *at)

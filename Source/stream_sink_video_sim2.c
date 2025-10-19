@@ -21,6 +21,7 @@
 #include "stream_resizer.h"
 #include "stream.h"
 #include "stream_alloc.h"
+#include "audio_interface.h"
 #include "util.h"
 #include "fb.h"
 #include "atime.h"
@@ -131,11 +132,22 @@ DBGSI2 serprintf("[[put %8d]]", time );
 static int _get_time( STREAM_SINK_VIDEO *sink )
 {
 	SINK_PRIV *p = sink->priv;
-	
+
 	int diff = atime() - p->venc_ref_time;
 	p->venc_time = p->venc_put_time + diff;
-//serprintf("get %8d + %8d = %8d\n", p->venc_put_time, diff, p->venc_time );	
-	
+
+	// Account for audio latency to sync video with actual audio playback
+	// The audio time reported is ahead of actual playback due to buffering
+	if (sink->ctx) {
+		STREAM *stream = (STREAM *)sink->ctx;
+		if (stream->audio_ctx) {
+			int audio_delay_ms = audio_interface_get_delay(stream->audio_ctx);
+			p->venc_time -= audio_delay_ms;  // Compensate by delaying video
+		}
+	}
+
+//serprintf("get %8d + %8d = %8d\n", p->venc_put_time, diff, p->venc_time );
+
 	return p->venc_time;
 }
 

@@ -43,6 +43,15 @@
 #define DBGQ   	if(Debug[DBG_Q])
 
 static int _sink_force_single_frame = 1;
+static int _sdl_initialized = 0;
+
+// Global SDL context that persists across stream restarts
+typedef struct {
+    SDL_Window *window;
+    SDL_Renderer *renderer;
+} SDL_GLOBAL_CONTEXT;
+
+static SDL_GLOBAL_CONTEXT _sdl_global = {NULL, NULL};
 
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_TOGGLE("sfsf", _sink_force_single_frame );
@@ -88,6 +97,12 @@ static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
     uint8_t *data[4];
     int linesize[4];
     const uint8_t * indata = frame->data[0];
+
+    if (!p->sdl_texture) {
+        serprintf("ERROR: blit_video_frame called but sdl_texture is NULL\n");
+        return;
+    }
+
     av_image_fill_arrays(data, linesize,
                              indata,
                              AV_PIX_FMT_BGR32,
@@ -100,6 +115,7 @@ static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
     SDL_RenderCopy(p->sdl_renderer, p->sdl_texture, NULL, NULL);
     SDL_RenderPresent(p->sdl_renderer);
 }
+
 
 static int _put_time( STREAM_SINK_VIDEO *sink, int time )
 {
@@ -146,14 +162,15 @@ DBGS serprintf("venc_thread::Starting\r\n");
 		if (!p->out_frame) {
 serprintf("venc_thread::stop 0\n");
 			continue;
-		}			
-			
+		}
+
 		VIDEO_FRAME *f = p->out_frame;
 		int venc_time;
 		int blit_duration;
 RETRY:
 		venc_time = _get_time(sink);
 		blit_duration = f->blit_time - venc_time;
+
 
 		int do_render = 1;
 		if( p->venc_put_time == 1 ) {
@@ -339,27 +356,66 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
 {
     SINK_PRIV *p = sink->priv;
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        return -1;
-        }
+    serprintf("sdl_open: initializing SDL for %dx%d\n", p->width, p->height);
 
-    int flags = SDL_WINDOW_SHOWN |
-    (p->sdl_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
-
-     if (SDL_CreateWindowAndRenderer(p->width, p->height,
-                                    flags, &p->sdl_window, &p->sdl_renderer) != 0) {
-            serprintf("Couldn't create window and renderer: %s\n", SDL_GetError());
+    // Only initialize SDL once
+    if (!_sdl_initialized) {
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+            serprintf("SDL_Init failed: %s\n", SDL_GetError());
             return -1;
+        }
+        _sdl_initialized = 1;
+        serprintf("sdl_open: SDL_Init done\n");
     }
 
-    SDL_SetWindowTitle(p->sdl_window, "nova video player (avos)");
-    SDL_SetWindowPosition(p->sdl_window, SDL_WINDOWPOS_CENTERED , SDL_WINDOWPOS_CENTERED );
-    SDL_ShowWindow(p->sdl_window);
+    // Use global SDL context that persists across streams
+    if (_sdl_global.window) {
+        // Window already exists from previous stream
+        serprintf("sdl_open: reusing global SDL window\n");
+        if (p->sdl_texture) {
+            SDL_DestroyTexture(p->sdl_texture);
+            p->sdl_texture = NULL;
+        }
+        // Reuse global renderer
+        p->sdl_window = _sdl_global.window;
+        p->sdl_renderer = _sdl_global.renderer;
+        // Clear renderer
+        SDL_RenderClear(p->sdl_renderer);
+        SDL_RenderPresent(p->sdl_renderer);
+        serprintf("sdl_open: renderer cleared\n");
+    } else {
+        // First run - create window
+        int flags = SDL_WINDOW_SHOWN |
+        (p->sdl_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+
+        serprintf("sdl_open: creating window %dx%d\n", p->width, p->height);
+        if (SDL_CreateWindowAndRenderer(p->width, p->height,
+                                        flags, &p->sdl_window, &p->sdl_renderer) != 0) {
+                serprintf("Couldn't create window and renderer: %s\n", SDL_GetError());
+                return -1;
+        }
+
+        serprintf("sdl_open: window=%p, renderer=%p\n", p->sdl_window, p->sdl_renderer);
+
+        SDL_SetWindowTitle(p->sdl_window, "nova video player (avos)");
+        SDL_SetWindowPosition(p->sdl_window, SDL_WINDOWPOS_CENTERED , SDL_WINDOWPOS_CENTERED );
+        SDL_ShowWindow(p->sdl_window);
+
+        // Store in global context
+        _sdl_global.window = p->sdl_window;
+        _sdl_global.renderer = p->sdl_renderer;
+    }
 
     p->sdl_texture = SDL_CreateTexture(p->sdl_renderer,
                                             SDL_PIXELFORMAT_ABGR8888,
                                             SDL_TEXTUREACCESS_STREAMING,
                                             p->width, p->height);
+    if (!p->sdl_texture) {
+        serprintf("SDL_CreateTexture failed: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    serprintf("sdl_open: texture=%p, SDL ready\n", p->sdl_texture);
     return 0;
 }
 
@@ -391,15 +447,18 @@ DBGS serprintf("stream_sink_video_open: WxH %d x %d  num_frames %d  cached %d\r\
 	
 	_clear( sink );
 	_flush( sink );
-	
+
+	// Initialize SDL BEFORE starting the venc_thread to avoid race condition
+	if( sdl_open(sink) ) {
+		return 1;
+	}
+
 	// lock and start the venc_thread
 	pthread_mutex_lock( &p->venc_mutex );
 	p->venc_run = 1;
 	apthread_create( &p->venc_thread_handle, 0, venc_thread, (void*)sink, "video sink venc" );
 
 	pthread_mutex_unlock( &p->venc_mutex );
-
-    sdl_open(sink);
 
 	sink->is_open = 1;
 
@@ -409,17 +468,17 @@ DBGS serprintf("stream_sink_video_open: WxH %d x %d  num_frames %d  cached %d\r\
 static int sdl_close( STREAM_SINK_VIDEO *sink ) {
     SINK_PRIV *p = sink->priv;
 
-    if (p->sdl_texture)
+    // Only destroy the texture - keep window and renderer for next stream
+    if (p->sdl_texture) {
         SDL_DestroyTexture(p->sdl_texture);
-    p->sdl_texture = NULL;
+        p->sdl_texture = NULL;
+    }
 
-    if (p->sdl_renderer)
-        SDL_DestroyRenderer(p->sdl_renderer);
+    // Clear pointers but don't destroy - they're in global context
     p->sdl_renderer = NULL;
-
-    if (p->sdl_window)
-        SDL_DestroyWindow(p->sdl_window);
     p->sdl_window = NULL;
+
+    serprintf("sdl_close: texture cleaned up, global SDL resources preserved\n");
 
     return 0;
 }

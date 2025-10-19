@@ -106,9 +106,11 @@ int stream_sync_av_delay( STREAM *s )
 		return 0;
 	} 
 	
-	// audio data passes through decoder and sink
+	// audio data passes through decoder, filter, and sink
 	// world time audio decoder delay not dependant on audio speed
 	int codec_delay = s->audio_dec ? s->audio_dec->delay( s->audio ) : 0;
+	// world time audio filter delay (AC3 encoder buffering) not dependant on audio speed
+	int filter_delay = s->audio_filter ? s->audio_filter->delay( s->audio_filter ) : 0;
 	// world time audio sink delay (audiotrack system_delay on android) not dependant on audio speed
 	int sink_delay = s->audio_sink ? s->audio_sink->delay( s ) : 0;
 	// wold time video sink delay not dependant on audio speed
@@ -124,9 +126,9 @@ int stream_sync_av_delay( STREAM *s )
 		// In sample-based sync, the audio sink's sample counter is the master clock.
 		// The codec_delay is upstream from the sink and not part of this clock,
 		// so it's excluded to prevent an incorrect sync bias.
-		return /*codec_delay +*/ sink_delay - video_delay;
+		return /*codec_delay +*/ filter_delay + sink_delay - video_delay;
 	} else {
-		return codec_delay + sink_delay - video_delay;
+		return codec_delay + filter_delay + sink_delay - video_delay;
 	}
 }
 
@@ -144,8 +146,9 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	// Computes video presentation time - audio presentation time
 	// Positive value means video is ahead of audio, negative means audio is ahead
 	// Formula accounts for buffering delays: audio/video timestamps represent generation time,
-	// but actual presentation happens later after passing through decoder/sink pipelines
-	// So the formula is actually: ( video_time - video_delay ) - ( audio_time - ( codec_delay + sink_delay ) ) = video_time - audio_time + codec_delay + sink_delay - video_delay
+	// but actual presentation happens later after passing through decoder/filter/sink pipelines
+	// So the formula is: ( video_time - video_delay ) - ( audio_time - ( codec_delay + filter_delay + sink_delay ) )
+	//                  = video_time - audio_time + codec_delay + filter_delay + sink_delay - video_delay
 	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
 	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
 	return ( video_time - audio_time ) + stream_sync_av_delay( s ) + RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );

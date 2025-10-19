@@ -140,11 +140,28 @@ void libavos_set_output_sample_rate(int sample_rate)
 	device_config_set_output_sample_rate(sample_rate);
 }
 
+static int ac3_recoding_enabled = 0;
+
+int libavos_get_ac3_recoding_enabled(void)
+{
+	return ac3_recoding_enabled;
+}
+
 void libavos_set_passthrough(int force_passthrough)
 {
+	serprintf("libavos_set_passthrough: mode=%d\n", force_passthrough);
 #ifdef CONFIG_SPDIF
 	audio_interface_exit();
-	spdif_set_passthrough(force_passthrough);
+	// Mode 3 is AC3 recoding: enable AC3 filter and use system passthrough
+	if (force_passthrough == 3) {
+		serprintf("libavos_set_passthrough: enabling AC3 recoding\n");
+		ac3_recoding_enabled = 1;
+		spdif_set_passthrough(2);  // Use system encapsulation for AC3 output
+	} else {
+		serprintf("libavos_set_passthrough: disabling AC3 recoding\n");
+		ac3_recoding_enabled = 0;
+		spdif_set_passthrough(force_passthrough);
+	}
 	audio_interface_init();
 #endif
 }

@@ -81,6 +81,10 @@ ifeq ($(AUDIO),ON)
 		DEFINES += -DCONFIG_AUDIO_AGC
 		CSRC_AUDIO += stream_filter_audio_agc.c
 	endif
+	ifeq ($(AUDIO_AC3),ON)
+		DEFINES += -DCONFIG_AUDIO_AC3
+		CSRC_AUDIO += stream_filter_audio_ac3.c
+	endif
 endif
 
 ifeq ($(VIDEO),ON)
@@ -124,7 +128,7 @@ ifeq ($(VIDEO),ON)
 		ifneq (,$(LIBAV_CONFIG_DIR))
 			INCLUDES += -I$(LIBAV_CONFIG_DIR)/include
 		endif
-		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter -lswscale
+		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter -lswscale -lswresample
 	endif
 
 	ifeq ($(VIDEO_REALVIDEO),ON)

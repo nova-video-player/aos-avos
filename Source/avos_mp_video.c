@@ -25,6 +25,8 @@
 #include "stream.h"
 #include "stream_subtitle.h"
 
+extern int libavos_get_ac3_recoding_enabled(void);
+
 #define DBG if(Debug[DBG_VIDEO_PLAYER])
 #define DBG2 if(Debug[DBG_VIDEO_PLAYER] > 1)
 
@@ -472,7 +474,16 @@ int avos_mp_video_setsubtitleratio(avos_mp_t *mp, avos_mp_video_t *video, uint32
 
 int avos_mp_video_setaudiofilter(avos_mp_t *mp, avos_mp_video_t *video, int n, int night_on)
 {
-	stream_set_audio_filter_level(video->s, n, night_on);
+	int forced_level = n;
+	int forced_night = night_on;
+
+	if (libavos_get_ac3_recoding_enabled()) {
+		serprintf("%p|%s: AC3 recoding active, forcing filter on\n", mp, __FUNCTION__);
+		forced_level = 1;
+		forced_night = 0;
+	}
+
+	stream_set_audio_filter_level(video->s, forced_level, forced_night);
 	return AVOS_ERR_OK;
 }
 

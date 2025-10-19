@@ -200,6 +200,9 @@ static inline STREAM_CPU get_cpu_priority( STREAM *s )
 
 STREAM_FILTER_AUDIO *stream_filter_audio_agc_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_ac3_new( void );
+
+extern int libavos_get_ac3_recoding_enabled(void);
 
 // *****************************************************************************
 //
@@ -405,24 +408,46 @@ serprintf("no audio dec found!\r\n");
 // *****************************************************************************
 static int stream_open_audio_filter( STREAM *s )
 {
+#ifdef CONFIG_AUDIO_AC3
+	// Force enable audio filter if AC3 recoding is enabled (passthrough mode 3)
+	if( libavos_get_ac3_recoding_enabled() ) {
+		s->audio_filter_enabled = 1;
+	}
+#endif
+
 	if( s->audio_filter_enabled ) {
+#ifdef CONFIG_AUDIO_AC3
+		// Check if AC3 recoding is enabled (passthrough mode 3)
+		if( libavos_get_ac3_recoding_enabled() ) {
+			s->audio_filter = stream_filter_audio_ac3_new();
+		}
+#endif
 #ifdef CONFIG_AUDIO_COMPRESS
-		s->audio_filter = stream_filter_audio_compress_new();
+		if( !s->audio_filter ) {
+			s->audio_filter = stream_filter_audio_compress_new();
+		}
 #endif
 #ifdef CONFIG_AUDIO_AGC
-		s->audio_filter = stream_filter_audio_agc_new();
+		if( !s->audio_filter ) {
+			s->audio_filter = stream_filter_audio_agc_new();
+		}
 #endif
 		if( s->audio_filter ) {
 DBGS serprintf("stream_open_audio_filter: [%s]\r\n", s->audio_filter->name);
 			if( s->audio_filter->open( s->audio_filter, s->audio ) ) {
 				if( s->audio_filter->delete  ) {
 					s->audio_filter->delete( s->audio_filter );
-				}	
+				}
 				s->audio_filter_enabled = 0;
 				s->audio_filter = NULL;
 				return 1;
 			}
-			stream_set_audio_filter_level( s, s->audio_filter_level, s->audio_filter_night_on );
+			// For AC3 recoding, enable the filter
+			if( libavos_get_ac3_recoding_enabled() ) {
+				stream_set_audio_filter_level( s, 1, 0 );  // enabled=1, night_on=0
+			} else {
+				stream_set_audio_filter_level( s, s->audio_filter_level, s->audio_filter_night_on );
+			}
 		}
 	}
 	return 0;
@@ -1224,8 +1249,9 @@ for( i = 0; i < s->av.as_max; i++ ) {
 }
 }
 
-	// close old audio decoder
+	// close old audio decoder and filter
 	stream_close_audio_dec( s );
+	stream_close_audio_filter( s );
 
 	// stop audio sink
 	if( s->audio_sink) {
@@ -1239,18 +1265,24 @@ for( i = 0; i < s->av.as_max; i++ ) {
 		goto ErrorExit;
 	}	
 	
-	// open the new one		
+	// open the new one
 	if( stream_try_open_audio_dec( s, s->av.as, NULL ) ) {
 		// no audio, disable it
 		stream_drop_audio( s );
 	} else {
+		if( stream_open_audio_filter( s ) ) {
+			stream_close_audio_dec( s );
+			stream_drop_audio( s );
+			goto ErrorExit;
+		}
 		if( s->audio_sink->start( s ) ) {
 			// no audio, close the codec
 			stream_close_audio_dec( s );
+			stream_close_audio_filter( s );
 			// drop audio
 			stream_drop_audio( s );
 		}
-			
+				
 		if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 			s->audio_time     = -1;
 			s->audio_ref_time = -1;

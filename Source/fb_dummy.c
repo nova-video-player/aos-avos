@@ -21,6 +21,7 @@
 #include "debug.h"
 #include "platform.h"
 
+#if defined(CONFIG_FB_QVFB)
 
 static void init_fb_ops( FRAME_BUFFER *fb );
 
@@ -103,4 +104,6 @@ static void init_fb_ops(FRAME_BUFFER *fb){
 	fb->fb_ops.set_video_properties = DUMMY_set_video_properties;
 	fb->fb_ops.set_display_enable = DUMMY_set_display_enable;
 }
+
+#endif
 

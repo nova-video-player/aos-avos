@@ -47,7 +47,7 @@
 #include <libavutil/error.h>
 #include <libswresample/swresample.h>
 
-#define DBG if(1)
+#define DBG if(0)
 
 // AC3 encoding defaults
 #define AC3_SAMPLE_RATE 48000
@@ -295,11 +295,11 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		return 0;
 	}
 
-	serprintf("faac3: filter call fmt=%04X size=%d enabled=%d\n", frame->format, frame->size, ctx->enabled);
+	DBG serprintf("faac3: filter call fmt=%04X size=%d enabled=%d\n", frame->format, frame->size, ctx->enabled);
 
 	// Only process if filter is enabled
 	if (!ctx->enabled) {
-		serprintf("faac3: filter disabled, bypassing\n");
+		DBG serprintf("faac3: filter disabled, bypassing\n");
 		return 0;
 	}
 
@@ -334,7 +334,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 			return 0;
 		}
 		av_audio_fifo_write(ctx->fifo, (void **)out_data, out_samples);
-		serprintf("faac3: wrote %d samples to fifo (size=%d)\n", out_samples, av_audio_fifo_size(ctx->fifo));
+		DBG serprintf("faac3: wrote %d samples to fifo (size=%d)\n", out_samples, av_audio_fifo_size(ctx->fifo));
 	}
 
 	av_freep(&out_data[0]);
@@ -342,7 +342,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	// Encode frames when we have enough samples
 	while (av_audio_fifo_size(ctx->fifo) >= ctx->enc_ctx->frame_size) {
 		int fifo_size = av_audio_fifo_size(ctx->fifo);
-		serprintf("faac3: encoding frame from fifo (size=%d)\n", fifo_size);
+		DBG serprintf("faac3: encoding frame from fifo (size=%d)\n", fifo_size);
 		if (av_frame_make_writable(ctx->frame) < 0) {
 			serprintf("faac3: failed to make frame writable\n");
 			return 0;
@@ -377,7 +377,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 			memcpy(ctx->encode_buffer + ctx->encode_buffer_used, ctx->pkt->data, ctx->pkt->size);
 			ctx->encode_buffer_used += ctx->pkt->size;
 			ctx->encoded_samples += ctx->enc_ctx->frame_size;
-			serprintf("faac3: encoded AC3 packet size=%d (total=%d samples=%d)\n",
+			DBG serprintf("faac3: encoded AC3 packet size=%d (total=%d samples=%d)\n",
 				ctx->pkt->size, ctx->encode_buffer_used, ctx->encoded_samples);
 
 			av_packet_unref(ctx->pkt);
@@ -398,14 +398,14 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		} else {
 			frame->fakeSize = 0;
 		}
-		serprintf("faac3: SUCCESS - produced AC3 frame size=%d fakeSize=%d format=0x%04X\n",
+		DBG serprintf("faac3: SUCCESS - produced AC3 frame size=%d fakeSize=%d format=0x%04X\n",
 			frame->size, frame->fakeSize, frame->format);
 		ctx->encode_buffer_used = 0;
 		ctx->encoded_samples = 0;
 	} else {
 		// No encoded frame ready yet; drop PCM frame to avoid format mismatch
 		// This causes ~32ms audio delay during initial buffering
-		serprintf("faac3: buffering samples (fifo size=%d), dropping input frame\n",
+		DBG serprintf("faac3: buffering samples (fifo size=%d), dropping input frame\n",
 			ctx->fifo ? av_audio_fifo_size(ctx->fifo) : 0);
 		frame->size = 0;
 		frame->fakeSize = 0;
@@ -461,7 +461,6 @@ static int _set_param(STREAM_FILTER_AUDIO *f, void *params, void *night_on)
 	if (ctx->enabled != new_enabled) {
 		ctx->enabled = new_enabled;
 		DBG serprintf("faac3: filter %s\n", ctx->enabled ? "enabled" : "disabled");
-		serprintf("faac3: runtime state %s\n", ctx->enabled ? "enabled" : "disabled");
 
 		if (!ctx->enabled) {
 			// Flush encoder when disabling

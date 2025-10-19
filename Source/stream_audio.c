@@ -29,6 +29,8 @@
 #define DBGA if(Debug[DBG_AUD])
 #define DBGV if(Debug[DBG_VID])
 
+#define DBG if(0)
+
 #ifdef CONFIG_STREAM
 
 AV_PROPERTIES *stream_force_audio_props = NULL;
@@ -358,17 +360,17 @@ serprintf(" ae! ");
 				int original_rate = s->audio->samplesPerSec;
 				int original_bits = s->audio->bitsPerSample;
 
-				serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d recoding=%d\n",
+				DBG serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d recoding=%d\n",
 					audio_frame.format, audio_frame.size, passthrough, ac3_recoding);
 
 				// For AC3 recoding, run the filter UNLESS source is already AC3/EAC3
 				// If source is AC3/EAC3, skip filter (already in correct format)
 				int run_filter = s->audio_filter && (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
 				if( run_filter ) {
-					serprintf("stream_audio: applying AC3 encoding filter\n");
+					DBG serprintf("stream_audio: applying AC3 encoding filter\n");
 					s->audio_filter->filter( s->audio_filter, &audio_frame );
 				}
-				serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
+				DBG serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
 					audio_frame.format, audio_frame.size);
 
 				// Check if filter changed the audio format or layout (e.g., PCM -> AC3 recoding)
@@ -383,7 +385,7 @@ serprintf(" ae! ");
 				                       (!is_ac3_recoding || !ac3_sink_configured);
 
 				if( audio_frame.size > 0 && need_reconfigure ) {
-serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink\n", original_format, audio_frame.format);
+DBG serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink\n", original_format, audio_frame.format);
 					// Update audio properties with new format and layout
 					// For AC3 recoding, DON'T update s->audio->format (keep source format)
 					if( format_changed && !is_ac3_recoding ) {
@@ -410,7 +412,7 @@ serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink\n", 
 							s->audio_sink->stop( s );
 						}
 						if( is_ac3_recoding ) {
-							serprintf("AC3 recoding: configuring sink for AC3 passthrough (stereo IEC61937)\n");
+							DBG serprintf("AC3 recoding: configuring sink for AC3 passthrough (stereo IEC61937)\n");
 							// Temporarily set s->audio to AC3 stereo for sink->start()
 							// sink->start() reads from s->audio to configure audio interface
 							int saved_format = s->audio->format;
@@ -424,7 +426,7 @@ serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink\n", 
 
 							// Call start() FIRST to update audio_ctx_t, THEN set_passthrough()
 							if( s->audio_sink->start( s ) ) {
-								serprintf("failed to restart audio sink after AC3 recoding\n");
+								DBG serprintf("failed to restart audio sink after AC3 recoding\n");
 								s->audio_sink_open = 0;
 								ac3_sink_configured = 0;
 							} else {
@@ -443,7 +445,7 @@ serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink\n", 
 							ac3_sink_configured = 0;
 							s->audio_sink->set_passthrough( s, 0 );
 							if( s->audio_sink->start( s ) ) {
-								serprintf("failed to restart audio sink after format change\n");
+								DBG serprintf("failed to restart audio sink after format change\n");
 								s->audio_sink_open = 0;
 							} else {
 								s->audio_sink_open = 1;
@@ -523,16 +525,16 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 			if(libavos_get_ac3_recoding_enabled()) {
 			// If source is already AC3/EAC3, use direct passthrough
 			if( (s->audio->format == WAVE_FORMAT_AC3 || s->audio->format == WAVE_FORMAT_EAC3) && s->audio_sink ) {
-				serprintf("AC3 recoding: source is AC3/EAC3, using direct passthrough\n");
+				DBG serprintf("AC3 recoding: source is AC3/EAC3, using direct passthrough\n");
 				// Initialize SPDIF for passthrough mode 2 (system encapsulation)
 				if( spdif_init(s->audio) ) {
 					s->audio_sink->set_passthrough( s, 2 );
 				} else {
-					serprintf("AC3 recoding: failed to init SPDIF, falling back to PCM\n");
+					DBG serprintf("AC3 recoding: failed to init SPDIF, falling back to PCM\n");
 					s->audio_sink->set_passthrough( s, 0 );
 				}
 			} else if( s->audio_sink ) {
-				serprintf("AC3 recoding: non-AC3/EAC3 source, will recode through PCM\n");
+				DBG serprintf("AC3 recoding: non-AC3/EAC3 source, will recode through PCM\n");
 				s->audio_sink->set_passthrough( s, 0 );
 			}
 			} else if(spdif_init(s->audio) && s->audio_sink) {

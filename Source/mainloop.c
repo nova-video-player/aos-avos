@@ -22,7 +22,9 @@
 #include "threadcom.h"
 #include "profiling.h"
 
+#ifdef CONFIG_FB_QVFB
 #include <SDL2/SDL.h>
+#endif
 
 #define MAX_TIMERS 32
 
@@ -131,6 +133,7 @@ void mainloop_enter( void )
 			service_data_events( &mainloop_events, &tv);
 		}
 
+#ifdef CONFIG_FB_QVFB
     int ret, quit = 0;
     SDL_Event event;
 
@@ -165,6 +168,7 @@ void mainloop_enter( void )
             break;
         }
     }
+#endif
 
 
 		PROFILE_START(ml);

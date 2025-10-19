@@ -31,10 +31,11 @@
 
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
-#include <SDL2/SDL.h>
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FB_QVFB
+
+#include <SDL2/SDL.h>
 
 #define DBGS 	if(Debug[DBG_STREAM])
 #define DBGSI 	if(Debug[DBG_SINK])

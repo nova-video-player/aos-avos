@@ -359,6 +359,11 @@ DBGCA2  serprintf("requested channel layout: %s for %d channel(s)\r\n", layout_d
 serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
+
+	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
+	p->actx->extradata      = NULL;
+	p->actx->extradata_size = 0;
+
 	if( need_parser ) {
 		p->aparser = av_parser_init(p->actx->codec_id);
 		if( !p->aparser ) {
@@ -411,13 +416,15 @@ serprintf("downmix to stereo S16\r\n");
 	
 	return 0;
 
-ErrorExit:	
+ErrorExit:
 	// Close the codec
 	if ( p->actx ) {
                 avcodec_free_context( &p->actx );
+		p->actx = NULL;
 	}
 	if( p->aparser )
 		av_parser_close( p->aparser );
+	p->aparser = NULL;
 
 	return 1;
 }

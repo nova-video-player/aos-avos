@@ -154,6 +154,10 @@ serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
 
+	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
+	vctx->extradata      = NULL;
+	vctx->extradata_size = 0;
+
 DBGS serprintf("name %s  type %d  id %d \r\n", vcodec->name, vcodec->type, vcodec->id);
 	p->vframe = av_frame_alloc();
 	
@@ -182,6 +186,7 @@ ErrorExit:
 		avcodec_free_context( &vctx );
 	}
 	vctx = NULL;
+	p->vctx = NULL;
 
 ErrorExit2:
 	return 1;

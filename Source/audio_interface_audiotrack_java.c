@@ -392,11 +392,11 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	DBG LOG( "audiotrack_update_latency: speed=%.2f, track_latency=%d, system_latency=%d, app_latency=%d, total_latency=%d, use track latency=%d",
 			 speed, track_latency, system_latency, app_latency, system_latency + app_latency , track_latency > 0);
 
-	if( track_latency > 0 ) {
-		// AudioTrack.getLatency() by default (API 29+)
+	if( !at->passthrough && track_latency > 0 ) {
+		// AudioTrack.getLatency() by default (API 29+) when not in passthrough mode since it induces a delay
 		at->latency = track_latency;
 	} else {
-		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation
+		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation (used for passthrough or when track_latency unavailable)
 		at->latency = system_latency + app_latency;
 	}
 }
@@ -863,6 +863,12 @@ static int audiotrack_get_delay(audio_ctx_t *at)
 	if (!at->init) {
 ERR		LOG("track not valid, error");
 		return -1;
+	}
+
+	// Use legacy static latency for passthrough mode
+	if (at->passthrough) {
+DBG2		LOG("%d (passthrough mode):", at->latency);
+		return at->latency;
 	}
 
 	// Use AudioTrack.getTimestamp() for dynamic latency calculation (API 19+)

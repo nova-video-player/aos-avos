@@ -557,6 +557,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int min_buffer_size = call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
 
+	if (min_buffer_size <= 0) {
+		ERR LOG("getMinBufferSize returned %d, falling back to 32768", min_buffer_size);
+		min_buffer_size = 32768;
+	}
+
 	if (at->passthrough == 2) {
 		// For compressed passthrough, use getMinBufferSize() with a safety margin
 		// Different formats have varying frame sizes (AC3 ~6KB, DTS ~2KB, TrueHD ~20KB)

@@ -80,6 +80,7 @@ struct audio_ctx {
 	jobject audioTimestamp;
 	int64_t last_timestamp_ns;
 	uint64_t last_timestamp_frames;
+	uint64_t timestamp_written_offset;
 	jmethodID getTimestampMethodID;
 	jfieldID framePositionFieldID;
 	jfieldID nanoTimeFieldID;
@@ -795,6 +796,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->i_samples_written = 0;
 	at->last_timestamp_ns = 0;
 	at->last_timestamp_frames = 0;
+	at->timestamp_written_offset = 0;
 	DBG LOG("track created");
 
 	return 0;
@@ -835,6 +837,9 @@ ERR		LOG("track not valid, error");
 
 	attach_thread(at);
 	call_void_method(at, "stop", "()V");
+	at->timestamp_written_offset = at->i_samples_written;
+	at->last_timestamp_frames = 0;
+	at->last_timestamp_ns = 0;
 	return 0;
 }
 
@@ -880,17 +885,16 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	// Use legacy static latency for passthrough mode
-	if (at->passthrough) {
-DBG2		LOG("%d (passthrough mode):", at->latency);
-		return at->latency;
-	}
-
 	// Use AudioTrack.getTimestamp() for dynamic latency calculation (API 19+)
 	// This automatically accounts for Bluetooth and other output latencies
 	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
 		// Fallback to static latency if AudioTimestamp not available
 DBG2		LOG("Using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
+	if (at->rate <= 0) {
+DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 		return at->latency;
 	}
 
@@ -924,10 +928,31 @@ DBG2		LOG("getTimestamp returned false, using static latency: %d ms", at->latenc
 	int64_t framePosition = (*env)->GetLongField(env, at->audioTimestamp, at->framePositionFieldID);
 	int64_t nanoTime = (*env)->GetLongField(env, at->audioTimestamp, at->nanoTimeFieldID);
 
+	if (framePosition < 0) {
+DBG2		LOG("Negative frame position, using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
+	uint64_t frames_presented = (uint64_t)framePosition;
+
+	// Detect playback head resets (stop/flush) or wrap-around and realign counters
+	if (frames_presented < at->last_timestamp_frames) {
+		uint64_t new_offset = 0;
+		if (at->i_samples_written > frames_presented) {
+			new_offset = at->i_samples_written - frames_presented;
+		}
+		at->timestamp_written_offset = new_offset;
+DBG2		LOG("Timestamp reset detected, offset=%llu", (unsigned long long)at->timestamp_written_offset);
+	}
+
+	uint64_t frames_written_adjusted = 0;
+	if (at->i_samples_written > at->timestamp_written_offset) {
+		frames_written_adjusted = at->i_samples_written - at->timestamp_written_offset;
+	}
+
 	// Calculate delay: (samples_written - samples_presented) / sample_rate * 1000
 	// Note: framePosition is the last frame that was presented
-	uint64_t frames_presented = (uint64_t)framePosition;
-	int64_t frames_pending = (int64_t)at->i_samples_written - (int64_t)frames_presented;
+	int64_t frames_pending = (int64_t)frames_written_adjusted - (int64_t)frames_presented;
 
 	if (frames_pending < 0) {
 		// This can happen if framePosition wraps around (32-bit) or during initialization
@@ -936,6 +961,12 @@ DBG2		LOG("getTimestamp returned false, using static latency: %d ms", at->latenc
 
 	// Convert frames to milliseconds: frames / (rate / 1000) = frames * 1000 / rate
 	int delay_ms = (int)((frames_pending * 1000) / at->rate);
+
+	// Guard against unrealistic estimates (e.g., during startup) and fallback to static latency
+	if (delay_ms < 0 || delay_ms > 2000) {
+DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay_ms, at->latency);
+		delay_ms = at->latency;
+	}
 
 	// Cache the timestamp for debugging/monitoring
 	at->last_timestamp_ns = nanoTime;
@@ -963,6 +994,7 @@ ERR		LOG("track not valid, error");
 	at->i_samples_written = 0;
 	at->last_timestamp_ns = 0;
 	at->last_timestamp_frames = 0;
+	at->timestamp_written_offset = 0;
 }
 
 static int audiotrack_preload(audio_ctx_t *at)

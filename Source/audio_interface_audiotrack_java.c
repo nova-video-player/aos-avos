@@ -414,12 +414,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	attach_thread( at );
 
-	audio_rate = rate;
-
-	at->rate = rate;
-	at->channel_count = channels;
 	at->format = format;
-	switch( at->channel_count ) {
+	int output_channels = channels;
+	switch( output_channels ) {
 	case 1:
 		track_chanmask = AUDIO_CHANNEL_OUT_MONO;
 		break;
@@ -456,10 +453,12 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		ERR LOG( "cannot set bits %d", bits );
 		return -1;
 	}
-	at->frame_size = bits / 8 * at->channel_count;
+	size_t frame_size = 0;
 
 	if( at->passthrough == 2 ) {
-		at->frame_size = bits / 8;
+		// Keep latency math consistent with the IEC61937 container the HAL sees:
+		// most compressed frames map to ~4 bytes per PCM sample equivalent.
+		frame_size = 4;
 		switch( at->format ) {
 		case WAVE_FORMAT_AC3:
 			track_format = 5; // AudioFormat.ENCODING_AC3;
@@ -486,10 +485,12 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
             case WAVE_FORMAT_AC3:
             case WAVE_FORMAT_DTS:
                 track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+                output_channels = 2;
                 rate = 48000;
                 break;
             case WAVE_FORMAT_EAC3:
                 track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+                output_channels = 2;
                 rate = 192000;
                 break;
             case WAVE_FORMAT_DTS_HD_MA:
@@ -497,17 +498,31 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
                 // Note: the logic to select DTS-core vs DTS-HD needs to be identical with the one selecting dtshd_rate
                 if (get_hdmi_supports_iec_8ch192khz()) {
                     track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+                    output_channels = 8;
                     rate = 192000;
                 } else {
                     track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+                    output_channels = 2;
                     rate = 48000;
                 }
+                break;
             case WAVE_FORMAT_TRUEHD:
                 track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+                output_channels = 8;
                 rate = 192000;
                 break;
         }
     }
+
+	if( at->passthrough != 2 ) {
+		frame_size = (bits / 8) * output_channels;
+	}
+
+	audio_rate = rate;
+	at->rate = rate;
+	at->channel_count = output_channels;
+	at->frame_size = frame_size;
+	channels = output_channels;
 
 	int reinit = 0;
 	if( at->init ) {

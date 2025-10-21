@@ -367,7 +367,7 @@ serprintf(" ae! ");
 				// If source is AC3/EAC3, skip filter (already in correct format)
 				int run_filter = s->audio_filter && (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
 				if( run_filter ) {
-					DBG serprintf("stream_audio: applying AC3 encoding filter\n");
+					DBG serprintf("stream_audio: applying audio filter\n");
 					s->audio_filter->filter( s->audio_filter, &audio_frame );
 				}
 				s->audio_filter_jni->filter( s->audio_filter_jni, &audio_frame );

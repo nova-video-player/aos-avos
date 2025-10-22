@@ -48,6 +48,10 @@ extern int get_hdmi_supports_iec(void);
 #define AUDIO_CONTENT_TYPE_MUSIC 2
 #endif
 
+#ifndef AUDIO_CONTENT_TYPE_MOVIE
+#define AUDIO_CONTENT_TYPE_MOVIE 3
+#endif
+
 typedef unsigned char bool;
 
 #define NO_ERROR 0
@@ -611,7 +615,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	if (!failed) {
 		jmethodID setContentTypeMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setContentType", "(I)Landroid/media/AudioAttributes$Builder;");
-		(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setContentTypeMethod, AUDIO_CONTENT_TYPE_MUSIC);
+		// Use CONTENT_TYPE_MOVIE for video player application
+		(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setContentTypeMethod, AUDIO_CONTENT_TYPE_MOVIE);
 		exception = (*at->env)->ExceptionOccurred(at->env);
 		if (exception) {
 			ERR LOG("exception during AudioAttributes.Builder.setContentType");

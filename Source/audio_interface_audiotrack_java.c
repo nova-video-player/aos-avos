@@ -434,8 +434,14 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	case 4:
 		track_chanmask = AUDIO_CHANNEL_OUT_SURROUND;
 		break;
+	case 5:
+		track_chanmask = AUDIO_CHANNEL_OUT_QUAD | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
+		break;
 	case 6:
 		track_chanmask = AUDIO_CHANNEL_OUT_5POINT1;
+		break;
+	case 7:
+		track_chanmask = AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;
 		break;
 	case 8:
 		track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;

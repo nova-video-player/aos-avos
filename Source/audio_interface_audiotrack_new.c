@@ -134,20 +134,26 @@ DBG	LOG("rate %d, channels %d, bits %d, format %d, passthrough mode %d", rate, c
 		case 2:
 			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 			break;
-		case 3:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
-			break;
-		case 4:
-			track_chanmask = AUDIO_CHANNEL_OUT_SURROUND;
-			break;
-		case 6:
-			track_chanmask = AUDIO_CHANNEL_OUT_5POINT1;
-			break;
-		case 8:
-			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-			break;
-		default:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+	case 3:
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
+		break;
+	case 4:
+		track_chanmask = AUDIO_CHANNEL_OUT_SURROUND;
+		break;
+	case 5:
+		track_chanmask = AUDIO_CHANNEL_OUT_QUAD | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
+		break;
+	case 6:
+		track_chanmask = AUDIO_CHANNEL_OUT_5POINT1;
+		break;
+	case 7:
+		track_chanmask = AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;
+		break;
+	case 8:
+		track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+		break;
+	default:
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 			break;
 	}
 

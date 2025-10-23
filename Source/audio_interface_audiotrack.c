@@ -102,8 +102,12 @@ static uint32_t _convert_to_chanmask(int channels)
 		return AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
 	case 4:
 		return AUDIO_CHANNEL_OUT_SURROUND;
+	case 5:
+		return AUDIO_CHANNEL_OUT_QUAD | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
 	case 6:
 		return AUDIO_CHANNEL_OUT_5POINT1;
+	case 7:
+		return AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;
 	case 8:
 		return AUDIO_CHANNEL_OUT_7POINT1;
 	default:

@@ -901,6 +901,14 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
+	// Use static latency for passthrough mode
+	// Dynamic latency doesn't work because we can't accurately track written vs presented frames
+	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
+	if (at->passthrough) {
+DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
+		return at->latency;
+	}
+
 	// Use AudioTrack.getTimestamp() for dynamic latency calculation (API 19+)
 	// This automatically accounts for Bluetooth and other output latencies
 	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
@@ -989,7 +997,7 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 	at->last_timestamp_frames = frames_presented;
 
 DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
-		delay_ms, (unsigned long long)at->i_samples_written, (unsigned long long)frames_presented, (long long)frames_pending);
+		delay_ms, (unsigned long long)frames_written_adjusted, (unsigned long long)frames_presented, (long long)frames_pending);
 
 	return delay_ms;
 }

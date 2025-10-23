@@ -547,7 +547,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	streamType = 3; /*STREAM_MUSIC*/
 	int sampleRateInHz = rate;
-	int channelConfig = track_chanmask;
+	int channelConfig = track_chanmask << 2;
 	int audioFormat = track_format;
 	mode = 1; /*MODE_STREAM*/
 

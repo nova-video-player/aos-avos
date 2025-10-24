@@ -600,6 +600,8 @@ typedef struct STREAM {
 	STREAM_RC 	audio_rc;
 
 	STREAM_FILTER_AUDIO *audio_filter;
+	STREAM_FILTER_AUDIO *audio_filter_compress;  // Compression/boost filter
+	STREAM_FILTER_AUDIO *audio_filter_ac3;       // AC3 encoding filter
 	STREAM_FILTER_AUDIO *audio_filter_jni;
 	int             audio_filter_enabled;
 	int             audio_filter_level;

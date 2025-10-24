@@ -57,7 +57,14 @@ void stream_audio_flush( STREAM *s )
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
 	}
-	if( s->audio_filter ) {
+	// Flush all active filters
+	if( s->audio_filter_compress && s->audio_filter_compress->flush ) {
+		s->audio_filter_compress->flush( s->audio_filter_compress );
+	}
+	if( s->audio_filter_ac3 && s->audio_filter_ac3->flush ) {
+		s->audio_filter_ac3->flush( s->audio_filter_ac3 );
+	}
+	if( s->audio_filter && s->audio_filter->flush ) {
 		s->audio_filter->flush( s->audio_filter );
 	}
 }
@@ -363,13 +370,28 @@ serprintf(" ae! ");
 				DBG serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d recoding=%d\n",
 					audio_frame.format, audio_frame.size, passthrough, ac3_recoding);
 
-				// For AC3 recoding, run the filter UNLESS source is already AC3/EAC3
-				// If source is AC3/EAC3, skip filter (already in correct format)
-				int run_filter = s->audio_filter && (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
+				// For AC3 recoding, run filters UNLESS source is already AC3/EAC3
+				// If source is AC3/EAC3, skip filters (already in correct format)
+				int run_filter = (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
 				if( run_filter ) {
-					DBG serprintf("stream_audio: applying audio filter\n");
-					s->audio_filter->filter( s->audio_filter, &audio_frame );
+					// Apply filters in order: compress -> AC3 -> JNI
+					// 1. Compression/boost filter
+					if( s->audio_filter_compress && audio_frame.size > 0 ) {
+						DBG serprintf("stream_audio: applying compress filter\n");
+						s->audio_filter_compress->filter( s->audio_filter_compress, &audio_frame );
+					}
+					// 2. AC3 encoding filter (only in AC3 recoding mode)
+					if( s->audio_filter_ac3 && audio_frame.size > 0 ) {
+						DBG serprintf("stream_audio: applying AC3 filter\n");
+						s->audio_filter_ac3->filter( s->audio_filter_ac3, &audio_frame );
+					}
+					// 3. Legacy AGC filter (fallback if compress not available)
+					if( s->audio_filter && audio_frame.size > 0 ) {
+						DBG serprintf("stream_audio: applying AGC filter\n");
+						s->audio_filter->filter( s->audio_filter, &audio_frame );
+					}
 				}
+				// 4. JNI filter always runs
 				s->audio_filter_jni->filter( s->audio_filter_jni, &audio_frame );
 
 				DBG serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",

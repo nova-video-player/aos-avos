@@ -411,46 +411,78 @@ static int stream_open_audio_filter( STREAM *s )
 {
 	s->audio_filter_jni = stream_filter_audio_jni_new();
 
+	int ac3_recoding = 0;
 #ifdef CONFIG_AUDIO_AC3
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
 	// Force enable audio filter if AC3 recoding is enabled (passthrough mode 3)
-	if( libavos_get_ac3_recoding_enabled() ) {
+	if( ac3_recoding ) {
 		s->audio_filter_enabled = 1;
 	}
 #endif
 
 	if( s->audio_filter_enabled ) {
-#ifdef CONFIG_AUDIO_AC3
-		// Check if AC3 recoding is enabled (passthrough mode 3)
-		if( libavos_get_ac3_recoding_enabled() ) {
-			s->audio_filter = stream_filter_audio_ac3_new();
-		}
-#endif
+		// Open compression filter for both normal and AC3 recoding mode
 #ifdef CONFIG_AUDIO_COMPRESS
-		if( !s->audio_filter ) {
-			s->audio_filter = stream_filter_audio_compress_new();
-		}
-#endif
-#ifdef CONFIG_AUDIO_AGC
-		if( !s->audio_filter ) {
-			s->audio_filter = stream_filter_audio_agc_new();
-		}
-#endif
-		if( s->audio_filter ) {
-DBGS serprintf("stream_open_audio_filter: [%s]\r\n", s->audio_filter->name);
-			if( s->audio_filter->open( s->audio_filter, s->audio ) ) {
-				if( s->audio_filter->delete  ) {
-					s->audio_filter->delete( s->audio_filter );
+		s->audio_filter_compress = stream_filter_audio_compress_new();
+		if( s->audio_filter_compress ) {
+			if( s->audio_filter_compress->open( s->audio_filter_compress, s->audio ) ) {
+				serprintf("stream_open_audio_filter: failed to open compress filter\n");
+				if( s->audio_filter_compress->delete ) {
+					s->audio_filter_compress->delete( s->audio_filter_compress );
 				}
-				s->audio_filter_enabled = 0;
-				s->audio_filter = NULL;
-				return 1;
+				s->audio_filter_compress = NULL;
+			} else {
+DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_compress->name);
 			}
+		}
+#endif
+
+		// Open AGC filter only if compression not available and not AC3 recoding
+#ifdef CONFIG_AUDIO_AGC
+		if( !s->audio_filter_compress && !ac3_recoding ) {
+			s->audio_filter = stream_filter_audio_agc_new();
+			if( s->audio_filter ) {
+				if( s->audio_filter->open( s->audio_filter, s->audio ) ) {
+					serprintf("stream_open_audio_filter: failed to open AGC filter\n");
+					if( s->audio_filter->delete ) {
+						s->audio_filter->delete( s->audio_filter );
+					}
+					s->audio_filter = NULL;
+				} else {
+DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter->name);
+				}
+			}
+		}
+#endif
+
+		// Open AC3 encoding filter if AC3 recoding enabled
+#ifdef CONFIG_AUDIO_AC3
+		if( ac3_recoding ) {
+			s->audio_filter_ac3 = stream_filter_audio_ac3_new();
+			if( s->audio_filter_ac3 ) {
+				if( s->audio_filter_ac3->open( s->audio_filter_ac3, s->audio ) ) {
+					serprintf("stream_open_audio_filter: failed to open AC3 filter\n");
+					if( s->audio_filter_ac3->delete ) {
+						s->audio_filter_ac3->delete( s->audio_filter_ac3 );
+					}
+					s->audio_filter_ac3 = NULL;
+				} else {
+DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_ac3->name);
+				}
+			}
+		}
+#endif
+
+		// Set filter parameters
+		if( s->audio_filter_compress || s->audio_filter_ac3 || s->audio_filter ) {
 			// For AC3 recoding, enable the filter
-			if( libavos_get_ac3_recoding_enabled() ) {
+			if( ac3_recoding ) {
 				stream_set_audio_filter_level( s, 1, 0 );  // enabled=1, night_on=0
 			} else {
 				stream_set_audio_filter_level( s, s->audio_filter_level, s->audio_filter_night_on );
 			}
+		} else {
+			s->audio_filter_enabled = 0;
 		}
 	}
 	return 0;
@@ -731,14 +763,37 @@ DBGS serprintf("stream_close_audio_dec\r\n");
 // *****************************************************************************
 static void stream_close_audio_filter( STREAM *s )
 {
-	if( s->audio_filter ) {
 DBGS serprintf("stream_close_audio_filter\r\n");
-		s->audio_filter->close( s->audio_filter );
-		if( s->audio_filter->delete  ) {
+	// Close and delete compression filter
+	if( s->audio_filter_compress ) {
+		if( s->audio_filter_compress->close ) {
+			s->audio_filter_compress->close( s->audio_filter_compress );
+		}
+		if( s->audio_filter_compress->delete ) {
+			s->audio_filter_compress->delete( s->audio_filter_compress );
+		}
+		s->audio_filter_compress = NULL;
+	}
+	// Close and delete AC3 filter
+	if( s->audio_filter_ac3 ) {
+		if( s->audio_filter_ac3->close ) {
+			s->audio_filter_ac3->close( s->audio_filter_ac3 );
+		}
+		if( s->audio_filter_ac3->delete ) {
+			s->audio_filter_ac3->delete( s->audio_filter_ac3 );
+		}
+		s->audio_filter_ac3 = NULL;
+	}
+	// Close and delete legacy filter (AGC)
+	if( s->audio_filter ) {
+		if( s->audio_filter->close ) {
+			s->audio_filter->close( s->audio_filter );
+		}
+		if( s->audio_filter->delete ) {
 			s->audio_filter->delete( s->audio_filter );
 		}
 		s->audio_filter = NULL;
-	}	
+	}
 }
 
 // *****************************************************************************

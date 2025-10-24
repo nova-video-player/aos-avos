@@ -727,11 +727,18 @@ int stream_set_audio_filter_level( STREAM *s, int level, int night_on )
 	s->audio_filter_enabled = 1;
 	s->audio_filter_level   = level;
 	s->audio_filter_night_on = night_on;
+	// Apply to all active filters
 	if( s->audio_filter && s->audio_filter->set_param ) {
 		s->audio_filter->set_param( s->audio_filter, &level, &night_on );
 	}
+	if( s->audio_filter_compress && s->audio_filter_compress->set_param ) {
+		s->audio_filter_compress->set_param( s->audio_filter_compress, &level, &night_on );
+	}
+	if( s->audio_filter_ac3 && s->audio_filter_ac3->set_param ) {
+		s->audio_filter_ac3->set_param( s->audio_filter_ac3, &level, &night_on );
+	}
 	return 0;
-} 
+}
 
 // ************************************************************
 //

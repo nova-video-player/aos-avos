@@ -20,6 +20,9 @@
 #include "util.h"
 #include "stream.h"
 
+#ifdef CONFIG_AUDIO_AC3
+extern int libavos_get_ac3_recoding_enabled(void);
+#endif
 
 #ifdef CONFIG_STREAM
 
@@ -106,11 +109,37 @@ int stream_sync_av_delay( STREAM *s )
 		return 0;
 	} 
 	
-	// audio data passes through decoder, filter, and sink
+	// audio data passes through decoder, filters, and sink
 	// world time audio decoder delay not dependant on audio speed
 	int codec_delay = s->audio_dec ? s->audio_dec->delay( s->audio ) : 0;
-	// world time audio filter delay (AC3 encoder buffering) not dependant on audio speed
-	int filter_delay = s->audio_filter ? s->audio_filter->delay( s->audio_filter ) : 0;
+
+	// world time audio filter delay (sum of all active filters) not dependant on audio speed
+	// Only count delays from filters that are actually being applied
+	int filter_delay = 0;
+	int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	int ac3_recoding = 0;
+#ifdef CONFIG_AUDIO_AC3
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
+#endif
+	// Check if source is already AC3/EAC3 in recoding mode (would skip decode/filter)
+	int skip_decode_for_native_ac3 = ac3_recoding && s->audio &&
+		(s->audio->format == WAVE_FORMAT_AC3 || s->audio->format == WAVE_FORMAT_EAC3);
+
+	// Filters only run in: normal PCM mode OR AC3 recoding mode (for non-AC3/EAC3 sources)
+	int run_filter = (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
+	if( run_filter ) {
+		// Sum delays from filters that are actually applied
+		if( s->audio_filter_compress && s->audio_filter_compress->delay ) {
+			filter_delay += s->audio_filter_compress->delay( s->audio_filter_compress );
+		}
+		if( s->audio_filter_ac3 && s->audio_filter_ac3->delay ) {
+			filter_delay += s->audio_filter_ac3->delay( s->audio_filter_ac3 );
+		}
+		if( s->audio_filter && s->audio_filter->delay ) {
+			filter_delay += s->audio_filter->delay( s->audio_filter );
+		}
+	}
+
 	// world time audio sink delay (audiotrack system_delay on android) not dependant on audio speed
 	int sink_delay = s->audio_sink ? s->audio_sink->delay( s ) : 0;
 	// wold time video sink delay not dependant on audio speed

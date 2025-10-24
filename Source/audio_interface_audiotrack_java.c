@@ -103,6 +103,7 @@ static int streamType = 3; /*STREAM_MUSIC*/
 static int mode = 1; /*MODE_STREAM*/
 
 static int audio_rate = 1; /* called from stream_sink_audio represents s->audio->samplesPerSec */
+static int enable_dynamic_audio_delay = 1; /* enabled by default */
 
 static inline void call_void_method(audio_ctx_t *at, const char * name, const char * signature)
 {
@@ -911,6 +912,13 @@ DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
 
 	// Use AudioTrack.getTimestamp() for dynamic latency calculation (API 19+)
 	// This automatically accounts for Bluetooth and other output latencies
+	// Can be disabled via preference if user experiences sync issues
+	if (!enable_dynamic_audio_delay) {
+		// User disabled dynamic latency, use static latency
+DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
 	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
 		// Fallback to static latency if AudioTimestamp not available
 DBG2		LOG("Using static latency: %d ms", at->latency);
@@ -1132,6 +1140,12 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
 	}
 	return 0;
+}
+
+void libavos_set_dynamic_audio_delay(int enable)
+{
+	DBG serprintf("audio_interface_audiotrack_java:libavos_set_dynamic_audio_delay enable=%d\n", enable);
+	enable_dynamic_audio_delay = enable;
 }
 
 const audio_interface_impl_t audio_interface_impl_audiotrack_java = {

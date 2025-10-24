@@ -438,34 +438,25 @@ static int _flush(STREAM_FILTER_AUDIO *f)
 
 static int _set_param(STREAM_FILTER_AUDIO *f, void *params, void *night_on)
 {
-	if (!f || !f->priv || !params) {
+	if (!f || !f->priv) {
 		DBG serprintf("faac3: set_param called with null parameters\n");
 		return -1;
 	}
 
-	int *enabled = params;
 	struct ctx *ctx = f->priv;
 
-	int new_enabled = (*enabled) ? 1 : 0;
-
-	DBG serprintf("faac3: set_param called - enabled=%d\n", new_enabled);
-
-	// Only allow enabling if encoder is initialized (not in passthrough-only mode)
-	if (new_enabled && !ctx->enc_ctx) {
-		serprintf("faac3: cannot enable - encoder not initialized (passthrough mode)\n");
-		return 0;  // Success but keep disabled
+	// AC3 filter should always be enabled in AC3 recoding mode
+	// The level/night_on parameters control the compress filter, not AC3 encoding
+	// Only disable if encoder is not initialized (pure passthrough mode)
+	if (!ctx->enc_ctx) {
+		DBG serprintf("faac3: encoder not initialized, keeping disabled\n");
+		return 0;
 	}
 
-	serprintf("faac3: set_param -> %s\n", new_enabled ? "enabled" : "disabled");
-
-	if (ctx->enabled != new_enabled) {
-		ctx->enabled = new_enabled;
-		DBG serprintf("faac3: filter %s\n", ctx->enabled ? "enabled" : "disabled");
-
-		if (!ctx->enabled) {
-			// Flush encoder when disabling
-			_flush(f);
-		}
+	// Enable AC3 encoding if encoder is available
+	if (!ctx->enabled) {
+		ctx->enabled = 1;
+		serprintf("faac3: AC3 encoding enabled for recoding mode\n");
 	}
 
 	return 0;

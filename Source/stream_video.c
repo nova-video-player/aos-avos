@@ -473,14 +473,10 @@ DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_ac3-
 		}
 #endif
 
-		// Set filter parameters
+		// Set filter parameters from user preferences
+		// AC3 encoding filter will run when needed, boost/night mode respect user settings
 		if( s->audio_filter_compress || s->audio_filter_ac3 || s->audio_filter ) {
-			// For AC3 recoding, enable the filter
-			if( ac3_recoding ) {
-				stream_set_audio_filter_level( s, 1, 0 );  // enabled=1, night_on=0
-			} else {
-				stream_set_audio_filter_level( s, s->audio_filter_level, s->audio_filter_night_on );
-			}
+			stream_set_audio_filter_level( s, s->audio_filter_level, s->audio_filter_night_on );
 		} else {
 			s->audio_filter_enabled = 0;
 		}

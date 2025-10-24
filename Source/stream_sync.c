@@ -121,12 +121,9 @@ int stream_sync_av_delay( STREAM *s )
 #ifdef CONFIG_AUDIO_AC3
 	ac3_recoding = libavos_get_ac3_recoding_enabled();
 #endif
-	// Check if source is already AC3/EAC3 in recoding mode (would skip decode/filter)
-	int skip_decode_for_native_ac3 = ac3_recoding && s->audio &&
-		(s->audio->format == WAVE_FORMAT_AC3 || s->audio->format == WAVE_FORMAT_EAC3);
 
-	// Filters only run in: normal PCM mode OR AC3 recoding mode (for non-AC3/EAC3 sources)
-	int run_filter = (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
+	// Filters run in: normal PCM mode OR AC3 recoding mode (all formats)
+	int run_filter = (!passthrough || ac3_recoding);
 	if( run_filter ) {
 		// Sum delays from filters that are actually applied
 		if( s->audio_filter_compress && s->audio_filter_compress->delay ) {

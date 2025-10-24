@@ -313,10 +313,9 @@ DBGS serprintf("~");
 
 		audio_frame.time = s->audio_time;
 
-		// For AC3 recoding, decode to PCM UNLESS source is already AC3/EAC3
-		// If source is AC3/EAC3 in recoding mode, skip decode (will use passthrough)
-		int skip_decode_for_native_ac3 = ac3_recoding && (s->audio->format == WAVE_FORMAT_AC3 || s->audio->format == WAVE_FORMAT_EAC3);
-		if( s->audio_dec && (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3)) ) {
+		// For AC3 recoding, always decode ALL formats (including AC3) to PCM to enable filters
+		// This provides consistent audio boost/night mode support for all source formats
+		if( s->audio_dec && (!passthrough || ac3_recoding) ) {
 			// Decode audio to PCM
 			audio_frame.samplesPerSec = s->audio->samplesPerSec;	
 
@@ -370,9 +369,9 @@ serprintf(" ae! ");
 				DBG serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d recoding=%d\n",
 					audio_frame.format, audio_frame.size, passthrough, ac3_recoding);
 
-				// For AC3 recoding, run filters UNLESS source is already AC3/EAC3
-				// If source is AC3/EAC3, skip filters (already in correct format)
-				int run_filter = (!passthrough || (ac3_recoding && !skip_decode_for_native_ac3));
+				// For AC3 recoding, always run filters on ALL decoded formats
+				// This provides consistent audio boost/night mode for all sources
+				int run_filter = (!passthrough || ac3_recoding);
 				if( run_filter ) {
 					// Apply filters in order: compress -> AC3 -> JNI
 					// 1. Compression/boost filter

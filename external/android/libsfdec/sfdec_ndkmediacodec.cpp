@@ -356,7 +356,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 int64_t half_frame = (1/2.0) * 1000.0 * 1000.0 / frame_length;
                 tus += half_frame;
 
-                int n = (float)tus / (1000.0 * 1000.0 / frame_length);
+                int n = (int)((double)timestamp_us * frame_length / 1000000.0 + 0.5);
                 //LOG("n-th frame %d", n);
                 int64_t tus_new = n * 1000.0 * 1000.0  / frame_length;
                 //LOG("After patching %lld", tus_new);

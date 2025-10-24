@@ -36,6 +36,9 @@
 #define DBGCA2 if(Debug[DBG_CA] > 1 )
 #define DBGS   if(Debug[DBG_STREAM])
 
+// Forward declaration for AC3 recoding check
+extern int libavos_get_ac3_recoding_enabled(void);
+
 // check if bit at position in value is 1
 #define CHECK_BIT(value,position) (((value)>>(position)) & 1)
 
@@ -407,6 +410,14 @@ static int spdif_get_rc( AUDIO_PROPERTIES *audio, STREAM_RC *rc )
 
 static int spdif_is_supported( AUDIO_PROPERTIES *audio )
 {
+	// When AC3 recoding is enabled (mode 3), ALL audio formats must be decoded to PCM
+	// using FFmpeg decoder, then filtered, then re-encoded to AC3.
+	// SPDIF decoder cannot decode to PCM (it only does passthrough encapsulation),
+	// so we must reject SPDIF decoder selection in AC3 recoding mode.
+	if (libavos_get_ac3_recoding_enabled()) {
+		DBGS serprintf("spdif_is_supported: AC3 recoding enabled, forcing FFmpeg decoder for format %04X\n", audio->format);
+		return 0;
+	}
 	return spdif_check( audio->format );
 }
 

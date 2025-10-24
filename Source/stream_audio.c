@@ -546,23 +546,15 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 			audio_format = s->audio->format;
 #ifdef CONFIG_SPDIF
 			if(libavos_get_ac3_recoding_enabled()) {
-			// If source is already AC3/EAC3, use direct passthrough
-			if( (s->audio->format == WAVE_FORMAT_AC3 || s->audio->format == WAVE_FORMAT_EAC3) && s->audio_sink ) {
-				DBG serprintf("AC3 recoding: source is AC3/EAC3, using direct passthrough\n");
-				// Initialize SPDIF for passthrough mode 2 (system encapsulation)
-				if( spdif_init(s->audio) ) {
-					s->audio_sink->set_passthrough( s, 2 );
-				} else {
-					DBG serprintf("AC3 recoding: failed to init SPDIF, falling back to PCM\n");
+				// AC3 recoding: ALL formats (including native AC3/EAC3) go through PCM decode -> filter -> AC3 recode
+				// This allows filters (night mode, audio boost) to work on all audio sources
+				if( s->audio_sink ) {
+					DBG serprintf("AC3 recoding: all formats will recode through PCM\n");
 					s->audio_sink->set_passthrough( s, 0 );
 				}
-			} else if( s->audio_sink ) {
-				DBG serprintf("AC3 recoding: non-AC3/EAC3 source, will recode through PCM\n");
-				s->audio_sink->set_passthrough( s, 0 );
-			}
 			} else if(spdif_init(s->audio) && s->audio_sink) {
 				s->audio_sink->set_passthrough(s, spdif_is_passthrough_on() );
-			} else 
+			} else
 #endif
 			{
 				s->audio_sink->set_passthrough(s, 0);

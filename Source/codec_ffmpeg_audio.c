@@ -718,67 +718,72 @@ Dump( data, 64 );
 serprintf("\r\n");
 Dump( data, size );
 }
-	AVPacket avpkt = { .data = data, .size = size };
-	av_init_packet(&avpkt);
+		AVPacket avpkt = { .data = data, .size = size };
+		av_init_packet(&avpkt);
 
-	int t1 = time_update_time();
-	av_frame_unref(p->aframe);
-	int ret_send = avcodec_send_packet(p->actx, &avpkt);
-    if (ret_send < 0) {
+		int t1 = time_update_time();
+		av_frame_unref(p->aframe);
+		int ret_send = avcodec_send_packet(p->actx, &avpkt);
+		if (ret_send < 0) {
+			if (ret_send != AVERROR(EAGAIN)) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
-    }
-	int ret_rx = avcodec_receive_frame(p->actx, p->aframe);
-	if (ret_rx < 0) {
+			}
+		}
+		int ret_rx = avcodec_receive_frame(p->actx, p->aframe);
+		if (ret_rx < 0 && ret_rx != AVERROR(EAGAIN) && ret_rx != AVERROR_EOF) {
 serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUNCTION__, av_err2str(ret_rx));
-	}
+		}
 
-	if( sleep_arm ) {
-		msec_sleep( sleep_arm );
-	}
-	int t2 = time_update_time();
-	
-	if ( ret_rx < 0 ) {
-		decoded = 0;
-	} else {
-		decoded += size;
-	}
+		if( sleep_arm ) {
+			msec_sleep( sleep_arm );
+		}
+		int t2 = time_update_time();
 
-	if( size && ret_send < 0 ) {
+		if ( ret_send >= 0 ) {
+			decoded += size;
+		} else if( size && ret_send < 0 ) {
 serprintf("FFMPEG_AUDIO_DEC ERROR!\r\n");
 msec_sleep( 10 );
-		decoded     = size;
-	//	audio_bytes = 0; 	
-	}
+			decoded     = size;
+		}
 
-	int channels, bits;
-	int audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
-	int t3 = time_update_time();
+		int channels = 0;
+		int bits     = 0;
+		int audio_bytes = 0;
+		int frame_available = (ret_rx >= 0);
 
-	char layout_desc[256];
-	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
+		if( frame_available ) {
+			audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
+		}
+		int t3 = time_update_time();
+
+		char layout_desc[256];
+		av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
 DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %X  tim %3d/%3d\r\n",
-					  decoded, p->aframe->nb_samples, audio_bytes, p->actx->sample_rate, p->actx->ch_layout.nb_channels, layout_desc,
+					  decoded, frame_available ? p->aframe->nb_samples : 0, audio_bytes, p->actx->sample_rate, p->actx->ch_layout.nb_channels, layout_desc,
 					  p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
 
-	avos_frame->data          = pcm_data;
-	avos_frame->size          = audio_bytes;
-	avos_frame->bits          = bits;
-	avos_frame->channels      = channels;
-	avos_frame->samplesPerSec = p->actx->sample_rate ? p->actx->sample_rate : audio->samplesPerSec;
-	avos_frame->format        = WAVE_FORMAT_PCM;
-	avos_frame->error         = 0;
+		avos_frame->data          = frame_available ? pcm_data : NULL;
+		avos_frame->size          = audio_bytes;
+		avos_frame->bits          = bits;
+		avos_frame->channels      = frame_available ? channels : audio->channels;
+		avos_frame->samplesPerSec = p->actx->sample_rate ? p->actx->sample_rate : audio->samplesPerSec;
+		avos_frame->format        = WAVE_FORMAT_PCM;
+		avos_frame->error         = frame_available ? 0 : (ret_rx == AVERROR(EAGAIN) ? 0 : 1);
 
-	AVFrame *temp_frame = av_frame_alloc();
-	while ( ret_send >= 0) {
-		// drain the decoder, should not be necessary
-		int ret_rx_post = avcodec_receive_frame(p->actx, temp_frame);
-		if (ret_rx_post == 0) {
+		if( frame_available ) {
+			AVFrame *temp_frame = av_frame_alloc();
+			while ( ret_send >= 0) {
+				// drain the decoder, should not be necessary
+				int ret_rx_post = avcodec_receive_frame(p->actx, temp_frame);
+				if (ret_rx_post == 0) {
 serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
-		} else {
-			break;
+				} else {
+					break;
+				}
+			}
+			av_frame_free(&temp_frame);
 		}
-	}
-	av_frame_free(&temp_frame);
 
 	if( p->ignore > 0 ) {
 DBGCA2 serprintf("FFMPEG IGNORE!\r\n");
@@ -1170,4 +1175,3 @@ DECLARE_DEBUG_COMMAND( "ffcm", ff_cm );
 #endif
 
 #endif
-

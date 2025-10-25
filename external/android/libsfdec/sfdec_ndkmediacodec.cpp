@@ -376,6 +376,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             // Compute before adjustment the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
             int64_t delta = ts - now_ts;
+            bool anchor_reset = false;
             if (
                     !sfdec->start_off || //Got reset
                     (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL || //If we had no frame since the last 500ms, user did pause/resume
@@ -386,6 +387,11 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 sfdec->start_off = timestamp_us * 1000LL;
                 // display first frame there asap
                 asap = 1;
+                anchor_reset = true;
+            }
+            if (anchor_reset) {
+                ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+                delta = ts - now_ts;
             }
             if (delta < 0) {
                 // We're late, schedule frames for later

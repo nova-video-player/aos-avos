@@ -103,9 +103,22 @@ DBGS serprintf("sync_init\r\n");
 // *****************************************************************************
 int stream_sync_av_delay( STREAM *s )
 {
+	// Defensive check: validate stream pointer and audio/video validity to prevent crashes
+	if (!s || !s->audio || !s->video) {
+		return 0;
+	}
+
 	// this returns delta(audio_delay - video_delay) in ms in real world domain (i.e. ts delta)
 	if ( !s->audio->valid || !s->video->valid ) {
 		// if we have no audio & video
+		return 0;
+	}
+
+	// Additional safety: check if sinks are being torn down
+	if (s->audio_sink && !s->audio_sink->is_open) {
+		return 0;
+	}
+	if (s->video_sink && !s->video_sink->is_open) {
 		return 0;
 	} 
 	
@@ -187,6 +200,11 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 // ************************************************************
 int stream_sync_audio( STREAM *s, int audio_time )
 {
+	// Defensive check: validate stream pointer to prevent JNI abort crashes
+	if (!s) {
+		return 0;
+	}
+
 	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
 			s->video_sink->put_time( s->video_sink, audio_time - stream_sync_av_delay( s ) - RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int ) );
@@ -241,6 +259,11 @@ DBGY serprintf("{{A %d}} ", diff );
 // ************************************************************
 int stream_sync_video( STREAM *s, int video_time )
 {
+	// Defensive check: validate stream pointer to prevent JNI abort crashes
+	if (!s) {
+		return 0;
+	}
+
 	s->sync_v_time = video_time;
 
 	if( !s->sync_video || s->speed != STREAM_SPEED_NORMAL || s->play_n_video_frames || stream_no_sync ) {

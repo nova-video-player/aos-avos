@@ -215,13 +215,50 @@ Java_com_archos_medialib_AvosMediaMetadataRetriever_nativeGetFrameAtTime(JNIEnv 
     avos_mr_t *mr = get_mr_or_throw(env, thiz);
     jobject bitmap;
     float scale;
+    uint32_t scaled_height;
 
     if (!mr) return NULL;
     CHECK(avos->getframe(mr, timeUs == -1 ? -1 : timeUs / 1000, &frame));
     if (!frame)
         return NULL;
+
+    // Validate frame dimensions to prevent division by zero and overflow
+    if (frame->width == 0 || frame->height == 0) {
+        LOGE("nativeGetFrameAtTime: invalid frame dimensions %dx%d", frame->width, frame->height);
+        free(frame);
+        return NULL;
+    }
+
+    // Limit frame dimensions to reasonable values (max 8K)
+    if (frame->width > 7680 || frame->height > 4320) {
+        LOGE("nativeGetFrameAtTime: frame dimensions too large %dx%d", frame->width, frame->height);
+        free(frame);
+        return NULL;
+    }
+
     scale = (float)ANDROID_THUMB_WIDTH / (float)frame->width;
-    bitmap = create_bitmap(env, frame, ANDROID_THUMB_WIDTH, (uint32_t)(frame->height * scale));
+    scaled_height = (uint32_t)(frame->height * scale);
+
+    // Validate scaled height to prevent overflow and excessive memory allocation
+    // Limit to reasonable thumbnail size (max 4096 pixels in any dimension)
+    if (scaled_height == 0 || scaled_height > 4096) {
+        LOGE("nativeGetFrameAtTime: invalid scaled height %u (original %dx%d, scale %.2f)",
+             scaled_height, frame->width, frame->height, scale);
+        free(frame);
+        return NULL;
+    }
+
+    bitmap = create_bitmap(env, frame, ANDROID_THUMB_WIDTH, scaled_height);
+
+    // Check for exceptions thrown during bitmap creation
+    if ((*env)->ExceptionCheck(env)) {
+        LOGE("nativeGetFrameAtTime: exception occurred during bitmap creation");
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        free(frame);
+        return NULL;
+    }
+
     free(frame);
     return bitmap;
 }

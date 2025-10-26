@@ -319,6 +319,16 @@ int android_buffer_cancel(android_surface_t *as, void *handle)
 	status_t err = NO_ERROR;
 	ANativeWindowBuffer_t *anb = (ANativeWindowBuffer_t *)handle;
 
+	if (!as) {
+		AVOSLOG("error: as is NULL");
+		return -1;
+	}
+
+	if (!as->anw) {
+		AVOSLOG("error: as->anw is NULL");
+		return -1;
+	}
+
 	if (as->gralloc) {
 		err = android_buffer_unlock_data(as, anb);
 		CHECK_ERR();

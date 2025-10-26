@@ -264,6 +264,13 @@ int stream_sync_video( STREAM *s, int video_time )
 		return 0;
 	}
 
+	// Additional validation: check critical nested pointers to prevent use-after-free crashes
+	// This can occur during stream teardown when the STREAM structure is being deallocated
+	// while another thread is still calling this function
+	if (!s->audio || !s->video) {
+		return 0;
+	}
+
 	s->sync_v_time = video_time;
 
 	if( !s->sync_video || s->speed != STREAM_SPEED_NORMAL || s->play_n_video_frames || stream_no_sync ) {

@@ -115,7 +115,7 @@ int stream_sync_av_delay( STREAM *s )
 	}
 
 	// Additional safety: check if sinks are being torn down
-	if (s->audio_sink && !s->audio_sink->is_open) {
+	if (s->audio_sink && !s->audio_sink_open) {
 		return 0;
 	}
 	if (s->video_sink && !s->video_sink->is_open) {

@@ -2508,6 +2508,28 @@ DBGS serprintf("stream_pause\r\n");
 		stream_audio_mute( s );
 
 		s->paused = 1;
+
+		// Flush passthrough audio so no encoded frames keep playing while video is paused
+		int passthrough = (s->audio_sink && s->audio_sink->get_passthrough)
+			? s->audio_sink->get_passthrough( s )
+			: 0;
+		if( s->audio->valid && passthrough ) {
+			// Park the audio thread while we drain decoder and sink state
+			int old_state = THREAD_IDLE;
+			if( thread_state_get( &s->audio_tstate ) != THREAD_EXIT ) {
+				old_state = thread_state_set( &s->audio_tstate, THREAD_IDLE );
+			}
+
+			if( s->audio_sink && s->audio_sink->flush ) {
+				s->audio_sink->flush( s );
+			}
+
+DBGS serprintf("stream_pause: flushed audio for passthrough mode %d\r\n", passthrough);
+
+			if( thread_state_get( &s->audio_tstate ) != THREAD_EXIT && old_state == THREAD_RUNNING ) {
+				thread_state_set( &s->audio_tstate, THREAD_RUNNING );
+			}
+		}
 	}
 
 	_stream_wait_for_idle( s, 1000 );

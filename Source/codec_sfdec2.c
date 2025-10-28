@@ -111,8 +111,10 @@ typedef struct priv {
 
 	int venc_put_time;
 	int venc_ref_time;
-	
+
 	int dropped;
+	int android_start_delay_ms;
+	int android_delay_dirty;
 	
 	STREAM_DEC_VIDEO *dec;
 } priv_t;
@@ -358,6 +360,42 @@ static void *videosink_thread(void *ctx)
 		}
 
 		int do_render = 1;
+
+		if (android_sync && p->android_delay_dirty && p->sfdec) {
+			int audio_delay_ms = 0;
+			if (s && s->audio_sink && s->audio_sink->delay) {
+				audio_delay_ms = s->audio_sink->delay(s);
+			}
+			if (audio_delay_ms < 0) {
+				audio_delay_ms = 0;
+			}
+
+			int target_ms = audio_delay_ms;
+			int have_audio_time = s && s->audio->valid && s->audio_time >= 0;
+			if (have_audio_time) {
+				int diff_ts = f->time - s->audio_time;
+				int diff_ms = TS_TO_RST_DELTA(diff_ts, int);
+				target_ms += diff_ms;
+			}
+
+			if (target_ms < 0) {
+				target_ms = 0;
+			} else if (target_ms > 2000) {
+				target_ms = 2000;
+			}
+
+			if (target_ms != p->android_start_delay_ms) {
+				sfdec_set_start_delay(p->sfdec, (int64_t)target_ms * 1000);
+				p->android_start_delay_ms = target_ms;
+			}
+
+			p->android_delay_dirty = have_audio_time ? 0 : 1;
+		}
+
+		if (android_sync && p->android_delay_dirty) {
+			do_render = 0;
+		}
+
 		int venc_time = _get_time(p);
 		int blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
 
@@ -369,6 +407,10 @@ static void *videosink_thread(void *ctx)
 DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
 		if( s && s->paused ) {
 DBGSI serprintf(" paused\n");
+			if (android_sync) {
+				p->android_delay_dirty = 1;
+				p->android_start_delay_ms = 0;
+			}
 		} else if (blit_duration > 0) {
 DBGSI serprintf(" wait\n");
 //DBGSI2 CLOG("sleep @ %10ld.%3ld  dur %3d  f(%2d)  blit %8d  venc %8d)", ts.tv_sec, ts.tv_nsec/1000000, blit_duration, f->index, f->blit_time, venc_time);
@@ -720,6 +762,10 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->locked.height = height;
 	p->locked.rotation = video->rotation;
 	p->locked.run = 1;
+	if (android_sync) {
+		p->android_delay_dirty = 1;
+		p->android_start_delay_ms = 0;
+	}
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;
@@ -894,6 +940,11 @@ DBGCV	CLOG();
 		frame_release(p->sfdec, p->frames[i]);
 
 	rm_state_l(p, THREAD_STATE_FLUSHING);
+
+	if (android_sync) {
+		p->android_delay_dirty = 1;
+		p->android_start_delay_ms = 0;
+	}
 
 	pthread_mutex_unlock(&p->locked.mtx);
 

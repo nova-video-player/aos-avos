@@ -39,7 +39,7 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGP if(Debug[DBG_PARSER])
 
-#define DBG if(1)
+#define DBG if(0)
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );

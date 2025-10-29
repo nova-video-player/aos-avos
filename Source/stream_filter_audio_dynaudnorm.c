@@ -29,7 +29,7 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 
-#define DBG if(1)
+#define DBG if(0)
 #define DBG2 if(0)
 
 struct ctx {

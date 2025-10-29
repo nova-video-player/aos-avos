@@ -29,7 +29,7 @@
 #define DBGA if(Debug[DBG_AUD])
 #define DBGV if(Debug[DBG_VID])
 
-#define DBG if(1)
+#define DBG if(0)
 
 #ifdef CONFIG_STREAM
 

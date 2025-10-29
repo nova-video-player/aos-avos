@@ -44,11 +44,11 @@
 // debug flags for a non release version
 #ifndef CONFIG_RELEASE
 int Debug[DBG_MAX_ENTRIES] = { 
-	[DBG_VIDEO_PLAYER] = 1,
-	[DBG_AUDIO_PLAYER] = 1,
-	[DBG_PARSER] = 1,
-	[DBG_STREAM] = 1,
-	[DBG_SINK] = 2,
+	[DBG_VIDEO_PLAYER] = 0,
+	[DBG_AUDIO_PLAYER] = 0,
+	[DBG_PARSER] = 0,
+	[DBG_STREAM] = 0,
+	[DBG_SINK] = 0,
 	[DBG_FB] = 1,
 };
 #endif

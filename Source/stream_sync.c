@@ -321,6 +321,13 @@ DBGY serprintf( "{{V %d}} ", diff );
 // ************************************************************
 void stream_sync( STREAM *s )
 {
+	// Defensive check: validate stream pointer and nested pointers to prevent JNI abort crashes
+	// This crash can occur during stream teardown when the STREAM structure is being deallocated
+	// while another thread (e.g., FileObserver) is still calling this function
+	if (!s || !s->audio || !s->video) {
+		return;
+	}
+
 	// if we have audio ...
 
 	if ( !s->audio->valid || !s->video->valid )
@@ -362,8 +369,8 @@ DBGVY serprintf("(D %d)", diff );
 	s->delay_valid = 1;
 	
 DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
-		
-	if ( stream_no_sync || s->video_sink->put_time ) {
+
+	if ( stream_no_sync || (s->video_sink && s->video_sink->put_time) ) {
 		// ANDROID: this is the android mode with a put_time function in the video sink which basically disables the sync logic
 		goto EXIT;
 	}

@@ -27,6 +27,9 @@ int android_window_set_buffers_rotation(void *anw, int rotation)
 {
 	uint32_t transform;
 
+	if (!anw)
+		return -1;
+
 	CHECK_ANW();
 	switch (rotation) {
 		case 0: transform = 0; break;

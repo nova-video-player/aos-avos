@@ -39,7 +39,6 @@ typedef int	(*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int rende
 typedef int	(*sfdec_buf_release_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf);
 typedef int	(*sfdec_reset_ts_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_set_playback_speed_t)(sfdec_priv_t *sfdec, int den, int num);
-typedef int	(*sfdec_set_start_delay_t)(sfdec_priv_t *sfdec, int64_t delay_us);
 
 typedef struct sfdec_itf {
 	const char *name;
@@ -54,8 +53,7 @@ typedef struct sfdec_itf {
 	sfdec_buf_render_t buf_render;
 	sfdec_buf_release_t buf_release;
 	sfdec_reset_ts_t reset_ts;
-	sfdec_set_playback_speed_t set_playback_speed;
-	sfdec_set_start_delay_t set_start_delay;
+    sfdec_set_playback_speed_t set_playback_speed;
 } sfdec_itf_t;
 
 struct sfdec {

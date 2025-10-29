@@ -823,7 +823,4 @@ sfdec_itf_t sfdec_itf_omxcodec = {
     sfdec_read,
     sfdec_buf_render,
     sfdec_buf_release,
-    NULL,
-    NULL,
-    NULL,
 };

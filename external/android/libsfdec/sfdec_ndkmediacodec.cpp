@@ -66,7 +66,6 @@ struct sfdec_mediacodec
     int playback_speed_den;
     int playback_speed_num;
     int n_late;
-    int64_t start_delay_ns;
 };
 
 struct sfbuf
@@ -147,8 +146,6 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->video_frame_rate_num = video_frame_rate_num;
     sfdec->playback_speed_den = 1;
     sfdec->playback_speed_num = 1;
-    sfdec->start_delay_ns = 100 * 1000LL * 1000LL;
-    sfdec->n_late = 0;
 
     DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
 
@@ -386,19 +383,17 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                     (delta < -500*1000LL*1000LL || delta > 500*1000LL*1000LL) // If distance between two frames is >500ms, that's a seek
                     ) {
                 // We store the first frame (its realtime timestamp -- now & codec timestamp)
-                // Bias the start by the configured audio/video delay so MediaCodec aligns with audio.
-                sfdec->start_monotonic = now_ts + sfdec->start_delay_ns;
+                sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 300ms
                 sfdec->start_off = timestamp_us * 1000LL;
                 // display first frame there asap
                 asap = 1;
                 anchor_reset = true;
-                sfdec->n_late = 0;
             }
             if (anchor_reset) {
                 ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
                 delta = ts - now_ts;
             }
-            if (!anchor_reset && delta < 0) {
+            if (delta < 0) {
                 // We're late, schedule frames for later
                 // Note that there is a valid reason to be late (at the start of playback):
                 // It's possible Audio buffer is bigger than our initial 100ms
@@ -409,8 +404,6 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 sfdec->n_late++;
                 sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
                 DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
-            } else if (sfdec->n_late && delta >= 0) {
-                sfdec->n_late = 0;
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
@@ -450,7 +443,6 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
 {
     sfdec->start_off = 0;
     sfdec->start_monotonic = 0;
-    sfdec->n_late = 0;
     return 0;
 }
 
@@ -458,18 +450,6 @@ static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num) {
     DBG LOG("Setting playbackspeed to %d / %d", num, den);
     sfdec->playback_speed_den = den;
     sfdec->playback_speed_num = num;
-    return 0;
-}
-
-static int sfdec_set_start_delay(sfdec_priv_t *sfdec, int64_t delay_us)
-{
-    if (delay_us < 0)
-        delay_us = 0;
-    if (delay_us > 2000000)
-        delay_us = 2000000;
-
-    sfdec->start_delay_ns = delay_us * 1000LL;
-    sfdec->n_late = 0;
     return 0;
 }
 
@@ -488,5 +468,4 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_buf_release,
     sfdec_reset_ts,
     sfdec_set_playback_speed,
-    sfdec_set_start_delay,
 };

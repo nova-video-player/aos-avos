@@ -136,10 +136,3 @@ int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num)
 		return sfdec->itf->set_playback_speed(sfdec->priv, den, num);
     return 0;
 }
-
-int sfdec_set_start_delay(sfdec_t *sfdec, int64_t delay_us)
-{
-	if (sfdec->itf->set_start_delay != NULL)
-		return sfdec->itf->set_start_delay(sfdec->priv, delay_us);
-	return 0;
-}

@@ -343,7 +343,4 @@ sfdec_itf_t dec_audio_mediacodec = {
     dec_audio_read,
     sfdec_buf_render,
     sfdec_buf_release,
-    NULL,
-    NULL,
-    NULL,
 };

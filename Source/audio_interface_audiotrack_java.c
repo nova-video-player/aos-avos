@@ -785,12 +785,6 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
 			ERR LOG("audiotrack ctor failed");
 			failed = 1;
-			// If passthrough mode failed, fallback to regular (non-passthrough) mode
-			if (at->passthrough > 0) {
-				ERR LOG("passthrough mode failed, falling back to regular PCM mode");
-				at->passthrough = 0;
-				return audiotrack_set_output_params(at, rate, channels, bits, format);
-			}
 			// If DTS HD failed, fallback to DTS for DTS core mode
 			if (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) {
 				return audiotrack_set_output_params(at, 48000, 2, 16, WAVE_FORMAT_DTS);
@@ -828,16 +822,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
 	at->passthrough = passthrough;
-	// Use 16-bit PCM for passthrough mode switching. This is correct because:
-	// 1. Mode 2 (compressed): always uses 16-bit container
-	// 2. Mode 1 (IEC61937): encoded audio is 16-bit PCM in container
-	// 3. Mode 0 (PCM): 16-bit is the most common PCM format
-	// NOTE: Cannot use at->frame_size * 8 / at->channel_count because:
-	//   - When mode changes, rate/channels can change (see passthrough mode 1 logic)
-	//   - at->frame_size/at->channel_count contain OLD configuration values
-	//   - Incorrect bits calculation would break audiotrack_set_output_params
-	int result = audiotrack_set_output_params(at, at->rate, at->channel_count, 16, at->format);
-	return result;
+	audiotrack_set_output_params(at, at->rate, at->channel_count, (passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, at->format);
+	return 0;
 }
 
 static int audiotrack_get_passthrough(audio_ctx_t *at)

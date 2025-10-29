@@ -136,15 +136,19 @@ DBGCA3 serprintf("dmix: num %5d  ch %d  bits %d\r\n", samples, channels, bits );
 // ******************************************
 void downmix_planar( uint16_t *pcm, uint8_t *_src[], int samples, int channels, int bits, int *map )
 {
-DBGCA3 serprintf("dmixP: num %5d  ch %d  bits %d\r\n", samples, channels, bits );	
+DBGCA3 serprintf("dmixP: num %5d  ch %d  bits %d\r\n", samples, channels, bits );
 	if ( no_downmix || !pcm || !_src || channels > 8 ) {
 		return;
 	}
-	
+
 	uint8_t *src[8];
 	int c;
 	for( c = 0; c < channels; c++ ) {
 		src[c] = _src[c];
+		// Safety check: if any channel pointer is NULL, bail out to prevent segfault
+		if( !src[c] ) {
+			return;
+		}
 	}
 
 	int shift = (bits == 32) ? 16 : (bits == 24 ) ? 8 : 0;
@@ -284,15 +288,19 @@ DBGCA3 serprintf("dmix_flt: num %5d  ch %d  bits %d\r\n", samples, channels, bit
 
 void downmix_float_planar( uint16_t *pcm, uint8_t *_src[], int samples, int channels, int bits, int *map )
 {
-DBGCA3 serprintf("dmix_fltP: num %5d  ch %d  bits %d\r\n", samples, channels, bits );	
+DBGCA3 serprintf("dmix_fltP: num %5d  ch %d  bits %d\r\n", samples, channels, bits );
 	if ( no_downmix || !pcm || !_src || channels > 8 ) {
 		return;
 	}
-	
+
 	uint8_t *src[8];
 	int c;
 	for( c = 0; c < channels; c++ ) {
 		src[c] = _src[c];
+		// Safety check: if any channel pointer is NULL, bail out to prevent segfault
+		if( !src[c] ) {
+			return;
+		}
 	}
 
 	int i;

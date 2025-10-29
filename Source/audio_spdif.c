@@ -93,6 +93,13 @@ static int spdif_put( UCHAR *data, int size, int *decoded )
 {
 	if ( !data || size < 10 )
 		return 0;
+
+	// Prevent segfault if format context is not initialized
+	if ( !fctxt ) {
+		serprintf("spdif_put: format context not initialized\n");
+		return 0;
+	}
+
 	AVPacket pkt;
 	av_init_packet( &pkt );
 	static int pts = 1;

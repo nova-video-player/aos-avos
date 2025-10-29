@@ -295,6 +295,12 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		return 0;
 	}
 
+	// Prevent segfault if encoder failed to initialize
+	if (!ctx->enc_ctx || !ctx->swr_ctx || !ctx->fifo) {
+		DBG serprintf("faac3: encoder not initialized, bypassing\n");
+		return 0;
+	}
+
 	DBG serprintf("faac3: filter call fmt=%04X size=%d enabled=%d\n", frame->format, frame->size, ctx->enabled);
 
 	// Only process if filter is enabled
@@ -368,6 +374,12 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		}
 
 		while (avcodec_receive_packet(ctx->enc_ctx, ctx->pkt) == 0) {
+			if (!ctx->pkt || !ctx->pkt->data || ctx->pkt->size <= 0) {
+				serprintf("faac3: invalid packet from encoder\n");
+				av_packet_unref(ctx->pkt);
+				return 0;
+			}
+
 			if (ctx->encode_buffer_used + ctx->pkt->size > ctx->encode_buffer_size) {
 				serprintf("faac3: encode buffer overflow\n");
 				av_packet_unref(ctx->pkt);

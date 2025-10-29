@@ -244,15 +244,28 @@ public:
     {
         size_t ret = 0;
         BufferQueue::Elm *buffer = NULL;
-    
+
         pthread_mutex_lock(&this->mutex);
 
         /*
          * when seeking: wait for read called with seek options in order to
          * fill up a new buffer
          */
-        while (this->run && !this->seeking && !(buffer = this->freeQ.getFirst()) && wait)
-            pthread_cond_wait(&this->cond, &this->mutex);
+        if (wait) {
+            struct timespec timeout;
+            clock_gettime(CLOCK_REALTIME, &timeout);
+            timeout.tv_sec += 5;  // 5 second timeout to prevent ANR
+            while (this->run && !this->seeking && !(buffer = this->freeQ.getFirst())) {
+                int cond_ret = pthread_cond_timedwait(&this->cond, &this->mutex, &timeout);
+                if (cond_ret == ETIMEDOUT) {
+                    LOG("fillBuffer timeout waiting for free buffer, aborting");
+                    break;
+                }
+            }
+        } else {
+            while (this->run && !this->seeking && !(buffer = this->freeQ.getFirst()) && wait)
+                pthread_cond_wait(&this->cond, &this->mutex);
+        }
         if (buffer) {
             MediaBuffer *mbuf = buffer->mbuf;
 
@@ -311,8 +324,17 @@ LOG("ABORT seek!");
             this->seeking = false;
         }
 
-            while (this->run && !this->seeking && !(buffer = this->filledQ.getFirst()))
-                pthread_cond_wait(&this->cond, &this->mutex);
+            // Use timed wait to prevent indefinite blocking that causes ANR
+            struct timespec timeout;
+            clock_gettime(CLOCK_REALTIME, &timeout);
+            timeout.tv_sec += 5;  // 5 second timeout to prevent ANR
+            while (this->run && !this->seeking && !(buffer = this->filledQ.getFirst())) {
+                int cond_ret = pthread_cond_timedwait(&this->cond, &this->mutex, &timeout);
+                if (cond_ret == ETIMEDOUT) {
+                    LOG("read timeout waiting for filled buffer, aborting");
+                    break;
+                }
+            }
             /*
              * when seeking but read not called with seek options:
              * send back the previous buffer to unblock the read call.

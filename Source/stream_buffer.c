@@ -344,8 +344,8 @@ DBGS serprintf("stream_buffer_resize_and_rebuffer(%s  new_size %d)\r\n", buffer-
 //	_open
 //
 // ************************************************************
-static int _open( STREAM_BUFFER *buffer, STREAM *s, STREAM_IO *io, 
-			int buffer_size, int overlap_size, UINT64 start, UINT64 end, 
+static int _open( STREAM_BUFFER *buffer, STREAM *s, STREAM_IO *io,
+			int buffer_size, int overlap_size, UINT64 start, UINT64 end,
 			UINT32 flags, const char *tag, STREAM_BUFFER *src )
 {
 DBGS serprintf("stream_buffer_open(%s  size %d  over %d  start %llX  end %llX  flags %08X)\r\n", tag, buffer_size, overlap_size, start, end,  flags  );
@@ -353,7 +353,8 @@ DBGS serprintf("stream_buffer_open(%s  size %d  over %d  start %llX  end %llX  f
 	buffer->s     = s;
 	buffer->io    = io;
 
-	strcpy( buffer->tag, tag );
+	strncpy( buffer->tag, tag, sizeof(buffer->tag) - 1 );
+	buffer->tag[sizeof(buffer->tag) - 1] = '\0';
 	
 	buffer->buffer_size  = buffer_size;
 	buffer->overlap_size = overlap_size;

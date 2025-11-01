@@ -33,6 +33,11 @@
 #include "android_codec.h"
 
 #include <time.h>
+#ifdef CONFIG_ANDROID
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #ifdef CONFIG_STREAM
 
 #define DBGS	if(0||Debug[DBG_STREAM])
@@ -50,6 +55,15 @@
 #define NSEC_PER_SEC 1000000000L
 
 #define CLOG(fmt, ...) serprintf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
+
+#ifdef CONFIG_ANDROID
+static void set_thread_priority_nice(int nice_value)
+{
+	int tid = (int)syscall(__NR_gettid);
+	if (tid > 0)
+		setpriority(PRIO_PROCESS, tid, nice_value);
+}
+#endif
 
 static int sfdec_max_frames = 2;
 static int sfdec_force_hw   = -1;
@@ -338,6 +352,10 @@ static void *videosink_thread(void *ctx)
 	priv_t *p = (priv_t*) ctx;
 	STREAM *s = (STREAM *)p->dec->ctx;
 
+#ifdef CONFIG_ANDROID
+	set_thread_priority_nice(-8);
+#endif
+
 	pthread_mutex_lock(&p->locked.mtx);
 	while (p->locked.run && !p->locked.error) {
 
@@ -443,6 +461,10 @@ static void *videodec_thread(void *ctx)
 {
 	priv_t *p = (priv_t*) ctx;
 	sfdec_read_out_t read_out;
+
+#ifdef CONFIG_ANDROID
+	set_thread_priority_nice(-6);
+#endif
 
 	pthread_mutex_lock(&p->locked.mtx);
 

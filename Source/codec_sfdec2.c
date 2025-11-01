@@ -371,7 +371,7 @@ DBGSI serprintf(" wait\n");
 				blit_duration = f->duration + 100;
 
 			struct timespec ts;
-			clock_gettime(CLOCK_REALTIME, &ts);
+			clock_gettime(CLOCK_MONOTONIC, &ts);
 			timespec_add_ms(&ts, blit_duration);
 
 			int rc = 0;
@@ -703,7 +703,11 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	frame_q_init(&p->locked.get_q, "get_q");
 
 	pthread_mutex_init(&p->locked.mtx, NULL);
-	pthread_cond_init(&p->locked.cond, NULL);
+	pthread_condattr_t cond_attr;
+	pthread_condattr_init(&cond_attr);
+	pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+	pthread_cond_init(&p->locked.cond, &cond_attr);
+	pthread_condattr_destroy(&cond_attr);
 	p->locked.width = width;
 	p->locked.height = height;
 	p->locked.rotation = video->rotation;

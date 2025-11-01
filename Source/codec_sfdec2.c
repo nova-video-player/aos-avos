@@ -872,9 +872,10 @@ DBGCV	CLOG();
 
 
 	if( is_android_sync_enabled() ) {
-
-		sfdec_reset_ts(p->sfdec);
-
+		STREAM *s = (STREAM *)p->dec->ctx;
+		if( !(s && s->paused) ) {
+			sfdec_reset_ts(p->sfdec);
+		}
 	}
 
 

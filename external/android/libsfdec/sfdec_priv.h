@@ -37,25 +37,24 @@ typedef int	(*sfdec_stop_input_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_read_t)(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
 typedef int	(*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap);
 typedef int	(*sfdec_buf_release_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf);
-typedef int	(*sfdec_reset_ts_t)(sfdec_priv_t *sfdec);
-typedef int	(*sfdec_set_playback_speed_t)(sfdec_priv_t *sfdec, int den, int num);
+	typedef int	(*sfdec_reset_ts_t)(sfdec_priv_t *sfdec);
+	typedef int	(*sfdec_set_playback_speed_t)(sfdec_priv_t *sfdec, int den, int num);
 
-typedef struct sfdec_itf {
-	const char *name;
-	sfdec_init_t init;
-	sfdec_destroy_t destroy;
-	sfdec_start_t start;
-	sfdec_stop_t stop;
-	sfdec_send_input_t send_input;
-	sfdec_flush_t flush;
-	sfdec_stop_input_t stop_input;
-	sfdec_read_t read;
-	sfdec_buf_render_t buf_render;
-	sfdec_buf_release_t buf_release;
-	sfdec_reset_ts_t reset_ts;
-    sfdec_set_playback_speed_t set_playback_speed;
-} sfdec_itf_t;
-
+	typedef struct sfdec_itf {
+		const char *name;
+		sfdec_init_t init;
+		sfdec_destroy_t destroy;
+		sfdec_start_t start;
+		sfdec_stop_t stop;
+		sfdec_send_input_t send_input;
+		sfdec_flush_t flush;
+		sfdec_stop_input_t stop_input;
+		sfdec_read_t read;
+		sfdec_buf_render_t buf_render;
+		sfdec_buf_release_t buf_release;
+		sfdec_reset_ts_t reset_ts;
+	    sfdec_set_playback_speed_t set_playback_speed;
+	} sfdec_itf_t;
 struct sfdec {
 	const sfdec_itf_t *itf;
 	sfdec_priv_t *priv;

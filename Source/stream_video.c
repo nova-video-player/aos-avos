@@ -40,6 +40,7 @@
 #include "mpg4.h"
 #include "dts.h"
 #include "fb.h"
+#include "sfdec.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -2535,12 +2536,11 @@ DBGS serprintf("stream_un_pause\r\n");
 		// so that we are back to the same a2v sync as before
 		if ( stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL ) {
 			s->audio_preload = 1;
-		} else {
-			s->audio_preload = 0;
-			s->audio_stuff_zero = 0;
+			s->audio_sink->start( s );
 		}
-
-		s->paused = 0;
+		if( is_android_sync_enabled() && s->video_dec && s->video_dec->flush ) {
+			s->video_dec->flush( s->video_dec );
+		}
 
 		if ( s->speed == STREAM_SPEED_NORMAL ) {
 			stream_audio_unmute( s );
@@ -2550,8 +2550,9 @@ DBGS serprintf("stream_un_pause\r\n");
 			s->parser->pause( s, 0 );
 		}
 	}
-}
 
+	s->paused = 0;
+}
 void stream_un_pause_from_jni( STREAM *s, int was_paused )
 {
 	if( ignore_first_unpause ) {

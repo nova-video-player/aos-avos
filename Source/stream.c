@@ -24,6 +24,7 @@
 #include "browse.h"
 #include "power_hdd.h"
 #include "stream_sync.h"
+#include "sfdec.h"
 
 #include "athread.h"
 
@@ -572,6 +573,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
 			serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
 					   av_speed, applied_speed, rc );
+		}
+		if( s->video_dec && s->video_dec->flush && is_android_sync_enabled() ) {
+			s->video_dec->flush( s->video_dec );
 		}
 	} else {
 		DBG serprintf( "stream:stream_set_av_speed no audio speed change, ensured video speed %f\n", av_speed );

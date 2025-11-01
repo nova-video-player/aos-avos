@@ -2549,9 +2549,9 @@ DBGS serprintf("stream_un_pause\r\n");
 		if ( s->parser && s->parser->pause ) {
 			s->parser->pause( s, 0 );
 		}
-	}
 
-	s->paused = 0;
+		s->paused = 0;
+	}
 }
 void stream_un_pause_from_jni( STREAM *s, int was_paused )
 {

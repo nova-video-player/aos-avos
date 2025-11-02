@@ -71,10 +71,6 @@ DLHELPER_REG(DLHELPER_CRIT, MediaCodec_releaseOutputBuffer,
     status_t, (void *, size_t),
     "_ZN7android10MediaCodec19releaseOutputBufferEj");
 
-DLHELPER_REG(DLHELPER_NOCRIT, MediaCodec_releaseOutputBufferAtTime,
-    status_t, (void *, size_t, int64_t),
-    "_ZN7android10MediaCodec26releaseOutputBufferAtTimeEjx");
-
 DLHELPER_REG(DLHELPER_CRIT, MediaCodec_getInputBuffers,
     status_t, (void *, Vector<sp<ABuffer> > *),
     "_ZNK7android10MediaCodec15getInputBuffersEPNS_6VectorINS_2spINS_7ABufferEEEEE");

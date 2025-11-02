@@ -125,10 +125,9 @@ typedef struct priv {
 
 	int venc_put_time;
 	int venc_ref_time;
-	int venc_put_time_wallclock;  // Track wall-clock time of last put_time call
-
+	
 	int dropped;
-
+	
 	STREAM_DEC_VIDEO *dec;
 } priv_t;
 
@@ -268,10 +267,16 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
 
+	int dt = time    - p->venc_put_time;
+	int dr = atime() - p->venc_ref_time;
+	if( dr < sfdec_threshold ) {
+		return 0;
+	}
+	
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
-	p->venc_put_time_wallclock = atime();
 
+DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 	return 0;
 }
 
@@ -380,7 +385,9 @@ static void *videosink_thread(void *ctx)
         if (android_sync) blit_duration -= 200;
 
 DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
-		if (blit_duration > 0) {
+		if( s && s->paused ) {
+DBGSI serprintf(" paused\n");
+		} else if (blit_duration > 0) {
 DBGSI serprintf(" wait\n");
 //DBGSI2 CLOG("sleep @ %10ld.%3ld  dur %3d  f(%2d)  blit %8d  venc %8d)", ts.tv_sec, ts.tv_nsec/1000000, blit_duration, f->index, f->blit_time, venc_time);
 
@@ -431,6 +438,11 @@ DBGCV3 CLOG("render <-");
 		} else {
 			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0);
 		}
+		// "Paused" here usually mean "seek"
+		if( s && s->paused ) {
+			sfdec_reset_ts(p->sfdec);
+		}
+
 		pthread_mutex_lock(&p->locked.mtx);
 endloop:
 		if (f) {
@@ -886,27 +898,32 @@ static int videodec_get_out(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **pout_frame)
 }
 
 static int videodec_flush(STREAM_DEC_VIDEO *dec)
-
 {
-
+	int i;
 	priv_t *p = (priv_t*)dec->priv;
-
-
 
 DBGCV	CLOG();
 
+	pthread_mutex_lock(&p->locked.mtx);
 
+	add_state_l(p, THREAD_STATE_FLUSHING);
 
-	if( is_android_sync_enabled() ) {
+	XDM_id_flush( &p->XDM_ctx );
+	XDM_ts_flush( &p->XDM_ctx );
+	sfdec_flush(p->sfdec);
 
-		sfdec_reset_ts(p->sfdec);
-
+	while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_RENDERING)) {
+		pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
 	}
 
+	for (i = 0; i < p->num_frames; ++i)
+		frame_release(p->sfdec, p->frames[i]);
 
+	rm_state_l(p, THREAD_STATE_FLUSHING);
+
+	pthread_mutex_unlock(&p->locked.mtx);
 
 	return 0;
-
 }
 
 static int videodec_get_rc(STREAM_DEC_VIDEO *dec, STREAM_RC *rc)
@@ -979,11 +996,6 @@ void set_android_sync(int sync)
 {
 	DBGSI serprintf("set_android_sync: %d\n", sync);
 	android_sync = sync;
-}
-
-int is_android_sync_enabled(void)
-{
-	return android_sync;
 }
 
 #define OMXC_REGISTER( format, mangler ) \

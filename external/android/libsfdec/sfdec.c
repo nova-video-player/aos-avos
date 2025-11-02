@@ -132,7 +132,7 @@ int sfdec_reset_ts(sfdec_t *sfdec)
 
 int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num)
 {
-    if (sfdec && sfdec->itf && sfdec->itf->set_playback_speed)
-        return sfdec->itf->set_playback_speed(sfdec->priv, den, num);
-    return -1;
+	if (sfdec->itf->set_playback_speed != NULL)
+		return sfdec->itf->set_playback_speed(sfdec->priv, den, num);
+    return 0;
 }

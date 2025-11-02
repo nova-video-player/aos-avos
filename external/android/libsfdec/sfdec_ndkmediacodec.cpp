@@ -30,7 +30,7 @@
 typedef struct sfdec_mediacodec sfdec_priv_t;
 #include "sfdec_priv.h"
 
-#define DBG if (1)
+#define DBG if (0)
 
 #undef LOG
 #define LOG(fmt, ...) do { \
@@ -66,9 +66,6 @@ struct sfdec_mediacodec
     int playback_speed_den;
     int playback_speed_num;
     int n_late;
-    int skip_late_check;
-    int64_t last_reset_monotonic;
-    int defer_reanchor;  // Prevent video re-anchoring when audio is transient
 };
 
 struct sfbuf
@@ -129,7 +126,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (!mime_type)
         return NULL;
 
-    DBG LOG("(NdkMediaCodec): %s with extradata size %zu", mime_type, extradata_size);
+    DBG LOG("(NdkMediaCodec): %s with extradata size %d", mime_type, extradata_size);
 
     sfdec_priv_t *sfdec = new sfdec_priv_t();
     if (sfdec == NULL)
@@ -149,11 +146,8 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->video_frame_rate_num = video_frame_rate_num;
     sfdec->playback_speed_den = 1;
     sfdec->playback_speed_num = 1;
-    sfdec->n_late = 0;
-    sfdec->skip_late_check = 0;
-    sfdec->last_reset_monotonic = 0;
 
-    DBG LOG("sfdec->mCodec %p sfdec->mFormat %p", sfdec->mCodec, sfdec->mFormat);
+    DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
 
     if (codec_name) {
         LOG("Grabbing codec by name %s", codec_name);
@@ -254,7 +248,7 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
 
     memcpy(buf, data, size);
 
-    DBG LOG("queueInputBuffer: index %zd size %zu time %lld flag %d\n", index, size, time_us, flag);
+    DBG LOG("queueInputBuffer: index %d size %d time %lld flag %d\n", index, size, time_us, flag);
     err = AMediaCodec_queueInputBuffer(sfdec->mCodec,
             index,
             0,
@@ -305,7 +299,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
             read_out->flag |= SFDEC_READ_BUF;
             read_out->buf.sfbuf = sfbuf;
             read_out->buf.time_us = info.presentationTimeUs;
-            DBG LOG("buf: %zd / time: %lld", index, info.presentationTimeUs);
+            DBG LOG("buf: %d / time: %lld", index, info.presentationTimeUs);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
 
@@ -382,9 +376,8 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             // Compute before adjustment the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
             int64_t delta = ts - now_ts;
-            int discontinuity_detected = 0;
             if (
-                    (!sfdec->start_off && !sfdec->defer_reanchor) || //Got reset (but only if not deferring re-anchor)
+                    !sfdec->start_off || //Got reset
                     (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL || //If we had no frame since the last 500ms, user did pause/resume
                     (delta < -500*1000LL*1000LL || delta > 500*1000LL*1000LL) // If distance between two frames is >500ms, that's a seek
                     ) {
@@ -393,19 +386,6 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 sfdec->start_off = timestamp_us * 1000LL;
                 // display first frame there asap
                 asap = 1;
-                discontinuity_detected = 1;
-                // Skip late check for next few frames after discontinuity
-                // Always ensure at least 5 frames of grace after ANY discontinuity
-                if (sfdec->skip_late_check < 5) {
-                    sfdec->skip_late_check = 5;
-                    DBG LOG("Discontinuity detected, setting skip_late_check to 5 frames");
-                } else {
-                    DBG LOG("Discontinuity detected, keeping existing skip_late_check=%d (already >= 5)", sfdec->skip_late_check);
-                }
-            } else if (sfdec->defer_reanchor && !sfdec->start_off) {
-                // Deferring re-anchor - force ASAP without re-anchoring
-                asap = 1;
-                DBG LOG("Deferring re-anchor (audio transient), forcing ASAP");
             }
             if (delta < 0) {
                 // We're late, schedule frames for later
@@ -415,27 +395,17 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 //
                 // And then we can be late because video decoder can't render at correct speed
                 // In that case, adding 100ms will make it completely stuttery, but well.
-                if (sfdec->skip_late_check > 0) {
-                    DBG LOG("Late detected but skipping penalty (skip_late_check=%d), forcing ASAP", sfdec->skip_late_check);
-                    // Don't decrement if we just set it on this frame (discontinuity detected)
-                    if (!discontinuity_detected) {
-                        sfdec->skip_late_check--;
-                    }
-                    asap = 1; // Force ASAP scheduling, don't use negative timestamp
-                } else {
-                    sfdec->n_late++;
-                    sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
-                    DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
-                }
+                sfdec->n_late++;
+                sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
+                DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
 
-            if (asap) {
+            if (asap)
                 DBG LOG("Scheduling frame in a jiffy");
-            } else {
+            else
                 DBG LOG("Scheduling frame in %lld", ts - now_ts);
-            }
 
             sfdec->last_monotonic = now_ts;
             sfdec->last_off = timestamp_us * 1000LL;
@@ -465,25 +435,8 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
 
 static int sfdec_reset_ts(sfdec_priv_t *sfdec)
 {
-    // Get current time
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    int64_t now_ts = now.tv_sec * 1000000000LL + now.tv_nsec;
-
-    // Avoid redundant resets within 100ms
-    if (sfdec->last_reset_monotonic > 0 &&
-        (now_ts - sfdec->last_reset_monotonic) < 100*1000LL*1000LL) {
-        DBG LOG("Skipping reset - last reset was only %lld ms ago",
-                (now_ts - sfdec->last_reset_monotonic) / 1000000LL);
-        return 0;
-    }
-
     sfdec->start_off = 0;
     sfdec->start_monotonic = 0;
-    sfdec->n_late = 0;
-    sfdec->skip_late_check = 5; // Skip Late penalty for next 5 frames after reset (enough for audio to settle)
-    sfdec->last_reset_monotonic = now_ts;
-    DBG LOG("Reset timing anchors, will skip late check for next 5 frames");
     return 0;
 }
 
@@ -494,32 +447,19 @@ static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num) {
     return 0;
 }
 
+
 sfdec_itf_t sfdec_itf_mediacodec = {
-
     "MediaCodec",
-
     sfdec_init,
-
     sfdec_destroy,
-
     sfdec_start,
-
     sfdec_stop,
-
     sfdec_send_input,
-
     sfdec_flush,
-
     sfdec_stop_input,
-
     sfdec_read,
-
     sfdec_buf_render,
-
     sfdec_buf_release,
-
     sfdec_reset_ts,
-
     sfdec_set_playback_speed,
-
 };

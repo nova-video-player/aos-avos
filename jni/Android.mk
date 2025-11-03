@@ -18,6 +18,7 @@ AVOS_JNI_DIR := $(LOCAL_PATH)
 AVOS_DIR := $(LOCAL_PATH)/..
 EXTERNAL_DIR := $(AVOS_DIR)/external
 ANDROID_DIR := $(EXTERNAL_DIR)/android
+LDFLAGS = -Wl,-z,max-page-size=16384
 include $(ANDROID_DIR)/include/ndkbuild.mk
 
 LIBAV_DIR := $(AVOS_DIR)/../ffmpeg-android-builder

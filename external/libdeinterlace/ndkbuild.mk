@@ -8,6 +8,7 @@ LOCAL_SRC_FILES := deinterlace.c
 LOCAL_C_INCLUDES :=
 
 LOCAL_SHARED_ANDROID_LIBRARIES :=
+LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 
 ifeq ($(TARGET_ARCH),arm)
 LOCAL_ARM_MODE := arm

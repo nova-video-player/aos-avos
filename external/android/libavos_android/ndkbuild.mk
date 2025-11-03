@@ -20,7 +20,7 @@ LOCAL_MODULE := libavos_android$(AVOS_LIBS_SUFFIX)
 LOCAL_SRC_FILES := android_buffer.c android_window.c
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/include $(ANDROID_INCLUDES_21)
-
+LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 LOCAL_LDLIBS:= -L$(TARGET_OUT) -landroid #-lstagefright -lmedia -lcutils -lutils -lbinder -lui -lhardware
 
 include $(BUILD_ANDROID_LIBS)

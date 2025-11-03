@@ -173,6 +173,27 @@ static const AVCodec *get_avcodec( AUDIO_PROPERTIES *audio )
 	case WAVE_FORMAT_PCM_BLURAY:
 		codec_id    = AV_CODEC_ID_PCM_BLURAY;
 		break;
+	case WAVE_FORMAT_PCM:
+		if( audio->codec_id ) {
+			codec_id = audio->codec_id;
+			break;
+		}
+		switch( audio->bitsPerSample ) {
+		case 8:
+			codec_id = AV_CODEC_ID_PCM_U8;
+			break;
+		case 24:
+			codec_id = audio->byteOrder ? AV_CODEC_ID_PCM_S24BE : AV_CODEC_ID_PCM_S24LE;
+			break;
+		case 32:
+			codec_id = audio->byteOrder ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
+			break;
+		case 16:
+		default:
+			codec_id = audio->byteOrder ? AV_CODEC_ID_PCM_S16BE : AV_CODEC_ID_PCM_S16LE;
+			break;
+		}
+		break;
 	case WAVE_FORMAT_ALAW:
 		codec_id    = AV_CODEC_ID_PCM_ALAW;
 		break;

@@ -20,7 +20,7 @@ else
 APP_ABI := $(NDK_APP_ABI)
 endif
 APP_PLATFORM := android-21
-APP_STL := c++_shared
+APP_STL := c++_static
 
 ifeq (1,$(ASAN))
 APP_CFLAGS := -fsanitize=address -fno-omit-frame-pointer

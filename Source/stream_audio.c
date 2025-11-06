@@ -24,6 +24,7 @@
 #include "file.h"
 
 #include <string.h>
+#include <math.h>
 
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGA if(Debug[DBG_AUD])
@@ -556,16 +557,18 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 		s->audio_buffer      += decoded;
 		s->audio_buffer_size -= decoded;
 
+		// Save decoded bytes for audio time accounting AFTER filtering
+		int decoded_bytes = decoded;
+
 		if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 			if( audio_frame.error ) {
 serprintf(" ae! ");
 				// there was a decoding error, resync the time
 				s->audio_ref_time  = -1;
-			} 
+			}
 		} else {
-							if( !s->audio->vbr && s->audio->bytesPerSec ) {
-					_add_audio_time( s, RST_TO_TS_DELTA(decoded * 1000 / s->audio->bytesPerSec, int) );
-				}
+			// Audio time will be updated AFTER filtering (see below)
+			// to account for actual output size (important for atempo filter)
 		}
 		
 		if( s->dump_pcm_fd > 0 ) {
@@ -594,6 +597,12 @@ serprintf(" ae! ");
 				// This provides consistent audio boost/night mode for all sources
 				int run_filter = (!passthrough_active || ac3_recoding);
 				frame_channels = audio_frame.channels ? audio_frame.channels : s->audio->channels;
+				// Apply atempo speed control filter FIRST (changes audio duration)
+				if( s->audio_filter_atempo && audio_frame.size > 0 ) {
+					DBG serprintf("stream_audio: applying atempo filter\n");
+					s->audio_filter_atempo->filter( s->audio_filter_atempo, &audio_frame );
+				}
+
 				if( run_filter ) {
 					// Apply filters in order: compress -> AC3 -> JNI
 															// 1. Compression/boost filter
@@ -901,6 +910,42 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Do not send raw AC3 frames when IEC encapsulation fails; wait for the muxer
 							// to output a proper burst on the next iteration to avoid corrupt audio.
 							audio_frame.size = 0;
+					}
+				}
+				// Update audio time based on ACTUAL filtered output (not decoded bytes)
+				// This is critical for atempo filter which changes audio duration
+				if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
+					if( !s->audio->vbr && audio_frame.size > 0 ) {
+						// Calculate time based on actual output size after filtering
+						int bytes_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits) / 8;
+						int channels = audio_frame.channels ? audio_frame.channels : original_channels;
+						int sample_rate = audio_frame.samplesPerSec ? audio_frame.samplesPerSec : original_rate;
+
+						if( bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
+							// For AC3 recoding, use fakeSize (represents PCM equivalent)
+							int effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
+								audio_frame.fakeSize : audio_frame.size;
+							int output_samples = effective_size / (bytes_per_sample * channels);
+							int output_time_ms = (output_samples * 1000) / sample_rate;
+
+							// Option B: atempo output is already in TS domain (physical playback time)
+							// Don't double-scale by applying RST_TO_TS_DELTA when atempo is active
+							// If filter exists, we're in Option B mode (timeline mapping enabled)
+							int using_atempo = (s->audio_filter_atempo != NULL);
+							if( using_atempo ) {
+								// atempo output duration = physical samples @ 1.0x = TS domain
+								_add_audio_time( s, output_time_ms );
+								DBG serprintf("stream_audio: atempo output, audio_time +%d ms (TS domain, no scaling)\n",
+									output_time_ms);
+							} else {
+								// Normal path: physical samples need RST→TS conversion
+								_add_audio_time( s, RST_TO_TS_DELTA(output_time_ms, int) );
+								DBG serprintf("stream_audio: normal output, audio_time +%d ms (RST→TS scaled)\n",
+									RST_TO_TS_DELTA(output_time_ms, int));
+							}
+						} else if( s->audio->bytesPerSec ) {
+							// Fallback: use decoded bytes (original behavior)
+							_add_audio_time( s, RST_TO_TS_DELTA(decoded_bytes * 1000 / s->audio->bytesPerSec, int) );
 						}
 					}
 				}
@@ -934,7 +979,20 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( s->audio->samplesPerSec ) {
 							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / s->audio->bytesPerFrame;
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
-							_set_audio_time( s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int) );
+
+							// Check if atempo filter is active - output samples are already in TS domain (physical time)
+							int using_atempo = (s->audio_filter_atempo != NULL);
+							if( using_atempo ) {
+								// atempo output = physical samples @ 1.0x = TS domain, no scaling needed
+								_set_audio_time( s, s->audio_ref_time + delta );
+								DBG serprintf("stream_audio SAMPLES: atempo active, audio_time = %d + %d (no scaling)\n",
+									s->audio_ref_time, delta);
+							} else {
+								// Normal path: samples in RST domain need RST→TS conversion
+								_set_audio_time( s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int) );
+								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
+									s->audio_ref_time, delta);
+							}
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}

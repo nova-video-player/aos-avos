@@ -603,15 +603,17 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int audioFormat = track_format;
 	mode = 1; /*MODE_STREAM*/
 
+	// When using atempo filter, AudioTrack always plays at 1.0x, so no need for larger buffers
+	int using_atempo = audio_interface_is_using_atempo();
 	DBG LOG( "audiotrack_set_output_params: track_format=%d, track_chanmask=0x%x, channelConfig=0x%x (format=%d, passthrough=%d, channels=%d)",
 	         track_format, track_chanmask, channelConfig, at->format, at->passthrough, channels );
 
-	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) {
-		buffer_scale = 2; // for 2.0x max audio speed
+	if(is_audio_speed_enabled && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23) {
+		buffer_scale = 2; // for 2.0x max audio speed (when using PlaybackParams)
 	} else {
 		buffer_scale = 1;
 	}
-	DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params buffer_scale=%d", buffer_scale );
+	DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params buffer_scale=%d (using_atempo=%d)", buffer_scale, using_atempo );
 
 	int min_buffer_size = call_static_int_method(at, at->audiotrackClass, "getMinBufferSize", "(III)I",
 			sampleRateInHz, channelConfig, audioFormat);
@@ -783,7 +785,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	jobject playbackParams;
 
-	if(!failed && is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23 && fabsf(as - 1.0f) > 1e-6f) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
+	// Skip AudioTrack playback rate if using atempo filter (speed is handled in PCM resampling)
+	// Note: using_atempo was already declared earlier in this function
+	if(!failed && is_audio_speed_enabled && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23 && fabsf(as - 1.0f) > 1e-6f) { // adapt audio_speed only when passthrough disabled and audio_speed != 1.0
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params audio_speed=%f (ENTERING speed set block)", as);
 		// get current audioparams
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_set_output_params calling getPlaybackParams");

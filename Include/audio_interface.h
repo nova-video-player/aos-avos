@@ -110,5 +110,7 @@ float audio_interface_get_previous_audio_speed();
 void audio_interface_enable_audio_speed(int enable);
 int audio_interface_is_audio_speed_enabled();
 int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed);
+void audio_interface_set_using_atempo(int using_atempo);
+int audio_interface_is_using_atempo();
 
 #endif

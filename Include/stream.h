@@ -603,6 +603,7 @@ typedef struct STREAM {
 	STREAM_FILTER_AUDIO *audio_filter;
 	STREAM_FILTER_AUDIO *audio_filter_compress;  // Compression/boost filter
 	STREAM_FILTER_AUDIO *audio_filter_ac3;       // AC3 encoding filter
+	STREAM_FILTER_AUDIO *audio_filter_atempo;    // Audio speed control filter
 	STREAM_FILTER_AUDIO *audio_filter_jni;
 	int             audio_filter_enabled;
 	int             audio_filter_level;
@@ -776,8 +777,9 @@ int	stream_seek_pos  ( STREAM *s, int pos,   int dir, int flags );
 int	stream_seek_frame( STREAM *s, int frame, int dir, int force_reload );
 int	stream_set_speed( STREAM *s, STREAM_SPEED speed );
 int	stream_set_audio_stream( STREAM *s, int audio_stream );
-int	stream_set_audio_filter_level( STREAM *s, int level, int night_on ); 
+int	stream_set_audio_filter_level( STREAM *s, int level, int night_on );
 void	stream_set_audio_downmix( int downmix );
+void	stream_disable_atempo_filter( int disable );
 int	stream_check_subtitles( STREAM *s );
 int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
 void	stream_audio_mute    ( STREAM *s );

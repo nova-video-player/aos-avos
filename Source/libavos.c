@@ -210,6 +210,11 @@ void libavos_enable_audio_speed(int enable)
 	audio_interface_enable_audio_speed(enable);
 }
 
+void libavos_disable_atempo_filter(int disable)
+{
+	stream_disable_atempo_filter(disable);
+}
+
 void libavos_set_parser_sync_mode(int mode)
 {
 	stream_parser_set_sync_mode(mode);

@@ -135,6 +135,11 @@ int stream_sync_av_delay( STREAM *s )
 	ac3_recoding = libavos_get_ac3_recoding_enabled();
 #endif
 
+	// atempo filter runs independently of other filters (controls playback speed)
+	if( s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
+		filter_delay += s->audio_filter_atempo->delay( s->audio_filter_atempo );
+	}
+
 	// Filters run in: normal PCM mode OR AC3 recoding mode (all formats)
 	int run_filter = (!passthrough || ac3_recoding);
 	if( run_filter ) {

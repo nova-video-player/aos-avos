@@ -28,6 +28,7 @@ static float audio_speed = 1.0f;
 static float previous_audio_speed = 1.0f;
 
 static int is_audio_speed_enabled = 0;
+static int using_atempo = 0;
 
 #ifdef CONFIG_ANDROID
 extern const audio_interface_impl_t audio_interface_impl_opensles;
@@ -253,6 +254,16 @@ int audio_interface_is_audio_speed_enabled()
 
 int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed) {
 	return impl->change_audio_speed ? impl->change_audio_speed(ctx, speed) : -1;
+}
+
+void audio_interface_set_using_atempo(int enable)
+{
+	using_atempo = enable;
+}
+
+int audio_interface_is_using_atempo()
+{
+	return using_atempo;
 }
 
 #ifdef DEBUG_MSG

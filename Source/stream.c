@@ -39,7 +39,7 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGP if(Debug[DBG_PARSER])
 
-#define DBG if(0)
+#define DBG if(Debug[DBG_STREAM])
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
@@ -561,17 +561,46 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 
 		DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d\n", current_time_ts, stream_current_time_rst );
 
-		int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
-		float applied_speed = audio_interface_get_audio_speed();
+		// Check if atempo filter is available and active
+		int using_atempo = (s->audio_filter_atempo != NULL);
 
-		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
+		// Notify audio interface layer whether we're using atempo
+		audio_interface_set_using_atempo( using_atempo );
 
-		DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
-					   stream_current_time_rst, current_time_ts, applied_speed, rc );
+        if( using_atempo ) {
+            // With atempo filter, enable timeline mapping
+            // - Parser scales all timestamps RST → TS
+            // - atempo physically changes audio duration to match playback speed
+            // - atempo output duration = TS domain (physical samples played at 1.0x)
+            // - AudioTrack plays at 1.0x rate
+            // - Timeline mapping maintains Δts = Δwc equivalence
+            float clamped_speed = av_speed;
+            if( clamped_speed < 0.25f ) {
+                clamped_speed = 0.25f;
+            } else if( clamped_speed > 2.0f ) {
+                clamped_speed = 2.0f;
+            }
+            audio_interface_set_audio_speed( clamped_speed );
 
-		if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
-			serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
-					   av_speed, applied_speed, rc );
+            // Apply timeline mapping with atempo speed (same as original architecture)
+            timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, clamped_speed );
+
+            DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
+                           stream_current_time_rst, current_time_ts, clamped_speed );
+        } else {
+			// Original method: AudioTrack playback rate + timeline mapping
+			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
+			float applied_speed = audio_interface_get_audio_speed();
+
+			timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
+
+			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
+						   stream_current_time_rst, current_time_ts, applied_speed, rc );
+
+			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
+				serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
+						   av_speed, applied_speed, rc );
+			}
 		}
 	} else {
 		DBG serprintf( "stream:stream_set_av_speed no audio speed change, ensured video speed %f\n", av_speed );

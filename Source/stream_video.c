@@ -69,6 +69,7 @@ int 		stream_zero_fill   = 1;
 
 int 		stream_max_delay   = 1;
 int 		stream_no_sync     = 0;
+static int	stream_disable_atempo = 0;  // disable atempo filter (use AudioTrack PlaybackParams instead)
 int	 	stream_no_audio    = 0;
 int	 	stream_force_drop_audio  = -1;
 int	 	stream_no_subtitles = 0;
@@ -202,6 +203,7 @@ STREAM_FILTER_AUDIO *stream_filter_audio_agc_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_jni_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_ac3_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new( void );
 
 extern int libavos_get_ac3_recoding_enabled(void);
 
@@ -481,6 +483,26 @@ DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_ac3-
 			s->audio_filter_enabled = 0;
 		}
 	}
+
+	// Open atempo audio speed control filter (unless disabled via preference)
+#ifdef CONFIG_FFMPEG_AUDIO
+	if (!stream_disable_atempo) {
+		s->audio_filter_atempo = stream_filter_audio_atempo_new();
+		if( s->audio_filter_atempo ) {
+			if( s->audio_filter_atempo->open( s->audio_filter_atempo, s->audio ) ) {
+				serprintf("stream_open_audio_filter: failed to open atempo filter\n");
+				if( s->audio_filter_atempo->delete ) {
+					s->audio_filter_atempo->delete( s->audio_filter_atempo );
+				}
+				s->audio_filter_atempo = NULL;
+			} else {
+DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_atempo->name);
+			}
+		}
+	} else {
+		serprintf("stream_open_audio_filter: atempo filter disabled (using AudioTrack PlaybackParams)\n");
+	}
+#endif
 	return 0;
 }
 
@@ -1269,6 +1291,17 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 void stream_set_audio_downmix( int downmix )
 {
 	stream_audio_downmix = downmix;
+}
+
+// *****************************************************************************
+//
+//	stream_disable_atempo_filter
+//
+// *****************************************************************************
+void stream_disable_atempo_filter( int disable )
+{
+	stream_disable_atempo = disable;
+serprintf("stream_disable_atempo_filter: %d (0=use atempo, 1=use AudioTrack PlaybackParams)\n", disable);
 }
 
 // *****************************************************************************

@@ -44,6 +44,7 @@ void libavos_set_downmix(int downmix);
 void libavos_set_dynamic_audio_delay(int enable);
 void libavos_set_hdmi_supported_audio_codecs(long flag);
 void libavos_set_audio_transform(int (*transformer)(float* buf, int nsamples));
+void libavos_disable_atempo_filter(int disable);
 
 fields_t fields;
 extern JavaVM *myVm;
@@ -415,6 +416,14 @@ Java_com_archos_medialib_LibAvos_nativeSetStreamBufferSize(JNIEnv *env, jobject 
 {
 	pthread_mutex_lock(&libavos.mtx);
 	libavos_set_default_stream_buffer_size(size);
+	pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeDisableAtempoFilter(JNIEnv *env, jobject thiz, jboolean disable)
+{
+	pthread_mutex_lock(&libavos.mtx);
+	libavos_disable_atempo_filter(disable);
 	pthread_mutex_unlock(&libavos.mtx);
 }
 

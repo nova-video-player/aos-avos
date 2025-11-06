@@ -20,6 +20,7 @@
 #include <media/stagefright/MediaErrors.h>
 
 #include <gui/Surface.h>
+#include <time.h>
 
 typedef struct sfdec_mediacodec sfdec_priv_t;
 #include "sfdec_priv.h"
@@ -83,13 +84,31 @@ struct sfdec_mediacodec
     int32_t width;
     int32_t height;
     bool started;
+    int64_t start_monotonic;
+    int64_t start_off;
+    int64_t last_off;
+    int64_t last_monotonic;
+    int64_t last_reset_monotonic;
+    int video_frame_rate_den;
+    int video_frame_rate_num;
+    int playback_speed_den;
+    int playback_speed_num;
+    int n_late;
 };
 
 struct sfbuf
 {
     size_t index;
     bool released;
+    int64_t timestamp_us;
 };
+
+static inline int64_t get_monotonic_ns(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000000000LL + now.tv_nsec;
+}
 
 static inline uint16_t U16_AT(const uint8_t *ptr)
 {
@@ -283,6 +302,17 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (sfdec == NULL)
         return NULL;
 
+    sfdec->start_monotonic = 0;
+    sfdec->start_off = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->last_reset_monotonic = 0;
+    sfdec->video_frame_rate_den = _video_frame_rate_den;
+    sfdec->video_frame_rate_num = _video_frame_rate_num;
+    sfdec->playback_speed_den = 1;
+    sfdec->playback_speed_num = 1;
+    sfdec->n_late = 0;
+
     err_count = 0;
     sfdec->width = *width;
     sfdec->height = *height;
@@ -390,6 +420,12 @@ static int sfdec_stop(sfdec_priv_t *sfdec)
         status_t err = dl_mc.MediaCodec_stop(sfdec->mCodec.get());
         CHECK_STATUS(err);
         sfdec->started = false;
+        sfdec->start_off = 0;
+        sfdec->start_monotonic = 0;
+        sfdec->last_off = 0;
+        sfdec->last_monotonic = 0;
+        sfdec->n_late = 0;
+        sfdec->last_reset_monotonic = get_monotonic_ns();
     }
     return 0;
 }
@@ -430,6 +466,12 @@ static int sfdec_flush(sfdec_priv_t *sfdec)
     err = dl_mc.MediaCodec_flush(sfdec->mCodec.get());
     CHECK_STATUS(err);
     err_count = 0;
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->n_late = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
     return 0;
 }
 
@@ -481,6 +523,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
                 return -1;
             sfbuf->index = index;
             sfbuf->released = false;
+            sfbuf->timestamp_us = presentationTimeUs;
             read_out->flag |= SFDEC_READ_BUF;
             read_out->buf.sfbuf = sfbuf;
             read_out->buf.time_us = presentationTimeUs;
@@ -501,14 +544,76 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
     }
 }
 
-static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render)
+static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap)
 {
-    if( !render )
-        return 0;
-	
     status_t err;
+
+    if (!render) {
+        err = dl_mc.MediaCodec_releaseOutputBuffer(sfdec->mCodec.get(), sfbuf->index);
+        CHECK_STATUS(err);
+        sfbuf->released = true;
+        return 0;
+    }
+
+    if (!asap && dl_mc.MediaCodec_releaseOutputBufferAtTime) {
+        int64_t timestamp_us = sfbuf->timestamp_us;
+        DBG LOG("Received og timestamp %lld", timestamp_us);
+        if (sfdec->video_frame_rate_den) {
+            int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
+            int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
+            int64_t tus = timestamp_us;
+            DBG LOG("Got rendering frame rate %d / %d", rendering_frame_rate_num, rendering_frame_rate_den);
+            double frame_length = rendering_frame_rate_num / ((double)rendering_frame_rate_den);
+            int64_t half_frame = (1 / 2.0) * 1000.0 * 1000.0 / frame_length;
+            tus += half_frame;
+
+            int n = (int)((double)timestamp_us * frame_length / 1000000.0 + 0.5);
+            int64_t tus_new = n * 1000.0 * 1000.0 / frame_length;
+            timestamp_us = tus_new;
+        }
+
+        int64_t now_ts = get_monotonic_ns();
+        int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+        int64_t delta = ts - now_ts;
+        if (!sfdec->start_off ||
+            (now_ts - sfdec->last_monotonic) > 500 * 1000LL * 1000LL ||
+            (delta < -500 * 1000LL * 1000LL || delta > 500 * 1000LL * 1000LL) ||
+            (sfdec->last_reset_monotonic > 0 && (now_ts - sfdec->last_reset_monotonic) < 200 * 1000LL * 1000LL)) {
+            sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000LL;
+            sfdec->start_off = timestamp_us * 1000LL;
+            asap = 1;
+        }
+        if (!asap && delta < 0) {
+            sfdec->n_late++;
+            sfdec->start_monotonic += 100 * 1000LL * 1000LL;
+            DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
+        }
+
+        ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+
+        if (!asap) {
+            DBG LOG("Scheduling frame in %lld", ts - now_ts);
+            sfdec->last_monotonic = now_ts;
+            sfdec->last_off = timestamp_us * 1000LL;
+            err = dl_mc.MediaCodec_releaseOutputBufferAtTime(sfdec->mCodec.get(), sfbuf->index, ts);
+            if (err == OK) {
+                sfbuf->released = true;
+                sfdec->n_late = 0;
+                return 0;
+            }
+            asap = 1;
+        }
+    } else {
+        if (!asap && !dl_mc.MediaCodec_releaseOutputBufferAtTime)
+            DBG LOG("releaseOutputBufferAtTime unavailable, rendering asap");
+        asap = 1;
+    }
+
     err = dl_mc.MediaCodec_renderOutputBufferAndRelease(sfdec->mCodec.get(), sfbuf->index);
     CHECK_STATUS(err);
+    sfdec->last_monotonic = get_monotonic_ns();
+    sfdec->last_off = sfbuf->timestamp_us * 1000LL;
+    sfdec->n_late = 0;
     sfbuf->released = true;
     return 0;
 }
@@ -523,6 +628,27 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
     return err == 0 ? 0 : -1;
 }
 
+static int sfdec_reset_ts(sfdec_priv_t *sfdec)
+{
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->n_late = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
+    return 0;
+}
+
+static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num)
+{
+    if (!den || !num)
+        return -1;
+    DBG LOG("Setting playbackspeed to %d / %d", num, den);
+    sfdec->playback_speed_den = den;
+    sfdec->playback_speed_num = num;
+    return 0;
+}
+
 sfdec_itf_t sfdec_itf_mediacodec = {
     "MediaCodec",
     sfdec_init,
@@ -535,4 +661,6 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_read,
     sfdec_buf_render,
     sfdec_buf_release,
+    sfdec_reset_ts,
+    sfdec_set_playback_speed,
 };

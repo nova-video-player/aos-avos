@@ -27,6 +27,7 @@ include $(PREBUILT_SHARED_LIBRARY)
 include $(CLEAR_VARS)
 
 LOCAL_CFLAGS := -O3 -DNDEBUG
+LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 
 LOCAL_SRC_FILES := \
 	libavos.c \

@@ -24,6 +24,7 @@ LOCAL_C_INCLUDES := \
 	$(AVOS_DIR)/common/Include \
 	$(ANDROID_L_PLATFORMS)/usr/include
 LOCAL_CFLAGS := -DSFDEC_ANDROID_API=21
+LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
 LOCAL_LDLIBS:= -L$(ANDROID_L_PLATFORMS)/usr/lib -lmediandk -landroid
 include $(BUILD_SHARED_LIBRARY)
@@ -34,6 +35,8 @@ LOCAL_MODULE := libsfdec$(AVOS_LIBS_SUFFIX)
 LOCAL_SRC_FILES := sfdec.c dec_audio.c
 LOCAL_C_INCLUDES :=
 LOCAL_CFLAGS :=
+LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
+LDFLAGS = -Wl,-z,max-page-size=16384
 
 #libsfdec audio
 

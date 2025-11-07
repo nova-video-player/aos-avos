@@ -13,9 +13,9 @@
 # limitations under the License.
 
 CFLAGS =
-LDFLAGS =
+LDFLAGS = -Wl,-z,max-page-size=16384
 ifeq ($(ASAN),1)
-LDFLAGS += -g -fsanitize=address
+LDFLAGS += -g -fsanitize=address 
 endif
 DEFINES =
 INCLUDES =

@@ -24,5 +24,5 @@ APP_STL := c++_static
 
 ifeq (1,$(ASAN))
 APP_CFLAGS := -fsanitize=address -fno-omit-frame-pointer
-APP_LDFLAGS := -fsanitize=address
+APP_LDFLAGS := -fsanitize=address -Wl,-z,max-page-size=16384
 endif

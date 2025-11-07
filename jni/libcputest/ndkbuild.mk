@@ -15,6 +15,7 @@
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES:= cputest_jni.c
+LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 
 LOCAL_STATIC_LIBRARIES := cpufeatures
 

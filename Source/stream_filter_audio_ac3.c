@@ -51,8 +51,10 @@
 
 // AC3 encoding defaults
 #define AC3_SAMPLE_RATE 48000
-#define AC3_BITRATE 640000  // 640 kbps for 5.1
+#define AC3_BITRATE_5POINT1 640000  // 640 kbps for multichannel content
+#define AC3_BITRATE_STEREO   192000 // 192 kbps for 2.0 content
 #define AC3_FRAME_SIZE 1536  // Standard AC3 frame size
+#define SURROUND_FOLD_GAIN 0.70710678  // -3 dB fold-down for back surrounds
 
 struct ctx {
 	AVCodecContext *enc_ctx;      // FFmpeg encoder context
@@ -122,8 +124,18 @@ static int init_channel_layout(AVChannelLayout *layout, int channels)
 	case 5:
 		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_5POINT0);
 		break;
-	default:
+	case 6:
 		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_5POINT1);
+		break;
+	case 7:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_6POINT1);
+		break;
+	case 8:
+		ret = av_channel_layout_from_mask(layout, AV_CH_LAYOUT_7POINT1);
+		break;
+	default:
+		av_channel_layout_default(layout, MIN(channels, 8));
+		ret = 0;
 		break;
 	}
 
@@ -138,6 +150,155 @@ static int init_channel_layout(AVChannelLayout *layout, int channels)
 	}
 
 	return 0;
+}
+
+static int channel_index_from_layout(const AVChannelLayout *layout, enum AVChannel channel)
+{
+	if (!layout) {
+		return -1;
+	}
+
+	for (unsigned int i = 0; i < layout->nb_channels; ++i) {
+		if (av_channel_layout_channel_from_index(layout, i) == channel) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+static inline void add_gain(double *matrix, int out_channels, int in_channels,
+			    int out_index, int in_index, double gain)
+{
+	if (!matrix || gain == 0.0 || out_index < 0 || in_index < 0) {
+		return;
+	}
+	matrix[out_index * in_channels + in_index] += gain;
+}
+
+static void ensure_row_has_gain(double *matrix, int row, int in_channels)
+{
+	if (!matrix || row < 0) {
+		return;
+	}
+	int has_gain = 0;
+	for (int c = 0; c < in_channels; ++c) {
+		if (matrix[row * in_channels + c] != 0.0) {
+			has_gain = 1;
+			break;
+		}
+	}
+	if (!has_gain) {
+		// Fallback: simply copy matching channel index to keep audio flowing
+		matrix[row * in_channels + (row % in_channels)] = 1.0;
+	}
+}
+
+static int configure_downmix_matrix(struct ctx *ctx, const AVChannelLayout *in_layout)
+{
+	if (!ctx || !ctx->enc_ctx || !ctx->swr_ctx || !in_layout) {
+		return 0;
+	}
+
+	const int out_channels = ctx->enc_ctx->ch_layout.nb_channels;
+	const int in_channels = in_layout->nb_channels;
+
+	// Only build a matrix when we truly need to fold channels (e.g. 7.1 -> 5.1)
+	if (in_channels <= out_channels) {
+		return 0;
+	}
+
+	double *matrix = acalloc(out_channels * in_channels, sizeof(double));
+	if (!matrix) {
+		serprintf("faac3: failed to allocate downmix matrix (%d x %d)\n", out_channels, in_channels);
+		return AVERROR(ENOMEM);
+	}
+
+	// Map fronts directly
+	add_gain(matrix, out_channels, in_channels,
+		channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_FRONT_LEFT),
+		channel_index_from_layout(in_layout, AV_CHAN_FRONT_LEFT), 1.0);
+	add_gain(matrix, out_channels, in_channels,
+		channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_FRONT_RIGHT),
+		channel_index_from_layout(in_layout, AV_CHAN_FRONT_RIGHT), 1.0);
+	add_gain(matrix, out_channels, in_channels,
+		channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_FRONT_CENTER),
+		channel_index_from_layout(in_layout, AV_CHAN_FRONT_CENTER), 1.0);
+	add_gain(matrix, out_channels, in_channels,
+		channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_LOW_FREQUENCY),
+		channel_index_from_layout(in_layout, AV_CHAN_LOW_FREQUENCY), 1.0);
+
+	// Derive surround left/right rows (fold back surrounds with -3 dB)
+	int out_sl = channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_SIDE_LEFT);
+	if (out_sl < 0) {
+		out_sl = channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_BACK_LEFT);
+	}
+	int out_sr = channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_SIDE_RIGHT);
+	if (out_sr < 0) {
+		out_sr = channel_index_from_layout(&ctx->enc_ctx->ch_layout, AV_CHAN_BACK_RIGHT);
+	}
+
+	int in_sl = channel_index_from_layout(in_layout, AV_CHAN_SIDE_LEFT);
+	int in_sr = channel_index_from_layout(in_layout, AV_CHAN_SIDE_RIGHT);
+	int in_bl = channel_index_from_layout(in_layout, AV_CHAN_BACK_LEFT);
+	int in_br = channel_index_from_layout(in_layout, AV_CHAN_BACK_RIGHT);
+	int in_bc = channel_index_from_layout(in_layout, AV_CHAN_BACK_CENTER);
+
+	add_gain(matrix, out_channels, in_channels, out_sl, in_sl, in_sl >= 0 ? 1.0 : 0.0);
+	add_gain(matrix, out_channels, in_channels, out_sr, in_sr, in_sr >= 0 ? 1.0 : 0.0);
+	add_gain(matrix, out_channels, in_channels, out_sl, in_bl, SURROUND_FOLD_GAIN);
+	add_gain(matrix, out_channels, in_channels, out_sr, in_br, SURROUND_FOLD_GAIN);
+
+	// If we only have a single back center channel, split it equally between SL/SR
+	if (in_bc >= 0) {
+		add_gain(matrix, out_channels, in_channels, out_sl, in_bc, SURROUND_FOLD_GAIN);
+		add_gain(matrix, out_channels, in_channels, out_sr, in_bc, SURROUND_FOLD_GAIN);
+	}
+
+	// Guarantee every output row has at least one contributor
+	for (int row = 0; row < out_channels; ++row) {
+		ensure_row_has_gain(matrix, row, in_channels);
+	}
+
+	int ret = swr_set_matrix(ctx->swr_ctx, matrix, in_channels);
+	if (ret < 0) {
+		char errbuf[64];
+		av_strerror(ret, errbuf, sizeof(errbuf));
+		serprintf("faac3: failed to set custom downmix matrix (%s)\n", errbuf);
+	}
+
+	if (ret >= 0) {
+		int opt_ret = av_opt_set_double(ctx->swr_ctx, "rematrix_volume", 1.0, 0);
+		if (opt_ret < 0) {
+			serprintf("faac3: warning - failed to set rematrix_volume option (%d)\n", opt_ret);
+		}
+#ifdef AV_MATRIX_ENCODING_DPLIIX
+		opt_ret = av_opt_set_int(ctx->swr_ctx, "matrix_encoding", in_channels >= 8 ? AV_MATRIX_ENCODING_DPLIIX : AV_MATRIX_ENCODING_DOLBY, 0);
+#else
+		opt_ret = av_opt_set_int(ctx->swr_ctx, "matrix_encoding", AV_MATRIX_ENCODING_DOLBY, 0);
+#endif
+		if (opt_ret < 0) {
+			serprintf("faac3: warning - failed to set matrix_encoding option (%d)\n", opt_ret);
+		}
+		serprintf("faac3: configured custom %dch -> %dch downmix matrix for AC3 encoding\n",
+			in_channels, out_channels);
+	}
+
+	afree(matrix);
+	return ret;
+}
+
+static int select_target_channels(int input_channels)
+{
+	if (input_channels <= 0) {
+		return 2;
+	}
+	if (input_channels <= 2) {
+		return 2;
+	}
+	if (input_channels >= 6) {
+		return 6;
+	}
+	return input_channels;
 }
 
 static int _delete(STREAM_FILTER_AUDIO *f)
@@ -167,7 +328,6 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 
 	f->priv = ctx;
 	ctx->enabled = 0;  // Disabled by default, enabled via set_param
-	ctx->channels = audio->channels;
 	ctx->sample_rate = audio->samplesPerSec;
 	ctx->pts = 0;
 
@@ -185,16 +345,25 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 		goto error;
 	}
 
-	// Configure encoder for 5.1 output
+	int input_channels = audio->channels > 0 ? audio->channels : 2;
+	int target_channels = select_target_channels(input_channels);
+	ctx->channels = input_channels;
+
+	// Configure encoder for target output
 	ctx->enc_ctx->sample_rate = AC3_SAMPLE_RATE;
-	ctx->enc_ctx->bit_rate = AC3_BITRATE;
+	ctx->enc_ctx->bit_rate = (target_channels <= 2) ? AC3_BITRATE_STEREO : AC3_BITRATE_5POINT1;
 	ctx->enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;  // AC3 encoder uses planar float
 
-	// Set encoder channel layout based on input channels
-	if (init_channel_layout(&ctx->enc_ctx->ch_layout, audio->channels) < 0) {
-		serprintf("faac3: failed to select encoder channel layout (%d channels)\n", audio->channels);
+	// Set encoder channel layout based on target channels (max 6)
+	if (init_channel_layout(&ctx->enc_ctx->ch_layout, target_channels) < 0) {
+		serprintf("faac3: failed to select encoder channel layout (%d channels)\n", target_channels);
 		goto error;
 	}
+
+	int bitrate_kbps = (int)(ctx->enc_ctx->bit_rate / 1000);
+	serprintf("faac3: configuring AC3 encoder target=%dch (%s) bitrate=%d kbps (source=%dch)\n",
+		target_channels, (target_channels <= 2) ? "2.0" : "multichannel",
+		bitrate_kbps, input_channels);
 
 	// Open encoder - if this fails, we might still be in passthrough mode
 	// so we allow the filter to be created but keep it disabled
@@ -212,8 +381,8 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 
 	// Allocate resampler if sample rate or format conversion needed
 	AVChannelLayout in_ch_layout = { 0 };
-	if (init_channel_layout(&in_ch_layout, audio->channels) < 0) {
-		serprintf("faac3: failed to select input channel layout (%d channels)\n", audio->channels);
+	if (init_channel_layout(&in_ch_layout, input_channels) < 0) {
+		serprintf("faac3: failed to select input channel layout (%d channels)\n", input_channels);
 		goto error;
 	}
 
@@ -222,6 +391,11 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 			&in_ch_layout, AV_SAMPLE_FMT_S16, audio->samplesPerSec,
 			0, NULL) < 0) {
 		serprintf("faac3: failed to allocate resampler\n");
+		av_channel_layout_uninit(&in_ch_layout);
+		goto error;
+	}
+
+	if (configure_downmix_matrix(ctx, &in_ch_layout) < 0) {
 		av_channel_layout_uninit(&in_ch_layout);
 		goto error;
 	}
@@ -270,8 +444,9 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 		goto error;
 	}
 
-	DBG serprintf("faac3: AC3 encoder initialized - %d channels @ %d Hz -> AC3 %d kbps\n",
-		audio->channels, audio->samplesPerSec, AC3_BITRATE / 1000);
+	int init_bitrate_kbps = (int)(ctx->enc_ctx->bit_rate / 1000);
+	DBG serprintf("faac3: AC3 encoder initialized - %dch input @ %d Hz -> %dch AC3 %d kbps\n",
+		input_channels, audio->samplesPerSec, target_channels, init_bitrate_kbps);
 	return 0;
 
 error:
@@ -291,8 +466,63 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	struct ctx *ctx = f->priv;
 
 	// Safety checks
-	if (!ctx || !frame || !frame->data || frame->size <= 0) {
+	if (!frame || !frame->data || frame->size <= 0) {
 		return 0;
+	}
+
+	// Lazy initialization: If filter was never opened, open it now with correct channel count
+	if (!ctx) {
+		serprintf("faac3: lazy init - opening filter with frame properties (%dch/%dHz)\n",
+			frame->channels, frame->samplesPerSec);
+
+		AUDIO_PROPERTIES props = {0};
+		props.channels = frame->channels;
+		props.samplesPerSec = frame->samplesPerSec;
+		props.bitsPerSample = frame->bits;
+
+		if (_open(f, &props) != 0) {
+			serprintf("faac3: ERROR: failed to open filter during lazy init!\n");
+			return 0;
+		}
+		ctx = f->priv;
+		// Enable the filter immediately after lazy init
+		ctx->enabled = 1;
+		serprintf("faac3: lazy init complete, AC3 encoding enabled\n");
+	}
+
+	// Only process if filter is enabled
+	if (!ctx->enabled) {
+		DBG serprintf("faac3: filter disabled, bypassing\n");
+		return 0;
+	}
+
+	// Check for property changes and re-initialize if needed.
+	// This handles track switching where the filter is not re-opened by the parent stream logic.
+	if (ctx->enc_ctx && (ctx->channels != frame->channels || ctx->sample_rate != frame->samplesPerSec)) {
+		serprintf("faac3: filter properties mismatch! Re-initializing. Filter: %dch/%dHz, Frame: %dch/%dHz\n",
+			ctx->channels, ctx->sample_rate, frame->channels, frame->samplesPerSec);
+
+		AUDIO_PROPERTIES props = {0};
+		props.channels = frame->channels;
+		props.samplesPerSec = frame->samplesPerSec;
+		props.bitsPerSample = frame->bits;
+
+		// Re-initialize by freeing the old context and creating a new one
+		_close(f);
+		ctx_free(f->priv);
+		f->priv = NULL;
+		if (_open(f, &props) != 0) {
+			serprintf("faac3: ERROR: failed to re-initialize filter!\n");
+			return 0; // Bypass filter on error
+		}
+		// Update context pointer after re-initialization
+		ctx = f->priv;
+		// The filter must be re-enabled after re-initialization, as _open defaults it to disabled.
+		ctx->enabled = 1;
+		// Explicitly flush the new encoder context to ensure it's in a clean state before processing data
+		if (ctx && ctx->enc_ctx) {
+			avcodec_flush_buffers(ctx->enc_ctx);
+		}
 	}
 
 	// Prevent segfault if encoder failed to initialize
@@ -301,17 +531,14 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		return 0;
 	}
 
-	DBG serprintf("faac3: filter call fmt=%04X size=%d enabled=%d\n", frame->format, frame->size, ctx->enabled);
-
-	// Only process if filter is enabled
-	if (!ctx->enabled) {
-		DBG serprintf("faac3: filter disabled, bypassing\n");
-		return 0;
-	}
-
 	// Convert input samples to encoder format
 	const uint8_t *in_data[1] = { frame->data };
-	int in_samples = frame->size / (ctx->channels * sizeof(int16_t));
+	int sample_bits = frame->bits ? frame->bits : 16;
+	int bytes_per_sample = sample_bits / 8;
+	if( bytes_per_sample <= 0 ) {
+		bytes_per_sample = 2;
+	}
+	int in_samples = frame->size / (ctx->channels * bytes_per_sample);
 
 	// Resample to encoder's format
 	uint8_t *out_data[AV_NUM_DATA_POINTERS] = { NULL };
@@ -345,8 +572,9 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 
 	av_freep(&out_data[0]);
 
-	// Encode frames when we have enough samples
-	while (av_audio_fifo_size(ctx->fifo) >= ctx->enc_ctx->frame_size) {
+	// Encode at most one AC3 frame per invocation to keep IEC bursts 1:1
+	while (ctx->encode_buffer_used == 0 &&
+	       av_audio_fifo_size(ctx->fifo) >= ctx->enc_ctx->frame_size) {
 		int fifo_size = av_audio_fifo_size(ctx->fifo);
 		DBG serprintf("faac3: encoding frame from fifo (size=%d)\n", fifo_size);
 		if (av_frame_make_writable(ctx->frame) < 0) {
@@ -373,6 +601,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 			return 0;
 		}
 
+		int packets_produced = 0;
 		while (avcodec_receive_packet(ctx->enc_ctx, ctx->pkt) == 0) {
 			if (!ctx->pkt || !ctx->pkt->data || ctx->pkt->size <= 0) {
 				serprintf("faac3: invalid packet from encoder\n");
@@ -393,6 +622,12 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 				ctx->pkt->size, ctx->encode_buffer_used, ctx->encoded_samples);
 
 			av_packet_unref(ctx->pkt);
+			packets_produced = 1;
+			break; // hold remaining packets for next invocation
+		}
+
+		if (!packets_produced) {
+			break;
 		}
 	}
 
@@ -402,11 +637,12 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		frame->size = ctx->encode_buffer_used;
 		frame->format = WAVE_FORMAT_AC3;  // Mark as AC3
 		frame->samplesPerSec = ctx->enc_ctx->sample_rate;
-		frame->channels = 2; // IEC61937 encapsulation uses stereo container
 		frame->bits = 16;
 		if (ctx->encoded_samples > 0) {
-			frame->fakeSize = ctx->encoded_samples *
-			                  ctx->enc_ctx->ch_layout.nb_channels * sizeof(int16_t);
+		// The fakeSize needs to represent the size of the *consumed* PCM data
+		// so that the audio clock advances correctly.
+		frame->fakeSize = ctx->encoded_samples *
+		                  ctx->channels * sizeof(int16_t);
 		} else {
 			frame->fakeSize = 0;
 		}

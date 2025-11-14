@@ -40,6 +40,7 @@
 #include "mpg4.h"
 #include "dts.h"
 #include "fb.h"
+#include "audio_spdif.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -62,8 +63,8 @@
 #define DBGCV1 	if(Debug[DBG_CV] > 1)
 #define DBGP 	if(Debug[DBG_PARSER])
 
-#define DBG if(0)
-#define DBG2 if(0)
+#define DBG if(Debug[DBG_STREAM])
+#define DBG2 if(Debug[DBG_STREAM]>1)
 
 int 		stream_zero_fill   = 1;
 
@@ -366,11 +367,19 @@ DBGS serprintf("stream_open_audio_dec\r\n");
 		// open the decoder
 		if( s->audio_dec->new && s->audio_dec->new( s->audio ) ) {
 serprintf("error creating audio_dec!\r\n");
-			s->audio_dec = NULL;		
+			s->audio_dec = NULL;
 			return 1;
 		}
-		if( stream_audio_downmix ) {
+		// Disable downmixing when AC3 recoding is enabled - we need original multichannel PCM for encoding
+		int ac3_recoding = libavos_get_ac3_recoding_enabled();
+DBGS serprintf("stream_open_audio_dec: downmix=%d max_channels=%d ac3_recoding=%d\r\n",
+			stream_audio_downmix, s->audio_max_channels, ac3_recoding);
+		if( stream_audio_downmix && !ac3_recoding ) {
 			s->audio->request_channels = s->audio_max_channels;
+DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r\n", s->audio->request_channels);
+		} else if( ac3_recoding ) {
+			s->audio->request_channels = 0;  // Explicitly clear to prevent downmix
+DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recoding\r\n");
 		}
 		if( s->audio_dec->open( s->audio ) ) {
 serprintf("error opening audio_dec!\r\n");
@@ -421,18 +430,26 @@ static int stream_open_audio_filter( STREAM *s )
 #endif
 
 	if( s->audio_filter_enabled ) {
-		// Open compression filter for both normal and AC3 recoding mode
+		// Create compression filter
+		// For AC3 recoding: don't open yet (lazy init with correct channel count)
+		// For normal mode: open immediately with current properties
 #ifdef CONFIG_AUDIO_COMPRESS
 		s->audio_filter_compress = stream_filter_audio_compress_new();
 		if( s->audio_filter_compress ) {
-			if( s->audio_filter_compress->open( s->audio_filter_compress, s->audio ) ) {
-				serprintf("stream_open_audio_filter: failed to open compress filter\n");
-				if( s->audio_filter_compress->delete ) {
-					s->audio_filter_compress->delete( s->audio_filter_compress );
-				}
-				s->audio_filter_compress = NULL;
-			} else {
+			if( !ac3_recoding ) {
+				// Normal mode: open immediately
+				if( s->audio_filter_compress->open( s->audio_filter_compress, s->audio ) ) {
+					serprintf("stream_open_audio_filter: failed to open compress filter\n");
+					if( s->audio_filter_compress->delete ) {
+						s->audio_filter_compress->delete( s->audio_filter_compress );
+					}
+					s->audio_filter_compress = NULL;
+				} else {
 DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_compress->name);
+				}
+			} else {
+				// AC3 recoding: lazy init on first frame
+DBGS serprintf("stream_open_audio_filter: created [%s] (will open lazily on first frame)\r\n", s->audio_filter_compress->name);
 			}
 		}
 #endif
@@ -455,20 +472,14 @@ DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter->nam
 		}
 #endif
 
-		// Open AC3 encoding filter if AC3 recoding enabled
+		// Create AC3 encoding filter if AC3 recoding enabled
+		// NOTE: Don't open it yet - it will be opened lazily on the first frame
+		// when we have the actual channel count from the decoder
 #ifdef CONFIG_AUDIO_AC3
 		if( ac3_recoding ) {
 			s->audio_filter_ac3 = stream_filter_audio_ac3_new();
 			if( s->audio_filter_ac3 ) {
-				if( s->audio_filter_ac3->open( s->audio_filter_ac3, s->audio ) ) {
-					serprintf("stream_open_audio_filter: failed to open AC3 filter\n");
-					if( s->audio_filter_ac3->delete ) {
-						s->audio_filter_ac3->delete( s->audio_filter_ac3 );
-					}
-					s->audio_filter_ac3 = NULL;
-				} else {
-DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_ac3->name);
-				}
+DBGS serprintf("stream_open_audio_filter: created [%s] (will open lazily on first frame)\r\n", s->audio_filter_ac3->name);
 			}
 		}
 #endif
@@ -530,6 +541,7 @@ static int stream_try_open_audio_dec( STREAM *s, int new, int *unsupported )
 		}
 DBGS serprintf("try audio[%d]\r\n", new );
 		s->audio = s->av.audio + new;
+		stream_audio_copy_sink_from_source( s );
 		
 		if( !s->audio->valid ) {
 DBGS serprintf("audio[%d] not valid\r\n", new );
@@ -571,6 +583,7 @@ DBGS serprintf("audio[%d] set parser!\r\n", new);
 	
 	// fallback to original one
 	s->audio = s->av.audio + s->av.as;
+	stream_audio_copy_sink_from_source( s );
 	
 	return 1;
 }
@@ -1253,6 +1266,15 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 		s->audio_sink->flush( s );
 		s->audio_sink->stop( s );
 	}
+#ifdef CONFIG_SPDIF
+	// When passthrough is disabled and AC3 recoding is disabled,
+	// audio will be decoded to PCM regardless of source format.
+	// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
+	if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
+	    s->audio->format != WAVE_FORMAT_PCM ) {
+		s->audio->format = WAVE_FORMAT_PCM;
+	}
+#endif
 	if( s->audio_sink->start( s ) ) {
 		// no audio, close the codec
 		stream_close_audio_dec( s );
@@ -1290,6 +1312,7 @@ serprintf("audio props changed!\r\n");
 		s->av.as = 0;
 	}
 	s->audio = &s->av.audio[s->av.as];
+	stream_audio_copy_sink_from_source( s );
 
 	// tell the user
 	if( s->message_cb ) {
@@ -1329,14 +1352,22 @@ for( i = 0; i < s->av.as_max; i++ ) {
 			stream_drop_audio( s );
 			goto ErrorExit;
 		}
+#ifdef CONFIG_SPDIF
+		// When passthrough is disabled and AC3 recoding is disabled,
+		// audio will be decoded to PCM regardless of source format.
+		// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
+		if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
+		    s->audio->format != WAVE_FORMAT_PCM ) {
+			s->audio->format = WAVE_FORMAT_PCM;
+		}
+#endif
 		if( s->audio_sink->start( s ) ) {
 			// no audio, close the codec
 			stream_close_audio_dec( s );
-			stream_close_audio_filter( s );
 			// drop audio
 			stream_drop_audio( s );
 		}
-				
+
 		if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 			s->audio_time     = -1;
 			s->audio_ref_time = -1;
@@ -2117,14 +2148,24 @@ serprintf("\r\nstream_start %s\r\n", s->src.url );
 			s->audio_sink = stream_get_default_audio_sink();
 			
 		if( s->audio_sink ) {
-serprintf("AUD_SNK: [%s]\n", s->audio_sink->name);	
+serprintf("AUD_SNK: [%s]\n", s->audio_sink->name);
 			if( s->audio_sink->open( s ) ) {
-serprintf("cannot open audio!\n");	
+serprintf("cannot open audio!\n");
 				// could not open, give up
 				stream_close_audio_dec( s );
 				// drop audio
 				stream_drop_audio( s );
 			} else {
+#ifdef CONFIG_SPDIF
+				// When passthrough is disabled and AC3 recoding is disabled,
+				// audio will be decoded to PCM regardless of source format.
+				// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
+				if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
+				    s->audio->format != WAVE_FORMAT_PCM ) {
+					s->audio->format = WAVE_FORMAT_PCM;
+				}
+
+#endif
 				if( s->audio_sink->start( s ) ) {
 serprintf("cannot start audio!\n");	
 					// cannot start, close the codec
@@ -4504,9 +4545,15 @@ serprintf("SSP: not open!\r\n");
 //
 // *****************************************************************************
 int stream_set_audio_stream( STREAM *s, int audio_stream )
-{	
+{
 serprintf("stream_set_audio_stream( %d )\r\n", audio_stream );
- 
+DBGS {
+	int i;
+	for( i = 0; i < s->av.as_max; i++ ) {
+		serprintf("  audio[%d] format=%04X\r\n", i, s->av.audio[i].format);
+	}
+}
+
 	if( !s->open ) {
 serprintf("SAS: not open!\r\n");
 		return 1;
@@ -4538,9 +4585,31 @@ serprintf("SAS: audio_stream already set\n");
 
 	// stop audio sink
 	if( s->audio_sink ) {
-		s->audio_sink->flush( s );
+		int passthrough_mode = 0;
+#ifdef CONFIG_SPDIF
+		passthrough_mode = spdif_is_passthrough_on();
+#endif
+		if( passthrough_mode == 0 ) {
+			s->audio_sink->flush( s );
+		}
 		s->audio_sink->stop( s );
+		if( passthrough_mode > 0 ) {
+			stream_audio_wait_for_passthrough_idle(s, "track-switch");
+		}
+		if( s->audio_sink->close && s->audio_sink->open ) {
+			if( passthrough_mode > 0 ) {
+				stream_audio_wait_for_passthrough_idle(s, "passthrough-reopen");
+			}
+			s->audio_sink->close( s );
+			if( s->audio_sink->open( s ) ) {
+serprintf("cannot reopen audio sink after passthrough stop!\n");
+				stream_close_audio_dec( s );
+				stream_drop_audio( s );
+				goto ErrorExit;
+			}
+		}
 	}
+	stream_audio_reset_ac3_passthrough_state();
 
 	// check audio format
 	if( stream_check_audio( s ) ) {
@@ -4548,7 +4617,7 @@ serprintf("SAS: audio_stream already set\n");
 		goto ErrorExit;
 	}	
 	
-	// open the new audio stream (if possible)	
+	// open the new audio stream (if possible)
 	if( stream_try_open_audio_dec( s, audio_stream, NULL ) ) {
 		// no audio, disable it
 		stream_drop_audio( s );
@@ -4560,8 +4629,18 @@ serprintf("SAS: audio_stream already set\n");
 		} else {
 			s->sync_mode = default_sync_mode;
 		}
-		
+
 		if( s->audio_sink ) {
+#ifdef CONFIG_SPDIF
+			// When passthrough is disabled and AC3 recoding is disabled,
+			// audio will be decoded to PCM regardless of source format.
+			// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
+			if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
+			    s->audio->format != WAVE_FORMAT_PCM ) {
+				s->audio->format = WAVE_FORMAT_PCM;
+			}
+
+#endif
 			if( s->audio_sink->start( s ) ) {
 				// no audio, close the codec
 				stream_close_audio_dec( s );

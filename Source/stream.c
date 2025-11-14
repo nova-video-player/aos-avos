@@ -39,7 +39,7 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBGP if(Debug[DBG_PARSER])
 
-#define DBG if(0)
+#define DBG if(Debug[DBG_STREAM])
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
@@ -205,6 +205,7 @@ static void _stream_reset( STREAM *s )
 	
 	// set pointer for "audio"/"video"
 	av_init_props( s );
+	memset( &s->audio_sink_props, 0, sizeof( AUDIO_PROPERTIES ) );
 }
 
 static int stream_buffer_sec  = 64;

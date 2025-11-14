@@ -32,6 +32,7 @@
 
 extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
+extern int libavos_get_ac3_recoding_enabled(void);
 #include "jni.h"
 
 #define DBG  if(0)
@@ -88,7 +89,11 @@ struct audio_ctx {
 	jmethodID getTimestampMethodID;
 	jfieldID framePositionFieldID;
 	jfieldID nanoTimeFieldID;
+	int in_error_recovery; // Flag to indicate we're in error recovery mode
+	int last_underrun_count;
 };
+
+static int audiotrack_log_underruns = 0;
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
@@ -284,6 +289,9 @@ static audio_ctx_t *audiotrack_open(int mode)
 		ERR LOG("malloc failed");
 		return NULL;
 	}
+	// calloc zeroes memory, but explicitly initialize our error recovery flag
+	at->in_error_recovery = 0;
+	at->last_underrun_count = 0;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -416,6 +424,16 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	float as = get_effective_audio_speed();
 	int is_audio_speed_enabled = audio_interface_is_audio_speed_enabled();
 
+	// For AC3 recoding, force format to WAVE_FORMAT_AC3 regardless of input format
+	// This ensures AudioTrack is created with AC3 format (2000) instead of original format (e.g., EAC3 18247)
+	int ac3_recoding_enabled = libavos_get_ac3_recoding_enabled();
+	if(ac3_recoding_enabled) {
+		format = WAVE_FORMAT_AC3;
+		at->passthrough = 2;
+		channels = 2;  // IEC61937 container is always stereo regardless of AC3 content (2.0 or 5.1)
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode 2, and 2 channels for IEC61937 container" );
+	}
+
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
 
 	attach_thread( at );
@@ -471,25 +489,54 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// Keep latency math consistent with the IEC61937 container the HAL sees:
 		// most compressed frames map to ~4 bytes per PCM sample equivalent.
 		frame_size = 4;
+
+		// For compressed passthrough, use ENCODING_IEC61937 (same as mode 1).
+		// The specific codec encodings (ENCODING_AC3, ENCODING_E_AC3, etc.) cause Android
+		// to decode to PCM. ENCODING_IEC61937 tells Android to pass through the compressed stream.
+		track_format = 13; // AudioFormat.ENCODING_IEC61937
+
+		// For compressed passthrough, the bitstream is transmitted as stereo even for multichannel content.
+		// The receiver/soundbar decodes the compressed stream to the appropriate channel configuration.
 		switch( at->format ) {
 		case WAVE_FORMAT_AC3:
-			track_format = 5; // AudioFormat.ENCODING_AC3;
-			break;
-		case WAVE_FORMAT_EAC3:
-			track_format = 6; // AudioFormat.ENCODING_E_AC3;
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
+			// IEC61937 always uses a 48kHz stereo container for AC3 bursts,
+			// even when the stream originated from an EAC3/EAC3+ source.
+			// Keep the rate at 48kHz so HAL timing matches the encoded frames.
+			rate = 48000;
 			break;
 		case WAVE_FORMAT_DTS:
-			track_format = 7; // AudioFormat.ENCODING_DTS;
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
+			rate = 48000;
+			break;
+		case WAVE_FORMAT_EAC3:
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
+			rate = 192000;
 			break;
 		case WAVE_FORMAT_DTS_HD_MA:
 		case WAVE_FORMAT_DTS_HD:
-			track_format = 8; // AudioFormat.ENCODING_DTS_HD;
+			if (get_hdmi_supports_iec_8ch192khz()) {
+				track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+				output_channels = 8;
+				rate = 192000;
+			} else {
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
+				rate = 48000;
+			}
 			break;
 		case WAVE_FORMAT_TRUEHD:
-			track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD;
+			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+			output_channels = 8;
+			rate = 192000;
 			break;
 		default:
-			track_format = 13; // AudioFormat.ENCODING_IEC61937
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
+			rate = 48000;
 		}
 	} else if(at->passthrough == 1 && device_get_android_api() >= 24 && get_hdmi_supports_iec()) {
         track_format = 13; // AudioFormat.ENCODING_IEC61937
@@ -557,6 +604,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int channelConfig = track_chanmask << 2;
 	int audioFormat = track_format;
 	mode = 1; /*MODE_STREAM*/
+
+	DBG LOG( "audiotrack_set_output_params: track_format=%d, track_chanmask=0x%x, channelConfig=0x%x (format=%d, passthrough=%d, channels=%d)",
+	         track_format, track_chanmask, channelConfig, at->format, at->passthrough, channels );
 
 	if(is_audio_speed_enabled && at->passthrough == 0 && device_get_android_api() >= 23) {
 		buffer_scale = 2; // for 2.0x max audio speed
@@ -821,8 +871,46 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
+	// Store previous passthrough mode to detect mode changes
+	int old_passthrough = at->passthrough;
+
 	at->passthrough = passthrough;
-	audiotrack_set_output_params(at, at->rate, at->channel_count, (passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, at->format);
+
+	// DO NOT call audiotrack_set_output_params here during format changes!
+	//
+	// When the audio thread loop detects a format change and calls set_passthrough, the values
+	// in audio_ctx_t (at->format, at->rate, at->channel_count, at->frame_size) all contain
+	// STALE data from the previous track/format. The correct values are in s->audio, which will
+	// be used when start() is called after the decoder is opened.
+	//
+	// Calling audiotrack_set_output_params with stale data causes multiple problems:
+	// 1. Stale channel count (e.g., channels=2 from AAC when switching to EAC3 5.1 with channels=6)
+	//    → Creates stereo AudioTrack instead of 5.1, causing Android to output PCM multichannel
+	// 2. Stale format with wrong passthrough mode (e.g., format=EAC3 + passthrough=0)
+	//    → Android blocks for seconds with invalid PCM configuration
+	// 3. Stale format with passthrough enabled (e.g., format=AAC + passthrough=2)
+	//    → Android falls back to PCM instead of compressed passthrough
+	//
+	// The passthrough mode has been updated (above), and start() will apply it with the
+	// correct parameters from s->audio when the sink is reconfigured.
+
+	// HOWEVER, we need to handle AudioTrack error recovery here for two cases:
+	// 1. When audiotrack_write() encounters ERROR_DEAD_OBJECT and calls us to recover
+	// 2. When the device explicitly needs to recreate an AudioTrack during recovery
+
+	// Only recreate AudioTrack if we're in error recovery mode (flag set by audiotrack_write)
+	if (at->in_error_recovery) {
+		// We're in error recovery mode, recreate the track
+		at->in_error_recovery = 0; // Reset the flag
+DBG		LOG("audiotrack_set_passthrough: recreating track for error recovery (passthrough=%d)", passthrough);
+
+		// Choose appropriate format for recovery
+		int recovery_format = at->format;
+
+		audiotrack_set_output_params(at, at->rate, at->channel_count,
+			(passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, recovery_format);
+	}
+
 	return 0;
 }
 
@@ -833,14 +921,17 @@ static int audiotrack_get_passthrough(audio_ctx_t *at)
 
 static int audiotrack_start(audio_ctx_t *at)
 {
-DBG	LOG();
+DBG	LOG("audiotrack_start: format=%04X, passthrough=%d", at->format, at->passthrough);
 	if (!at->init) {
-ERR		LOG("track not valid, error");
+ERR		LOG("audiotrack_start: track not valid, error");
 		return -1;
 	}
 
 	attach_thread(at);
+
+	// Call AudioTrack.play()
 	call_void_method(at, "play", "()V");
+
 	return 0;
 }
 
@@ -862,35 +953,57 @@ ERR		LOG("track not valid, error");
 
 static int audiotrack_can_write(audio_ctx_t *at, int len)
 {
+	// This function always returns true, which means it never blocks
+	// For AC3 recoding troubleshooting, log when it's called
+	DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (always returns true)",
+		at->format, at->passthrough, len);
+
+	// TODO: Consider implementing actual buffer checking using AudioTrack.getPlaybackHeadPosition()
+	// and AudioTrack.getBufferSizeInFrames() to prevent buffer overflows
+
 	return 1;
 }
 
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
 {
-DBG2	LOG("len %d", len);
+DBG	LOG("audiotrack_write: format=%04X, passthrough=%d, len=%d", at->format, at->passthrough, len);
 	if (!at->init) {
-ERR		LOG("track not valid, error");
+ERR		LOG("audiotrack_write: track not valid, error");
 		return -1;
 	}
 
 	attach_thread(at);
-	if (call_int_method(at, "getPlayState", "()I") != 3 ) /* PLAYSTATE_PLAYING */
-		audiotrack_start(at);
-
 	ssize_t ret = 0;
 	ssize_t len_to_write = MIN(at->buf_size, len);
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);
 	ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
-DBG2	LOG("wrote %d out of %d", ret, len);
+DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d)",
+		ret, len_to_write, at->format, at->passthrough);
 
 	// Track samples written for dynamic latency calculation
 	if (ret > 0) {
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
+
+		if (audiotrack_log_underruns) {
+			int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
+			if (underrun_count >= 0 && underrun_count != at->last_underrun_count) {
+				ERR LOG("AudioTrack underruns: total=%d delta=%+d (format=%04X, passthrough=%d)",
+					 underrun_count,
+					 underrun_count - at->last_underrun_count,
+					 at->format, at->passthrough);
+				at->last_underrun_count = underrun_count;
+			}
+		}
 	}
 
-	if (at->passthrough && ret == -6 /* ERROR_DEAD_OBJECT */) {
-ERR		LOG("audiotrack_interface_audiotrack_java:audiotrack_write dead object -> call audiotrack_set_output_params");
+	if (ret == -6 /* ERROR_DEAD_OBJECT */) {
+ERR		LOG("audiotrack_write: ERROR_DEAD_OBJECT (-6) -> recovering track");
+		// Set error recovery flag
+		at->in_error_recovery = 1;
+		// Recreate the AudioTrack by passing current values
 		audiotrack_set_passthrough(at, at->passthrough);
+	} else if (ret < 0) {
+ERR		LOG("audiotrack_write: ERROR code %d returned from Java write()", ret);
 	}
 	return ret;
 }
@@ -1167,3 +1280,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.get_passthrough = audiotrack_get_passthrough,
 	.change_audio_speed = audiotrack_change_audio_speed,
 };
+
+#ifdef DEBUG_MSG
+DECLARE_DEBUG_PARAM("at_underrun", audiotrack_log_underruns );
+#endif

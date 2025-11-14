@@ -354,7 +354,8 @@ serprintf("cannot find codec\r\n");
 		goto ErrorExit;
 	}
 	p->request_channels = audio->request_channels;
-	
+DBGS serprintf("codec_ffmpeg_audio: audio->request_channels=%d on entry\r\n", audio->request_channels);
+
 	// provide all the data that the decoder might need
 	p->actx->sample_rate      = audio->samplesPerSec;
 	p->actx->block_align      = audio->blockAlign;
@@ -396,16 +397,21 @@ serprintf("cannot open parser for %04X\r\n", p->actx->codec_id );
 DBGS serprintf("name %s  type %d  id %d \r\n", p->acodec->name, p->acodec->type, p->acodec->id);
 
 	if (!p->request_channels) {
-		switch( p->actx->sample_fmt ) {	
+DBGS serprintf("codec_ffmpeg_audio: request_channels is 0, checking sample_fmt=%d\r\n", p->actx->sample_fmt);
+		switch( p->actx->sample_fmt ) {
 		case AV_SAMPLE_FMT_FLT:
 		case AV_SAMPLE_FMT_DBL:
 		case AV_SAMPLE_FMT_FLTP:
 		case AV_SAMPLE_FMT_DBLP:
 			p->request_channels = p->actx->ch_layout.nb_channels;
+DBGS serprintf("codec_ffmpeg_audio: float format detected, setting request_channels=%d\r\n", p->request_channels);
 			break;
 		default:
+DBGS serprintf("codec_ffmpeg_audio: non-float format, keeping request_channels=0\r\n");
 			break;
 		}
+	} else {
+DBGS serprintf("codec_ffmpeg_audio: request_channels=%d (not zero, skipping sample_fmt check)\r\n", p->request_channels);
 	}
 	audio->sourceSamples = audio->samplesPerSec;
 	audio->sourceChannels = audio->channels;

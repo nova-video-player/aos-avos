@@ -397,6 +397,7 @@ typedef struct STREAM {
 	int 		etype;
 	int		audio_end;
 	AUDIO_PROPERTIES *audio;
+	AUDIO_PROPERTIES audio_sink_props;
 	// ****************************************
 	// end of common area
 	// ****************************************
@@ -782,6 +783,10 @@ int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
 void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
+AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
+void    stream_audio_copy_sink_from_source( STREAM *s );
+void    stream_audio_reset_ac3_passthrough_state(void);
+void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
 void	stream_un_pause ( STREAM *s, int was_paused );
 int	stream_is_paused( STREAM *s );

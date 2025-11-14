@@ -127,6 +127,15 @@ static int spdif_fakeget( AUDIO_FRAME *frame )
         return 0;
 }
 
+// Store audio properties reference passed to spdif_init
+static AUDIO_PROPERTIES *current_audio_props = NULL;
+
+// Called by spdif_init to store the audio properties for use in spdif_get
+static void spdif_set_audio_props(AUDIO_PROPERTIES *a)
+{
+	current_audio_props = a;
+}
+
 static int spdif_get( AUDIO_FRAME *frame )
 {
 	frame->error  = 0;
@@ -137,8 +146,28 @@ static int spdif_get( AUDIO_FRAME *frame )
 		return 0;
 	frame->data = b.buf;
 	frame->size = b.pos;
-	b.pos = 0;
 
+	// For passthrough mode 2 (regular passthrough, NOT AC3 recoding), we need to scale fakeSize
+	// to match the channel count. The IEC61937 stream is always a 2-channel container (4 bytes
+	// per sample), but bytesPerFrame in stream_sync.c uses the source channel count (e.g., 6ch = 12
+	// bytes per frame). To ensure correct sync timing, we scale fakeSize by channels/2.
+	//
+	// For AC3 recoding, DO NOT scale: the AC3 filter already sets fakeSize to represent the PCM
+	// equivalent (1536 samples × channels × 2 bytes), and stream_audio.c updates bytesPerFrame
+	// to match the source channel count. Scaling would make the audio clock advance 4x too fast
+	// for 8-channel content, causing choppy audio.
+	if (passthrough_on == 2 && !libavos_get_ac3_recoding_enabled() &&
+	    current_audio_props && current_audio_props->channels > 2) {
+		// Scale by channels/2 to compensate (e.g., 6ch/2 = 3x multiplier)
+		int channels = current_audio_props->channels;
+		frame->fakeSize = b.pos * (channels / 2);
+		DBGS serprintf("spdif_get: scaling fakeSize by %dx (%d->%d) for %d channels\n",
+		              channels / 2, b.pos, frame->fakeSize, channels);
+	} else {
+		frame->fakeSize = b.pos;  // Mode 0/1, AC3 recoding, or unknown channels: no scaling
+	}
+
+	b.pos = 0;
 	return 0;
 }
 
@@ -160,15 +189,9 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 		int dummy;
 		spdif_put( out, out_size, &dummy );
 
-		if (passthrough_on == 2) {
-			frame->data = out;
-			frame->size = out_size;
-			spdif_fakeget( frame );
-			if (a->format == WAVE_FORMAT_EAC3)
-				frame->fakeSize /= 4;
-		} else {
-			spdif_get( frame );
-		}
+		// Both passthrough mode 1 and 2 now use ENCODING_IEC61937 in AudioTrack,
+		// so both should send IEC61937-wrapped data from the FFmpeg spdif muxer.
+		spdif_get( frame );
 		return 0;
 	}
 DBGCA2 serprintf("\n", size );
@@ -184,6 +207,16 @@ static int spdif_free( void )
 		av_parser_close( aparser );
 		aparser = NULL;
 	}
+	if (fctxt) {
+		avformat_free_context(fctxt);
+		fctxt = NULL;
+	}
+	// Clear buffer position to prevent stale data
+	b.pos = 0;
+	memset(&b, 0, sizeof(b));
+
+	// Clear audio properties reference
+	current_audio_props = NULL;
 
 	return 0;
 }
@@ -287,6 +320,9 @@ DBGS serprintf( "spdif_init\n");
 	int codecid = a->format;
 	spdif_free();
 
+	// Store the audio properties for use in spdif_get
+	spdif_set_audio_props(a);
+
 	if ( !spdif_check( codecid ) )
 		return 0;
 
@@ -312,13 +348,19 @@ DBGS serprintf( "spdif_init\n");
 		return 0;
 
 	// try to get a parser for this codec
-	memset( &avctx, 0, sizeof( avctx )); 
-	aparser = av_parser_init(stream->codecpar->codec_id);
-	if( !aparser ) {
+	// Skip parser for AC3 recoding - the encoder already produces complete syncframes
+	memset( &avctx, 0, sizeof( avctx ));
+	if ( !libavos_get_ac3_recoding_enabled() ) {
+		aparser = av_parser_init(stream->codecpar->codec_id);
+		if( !aparser ) {
 serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
+		}
+	} else {
+		aparser = NULL;
+		DBGS serprintf("spdif_init: skipping parser for AC3 recoding (encoder produces complete frames)\n");
 	}
 
-	char *dtsrate;
+	const char *dtsrate = NULL;
     if (a->codec_id == WAVE_FORMAT_DTS_HD_MA || a->codec_id == WAVE_FORMAT_DTS_HD) {
         if (get_hdmi_supports_iec_8ch192khz()) {
             dtsrate = "dtshd_rate=768000";
@@ -326,7 +368,7 @@ serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
             dtsrate = "dtshd_rate=0";
         }
     }
-	if ( av_set_options_string( &fctxt->av_class, dtsrate, "=", ":" ) < 0 )
+	if (dtsrate && av_set_options_string( &fctxt->av_class, dtsrate, "=", ":" ) < 0 )
 		serprintf( "Failed2 setting dtshd rate to %s\n", dtsrate );
 
 	return 1;
@@ -346,7 +388,11 @@ DBGS serprintf( "spdif_open\n");
 DBGS serprintf("audio format is %d, %d channels, %dkHz, %d bits, %d B/s, %d B/f\n", audio->format, audio->channels, audio->samplesPerSec/1000, audio->bitsPerSample, audio->bytesPerSec, audio->bytesPerFrame);
 
 	audio->bitsPerSample = 16;
-	audio->channels      = 2;
+	// Only set channels=2 for IEC61937 passthrough (mode 1), which uses stereo container.
+	// For compressed passthrough (mode 2), preserve original channel count (e.g., 6 for 5.1).
+	if (passthrough_on == 1) {
+		audio->channels = 2;
+	}
 	audio->samplesPerSec = 48000;
 
 	int codecid = audio->format;
@@ -359,7 +405,8 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
 
 	switch (codecid) {
 	case WAVE_FORMAT_EAC3:
-		if (passthrough_on == 1)
+		// EAC3 passthrough (both mode 1 and mode 2) requires 192kHz sample rate
+		if (passthrough_on == 1 || passthrough_on == 2)
 			audio->samplesPerSec = 192000;
 		break;
 	case WAVE_FORMAT_DTS_HD:

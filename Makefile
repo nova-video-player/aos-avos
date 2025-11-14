@@ -75,7 +75,10 @@ INCLUDES += -I/opt/homebrew/include
 
 SHARED_LIBS += -lzip -pthread -lm
 
-LDFLAGS += -rdynamic -Wl,-z,max-page-size=16384
+LDFLAGS += -rdynamic
+ifeq ($(UNAME_S),Linux)
+LDFLAGS += -Wl,-z,max-page-size=16384
+endif
 
 LDFLAGS += -L$(TOOLCHAIN_PATH)/usr/$(LIBDIR)
 

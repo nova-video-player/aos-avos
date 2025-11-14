@@ -47,7 +47,6 @@ LOCAL_SRC_FILES := $(addprefix Source/, $(CSRC)) \
 LOCAL_C_INCLUDES := $(patsubst -I%,%,$(INCLUDES))
 LOCAL_C_INCLUDES += $(OMX_INCLUDES)
 LOCAL_C_INCLUDES += $(ANDROID_DIR)/libavos_android/include
-LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 LOCAL_CFLAGS := $(CFLAGS) $(DEFINES)
 
 #uncomment for clang, it does not like gnu extensions

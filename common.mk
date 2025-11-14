@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+UNAME_S := $(shell uname -s)
+
 CFLAGS =
-LDFLAGS = -Wl,-z,max-page-size=16384
+LDFLAGS =
+ifeq ($(UNAME_S),Linux)
+LDFLAGS += -Wl,-z,max-page-size=16384
+endif
 ifeq ($(ASAN),1)
 LDFLAGS += -g -fsanitize=address 
 endif

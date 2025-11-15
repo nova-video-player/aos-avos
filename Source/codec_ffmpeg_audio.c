@@ -24,6 +24,7 @@
 #include "get.h"
 #include "downmix.h"
 #include "device_config.h"
+#include <stdint.h>
 #include <libavutil/channel_layout.h>
 #include <stdbool.h>
 
@@ -47,6 +48,35 @@
 #endif
 
 static int sleep_arm = 0;
+
+static uint64_t ff_channel_layout_get_mask(const AVChannelLayout *layout)
+{
+	if( !layout ) {
+		return 0;
+	}
+	if( layout->order == AV_CHANNEL_ORDER_NATIVE ) {
+		return layout->u.mask;
+	}
+
+	uint64_t mask = 0;
+	int i;
+	for( i = 0; i < layout->nb_channels; i++ ) {
+		enum AVChannel ch = av_channel_layout_channel_from_index( layout, i );
+		if( ch >= 0 && ch < 63 ) {
+			mask |= (1ULL << ch);
+		}
+	}
+	return mask;
+}
+
+static void update_audio_channel_mask( AUDIO_PROPERTIES *audio, const AVChannelLayout *layout )
+{
+	if( !audio || !layout )
+		return;
+	uint64_t mask = ff_channel_layout_get_mask( layout );
+	if( mask )
+		audio->channelMask = (int)mask;
+}
 
 // Channel map built in convert_to_stereo()
 static int channel_map[8] = { CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED };
@@ -426,6 +456,7 @@ serprintf("downmix to stereo S16\r\n");
 		audio->channels = p->actx->ch_layout.nb_channels;
 		audio->bitsPerSample = 16; //av_get_bytes_per_sample(p->actx->sample_fmt) * 4;
 	}
+	update_audio_channel_mask( audio, &p->actx->ch_layout );
 	if (audio->sourceSamples != audio->samplesPerSec)
 		serprintf("sample_rate changed! %d\r\n", audio->sourceSamples);
 	if (audio->sourceChannels != audio->channels)
@@ -781,6 +812,10 @@ msec_sleep( 10 );
 
 		if( frame_available ) {
 			audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
+			uint64_t frame_mask = ff_channel_layout_get_mask( &p->aframe->ch_layout );
+			if( frame_mask ) {
+				audio->channelMask = (int)frame_mask;
+			}
 		}
 		int t3 = time_update_time();
 

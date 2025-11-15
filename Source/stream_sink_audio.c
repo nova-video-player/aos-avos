@@ -46,6 +46,9 @@ static int _close( STREAM *s )
 static int start( STREAM *s )
 {
 	AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
+	if( s->audio_ctx ) {
+		audio_interface_set_channel_mask( s->audio_ctx, sink ? sink->channelMask : 0 );
+	}
 	if( audio_interface_set_output_params( s->audio_ctx, sink->samplesPerSec, sink->channels, sink->bitsPerSample, sink->format ) ) {
 serprintf("stream_sink_audio_start: cannot set params: fs %d  ch %d  bits %d\r\n", sink->samplesPerSec, sink->channels, sink->bitsPerSample );
 		return 1;

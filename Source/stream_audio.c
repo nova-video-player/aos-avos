@@ -119,6 +119,25 @@ AUDIO_PROPERTIES *stream_audio_get_sink_props(STREAM *s)
 	return sink;
 }
 
+// ************************************************************
+//
+//	stream_audio_copy_sink_from_source
+//
+//	Initializes audio sink properties from the current source stream.
+//	This function MUST be called before every audio_sink->start() call
+//	to ensure sink properties are properly synchronized with the source.
+//
+//	What it does:
+//	  1. Copies all audio properties from source (s->audio) to sink (s->audio_sink_props)
+//	  2. Applies default values for any missing/zero fields (via stream_audio_init_sink_defaults)
+//	  3. Forces format to WAVE_FORMAT_PCM when passthrough is disabled and AC3 recoding is off,
+//	     since all compressed formats are decoded to PCM in this mode
+//
+//	NOTE: AC3 recoding and native passthrough paths call this function and then
+//	override the format field to WAVE_FORMAT_AC3 or other compressed formats.
+//	The PCM forcing step is harmless in these cases.
+//
+// ************************************************************
 void stream_audio_copy_sink_from_source(STREAM *s)
 {
 	if( !s || !s->audio ) {
@@ -130,6 +149,18 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 	}
 	memcpy( sink, s->audio, sizeof( AUDIO_PROPERTIES ) );
 	stream_audio_init_sink_defaults( sink );
+
+#ifdef CONFIG_SPDIF
+	// When passthrough is disabled and AC3 recoding is disabled,
+	// audio will be decoded to PCM regardless of source format.
+	// Force sink format to PCM to ensure AudioTrack is created with correct format.
+	// (AC3 recoding paths will override this to WAVE_FORMAT_AC3 after calling this function)
+	if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() ) {
+		if( sink->format != WAVE_FORMAT_PCM ) {
+			sink->format = WAVE_FORMAT_PCM;
+		}
+	}
+#endif
 }
 
 static int stream_audio_setup_ac3_sink(STREAM *s)

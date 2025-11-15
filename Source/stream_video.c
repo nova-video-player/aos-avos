@@ -1266,15 +1266,10 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 		s->audio_sink->flush( s );
 		s->audio_sink->stop( s );
 	}
-#ifdef CONFIG_SPDIF
-	// When passthrough is disabled and AC3 recoding is disabled,
-	// audio will be decoded to PCM regardless of source format.
-	// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
-	if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
-	    s->audio->format != WAVE_FORMAT_PCM ) {
-		s->audio->format = WAVE_FORMAT_PCM;
-	}
-#endif
+
+	// Initialize sink properties from source (includes PCM forcing when needed)
+	stream_audio_copy_sink_from_source( s );
+
 	if( s->audio_sink->start( s ) ) {
 		// no audio, close the codec
 		stream_close_audio_dec( s );
@@ -1352,15 +1347,10 @@ for( i = 0; i < s->av.as_max; i++ ) {
 			stream_drop_audio( s );
 			goto ErrorExit;
 		}
-#ifdef CONFIG_SPDIF
-		// When passthrough is disabled and AC3 recoding is disabled,
-		// audio will be decoded to PCM regardless of source format.
-		// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
-		if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
-		    s->audio->format != WAVE_FORMAT_PCM ) {
-			s->audio->format = WAVE_FORMAT_PCM;
-		}
-#endif
+
+		// Re-initialize sink properties from the new audio source (includes PCM forcing when needed)
+		stream_audio_copy_sink_from_source( s );
+
 		if( s->audio_sink->start( s ) ) {
 			// no audio, close the codec
 			stream_close_audio_dec( s );
@@ -2156,18 +2146,11 @@ serprintf("cannot open audio!\n");
 				// drop audio
 				stream_drop_audio( s );
 			} else {
-#ifdef CONFIG_SPDIF
-				// When passthrough is disabled and AC3 recoding is disabled,
-				// audio will be decoded to PCM regardless of source format.
-				// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
-				if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
-				    s->audio->format != WAVE_FORMAT_PCM ) {
-					s->audio->format = WAVE_FORMAT_PCM;
-				}
+				// Initialize sink properties from source (includes PCM forcing when needed)
+				stream_audio_copy_sink_from_source( s );
 
-#endif
 				if( s->audio_sink->start( s ) ) {
-serprintf("cannot start audio!\n");	
+serprintf("cannot start audio!\n");
 					// cannot start, close the codec
 					stream_close_audio_dec( s );
 					// drop audio
@@ -4631,16 +4614,9 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 		}
 
 		if( s->audio_sink ) {
-#ifdef CONFIG_SPDIF
-			// When passthrough is disabled and AC3 recoding is disabled,
-			// audio will be decoded to PCM regardless of source format.
-			// Set format to PCM before starting the sink to avoid creating AudioTrack with wrong format.
-			if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() &&
-			    s->audio->format != WAVE_FORMAT_PCM ) {
-				s->audio->format = WAVE_FORMAT_PCM;
-			}
+			// Initialize sink properties from source (includes PCM forcing when needed)
+			stream_audio_copy_sink_from_source( s );
 
-#endif
 			if( s->audio_sink->start( s ) ) {
 				// no audio, close the codec
 				stream_close_audio_dec( s );

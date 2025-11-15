@@ -68,7 +68,6 @@ struct audio_ctx {
 	int frame_count;
 	size_t frame_size;
 	int channel_count;
-	uint32_t channel_mask_hint;
 	uint32_t latency;
 	int passthrough;
 	JNIEnv * env;
@@ -293,7 +292,6 @@ static audio_ctx_t *audiotrack_open(int mode)
 	// calloc zeroes memory, but explicitly initialize our error recovery flag
 	at->in_error_recovery = 0;
 	at->last_underrun_count = 0;
-	at->channel_mask_hint = 0;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -417,42 +415,19 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	}
 }
 
-static uint32_t audiotrack_choose_channel_mask(audio_ctx_t *at, int channels)
+static uint32_t audiotrack_default_channel_mask(int channels)
 {
-	if (!at || channels <= 0) {
-		return 0;
+	switch( channels ) {
+	case 1: return AUDIO_CHANNEL_OUT_MONO;
+	case 2: return AUDIO_CHANNEL_OUT_STEREO;
+	case 3: return AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
+	case 4: return AUDIO_CHANNEL_OUT_SURROUND;
+	case 5: return AUDIO_CHANNEL_OUT_QUAD | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
+	case 6: return AUDIO_CHANNEL_OUT_5POINT1;
+	case 7: return AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;
+	case 8: return AUDIO_CHANNEL_OUT_7POINT1;
+	default: return 0;
 	}
-
-	uint32_t mask = at->channel_mask_hint;
-	if (!mask) {
-		return 0;
-	}
-
-	int bit_count = 0;
-	uint32_t tmp = mask;
-	while (tmp) {
-		bit_count += tmp & 1;
-		tmp >>= 1;
-	}
-
-	if (bit_count != channels) {
-		return 0;
-	}
-
-	if (!(mask & AUDIO_CHANNEL_OUT_FRONT_LEFT) || !(mask & AUDIO_CHANNEL_OUT_FRONT_RIGHT)) {
-		return 0;
-	}
-
-	return mask;
-}
-
-static int audiotrack_set_channel_mask(audio_ctx_t *at, uint32_t mask)
-{
-	if (!at) {
-		return -1;
-	}
-	at->channel_mask_hint = mask;
-	return 0;
 }
 
 static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int bits, int format)
@@ -480,37 +455,13 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	at->format = format;
 	int output_channels = channels;
-	track_chanmask = audiotrack_choose_channel_mask(at, output_channels);
+	int retry_rate = rate;
+	int retry_channels = channels;
+	int retry_bits = bits;
+	int retry_format = format;
+	track_chanmask = audiotrack_default_channel_mask(output_channels);
 	if (!track_chanmask) {
-		switch( output_channels ) {
-		case 1:
-			track_chanmask = AUDIO_CHANNEL_OUT_MONO;
-			break;
-		case 2:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			break;
-		case 3:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
-			break;
-		case 4:
-			track_chanmask = AUDIO_CHANNEL_OUT_SURROUND;
-			break;
-		case 5:
-			track_chanmask = AUDIO_CHANNEL_OUT_QUAD | AUDIO_CHANNEL_OUT_LOW_FREQUENCY;
-			break;
-		case 6:
-			track_chanmask = AUDIO_CHANNEL_OUT_5POINT1;
-			break;
-		case 7:
-			track_chanmask = AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;
-			break;
-		case 8:
-			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-			break;
-		default:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			break;
-		}
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 	}
 
 	switch( bits ) {
@@ -893,7 +844,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if (failed && reinit) {
 		msec_sleep( 30 );
 		ERR LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
-		return audiotrack_set_output_params(at, rate, channels, bits, format);
+		return audiotrack_set_output_params(at, retry_rate, retry_channels, retry_bits, retry_format);
 	}
 
 	if(failed)
@@ -1315,7 +1266,6 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.can_write = audiotrack_can_write,
 	.write = audiotrack_write,
 	.set_output_params = audiotrack_set_output_params,
-	.set_channel_mask = audiotrack_set_channel_mask,
 	.get_delay = audiotrack_get_delay,
 	.flush_output = audiotrack_flush_output,
 	.preload = audiotrack_preload,

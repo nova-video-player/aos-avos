@@ -175,13 +175,6 @@ int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, 
 	return impl->set_output_params(ctx, freq, channels, bits, format);
 }
 
-int audio_interface_set_channel_mask(audio_ctx_t *ctx, uint32_t channel_mask)
-{
-	if (!impl || !impl->set_channel_mask)
-		return 0;
-	return impl->set_channel_mask(ctx, channel_mask);
-}
-
 int audio_interface_get_delay(audio_ctx_t *ctx)
 {
 	return impl->get_delay(ctx);

@@ -568,7 +568,8 @@ serprintf(" ae! ");
 		if( s->audio_sink ) {
 			if( !audio_frame.error ) {
 				// Store original format and properties before filtering
-				original_format = s->audio->format;
+				AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
+				original_format = sink_props ? sink_props->format : s->audio->format;
 				original_channels = s->audio->channels;
 				original_rate = s->audio->samplesPerSec;
 				original_bits = s->audio->bitsPerSample;
@@ -642,8 +643,14 @@ serprintf(" ae! ");
 					audio_frame.format, audio_frame.size);
 
 				// Check if filter changed the audio format or layout (e.g., PCM -> AC3 recoding)
-				AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
-				int format_changed = audio_frame.format && audio_frame.format != original_format;
+				int expected_format = sink_props ? sink_props->format : original_format;
+				int is_pcm_to_pcm = (!ac3_recoding && sink_props &&
+				                     sink_props->format == WAVE_FORMAT_PCM &&
+				                     audio_frame.format == WAVE_FORMAT_PCM);
+				int format_changed = 0;
+				if( !is_pcm_to_pcm ) {
+					format_changed = audio_frame.format && audio_frame.format != expected_format;
+				}
 				if( ac3_recoding && ac3_sink_configured && sink_props &&
 				    sink_props->format == WAVE_FORMAT_AC3 && audio_frame.format == WAVE_FORMAT_AC3 ) {
 					// Once the sink is configured for AC3 recoding, treat AC3 frames as expected

@@ -143,6 +143,7 @@ void libavos_set_output_sample_rate(int sample_rate)
 }
 
 static int ac3_recoding_enabled = 0;
+static int pcm_output_max_channels = 0;
 
 int libavos_get_ac3_recoding_enabled(void)
 {
@@ -173,6 +174,19 @@ void libavos_set_hdmi_supported_audio_codecs(long flag)
 #ifdef CONFIG_ANDROID
 	set_hdmi_supported_audio_codecs(flag);
 #endif
+}
+
+void libavos_set_max_pcm_channels(int max_channels)
+{
+	if( max_channels < 0 )
+		max_channels = 0;
+	pcm_output_max_channels = max_channels;
+	serprintf("libavos_set_max_pcm_channels: %d\n", pcm_output_max_channels);
+}
+
+int libavos_get_max_pcm_channels(void)
+{
+	return pcm_output_max_channels;
 }
 
 void libavos_set_audio_speed(float speed)

@@ -205,6 +205,7 @@ STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_ac3_new( void );
 
 extern int libavos_get_ac3_recoding_enabled(void);
+extern int libavos_get_max_pcm_channels(void);
 
 // *****************************************************************************
 //
@@ -380,6 +381,21 @@ DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r
 		} else if( ac3_recoding ) {
 			s->audio->request_channels = 0;  // Explicitly clear to prevent downmix
 DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recoding\r\n");
+		}
+#ifdef CONFIG_SPDIF
+		int passthrough_mode = spdif_is_passthrough_on();
+#else
+		int passthrough_mode = 0;
+#endif
+		if( !passthrough_mode && !ac3_recoding ) {
+			int max_pcm = libavos_get_max_pcm_channels();
+			int clamp_to = max_pcm > 0 ? max_pcm : 6;
+			if( s->audio->channels > clamp_to ) {
+				if( s->audio->request_channels == 0 || s->audio->request_channels > clamp_to ) {
+					s->audio->request_channels = clamp_to;
+DBGS serprintf("stream_open_audio_dec: clamping PCM to %d channels (requested %d)\r\n", clamp_to, s->audio->channels);
+				}
+			}
 		}
 		if( s->audio_dec->open( s->audio ) ) {
 serprintf("error opening audio_dec!\r\n");

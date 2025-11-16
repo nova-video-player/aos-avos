@@ -47,6 +47,9 @@ static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when A
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations
 extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
+extern int libavos_get_max_pcm_channels(void);
+
+static void truncate_to_six_channels(AUDIO_FRAME *frame);
 
 static int stream_audio_format_supports_passthrough(int format)
 {
@@ -637,6 +640,16 @@ serprintf(" ae! ");
 				DBG serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
 					audio_frame.format, audio_frame.size);
 
+				if( !passthrough_active && !ac3_recoding ) {
+					int max_pcm = libavos_get_max_pcm_channels();
+					int clamp_to = max_pcm > 0 ? max_pcm : 6;
+					if( audio_frame.channels > clamp_to ) {
+						truncate_to_six_channels( &audio_frame );
+						frame_channels = audio_frame.channels;
+						DBG serprintf("stream_audio: truncated PCM frame to %d channels for sink compatibility\n", frame_channels);
+					}
+				}
+
 				// Check if filter changed the audio format or layout (e.g., PCM -> AC3 recoding)
 				AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
 				int format_changed = audio_frame.format && audio_frame.format != original_format;
@@ -1015,3 +1028,25 @@ DECLARE_DEBUG_COMMAND("sa",   _audio_singlestep );
 #endif
 
 #endif
+static void truncate_to_six_channels(AUDIO_FRAME *frame)
+{
+	if( !frame || frame->channels <= 6 )
+		return;
+	if( frame->bits != 16 || !frame->data || frame->size <= 0 )
+		return;
+
+	int in_channels = frame->channels;
+	int out_channels = 6;
+	int sample_count = frame->size / (in_channels * 2);
+	short *samples = (short*)frame->data;
+
+	for( int i = sample_count - 1; i >= 0; i-- ) {
+		for( int ch = out_channels - 1; ch >= 0; ch-- ) {
+			samples[i * out_channels + ch] = samples[i * in_channels + ch];
+		}
+	}
+
+	frame->size = sample_count * out_channels * 2;
+	frame->channels = out_channels;
+	frame->fakeSize = frame->fakeSize ? (frame->fakeSize * out_channels) / in_channels : frame->size;
+}

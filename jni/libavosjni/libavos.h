@@ -60,5 +60,7 @@ void libavos_enable_audio_speed(int enable);
 void libavos_set_parser_sync_mode(int mode);
 void libavos_set_default_stream_buffer_size(int size);
 void libavos_set_default_stream_max_iframe_size(int size);
+void libavos_set_max_pcm_channels(int max_channels);
+int  libavos_get_max_pcm_channels(void);
 
 #endif

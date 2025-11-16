@@ -370,38 +370,46 @@ DBGS serprintf("stream_open_audio_dec\r\n");
 serprintf("error creating audio_dec!\r\n");
 			s->audio_dec = NULL;
 			return 1;
-		}
-		// Disable downmixing when AC3 recoding is enabled - we need original multichannel PCM for encoding
-		int ac3_recoding = libavos_get_ac3_recoding_enabled();
+	}
+	// Disable downmixing when AC3 recoding is enabled - we need original multichannel PCM for encoding
+	int ac3_recoding = libavos_get_ac3_recoding_enabled();
 DBGS serprintf("stream_open_audio_dec: downmix=%d max_channels=%d ac3_recoding=%d\r\n",
 			stream_audio_downmix, s->audio_max_channels, ac3_recoding);
-		if( stream_audio_downmix && !ac3_recoding ) {
-			s->audio->request_channels = s->audio_max_channels;
+	if( stream_audio_downmix && !ac3_recoding ) {
+		s->audio->request_channels = s->audio_max_channels;
 DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r\n", s->audio->request_channels);
-		} else if( ac3_recoding ) {
-			s->audio->request_channels = 0;  // Explicitly clear to prevent downmix
+	} else if( ac3_recoding ) {
+		s->audio->request_channels = 0;  // Explicitly clear to prevent downmix
 DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recoding\r\n");
-		}
+	}
 #ifdef CONFIG_SPDIF
-		int passthrough_mode = spdif_is_passthrough_on();
+	int passthrough_mode = spdif_is_passthrough_on();
 #else
-		int passthrough_mode = 0;
+	int passthrough_mode = 0;
 #endif
-		if( !passthrough_mode && !ac3_recoding ) {
-			int max_pcm = libavos_get_max_pcm_channels();
-			int clamp_to = max_pcm > 0 ? max_pcm : 6;
-			if( s->audio->channels > clamp_to ) {
-				if( s->audio->request_channels == 0 || s->audio->request_channels > clamp_to ) {
-					s->audio->request_channels = clamp_to;
-DBGS serprintf("stream_open_audio_dec: clamping PCM to %d channels (requested %d)\r\n", clamp_to, s->audio->channels);
-				}
+	if( !passthrough_mode && !ac3_recoding ) {
+		int pcm_cap = libavos_get_max_pcm_channels();         // 0 if unknown
+		int desired  = s->audio->request_channels;            // may be 0 (no downmix) or user downmix
+
+		// If sink reports a cap and we don't already downmix below it, cap the request
+		if( pcm_cap > 0 ) {
+			if( desired == 0 || desired > pcm_cap ) {
+				desired = pcm_cap;
 			}
 		}
-		if( s->audio_dec->open( s->audio ) ) {
-serprintf("error opening audio_dec!\r\n");
-			s->audio_dec = NULL;		
-			return 1;
+
+		// Apply downmix request only when it reduces channel count
+		if( desired > 0 && desired < s->audio->channels ) {
+			s->audio->request_channels = desired;
+DBGS serprintf("stream_open_audio_dec: request_channels=%d (src=%d, cap=%d)\r\n",
+	desired, s->audio->channels, pcm_cap);
 		}
+	}
+	if( s->audio_dec->open( s->audio ) ) {
+serprintf("error opening audio_dec!\r\n");
+		s->audio_dec = NULL;		
+		return 1;
+	}
 		s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
 
 		memset( &s->audio_rc, 0, sizeof( s->audio_rc ) );

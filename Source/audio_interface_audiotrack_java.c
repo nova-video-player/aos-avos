@@ -444,9 +444,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int ac3_recoding_enabled = libavos_get_ac3_recoding_enabled();
 	if(ac3_recoding_enabled) {
 		format = WAVE_FORMAT_AC3;
-		at->passthrough = 2;
+		at->passthrough = 1;  // Use mode 1 (IEC61937 manual wrapping) for universal compatibility
 		channels = 2;  // IEC61937 container is always stereo regardless of AC3 content (2.0 or 5.1)
-		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode 2, and 2 channels for IEC61937 container" );
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode 1, and 2 channels for IEC61937 container" );
 	}
 
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
@@ -480,58 +480,36 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	size_t frame_size = 0;
 
 	if( at->passthrough == 2 ) {
-		// Keep latency math consistent with the IEC61937 container the HAL sees:
-		// most compressed frames map to ~4 bytes per PCM sample equivalent.
-		frame_size = 4;
+		// Mode 2: Delegate encapsulation to Android using codec-specific encodings.
+		// Android should recognize ENCODING_AC3/E_AC3/DTS and handle passthrough internally.
+		// If this causes PCM decoding instead of passthrough, we'll need to revert to ENCODING_IEC61937.
+		frame_size = bits / 8;
 
-		// For compressed passthrough, use ENCODING_IEC61937 (same as mode 1).
-		// The specific codec encodings (ENCODING_AC3, ENCODING_E_AC3, etc.) cause Android
-		// to decode to PCM. ENCODING_IEC61937 tells Android to pass through the compressed stream.
-		track_format = 13; // AudioFormat.ENCODING_IEC61937
-
-		// For compressed passthrough, the bitstream is transmitted as stereo even for multichannel content.
-		// The receiver/soundbar decodes the compressed stream to the appropriate channel configuration.
 		switch( at->format ) {
 		case WAVE_FORMAT_AC3:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			// IEC61937 always uses a 48kHz stereo container for AC3 bursts,
-			// even when the stream originated from an EAC3/EAC3+ source.
-			// Keep the rate at 48kHz so HAL timing matches the encoded frames.
-			rate = 48000;
-			break;
-		case WAVE_FORMAT_DTS:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			rate = 48000;
+			track_format = 5; // AudioFormat.ENCODING_AC3
+			// Keep original channel mask from content (5.1 = 6ch, stereo = 2ch)
+			// Android should handle the passthrough based on encoding + channel config
 			break;
 		case WAVE_FORMAT_EAC3:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			rate = 192000;
+			track_format = 6; // AudioFormat.ENCODING_E_AC3
+			break;
+		case WAVE_FORMAT_DTS:
+			track_format = 7; // AudioFormat.ENCODING_DTS
 			break;
 		case WAVE_FORMAT_DTS_HD_MA:
 		case WAVE_FORMAT_DTS_HD:
-			if (get_hdmi_supports_iec_8ch192khz()) {
-				track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-				output_channels = 8;
-				rate = 192000;
-			} else {
-				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-				output_channels = 2;
-				rate = 48000;
-			}
+			track_format = 8; // AudioFormat.ENCODING_DTS_HD
 			break;
 		case WAVE_FORMAT_TRUEHD:
-			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-			output_channels = 8;
-			rate = 192000;
+			track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
 			break;
 		default:
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			rate = 48000;
+			// Fallback to IEC61937 for unknown formats
+			track_format = 13; // AudioFormat.ENCODING_IEC61937
 		}
+		DBG LOG("Mode 2: codec-specific encoding=%d for format=%04X, channels=%d, rate=%d",
+			track_format, at->format, output_channels, rate);
 	} else if(at->passthrough == 1 && device_get_android_api() >= 24 && get_hdmi_supports_iec()) {
         track_format = 13; // AudioFormat.ENCODING_IEC61937
         switch(at->format) {

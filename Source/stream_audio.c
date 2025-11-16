@@ -757,12 +757,12 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 						}
 						// For AC3 recoding, the AC3 encoder outputs AC3 compressed frames that need
-						// to be sent via passthrough mode 2 (compressed bitstream passthrough).
+						// to be sent via passthrough mode 1 (manual IEC61937 wrapping).
 						// This allows androidTV devices with ARC (non-eARC) to transmit multichannel
 						// audio to soundbars that support AC3 but not the original codec or PCM multichannel.
 						AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
 						if( is_ac3_recoding ) {
-							DBG serprintf("AC3 recoding: configuring sink for compressed passthrough mode 2\n");
+							DBG serprintf("AC3 recoding: configuring sink for compressed passthrough mode 1 (IEC61937)\n");
 
 							AUDIO_PROPERTIES saved_sink = *sink;
 

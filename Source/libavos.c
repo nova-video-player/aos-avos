@@ -155,11 +155,11 @@ void libavos_set_passthrough(int force_passthrough)
 	serprintf("libavos_set_passthrough: mode=%d\n", force_passthrough);
 #ifdef CONFIG_SPDIF
 	audio_interface_exit();
-	// Mode 3 is AC3 recoding: enable AC3 filter and use system passthrough
+	// Mode 3 is AC3 recoding: enable AC3 filter and use manual IEC61937 wrapping (mode 1)
 	if (force_passthrough == 3) {
 		serprintf("libavos_set_passthrough: enabling AC3 recoding\n");
 		ac3_recoding_enabled = 1;
-		spdif_set_passthrough(2);  // Use system encapsulation for AC3 output
+		spdif_set_passthrough(1);  // Use mode 1 (manual IEC wrapping) for universal compatibility
 	} else {
 		serprintf("libavos_set_passthrough: disabling AC3 recoding\n");
 		ac3_recoding_enabled = 0;

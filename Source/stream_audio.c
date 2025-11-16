@@ -566,9 +566,9 @@ serprintf(" ae! ");
 		int frame_channels = 0;
 
 		if( s->audio_sink ) {
+			AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
 			if( !audio_frame.error ) {
 				// Store original format and properties before filtering
-				AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
 				original_format = sink_props ? sink_props->format : s->audio->format;
 				original_channels = s->audio->channels;
 				original_rate = s->audio->samplesPerSec;

@@ -2813,10 +2813,19 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
 		goto Discard;
 	}
-	
+	int sync_wait_ms = 0;
+	const int sync_wait_timeout_ms = 5000; // Avoid indefinite freeze if audio never starts
+
 	while( qframe && !_engine_abort( s ) && stream_sync_video( s, frame->time ) ) {
-serprintf("#");
+		if( (sync_wait_ms % 1000) == 0 ) { // every 1s
+DBG			serprintf("video waiting for audio sync (%d ms)\n", sync_wait_ms);
+		}
+		if( sync_wait_ms >= sync_wait_timeout_ms ) {
+			serprintf("WARNING: audio sync timeout after %d ms, continuing video\n", sync_wait_ms);
+			break;
+		}
 		msec_sleep( 10 );
+		sync_wait_ms += 10;
 	}
 		
 DBGV2 serprintf("  out %8d/%2d/%c", frame->time, frame->index, frame_type( frame->type ) );

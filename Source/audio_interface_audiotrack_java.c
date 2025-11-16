@@ -827,12 +827,13 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 		status = call_int_method(at, "getState", "()I");
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
-			ERR LOG("audiotrack ctor failed");
+			ERR LOG("audiotrack ctor failed (status=%d) - backing off and retrying", status);
 			failed = 1;
 			// If DTS HD failed, fallback to DTS for DTS core mode
 			if (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) {
 				return audiotrack_set_output_params(at, 48000, 2, 16, WAVE_FORMAT_DTS);
 			}
+			msec_sleep(100); // give AudioFlinger more time to recover before re-entering
 		}
 
 		//frame_size reported can be false for compressed formats
@@ -842,7 +843,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	}
 
 	if (failed && reinit) {
-		msec_sleep( 30 );
+		msec_sleep( 100 );
 		ERR LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
 		return audiotrack_set_output_params(at, retry_rate, retry_channels, retry_bits, retry_format);
 	}

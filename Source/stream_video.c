@@ -2173,6 +2173,18 @@ serprintf("cannot open audio!\n");
 				// Initialize sink properties from source (includes PCM forcing when needed)
 				stream_audio_copy_sink_from_source( s );
 
+				// Set up passthrough mode BEFORE starting the sink
+				// This ensures audiotrack_set_output_params is called with the correct passthrough mode
+#ifdef CONFIG_SPDIF
+				AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
+				int passthrough_mode = 0;
+				if( spdif_is_passthrough_on() && spdif_init(sink) ) {
+					passthrough_mode = spdif_is_passthrough_on();
+					DBG serprintf("stream_start: passthrough enabled, mode=%d\n", passthrough_mode);
+				}
+				s->audio_sink->set_passthrough( s, passthrough_mode );
+#endif
+
 				if( s->audio_sink->start( s ) ) {
 serprintf("cannot start audio!\n");
 					// cannot start, close the codec
@@ -4649,6 +4661,18 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 		if( s->audio_sink ) {
 			// Initialize sink properties from source (includes PCM forcing when needed)
 			stream_audio_copy_sink_from_source( s );
+
+			// Set up passthrough mode BEFORE starting the sink
+			// This ensures audiotrack_set_output_params is called with the correct passthrough mode
+#ifdef CONFIG_SPDIF
+			AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
+			int passthrough_mode = 0;
+			if( spdif_is_passthrough_on() && spdif_init(sink) ) {
+				passthrough_mode = spdif_is_passthrough_on();
+				DBG serprintf("stream_start: passthrough enabled, mode=%d\n", passthrough_mode);
+			}
+			s->audio_sink->set_passthrough( s, passthrough_mode );
+#endif
 
 			if( s->audio_sink->start( s ) ) {
 				// no audio, close the codec

@@ -481,28 +481,43 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 	if( at->passthrough == 2 ) {
 		// Mode 2: Delegate encapsulation to Android using codec-specific encodings.
-		// Android should recognize ENCODING_AC3/E_AC3/DTS and handle passthrough internally.
-		// If this causes PCM decoding instead of passthrough, we'll need to revert to ENCODING_IEC61937.
+		// Use content sample rate (typically 48kHz), not IEC container rate (192kHz).
+		// Android handles the container format internally when using codec-specific encodings.
 		frame_size = bits / 8;
 
 		switch( at->format ) {
 		case WAVE_FORMAT_AC3:
 			track_format = 5; // AudioFormat.ENCODING_AC3
-			// Keep original channel mask from content (5.1 = 6ch, stereo = 2ch)
-			// Android should handle the passthrough based on encoding + channel config
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
+			// Keep content rate (typically 48kHz from demuxer)
 			break;
 		case WAVE_FORMAT_EAC3:
 			track_format = 6; // AudioFormat.ENCODING_E_AC3
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
+			// Keep content rate (typically 48kHz), not IEC container rate (192kHz)
 			break;
 		case WAVE_FORMAT_DTS:
 			track_format = 7; // AudioFormat.ENCODING_DTS
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
 			break;
 		case WAVE_FORMAT_DTS_HD_MA:
 		case WAVE_FORMAT_DTS_HD:
 			track_format = 8; // AudioFormat.ENCODING_DTS_HD
+			if (get_hdmi_supports_iec_8ch192khz()) {
+				track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+				output_channels = 8;
+			} else {
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
+			}
 			break;
 		case WAVE_FORMAT_TRUEHD:
 			track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
+			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+			output_channels = 8;
 			break;
 		default:
 			// Fallback to IEC61937 for unknown formats
@@ -1128,8 +1143,9 @@ ERR		LOG("track not valid, error");
 	}
 
 	// since at->frame_count = at->buf_size / at->frame_size; simplify
+	// Mode 2 now uses raw compressed data (not IEC), so use channel_count for all modes
 	// original: len = at->frame_count * at->frame_size * ((at->passthrough == 2) ? 4 : at->channel_count);
-	len = at->buf_size * ( ( at->passthrough == 2 ) ? 4 : at->channel_count );
+	len = at->buf_size * at->channel_count;
 
 	if ((buffer = (unsigned char *)malloc(len)) == NULL)
 		return -1;

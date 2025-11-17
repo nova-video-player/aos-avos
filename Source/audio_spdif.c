@@ -168,17 +168,17 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			frame->format = a->format;  // Preserve codec ID (AC3/EAC3/DTS) for downstream logic
 
 			// fakeSize represents the "PCM-equivalent" data size for timing calculations.
-			// For compressed passthrough, use the raw compressed frame size as a proxy.
-			// Note: This works because spdif_open preserves original bitsPerSample/bytesPerFrame
-			// for mode 2, so timing math (fakeSize / bytesPerFrame) stays consistent with
-			// the compressed frame rate (~32ms per AC3 frame @ 1536 samples).
-			frame->fakeSize = out_size;
-			// EAC3 has 4x higher frame rate than AC3 (1536 samples @ 4x repeat)
-			// so divide by 4 to match AC3 timing expectations
-			if (a->format == WAVE_FORMAT_EAC3)
-				frame->fakeSize /= 4;
-			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d\n",
-			                 frame->format, frame->size, frame->fakeSize);
+			// AC3/EAC3/DTS core frames always contain 1536 samples regardless of sample rate:
+			//   - 48kHz: 1536 samples = 32ms
+			//   - 44.1kHz: 1536 samples = 34.8ms
+			//   - 32kHz: 1536 samples = 48ms
+			// Since we preserve samplesPerSec from demuxer in spdif_open, the timing formula
+			// time = fakeSize / bytesPerSec = (1536 * bytesPerFrame) / (samplesPerSec * bytesPerFrame)
+			//      = 1536 / samplesPerSec is correct for any sample rate.
+			frame->fakeSize = 1536 * a->bytesPerFrame;
+
+			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d\n",
+			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame);
 		} else {
 			// Mode 1: Manual IEC61937 wrapping via FFmpeg SPDIF muxer
 			int dummy;
@@ -384,7 +384,7 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
         }
 
 	// Mode 1 (IEC61937 wrapping): Apply IEC-specific rate/channel/bit-depth adjustments
-	// Mode 2 (raw data to Android): Preserve original content properties, let Android handle it
+	// Mode 2 (raw data to Android): Must match AudioTrack configuration for timing sync
 	if (passthrough_on == 1) {
 		// IEC61937 container is always 16-bit, 2-channel stereo (or 8ch for high-bitrate)
 		audio->bitsPerSample = 16;
@@ -412,10 +412,18 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
 		// Recalculate bytesPerFrame for IEC container
 		audio->bytesPerFrame = audio->channels * audio->bitsPerSample / 8;
 		audio->bytesPerSec = audio->samplesPerSec * audio->bytesPerFrame;
+	} else if (passthrough_on == 2) {
+		// Mode 2: Keep content sample rate for timing, but match channel/bit-depth to AudioTrack
+		// Android handles the actual container format when using codec-specific encodings
+		audio->bitsPerSample = 16;
+		audio->channels = 2;
+		// Keep original samplesPerSec from demuxer (typically 48kHz for AC3/EAC3/DTS content)
+		// Don't force to 192kHz - that's an IEC container requirement, not needed for codec-specific encodings
+
+		// Recalculate bytesPerFrame based on the channel/bit-depth
+		audio->bytesPerFrame = audio->channels * audio->bitsPerSample / 8;
+		audio->bytesPerSec = audio->samplesPerSec * audio->bytesPerFrame;
 	}
-	// Mode 2: Keep original content properties (channels, rate, bit depth already set from demuxer)
-	// Android's codec-specific encodings will handle the format natively.
-	// DON'T modify bitsPerSample/bytesPerFrame - they're used for timing calculations.
 
 DBGS serprintf("spdif_open: mode=%d final: %dch, %dHz, %dbits, %dB/f\n",
                passthrough_on, audio->channels, audio->samplesPerSec, audio->bitsPerSample, audio->bytesPerFrame);

@@ -193,7 +193,8 @@ static int stream_audio_setup_ac3_sink(STREAM *s)
 		return -1;
 	}
 
-	s->audio_sink->set_passthrough( s, 2 );
+	// AC3 recoding uses mode 1 (manual IEC61937 wrapping) for universal compatibility
+	s->audio_sink->set_passthrough( s, 1 );
 
 	stream_audio_wait_for_passthrough_idle(s, "ac3-prestart");
 
@@ -777,7 +778,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 #ifdef CONFIG_SPDIF
 							int ac3_sink_started = 0;
 							if( spdif_init(sink) ) {
-								s->audio_sink->set_passthrough( s, 2 );
+								// AC3 recoding uses mode 1 (manual IEC61937 wrapping) for universal compatibility
+								s->audio_sink->set_passthrough( s, 1 );
 								// Call start() with AC3 2-channel format
 								if( s->audio_sink->start( s ) ) {
 									DBG serprintf("failed to restart audio sink after AC3 recoding\n");
@@ -805,7 +807,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 #endif
 						} else {
 							stream_audio_copy_sink_from_source( s );
-							s->audio_sink->set_passthrough( s, 0 );
+							// Set passthrough mode based on whether SPDIF passthrough is enabled
+							int passthrough_mode = 0;
+#ifdef CONFIG_SPDIF
+							if(spdif_is_passthrough_on() && spdif_init(sink)) {
+								passthrough_mode = spdif_is_passthrough_on();
+								DBG serprintf("stream_audio: regular passthrough enabled, mode=%d\n", passthrough_mode);
+							}
+#endif
+							s->audio_sink->set_passthrough( s, passthrough_mode );
 							ac3_sink_configured = 0;
 							ac3_reconfigure_pending = 1;
 							if( s->audio_sink->start( s ) ) {

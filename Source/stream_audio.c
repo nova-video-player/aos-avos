@@ -193,8 +193,18 @@ static int stream_audio_setup_ac3_sink(STREAM *s)
 		return -1;
 	}
 
-	// AC3 recoding uses mode 1 (manual IEC61937 wrapping) for universal compatibility
-	s->audio_sink->set_passthrough( s, 1 );
+	// AC3 recoding: determine passthrough mode based on IEC61937 capability
+	// Prefer Mode 1 (manual IEC wrapping) if IEC61937 is supported
+	// Fall back to Mode 2 (codec-specific) if IEC61937 is not available (e.g., eARC without IEC)
+	int passthrough_mode = spdif_is_passthrough_on();  // Default from libavos_set_passthrough
+	extern int get_hdmi_supports_iec(void);
+	if (libavos_get_ac3_recoding_enabled() && !get_hdmi_supports_iec()) {
+		passthrough_mode = 2;  // Override to mode 2 if IEC not available
+		serprintf("stream_audio_setup_ac3_sink: IEC61937 not available, using mode 2 (codec-specific) for AC3 recoding\n");
+	} else {
+		serprintf("stream_audio_setup_ac3_sink: using mode %d for AC3 recoding\n", passthrough_mode);
+	}
+	s->audio_sink->set_passthrough( s, passthrough_mode );
 
 	stream_audio_wait_for_passthrough_idle(s, "ac3-prestart");
 
@@ -778,8 +788,17 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 #ifdef CONFIG_SPDIF
 							int ac3_sink_started = 0;
 							if( spdif_init(sink) ) {
-								// AC3 recoding uses mode 1 (manual IEC61937 wrapping) for universal compatibility
-								s->audio_sink->set_passthrough( s, 1 );
+								// AC3 recoding: determine passthrough mode based on IEC61937 capability
+								// Prefer Mode 1 if IEC61937 supported, fallback to Mode 2 if not
+								int passthrough_mode = spdif_is_passthrough_on();  // Default from libavos_set_passthrough
+								extern int get_hdmi_supports_iec(void);
+								if (libavos_get_ac3_recoding_enabled() && !get_hdmi_supports_iec()) {
+									passthrough_mode = 2;  // Override to mode 2 if IEC not available
+									serprintf("AC3 recoding reconfigure: IEC61937 not available, using mode 2\n");
+								} else {
+									DBG serprintf("AC3 recoding reconfigure: using mode %d\n", passthrough_mode);
+								}
+								s->audio_sink->set_passthrough( s, passthrough_mode );
 								// Call start() with AC3 2-channel format
 								if( s->audio_sink->start( s ) ) {
 									DBG serprintf("failed to restart audio sink after AC3 recoding\n");

@@ -155,11 +155,13 @@ void libavos_set_passthrough(int force_passthrough)
 	serprintf("libavos_set_passthrough: mode=%d\n", force_passthrough);
 #ifdef CONFIG_SPDIF
 	audio_interface_exit();
-	// Mode 3 is AC3 recoding: enable AC3 filter and use manual IEC61937 wrapping (mode 1)
+	// Mode 3 is AC3 recoding: enable AC3 filter
+	// The actual passthrough mode (1 or 2) will be determined at sink creation time
+	// based on current HDMI capability state via get_hdmi_supports_iec()
 	if (force_passthrough == 3) {
-		serprintf("libavos_set_passthrough: enabling AC3 recoding\n");
+		serprintf("libavos_set_passthrough: enabling AC3 recoding (will use Mode 1 or 2 based on IEC61937 capability at sink creation)\n");
 		ac3_recoding_enabled = 1;
-		spdif_set_passthrough(1);  // Use mode 1 (manual IEC wrapping) for universal compatibility
+		spdif_set_passthrough(1);  // Default to mode 1; stream_audio.c will override if IEC unavailable
 	} else {
 		serprintf("libavos_set_passthrough: disabling AC3 recoding\n");
 		ac3_recoding_enabled = 0;

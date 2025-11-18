@@ -200,6 +200,7 @@ static int stream_audio_setup_ac3_sink(STREAM *s)
 	extern int get_hdmi_supports_iec(void);
 	if (libavos_get_ac3_recoding_enabled() && !get_hdmi_supports_iec()) {
 		passthrough_mode = 2;  // Override to mode 2 if IEC not available
+		spdif_set_passthrough(passthrough_mode); // Keep SPDIF encapsulation mode in sync
 		serprintf("stream_audio_setup_ac3_sink: IEC61937 not available, using mode 2 (codec-specific) for AC3 recoding\n");
 	} else {
 		serprintf("stream_audio_setup_ac3_sink: using mode %d for AC3 recoding\n", passthrough_mode);
@@ -794,6 +795,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								extern int get_hdmi_supports_iec(void);
 								if (libavos_get_ac3_recoding_enabled() && !get_hdmi_supports_iec()) {
 									passthrough_mode = 2;  // Override to mode 2 if IEC not available
+									spdif_set_passthrough(passthrough_mode); // Keep SPDIF encapsulation mode in sync
 									serprintf("AC3 recoding reconfigure: IEC61937 not available, using mode 2\n");
 								} else {
 									DBG serprintf("AC3 recoding reconfigure: using mode %d\n", passthrough_mode);

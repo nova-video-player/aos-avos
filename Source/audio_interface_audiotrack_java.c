@@ -33,6 +33,7 @@
 extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
 extern int libavos_get_ac3_recoding_enabled(void);
+extern int spdif_is_passthrough_on(void);
 #include "jni.h"
 
 #define DBG  if(0)
@@ -444,9 +445,14 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int ac3_recoding_enabled = libavos_get_ac3_recoding_enabled();
 	if(ac3_recoding_enabled) {
 		format = WAVE_FORMAT_AC3;
-		at->passthrough = 1;  // Use mode 1 (IEC61937 manual wrapping) for universal compatibility
-		channels = 2;  // IEC61937 container is always stereo regardless of AC3 content (2.0 or 5.1)
-		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode 1, and 2 channels for IEC61937 container" );
+		// Respect the current passthrough mode selected in native (may be 1 or 2)
+		int pt_mode = spdif_is_passthrough_on();
+		if (pt_mode != 1 && pt_mode != 2) {
+			pt_mode = 1;  // default to IEC if unset
+		}
+		at->passthrough = pt_mode;
+		channels = 2;  // IEC/codec-specific container is stereo for compressed payload
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d", pt_mode, channels );
 	}
 
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );

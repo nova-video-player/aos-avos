@@ -523,8 +523,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			break;
 		case WAVE_FORMAT_TRUEHD:
 			track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
-			track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-			output_channels = 8;
+			// Android encapsulates the bitstream internally, so force stereo just like AC3/EAC3.
+			// Using a 7.1 mask here makes AudioSystem reject the track when HDMI is set to "Auto"
+			// (Chromecast/Google TV case), resulting in complete silence.
+			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+			output_channels = 2;
 			break;
 		default:
 			// Fallback to IEC61937 for unknown formats

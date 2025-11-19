@@ -827,7 +827,12 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							(void)sink;
 #endif
 						} else {
-							stream_audio_copy_sink_from_source( s );
+							// For non-AC3 recoding, copy source properties to sink and reconfigure.
+							// Do NOT copy if we're in AC3 recoding mode with configured sink, as this
+							// would overwrite the AC3 format with the source codec format.
+							if( !libavos_get_ac3_recoding_enabled() || !ac3_sink_configured ) {
+								stream_audio_copy_sink_from_source( s );
+							}
 							// Set passthrough mode based on whether SPDIF passthrough is enabled
 							int passthrough_mode = 0;
 #ifdef CONFIG_SPDIF
@@ -837,8 +842,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 #endif
 							s->audio_sink->set_passthrough( s, passthrough_mode );
-							ac3_sink_configured = 0;
-							ac3_reconfigure_pending = 1;
+							if( !libavos_get_ac3_recoding_enabled() || !ac3_sink_configured ) {
+								ac3_sink_configured = 0;
+								ac3_reconfigure_pending = 1;
+							}
 							if( s->audio_sink->start( s ) ) {
 								DBG serprintf("failed to restart audio sink after format change\n");
 								s->audio_sink_open = 0;
@@ -975,10 +982,13 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 		AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
 		if( sink && sink->format != audio_format_configured ) {
 #ifdef CONFIG_SPDIF
-			if(libavos_get_ac3_recoding_enabled() && audio_format_configured == WAVE_FORMAT_AC3 &&
+			// In AC3 recoding mode with configured sink, keep it pinned to AC3.
+			// Only update audio_format_configured to stop re-detecting this as a format change.
+			if(libavos_get_ac3_recoding_enabled() && ac3_sink_configured &&
 			   sink->format == WAVE_FORMAT_AC3) {
-				// Sink intentionally stays in AC3 passthrough while source metadata reports original codec.
-				DBG serprintf("AC3 recoding: source format=%04X, sink pinned to AC3 (no reconfigure)\n",
+				// Sink is pinned to AC3, just record the format for next iteration
+				audio_format_configured = WAVE_FORMAT_AC3;
+				DBG serprintf("AC3 recoding: sink pinned to AC3 (source format=%04X)\n",
 					s->audio->format);
 				goto skip_format_change;
 			}
@@ -986,20 +996,20 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 
 #ifdef CONFIG_SPDIF
 			if(libavos_get_ac3_recoding_enabled()) {
-				// AC3 recoding: ALL formats go through PCM decode -> filter -> AC3 recode
-				// _audio_decode will reconfigure the sink when the first AC3 frame is generated.
-				DBG serprintf("AC3 recoding: sink format updated to %04X, handled by _audio_decode\n",
-					sink->format);
-				ac3_sink_configured = 0;
+				// AC3 recoding: waiting for _audio_decode to configure sink to AC3.
+				// Don't update audio_format_configured - let _audio_decode set it.
+				DBG serprintf("AC3 recoding: waiting for AC3 sink setup (source=%04X, sink=%04X)\n",
+					s->audio->format, sink->format);
 			} else if(spdif_is_passthrough_on() && spdif_init(sink) && s->audio_sink) {
 				// Only call spdif_init if passthrough is actually enabled to avoid unnecessary side effects
 				s->audio_sink->set_passthrough(s, spdif_is_passthrough_on() );
+				audio_format_configured = sink->format;
 			} else
 #endif
 			{
 				s->audio_sink->set_passthrough(s, 0);
+				audio_format_configured = sink->format;
 			}
-			audio_format_configured = sink->format;
 		}
 skip_format_change:
 

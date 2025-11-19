@@ -38,6 +38,7 @@
 #define WAVE_FORMAT_AAC 0x00FF
 #define WAVE_FORMAT_AC3 0x2000
 #define WAVE_FORMAT_EAC3 0x4747
+#define WAVE_FORMAT_E_AC3_JOC 0x4748
 
 #define DBG if( Debug[DBG_AUDIODEVICE] )
 #define DBG2 if( Debug[DBG_AUDIODEVICE] > 1 )
@@ -196,6 +197,7 @@ static int _convert_to_sdl_format( int fmt, SDL_AudioFormat *sdl_fmt )
 		*sdl_fmt = AUDIO_S16LSB;
 		return 0;
 	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
 	case WAVE_FORMAT_AC3:
 	case WAVE_FORMAT_AAC:
 	case WAVE_FORMAT_MPEGLAYER3:

@@ -498,10 +498,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			output_channels = 2;
 			// Keep content rate (typically 48kHz from demuxer)
 			break;
-		case WAVE_FORMAT_EAC3:
-			track_format = 6; // AudioFormat.ENCODING_E_AC3
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
+	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
+		track_format = 6; // AudioFormat.ENCODING_E_AC3
+		track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+		output_channels = 2;
 			// Keep content rate (typically 48kHz), not IEC container rate (192kHz)
 			break;
 		case WAVE_FORMAT_DTS:
@@ -540,7 +541,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
                 output_channels = 2;
                 rate = 48000;
                 break;
-            case WAVE_FORMAT_EAC3:
+	    case WAVE_FORMAT_EAC3:
+	    case WAVE_FORMAT_E_AC3_JOC:
                 track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
                 output_channels = 2;
                 rate = 192000;

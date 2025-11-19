@@ -516,6 +516,12 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 				audio->codec_id	     = codecpar->codec_id;
 				strnZcpy( audio->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				audio->format        = get_ff_format( codecpar->codec_id, NULL );
+				if( audio->format == WAVE_FORMAT_EAC3 &&
+				    codecpar->profile == AV_PROFILE_EAC3_DDP_ATMOS ) {
+					audio->format = WAVE_FORMAT_E_AC3_JOC;
+					DBG serprintf("stream_parser_ffmpeg: detected EAC3 Atmos (profile=%d)\n",
+						codecpar->profile);
+				}
 
 				if( audio->format == 0 && audio->codec_id ) {
 					audio->format = WAVE_FORMAT_LAVC;

@@ -190,6 +190,7 @@ typedef enum {
 #define WAVE_FORMAT_IMA_QT			0x4444 /* QT/MOV/MP4 */
 #define WAVE_FORMAT_TRUEHD			0x4646 /* TrueHD */
 #define WAVE_FORMAT_EAC3			0x4747 /* EAC3 */
+#define WAVE_FORMAT_E_AC3_JOC		0x4748 /* EAC3 Dolby Digital Plus with Atmos */
 #define WAVE_FORMAT_DTS_HD			0x4848 /* DTS HD */
 #define WAVE_FORMAT_DTS_HD_MA			0x4949 /* DTS HD MA */
 

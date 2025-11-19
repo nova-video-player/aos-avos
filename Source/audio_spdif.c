@@ -236,6 +236,7 @@ static int wave2libav_codecid( int codecid )
 			return 0;
 		}
 	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
 		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
 			serprintf("EAC3 encoding passthrough supported\n");
 			return AV_CODEC_ID_EAC3;
@@ -393,6 +394,7 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
 
 		switch (codecid) {
 		case WAVE_FORMAT_EAC3:
+		case WAVE_FORMAT_E_AC3_JOC:
 			// EAC3 IEC61937 requires 192kHz container
 			audio->samplesPerSec = 192000;
 			break;
@@ -506,6 +508,7 @@ static STREAM_DEC_AUDIO stream_spdif =
 
 static STREAM_REG_DEC_AUDIO reg_spdif_ac3		= { WAVE_FORMAT_AC3,	&stream_spdif, 6 };
 static STREAM_REG_DEC_AUDIO reg_spdif_eac3              = { WAVE_FORMAT_EAC3,    &stream_spdif, 8 };
+static STREAM_REG_DEC_AUDIO reg_spdif_eac3_joc          = { WAVE_FORMAT_E_AC3_JOC,&stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_dts		= { WAVE_FORMAT_DTS,	&stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_dts_hd		= { WAVE_FORMAT_DTS_HD,    &stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_truehd	= { WAVE_FORMAT_TRUEHD,	&stream_spdif, 8 };
@@ -513,6 +516,7 @@ static void register_spdif(void) __attribute__((constructor));
 static void register_spdif(void) {
 	stream_register_dec_audio_head( &reg_spdif_ac3);
 	stream_register_dec_audio_head( &reg_spdif_eac3);
+	stream_register_dec_audio_head( &reg_spdif_eac3_joc);
 	stream_register_dec_audio_head( &reg_spdif_dts);
 	stream_register_dec_audio_head( &reg_spdif_dts_hd);
 	stream_register_dec_audio_head( &reg_spdif_truehd);

@@ -182,9 +182,10 @@ DBG	LOG("rate %d, channels %d, bits %d, format %d, passthrough mode %d", rate, c
 			case WAVE_FORMAT_AC3:
 				track_format = AUDIO_FORMAT_AC3;
 				break;
-			case WAVE_FORMAT_EAC3:
-				track_format = AUDIO_FORMAT_E_AC3;
-				break;
+		case WAVE_FORMAT_EAC3:
+		case WAVE_FORMAT_E_AC3_JOC:
+			track_format = AUDIO_FORMAT_E_AC3;
+			break;
 			case WAVE_FORMAT_DTS:
 				track_format = AUDIO_FORMAT_DTS;
 				break;

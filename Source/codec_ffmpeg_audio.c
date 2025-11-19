@@ -1169,6 +1169,7 @@ STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_VOICEAGE_AMR_WB,	stream_dec_audio_ffmpeg,
 #endif
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AC3, 		stream_dec_audio_ffmpeg, 6 );
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_EAC3,		stream_dec_audio_ffmpeg, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_E_AC3_JOC,	stream_dec_audio_ffmpeg, 8 );
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_TRUEHD,		stream_dec_audio_ffmpeg, 8 );
 STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_PCM_BLURAY,	stream_dec_audio_ffmpeg, 8 );
 

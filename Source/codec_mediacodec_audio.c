@@ -55,6 +55,7 @@ static int wave2libav_codecid( int codecid )
 	case WAVE_FORMAT_AC3:
 		return AV_CODEC_ID_AC3;
 	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
 		return AV_CODEC_ID_EAC3;
 	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:

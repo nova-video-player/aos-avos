@@ -56,6 +56,7 @@ static int stream_audio_format_supports_passthrough(int format)
 	switch( format ) {
 	case WAVE_FORMAT_AC3:
 	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
 	case WAVE_FORMAT_DTS:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS_HD_MA:

@@ -198,6 +198,7 @@ static const AVCodec *get_avcodec( AUDIO_PROPERTIES *audio )
 		codec_id    = AV_CODEC_ID_TRUEHD;
 		break;
 	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
 		codec_id    = AV_CODEC_ID_EAC3;
 		break;
 	case WAVE_FORMAT_PCM_BLURAY:

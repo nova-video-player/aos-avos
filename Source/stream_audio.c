@@ -760,7 +760,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										s->audio_sink_open = 0;
 									}
 								}
-							} else if( (format_changed || channels_changed || samplerate_changed || bits_changed) &&
+							} else if( !is_ac3_recoding &&
+							           (format_changed || channels_changed || samplerate_changed || bits_changed) &&
 							           s->audio_sink->close && s->audio_sink->open ) {
 								s->audio_sink->close( s );
 								if( s->audio_sink->open( s ) ) {

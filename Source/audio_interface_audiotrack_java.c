@@ -489,7 +489,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// Mode 2: Delegate encapsulation to Android using codec-specific encodings.
 		// Use content sample rate (typically 48kHz), not IEC container rate (192kHz).
 		// Android handles the container format internally when using codec-specific encodings.
-		frame_size = bits / 8;
+		frame_size = (bits / 8) * channels; // keep PCM-equivalent frame size for latency calc
 
 		switch( at->format ) {
 		case WAVE_FORMAT_AC3:

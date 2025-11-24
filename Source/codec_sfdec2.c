@@ -361,10 +361,9 @@ static void *videosink_thread(void *ctx)
 		int venc_time = _get_time(p);
 		int blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
 
-        // Android sync displays the frame 100ms in the future
-        // And it'll block based on timestamps (so blit_duration will usually be < 0)
-        // So offset the waiting time by 200ms
-        if (android_sync) blit_duration -= 200;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t render_ts_ns = 0;
 
 DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
 		if( s && s->paused ) {
@@ -377,16 +376,17 @@ DBGSI serprintf(" wait\n");
 			if( blit_duration > f->duration + 100 )
 				blit_duration = f->duration + 100;
 
-			struct timespec ts;
-			clock_gettime(CLOCK_MONOTONIC, &ts);
-			timespec_add_ms(&ts, blit_duration);
+			if( !android_sync ) {
+				struct timespec ts_wait = ts;
+				timespec_add_ms(&ts_wait, blit_duration);
 
-			int rc = 0;
-			while (p->locked.run && rc == 0 && !has_state_l(p, THREAD_STATE_FLUSHING)) {
-				rc = pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts);
-			}
-			if (!p->locked.run) {
+				int rc = 0;
+				while (p->locked.run && rc == 0 && !has_state_l(p, THREAD_STATE_FLUSHING)) {
+					rc = pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
+				}
+				if (!p->locked.run) {
 DBGCV CLOG("stop thread 2");
+				}
 			}
 		// Android sync will happily drop the frames for us
 		} else if ( !android_sync && (blit_duration < -40 && p->dropped < 5) ) {
@@ -412,13 +412,13 @@ DBGSI serprintf(" ok\n");
 		if (do_render) {
 DBGCV3 CLOG("render ->");
 			int start = time_update_time();
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, !android_sync);
+			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, !android_sync, 0);
 			int took = time_update_time() - start;
 			p->dropped = 0;
 DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );
 DBGCV3 CLOG("render <-");
 		} else {
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0);
+			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 		}
 		// "Paused" here usually mean "seek"
 		if( s && s->paused ) {
@@ -717,7 +717,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	pthread_mutex_init(&p->locked.mtx, NULL);
 	pthread_condattr_t cond_attr;
 	pthread_condattr_init(&cond_attr);
+#ifndef __APPLE__
 	pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+#endif
 	pthread_cond_init(&p->locked.cond, &cond_attr);
 	pthread_condattr_destroy(&cond_attr);
 	p->locked.width = width;

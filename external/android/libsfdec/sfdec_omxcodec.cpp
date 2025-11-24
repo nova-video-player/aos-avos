@@ -787,8 +787,10 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
     return read_out->flag == SFDEC_READ_INVALID ? -1 : 0;
 }
 
-static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render)
+static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns)
 {
+	(void)asap;
+	(void)render_ts_ns;
     if(!render)
         return 0;
 	

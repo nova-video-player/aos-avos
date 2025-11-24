@@ -35,7 +35,7 @@ typedef ssize_t	(*sfdec_send_input_t)(sfdec_priv_t *sfdec, void *data, size_t si
 typedef int	(*sfdec_flush_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_stop_input_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_read_t)(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
-typedef int	(*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap);
+typedef int (*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns);
 typedef int	(*sfdec_buf_release_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf);
 typedef int	(*sfdec_reset_ts_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_set_playback_speed_t)(sfdec_priv_t *sfdec, int den, int num);

@@ -544,7 +544,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
     }
 }
 
-static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap)
+static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns)
 {
     status_t err;
 
@@ -555,7 +555,16 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         return 0;
     }
 
-    if (!asap && dl_mc.MediaCodec_releaseOutputBufferAtTime) {
+    if (render_ts_ns > 0 && dl_mc.MediaCodec_releaseOutputBufferAtTime) {
+        DBG LOG("Rendering frame at absolute time %lld", render_ts_ns);
+        err = dl_mc.MediaCodec_releaseOutputBufferAtTime(sfdec->mCodec.get(), sfbuf->index, render_ts_ns);
+        if (err == OK) {
+            sfbuf->released = true;
+            sfdec->n_late = 0;
+            return 0;
+        }
+        asap = 1;
+    } else if (!asap && dl_mc.MediaCodec_releaseOutputBufferAtTime) {
         int64_t timestamp_us = sfbuf->timestamp_us;
         DBG LOG("Received og timestamp %lld", timestamp_us);
         if (sfdec->video_frame_rate_den) {

@@ -104,15 +104,16 @@ typedef struct priv {
 		int error;
 		int width;
 		int height;
-		int rotation;
-		int interlaced;
-		int state;
-	} locked;
+	int rotation;
+	int interlaced;
+	int state;
+} locked;
 
 	int venc_put_time;
 	int venc_ref_time;
 	
 	int dropped;
+	int prev_paused;
 	
 	STREAM_DEC_VIDEO *dec;
 } priv_t;
@@ -345,6 +346,23 @@ static void *videosink_thread(void *ctx)
 
 	pthread_mutex_lock(&p->locked.mtx);
 	while (p->locked.run && !p->locked.error) {
+
+		// Detect pause/resume transitions to keep codec anchors aligned
+		if( s ) {
+			if( s->paused && !p->prev_paused ) {
+				if( android_sync ) {
+					sfdec_pause( p->sfdec );
+DBGSI serprintf("MediaCodec pause\n");
+				}
+				p->prev_paused = 1;
+			} else if( !s->paused && p->prev_paused ) {
+				if( android_sync ) {
+					sfdec_resume( p->sfdec );
+DBGSI serprintf("MediaCodec resume\n");
+				}
+				p->prev_paused = 0;
+			}
+		}
 
 		VIDEO_FRAME *f = NULL;
 		while (has_state_l(p, THREAD_STATE_FLUSHING) || (p->locked.run && !(f = frame_q_get(&p->locked.venc_q)))) {
@@ -729,6 +747,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->locked.height = height;
 	p->locked.rotation = video->rotation;
 	p->locked.run = 1;
+	p->prev_paused = 0;
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;
@@ -894,6 +913,10 @@ DBGCV	CLOG();
 	XDM_id_flush( &p->XDM_ctx );
 	XDM_ts_flush( &p->XDM_ctx );
 	sfdec_flush(p->sfdec);
+	if( android_sync ) {
+		sfdec_seek_reset( p->sfdec );
+DBGCV CLOG("MediaCodec seek reset");
+	}
 
 	while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_RENDERING)) {
 		pthread_cond_wait(&p->locked.cond, &p->locked.mtx);

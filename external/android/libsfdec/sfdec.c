@@ -136,5 +136,26 @@ int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num)
 {
 	if (sfdec->itf->set_playback_speed != NULL)
 		return sfdec->itf->set_playback_speed(sfdec->priv, den, num);
-    return 0;
+	return 0;
+}
+
+int sfdec_pause(sfdec_t *sfdec)
+{
+	if (sfdec->itf->pause)
+		return sfdec->itf->pause(sfdec->priv);
+	return 0;
+}
+
+int sfdec_resume(sfdec_t *sfdec)
+{
+	if (sfdec->itf->resume)
+		return sfdec->itf->resume(sfdec->priv);
+	return 0;
+}
+
+int sfdec_seek_reset(sfdec_t *sfdec)
+{
+	if (sfdec->itf->seek_reset)
+		return sfdec->itf->seek_reset(sfdec->priv);
+	return 0;
 }

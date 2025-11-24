@@ -38,6 +38,13 @@ typedef struct sfdec_mediacodec sfdec_priv_t;
     fflush(stdout); \
 } while (0)
 
+static inline int64_t get_monotonic_ns(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000000000LL + now.tv_nsec;
+}
+
 
 struct sfdec_mediacodec
 {
@@ -66,6 +73,9 @@ struct sfdec_mediacodec
     int playback_speed_den;
     int playback_speed_num;
     int n_late;
+    bool is_paused;
+    int64_t pause_start_monotonic;
+    int64_t last_reset_monotonic;
 };
 
 struct sfbuf
@@ -176,6 +186,9 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     CHECK_STATUS(err);
     sfdec->started = true;
     sfdec->flush = 1;
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
 
     return sfdec;
 }
@@ -386,17 +399,30 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 // display first frame there asap
                 asap = 1;
             }
-            if (delta < 0) {
-                // We're late, schedule frames for later
-                // Note that there is a valid reason to be late (at the start of playback):
-                // It's possible Audio buffer is bigger than our initial 100ms
-                // Adding latency to our display makes us closer to audio
-                //
-                // And then we can be late because video decoder can't render at correct speed
-                // In that case, adding 100ms will make it completely stuttery, but well.
-                sfdec->n_late++;
-                sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
-                DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
+
+            // Drop policy thresholds
+            const int64_t DROP_THRESHOLD_NS = 50 * 1000 * 1000LL;   // 50ms
+            const int64_t LATE_THRESHOLD_NS = 5 * 1000 * 1000LL;    // 5ms
+
+            if (!asap) {
+                if (delta < -DROP_THRESHOLD_NS) {
+                    sfdec->n_late++;
+                    DBG LOG("Dropping frame: %lld ns late", -delta);
+                    err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
+                    CHECK_STATUS(err);
+                    sfbuf->released = true;
+                    return 0;
+                } else if (delta < -LATE_THRESHOLD_NS) {
+                    sfdec->n_late++;
+                    DBG LOG("Late frame (%lld ns), rendering ASAP", -delta);
+                    asap = 1;
+                } else if (delta < 0) {
+                    sfdec->n_late++;
+                    sfdec->start_monotonic += 100 * 1000LL * 1000L; // Delay 100ms
+                    DBG LOG("Slightly late (%d), adjusting +100ms", sfdec->n_late);
+                } else {
+                    sfdec->n_late = 0;
+                }
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
@@ -436,6 +462,12 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
 {
     sfdec->start_off = 0;
     sfdec->start_monotonic = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->n_late = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
     return 0;
 }
 
@@ -443,6 +475,42 @@ static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num) {
     DBG LOG("Setting playbackspeed to %d / %d", num, den);
     sfdec->playback_speed_den = den;
     sfdec->playback_speed_num = num;
+    return 0;
+}
+
+static int sfdec_pause(sfdec_priv_t *sfdec)
+{
+    if (!sfdec->is_paused) {
+        sfdec->pause_start_monotonic = get_monotonic_ns();
+        sfdec->is_paused = true;
+    }
+    return 0;
+}
+
+static int sfdec_resume(sfdec_priv_t *sfdec)
+{
+    if (sfdec->is_paused) {
+        int64_t now = get_monotonic_ns();
+        int64_t paused = now - sfdec->pause_start_monotonic;
+        sfdec->start_monotonic += paused;
+        sfdec->last_reset_monotonic += paused;
+        sfdec->last_monotonic += paused;
+        sfdec->is_paused = false;
+        sfdec->pause_start_monotonic = 0;
+    }
+    return 0;
+}
+
+static int sfdec_seek_reset(sfdec_priv_t *sfdec)
+{
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->n_late = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
     return 0;
 }
 
@@ -461,4 +529,7 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_buf_release,
     sfdec_reset_ts,
     sfdec_set_playback_speed,
+    sfdec_pause,
+    sfdec_resume,
+    sfdec_seek_reset,
 };

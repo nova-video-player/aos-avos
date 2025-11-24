@@ -94,6 +94,10 @@ struct sfdec_mediacodec
     int playback_speed_den;
     int playback_speed_num;
     int n_late;
+    bool is_paused;
+    int64_t pause_start_monotonic;
+    bool is_paused;
+    int64_t pause_start_monotonic;
 };
 
 struct sfbuf
@@ -472,6 +476,8 @@ static int sfdec_flush(sfdec_priv_t *sfdec)
     sfdec->last_monotonic = 0;
     sfdec->n_late = 0;
     sfdec->last_reset_monotonic = get_monotonic_ns();
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
     return 0;
 }
 
@@ -589,21 +595,41 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             (delta < -500 * 1000LL * 1000LL || delta > 500 * 1000LL * 1000LL) ||
             (sfdec->last_reset_monotonic > 0 && (now_ts - sfdec->last_reset_monotonic) < 200 * 1000LL * 1000LL)) {
             sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000LL;
-            sfdec->start_off = timestamp_us * 1000LL;
+            sfdec->start_off = timestamp_ns;
             asap = 1;
         }
-        if (!asap && delta < 0) {
-            sfdec->n_late++;
-            sfdec->start_monotonic += 100 * 1000LL * 1000LL;
-            DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
+
+        // Drop policy thresholds
+        const int64_t DROP_THRESHOLD_NS = 50 * 1000 * 1000LL;   // 50ms
+        const int64_t LATE_THRESHOLD_NS = 5 * 1000 * 1000LL;    // 5ms
+
+        if (!asap) {
+            if (delta < -DROP_THRESHOLD_NS) {
+                sfdec->n_late++;
+                DBG LOG("Dropping frame: %lld ns late", -delta);
+                err = dl_mc.MediaCodec_releaseOutputBuffer(sfdec->mCodec.get(), sfbuf->index);
+                CHECK_STATUS(err);
+                sfbuf->released = true;
+                return 0;
+            } else if (delta < -LATE_THRESHOLD_NS) {
+                sfdec->n_late++;
+                DBG LOG("Late frame (%lld ns), rendering ASAP", -delta);
+                asap = 1;
+            } else if (delta < 0) {
+                sfdec->n_late++;
+                sfdec->start_monotonic += 100 * 1000LL * 1000LL;
+                DBG LOG("Slightly late (%d), adjusting +100ms", sfdec->n_late);
+            } else {
+                sfdec->n_late = 0;
+            }
         }
 
-        ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+        ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
 
         if (!asap) {
             DBG LOG("Scheduling frame in %lld", ts - now_ts);
             sfdec->last_monotonic = now_ts;
-            sfdec->last_off = timestamp_us * 1000LL;
+            sfdec->last_off = timestamp_ns;
             err = dl_mc.MediaCodec_releaseOutputBufferAtTime(sfdec->mCodec.get(), sfbuf->index, ts);
             if (err == OK) {
                 sfbuf->released = true;
@@ -645,6 +671,8 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
     sfdec->last_monotonic = 0;
     sfdec->n_late = 0;
     sfdec->last_reset_monotonic = get_monotonic_ns();
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
     return 0;
 }
 
@@ -655,6 +683,42 @@ static int sfdec_set_playback_speed(sfdec_priv_t *sfdec, int den, int num)
     DBG LOG("Setting playbackspeed to %d / %d", num, den);
     sfdec->playback_speed_den = den;
     sfdec->playback_speed_num = num;
+    return 0;
+}
+
+static int sfdec_pause(sfdec_priv_t *sfdec)
+{
+    if (!sfdec->is_paused) {
+        sfdec->pause_start_monotonic = get_monotonic_ns();
+        sfdec->is_paused = true;
+    }
+    return 0;
+}
+
+static int sfdec_resume(sfdec_priv_t *sfdec)
+{
+    if (sfdec->is_paused) {
+        int64_t now = get_monotonic_ns();
+        int64_t paused = now - sfdec->pause_start_monotonic;
+        sfdec->start_monotonic += paused;
+        sfdec->last_reset_monotonic += paused;
+        sfdec->last_monotonic += paused;
+        sfdec->is_paused = false;
+        sfdec->pause_start_monotonic = 0;
+    }
+    return 0;
+}
+
+static int sfdec_seek_reset(sfdec_priv_t *sfdec)
+{
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->n_late = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
     return 0;
 }
 
@@ -672,4 +736,7 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_buf_release,
     sfdec_reset_ts,
     sfdec_set_playback_speed,
+    sfdec_pause,
+    sfdec_resume,
+    sfdec_seek_reset,
 };

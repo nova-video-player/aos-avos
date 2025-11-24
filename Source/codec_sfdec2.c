@@ -361,6 +361,7 @@ static void *videosink_thread(void *ctx)
 		int venc_time = _get_time(p);
 		int blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
 
+		// Use MediaCodec's projection (nanosecond snapping) by not providing an absolute timestamp here.
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
@@ -412,7 +413,9 @@ DBGSI serprintf(" ok\n");
 		if (do_render) {
 DBGCV3 CLOG("render ->");
 			int start = time_update_time();
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, !android_sync, 0);
+			// For android_sync we rely on MediaCodec projection; only non-android_sync uses ASAP.
+			int asap = !android_sync;
+			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, asap, render_ts_ns);
 			int took = time_update_time() - start;
 			p->dropped = 0;
 DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );

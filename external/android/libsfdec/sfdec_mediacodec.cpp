@@ -565,24 +565,24 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         }
         asap = 1;
     } else if (!asap && dl_mc.MediaCodec_releaseOutputBufferAtTime) {
-        int64_t timestamp_us = sfbuf->timestamp_us;
-        DBG LOG("Received og timestamp %lld", timestamp_us);
+        int64_t timestamp_ns = sfbuf->timestamp_us * 1000LL;
+        DBG LOG("Received og timestamp %lld us", sfbuf->timestamp_us);
         if (sfdec->video_frame_rate_den) {
             int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
             int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
-            int64_t tus = timestamp_us;
             DBG LOG("Got rendering frame rate %d / %d", rendering_frame_rate_num, rendering_frame_rate_den);
             double frame_length = rendering_frame_rate_num / ((double)rendering_frame_rate_den);
-            int64_t half_frame = (1 / 2.0) * 1000.0 * 1000.0 / frame_length;
-            tus += half_frame;
+            int64_t half_frame = (int64_t)( (1.0 / 2.0) * 1000000000.0 / frame_length );
+            int64_t tns = timestamp_ns + half_frame;
 
-            int n = (int)((double)timestamp_us * frame_length / 1000000.0 + 0.5);
-            int64_t tus_new = n * 1000.0 * 1000.0 / frame_length;
-            timestamp_us = tus_new;
+            int n = (int)((double)timestamp_ns * frame_length / 1000000000.0 + 0.5);
+            int64_t tns_new = (int64_t)( n * 1000000000.0 / frame_length );
+            timestamp_ns = tns_new;
+            (void)tns; // keep static analyzers happy if half_frame unused
         }
 
         int64_t now_ts = get_monotonic_ns();
-        int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+        int64_t ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
         int64_t delta = ts - now_ts;
         if (!sfdec->start_off ||
             (now_ts - sfdec->last_monotonic) > 500 * 1000LL * 1000LL ||

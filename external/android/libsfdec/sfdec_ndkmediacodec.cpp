@@ -346,24 +346,21 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         } else if (asap) {
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
         } else {
-            int64_t timestamp_us = sfbuf->timestamp_us;
-            DBG LOG("Received og timestamp %lld", timestamp_us);
+            int64_t timestamp_ns = sfbuf->timestamp_us * 1000LL;
+            DBG LOG("Received og timestamp %lld us", sfbuf->timestamp_us);
             if (sfdec->video_frame_rate_den) {
                 int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
                 int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
-                int64_t tus = timestamp_us;
                 DBG LOG("Got rendering frame rate %d / %d", rendering_frame_rate_num, rendering_frame_rate_den);
                 // Add half a frame, so flooring almost exact match succeeds
                 double frame_length = rendering_frame_rate_num / ( (double)(rendering_frame_rate_den));
-                int64_t half_frame = (1/2.0) * 1000.0 * 1000.0 / frame_length;
-                tus += half_frame;
+                int64_t half_frame = (int64_t)( (1.0/2.0) * 1000000000.0 / frame_length );
+                int64_t tns = timestamp_ns + half_frame;
 
-                int n = (int)((double)timestamp_us * frame_length / 1000000.0 + 0.5);
-                //LOG("n-th frame %d", n);
-                int64_t tus_new = n * 1000.0 * 1000.0  / frame_length;
-                //LOG("After patching %lld", tus_new);
-                //LOG("Delta %lld", tus - tus_new - half_frame);
-                timestamp_us = tus_new;
+                int n = (int)((double)timestamp_ns * frame_length / 1000000000.0 + 0.5);
+                int64_t tns_new = (int64_t)( n * 1000000000.0  / frame_length );
+                timestamp_ns = tns_new;
+                (void)tns; // keep static analyzers happy if half_frame unused
             }
 
 
@@ -376,7 +373,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             }
 
             // Compute before adjustment the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
-            int64_t ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+            int64_t ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
             int64_t delta = ts - now_ts;
             if (
                     !sfdec->start_off || //Got reset
@@ -385,7 +382,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                     ) {
                 // We store the first frame (its realtime timestamp -- now & codec timestamp)
                 sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 300ms
-                sfdec->start_off = timestamp_us * 1000LL;
+                sfdec->start_off = timestamp_ns;
                 // display first frame there asap
                 asap = 1;
             }
@@ -402,7 +399,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 DBG LOG("Late (%d), delaying 100ms", sfdec->n_late);
             }
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
-            ts = timestamp_us * 1000LL - sfdec->start_off + sfdec->start_monotonic;
+            ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
 
             if (asap)
                 DBG LOG("Scheduling frame in a jiffy");
@@ -410,7 +407,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 DBG LOG("Scheduling frame in %lld", ts - now_ts);
 
             sfdec->last_monotonic = now_ts;
-            sfdec->last_off = timestamp_us * 1000LL;
+            sfdec->last_off = timestamp_ns;
 
             if (asap)
                 err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);

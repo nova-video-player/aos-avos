@@ -68,6 +68,7 @@ struct sfdec_mediacodec
     int64_t last_off;
     int64_t last_monotonic;
 
+    bool zero_anchor_on_start;
     int video_frame_rate_den;
     int video_frame_rate_num;
     int playback_speed_den;
@@ -152,6 +153,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->mNativeWindow = (ANativeWindow *)surface_handle;
     sfdec->start_off = 0;
     sfdec->start_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
     sfdec->video_frame_rate_den = video_frame_rate_den;
     sfdec->video_frame_rate_num = video_frame_rate_num;
     sfdec->playback_speed_den = 1;
@@ -229,6 +231,15 @@ static int sfdec_stop(sfdec_priv_t *sfdec)
         media_status_t err = AMediaCodec_stop(sfdec->mCodec);
         CHECK_STATUS(err);
         sfdec->started = false;
+        sfdec->start_off = 0;
+        sfdec->start_monotonic = 0;
+        sfdec->last_off = 0;
+        sfdec->last_monotonic = 0;
+        sfdec->n_late = 0;
+        sfdec->last_reset_monotonic = get_monotonic_ns();
+        sfdec->is_paused = false;
+        sfdec->pause_start_monotonic = 0;
+        sfdec->zero_anchor_on_start = false;
     }
     return 0;
 }
@@ -279,6 +290,15 @@ static int sfdec_flush(sfdec_priv_t *sfdec)
     media_status_t err = AMediaCodec_flush(sfdec->mCodec);
     CHECK_STATUS(err);
     err_count = 0;
+    sfdec->start_off = 0;
+    sfdec->start_monotonic = 0;
+    sfdec->last_off = 0;
+    sfdec->last_monotonic = 0;
+    sfdec->n_late = 0;
+    sfdec->last_reset_monotonic = get_monotonic_ns();
+    sfdec->is_paused = false;
+    sfdec->pause_start_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
 
     return 0;
 }
@@ -388,14 +408,16 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             // Compute before adjustment the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             int64_t ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
             int64_t delta = ts - now_ts;
-            if (
-                    !sfdec->start_off || //Got reset
-                    (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL || //If we had no frame since the last 500ms, user did pause/resume
-                    (delta < -500*1000LL*1000LL || delta > 500*1000LL*1000LL) // If distance between two frames is >500ms, that's a seek
-                    ) {
-                // We store the first frame (its realtime timestamp -- now & codec timestamp)
-                sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000L; // Start in 300ms
+            bool fresh_start = !sfdec->start_off; //Got reset
+            bool long_gap = (now_ts - sfdec->last_monotonic) > 500*1000LL*1000LL; //If we had no frame since the last 500ms, user did pause/resume
+            bool big_delta = (delta < -500*1000LL*1000LL || delta > 500*1000LL*1000LL); // If distance between two frames is >500ms, that's a seek
+            bool recent_reset = (sfdec->last_reset_monotonic > 0 && (now_ts - sfdec->last_reset_monotonic) < 200 * 1000LL * 1000LL);
+            if (fresh_start || long_gap || big_delta || recent_reset) {
+                // On first start keep a small buffer; on resume/seek anchor immediately to avoid audio drift
+                int64_t anchor_delay = (fresh_start && !sfdec->zero_anchor_on_start) ? 100 * 1000LL * 1000LL : 0;
+                sfdec->start_monotonic = now_ts + anchor_delay;
                 sfdec->start_off = timestamp_ns;
+                sfdec->zero_anchor_on_start = false; // consumed on next anchor
                 // display first frame there asap
                 asap = 1;
             }
@@ -468,6 +490,7 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
     sfdec->last_reset_monotonic = get_monotonic_ns();
     sfdec->is_paused = false;
     sfdec->pause_start_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
     return 0;
 }
 
@@ -491,10 +514,14 @@ static int sfdec_resume(sfdec_priv_t *sfdec)
 {
     if (sfdec->is_paused) {
         int64_t now = get_monotonic_ns();
-        int64_t paused = now - sfdec->pause_start_monotonic;
-        sfdec->start_monotonic += paused;
-        sfdec->last_reset_monotonic += paused;
-        sfdec->last_monotonic += paused;
+        // Reset anchors and request immediate (0ms) re-anchor on next frame after resume
+        sfdec->start_off = 0;
+        sfdec->start_monotonic = 0;
+        sfdec->last_off = 0;
+        sfdec->last_monotonic = 0;
+        sfdec->n_late = 0;
+        sfdec->last_reset_monotonic = now;
+        sfdec->zero_anchor_on_start = true;
         sfdec->is_paused = false;
         sfdec->pause_start_monotonic = 0;
     }
@@ -511,6 +538,7 @@ static int sfdec_seek_reset(sfdec_priv_t *sfdec)
     sfdec->last_reset_monotonic = get_monotonic_ns();
     sfdec->is_paused = false;
     sfdec->pause_start_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
     return 0;
 }
 

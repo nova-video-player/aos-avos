@@ -89,13 +89,12 @@ struct sfdec_mediacodec
     int64_t last_off;
     int64_t last_monotonic;
     int64_t last_reset_monotonic;
+    bool zero_anchor_on_start;
     int video_frame_rate_den;
     int video_frame_rate_num;
     int playback_speed_den;
     int playback_speed_num;
     int n_late;
-    bool is_paused;
-    int64_t pause_start_monotonic;
     bool is_paused;
     int64_t pause_start_monotonic;
 };
@@ -311,6 +310,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->last_off = 0;
     sfdec->last_monotonic = 0;
     sfdec->last_reset_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
     sfdec->video_frame_rate_den = _video_frame_rate_den;
     sfdec->video_frame_rate_num = _video_frame_rate_num;
     sfdec->playback_speed_den = 1;
@@ -430,6 +430,7 @@ static int sfdec_stop(sfdec_priv_t *sfdec)
         sfdec->last_monotonic = 0;
         sfdec->n_late = 0;
         sfdec->last_reset_monotonic = get_monotonic_ns();
+        sfdec->zero_anchor_on_start = false;
     }
     return 0;
 }
@@ -478,6 +479,7 @@ static int sfdec_flush(sfdec_priv_t *sfdec)
     sfdec->last_reset_monotonic = get_monotonic_ns();
     sfdec->is_paused = false;
     sfdec->pause_start_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
     return 0;
 }
 
@@ -590,12 +592,15 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         int64_t now_ts = get_monotonic_ns();
         int64_t ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
         int64_t delta = ts - now_ts;
-        if (!sfdec->start_off ||
-            (now_ts - sfdec->last_monotonic) > 500 * 1000LL * 1000LL ||
-            (delta < -500 * 1000LL * 1000LL || delta > 500 * 1000LL * 1000LL) ||
-            (sfdec->last_reset_monotonic > 0 && (now_ts - sfdec->last_reset_monotonic) < 200 * 1000LL * 1000LL)) {
-            sfdec->start_monotonic = now_ts + 100 * 1000LL * 1000LL;
+        bool fresh_start = !sfdec->start_off;
+        bool long_gap = (now_ts - sfdec->last_monotonic) > 500 * 1000LL * 1000LL;
+        bool big_delta = (delta < -500 * 1000LL * 1000LL || delta > 500 * 1000LL * 1000LL);
+        bool recent_reset = (sfdec->last_reset_monotonic > 0 && (now_ts - sfdec->last_reset_monotonic) < 200 * 1000LL * 1000LL);
+        if (fresh_start || long_gap || big_delta || recent_reset) {
+            int64_t anchor_delay = (fresh_start && !sfdec->zero_anchor_on_start) ? 100 * 1000LL * 1000LL : 0; // buffer only on first start; resume/seek anchors immediately
+            sfdec->start_monotonic = now_ts + anchor_delay;
             sfdec->start_off = timestamp_ns;
+            sfdec->zero_anchor_on_start = false; // consumed if set for resume
             asap = 1;
         }
 
@@ -673,6 +678,7 @@ static int sfdec_reset_ts(sfdec_priv_t *sfdec)
     sfdec->last_reset_monotonic = get_monotonic_ns();
     sfdec->is_paused = false;
     sfdec->pause_start_monotonic = 0;
+    sfdec->zero_anchor_on_start = false;
     return 0;
 }
 
@@ -699,10 +705,14 @@ static int sfdec_resume(sfdec_priv_t *sfdec)
 {
     if (sfdec->is_paused) {
         int64_t now = get_monotonic_ns();
-        int64_t paused = now - sfdec->pause_start_monotonic;
-        sfdec->start_monotonic += paused;
-        sfdec->last_reset_monotonic += paused;
-        sfdec->last_monotonic += paused;
+        // Reset anchors and request immediate (0ms) re-anchor on next frame after resume
+        sfdec->start_off = 0;
+        sfdec->start_monotonic = 0;
+        sfdec->last_off = 0;
+        sfdec->last_monotonic = 0;
+        sfdec->n_late = 0;
+        sfdec->last_reset_monotonic = now;
+        sfdec->zero_anchor_on_start = true;
         sfdec->is_paused = false;
         sfdec->pause_start_monotonic = 0;
     }

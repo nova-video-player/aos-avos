@@ -116,6 +116,7 @@ typedef struct priv {
 	int prev_paused;
 	
 	STREAM_DEC_VIDEO *dec;
+	int64_t render_offset_ns;
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -355,12 +356,14 @@ static void *videosink_thread(void *ctx)
 DBGSI serprintf("MediaCodec pause\n");
 				}
 				p->prev_paused = 1;
+				p->render_offset_ns = -1;
 			} else if( !s->paused && p->prev_paused ) {
 				if( android_sync ) {
 					sfdec_resume( p->sfdec );
 DBGSI serprintf("MediaCodec resume\n");
 				}
 				p->prev_paused = 0;
+				p->render_offset_ns = -1;
 			}
 		}
 
@@ -383,6 +386,8 @@ DBGSI serprintf("MediaCodec resume\n");
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
+
+
 
 DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
 		if( s && s->paused ) {
@@ -420,6 +425,28 @@ DBGSI serprintf(" DROP\n");
 //CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d", f->index, (venc_time - f->blit_time), f->blit_time, venc_time, f->time);
 		} else {
 DBGSI serprintf(" ok\n");
+		}
+
+		if( android_sync ) {
+			// Calculate raw blit duration (unclamped)
+			int raw_blit_duration = f->blit_time - venc_time;
+			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+
+			// If we are within a reasonable sync window (e.g. -1s to +5s), use the player clock
+			// We allow a large positive window because buffering (frames ahead of time) is good and shouldn't be squashed.
+			// We allow a negative window to let the player catch up (fast forward) if slightly behind.
+			if (raw_blit_duration > -1000 && raw_blit_duration < 5000) {
+				p->render_offset_ns = -1;
+				render_ts_ns = now_ns + (int64_t)raw_blit_duration * 1000000LL;
+			} else {
+				// Large desync detected (e.g. clock reset). Establish a local anchor.
+				if (p->render_offset_ns == -1) {
+					// Anchor the current frame to play in 50ms
+					p->render_offset_ns = now_ns - (int64_t)f->time * 1000000LL + 50000000LL;
+					DBGSI serprintf("android_sync: re-anchoring. raw_dur=%d, offset=%lld\n", raw_blit_duration, p->render_offset_ns);
+				}
+				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
+			}
 		}
 
 		if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
@@ -748,6 +775,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->locked.rotation = video->rotation;
 	p->locked.run = 1;
 	p->prev_paused = 0;
+	p->render_offset_ns = -1;
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;
@@ -907,6 +935,7 @@ static int videodec_flush(STREAM_DEC_VIDEO *dec)
 DBGCV	CLOG();
 
 	pthread_mutex_lock(&p->locked.mtx);
+	p->render_offset_ns = -1;
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
 

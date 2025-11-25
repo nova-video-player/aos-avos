@@ -33,6 +33,12 @@
 #include "android_codec.h"
 
 #include <time.h>
+#include <limits.h>
+#ifdef CONFIG_ANDROID
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #ifdef CONFIG_STREAM
 
 #define DBGS	if(0||Debug[DBG_STREAM])
@@ -48,6 +54,7 @@
 #define SFDEC_MAX_FRAMES 16
 
 #define NSEC_PER_SEC 1000000000L
+#define NSEC_PER_MSEC 1000000L
 
 #define CLOG(fmt, ...) serprintf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
 
@@ -111,10 +118,19 @@ typedef struct priv {
 
 	int venc_put_time;
 	int venc_ref_time;
-	
+
 	int dropped;
+	int video_frame_rate_num;
+	int video_frame_rate_den;
+	int playback_speed_num;
+	int playback_speed_den;
+	INT64 sched_start_off_ns;
+	INT64 sched_start_mono_ns;
+	INT64 sched_last_off_ns;
+	INT64 sched_last_mono_ns;
+	int sched_late;
 	int prev_paused;
-	
+
 	STREAM_DEC_VIDEO *dec;
 	int64_t render_offset_ns;
 } priv_t;
@@ -123,6 +139,78 @@ static int _get_time( priv_t *p )
 {
 	int diff = atime() - p->venc_ref_time;
 	return p->venc_put_time + diff;
+}
+
+static inline INT64 _get_monotonic_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (INT64)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+}
+
+static INT64 _snap_timestamp_ns(priv_t *p, int frame_time)
+{
+	if( frame_time < 0 )
+		return 0;
+	INT64 timestamp_us = (INT64)frame_time * 1000LL;
+	if( p->video_frame_rate_den && p->playback_speed_den ) {
+		INT64 rendering_num = (INT64)p->video_frame_rate_num * p->playback_speed_num;
+		INT64 rendering_den = (INT64)p->video_frame_rate_den * p->playback_speed_den;
+		if( rendering_num && rendering_den ) {
+			double frame_length = (double)rendering_num / (double)rendering_den;
+			double tus = (double)timestamp_us;
+			double half_frame = 0.5 * 1000.0 * 1000.0 / frame_length;
+			tus += half_frame;
+			double frame_index = (double)timestamp_us * frame_length / 1000000.0;
+			int snapped_index = (int)(frame_index + 0.5);
+			double snapped = (double)snapped_index * 1000.0 * 1000.0 / frame_length;
+			timestamp_us = (INT64)snapped;
+		}
+	}
+	return timestamp_us * 1000LL;
+}
+
+// Reproduce MediaCodec's releaseOutputBufferAtTime() pacing logic when we can't
+// use android_sync, so reordered frames still map to the correct WC deadline.
+static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f)
+{
+	INT64 timestamp_ns = _snap_timestamp_ns(p, f ? f->time : -1);
+	INT64 now_ns = _get_monotonic_ns();
+	INT64 start_off = p->sched_start_off_ns;
+	INT64 start_mono = p->sched_start_mono_ns;
+	INT64 target_ns = timestamp_ns - start_off + start_mono;
+	INT64 delta = target_ns - now_ns;
+	int asap = 0;
+
+	if( !start_off ||
+	    (now_ns - p->sched_last_mono_ns) > 500 * NSEC_PER_MSEC ||
+	    (delta < -500 * NSEC_PER_MSEC || delta > 500 * NSEC_PER_MSEC) ) {
+		p->sched_start_mono_ns = now_ns + 100 * NSEC_PER_MSEC;
+		p->sched_start_off_ns = timestamp_ns;
+		asap = 1;
+	}
+
+	if( !asap && delta < 0 ) {
+		p->sched_late++;
+		p->sched_start_mono_ns += 100 * NSEC_PER_MSEC;
+	} else {
+		p->sched_late = 0;
+	}
+
+	target_ns = timestamp_ns - p->sched_start_off_ns + p->sched_start_mono_ns;
+	p->sched_last_mono_ns = now_ns;
+	p->sched_last_off_ns = timestamp_ns;
+
+	if( asap )
+		return 0;
+
+	delta = target_ns - now_ns;
+	if( delta > (INT64)INT_MAX * NSEC_PER_MSEC )
+		delta = (INT64)INT_MAX * NSEC_PER_MSEC;
+	if( delta < (INT64)INT_MIN * NSEC_PER_MSEC )
+		delta = (INT64)INT_MIN * NSEC_PER_MSEC;
+
+	return (int)( delta / 1000000LL );
 }
 
 static inline void timespec_add_ns(struct timespec *a, INT64 ns)
@@ -257,10 +345,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	int dt = time    - p->venc_put_time;
 	int dr = atime() - p->venc_ref_time;
-	if( dr < sfdec_threshold ) {
+	if( dr < sfdec_threshold && p->venc_put_time && time > p->venc_put_time ) {
 		return 0;
 	}
-	
+
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 
@@ -378,16 +466,24 @@ DBGSI serprintf("MediaCodec resume\n");
 			goto endloop;
 		}
 
-		int do_render = 1;
-		int venc_time = _get_time(p);
-		int blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
+ 		int do_render = 1;
+ 		int venc_time = _get_time(p);
+ 		int blit_duration;
 
 		// Use MediaCodec's projection (nanosecond snapping) by not providing an absolute timestamp here.
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
 
-
+		if( android_sync ) {
+			// For android_sync, use the traditional blit_time calculation
+			blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
+		} else if( sfdec_force_blit ) {
+			blit_duration = 0;
+		} else {
+			// For non-android_sync, use the pacing logic that mimics MediaCodec's behavior
+			blit_duration = _compute_blit_wait_ms( p, f );
+		}
 
 DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
 		if( s && s->paused ) {
@@ -616,7 +712,16 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 
 	dec->ctx = ctx;
 	p->dec = dec;
-	
+	p->video_frame_rate_num = video->frame_rate_num;
+	p->video_frame_rate_den = video->frame_rate_den;
+	p->playback_speed_num = 100;
+	p->playback_speed_den = 100;
+	p->sched_start_off_ns = 0;
+	p->sched_start_mono_ns = 0;
+	p->sched_last_off_ns = 0;
+	p->sched_last_mono_ns = 0;
+	p->sched_late = 0;
+
 	p->reorder_pts = video->reorder_pts;
 
 	if (hw_type == HW_TYPE_OMAP4 || hw_type == HW_TYPE_ARCHOS_OMAP4) {
@@ -993,7 +1098,11 @@ static int videodec_destroy(STREAM_DEC_VIDEO *dec)
 
 static int videodec_set_playback_speed(struct STREAM_DEC_VIDEO *dec, int den, int num) {
 	priv_t *p = (priv_t*)dec->priv;
-    return sfdec_set_playback_speed(p->sfdec, den, num);
+	    if( den )
+	    	p->playback_speed_den = den;
+	    if( num )
+	    	p->playback_speed_num = num;
+	    return sfdec_set_playback_speed(p->sfdec, den, num);
 }
 
 

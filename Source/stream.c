@@ -528,6 +528,8 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 //	stream_set_av_speed
 //
 // ************************************************************
+extern void _stream_resync( STREAM *s );
+
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
@@ -548,63 +550,58 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
 	}
 
-	if( is_audio_speed_changed( av_speed ) ) {
-		DBG serprintf( "stream:stream_set_av_speed av_speed=%f, audio_interface_get_audio_speed=%f\n", av_speed, audio_interface_get_audio_speed() );
+	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
+	if( current_time_ts < 0 ) {
+		current_time_ts = 0;
+	}
+	int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+	if( stream_current_time_rst < 0 ) {
+		stream_current_time_rst = 0;
+	}
 
-		int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
-		if( current_time_ts < 0 ) {
-			current_time_ts = 0;
+	DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d\n", current_time_ts, stream_current_time_rst );
+
+	int using_atempo = (s->audio_filter_atempo != NULL);
+	audio_interface_set_using_atempo( using_atempo );
+
+	float applied_speed = av_speed;
+	if( using_atempo ) {
+		// With the software atempo filter we keep AudioTrack at 1.0x and change the
+		// parser timeline instead, so every playback restart must rebuild the
+		// RST->TS mapping even if the requested speed matches the previously cached one.
+		float clamped_speed = av_speed;
+		if( clamped_speed < 0.25f ) {
+			clamped_speed = 0.25f;
+		} else if( clamped_speed > 2.0f ) {
+			clamped_speed = 2.0f;
 		}
-		int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
-		if( stream_current_time_rst < 0 ) {
-			stream_current_time_rst = 0;
-		}
-
-		DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d\n", current_time_ts, stream_current_time_rst );
-
-		// Check if atempo filter is available and active
-		int using_atempo = (s->audio_filter_atempo != NULL);
-
-		// Notify audio interface layer whether we're using atempo
-		audio_interface_set_using_atempo( using_atempo );
-
-        if( using_atempo ) {
-            // With atempo filter, enable timeline mapping
-            // - Parser scales all timestamps RST → TS
-            // - atempo physically changes audio duration to match playback speed
-            // - atempo output duration = TS domain (physical samples played at 1.0x)
-            // - AudioTrack plays at 1.0x rate
-            // - Timeline mapping maintains Δts = Δwc equivalence
-            float clamped_speed = av_speed;
-            if( clamped_speed < 0.25f ) {
-                clamped_speed = 0.25f;
-            } else if( clamped_speed > 2.0f ) {
-                clamped_speed = 2.0f;
-            }
-            audio_interface_set_audio_speed( clamped_speed );
-
-            // Apply timeline mapping with atempo speed (same as original architecture)
-            timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, clamped_speed );
-
-            DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
-                           stream_current_time_rst, current_time_ts, clamped_speed );
-        } else {
-			// Original method: AudioTrack playback rate + timeline mapping
+		audio_interface_set_audio_speed( clamped_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, clamped_speed );
+		DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
+				   stream_current_time_rst, current_time_ts, clamped_speed );
+		applied_speed = clamped_speed;
+	} else {
+		float previous_speed = audio_interface_get_audio_speed();
+		if( is_audio_speed_changed( av_speed ) ) {
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
-			float applied_speed = audio_interface_get_audio_speed();
-
-			timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
-
+			applied_speed = audio_interface_get_audio_speed();
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
-						   stream_current_time_rst, current_time_ts, applied_speed, rc );
-
+					   stream_current_time_rst, current_time_ts, applied_speed, rc );
 			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
 				serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
-						   av_speed, applied_speed, rc );
+					   av_speed, applied_speed, rc );
 			}
+		} else {
+			applied_speed = previous_speed;
+			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
-	} else {
-		DBG serprintf( "stream:stream_set_av_speed no audio speed change, ensured video speed %f\n", av_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
+	}
+
+	if( s->video->valid ) {
+		// Restart the sink/sync reference so `_real_time()` and the Android sink stay
+		// aligned with the freshly applied timeline mapping.
+		_stream_resync( s );
 	}
 
 	return 0;

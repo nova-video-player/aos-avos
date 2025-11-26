@@ -86,6 +86,8 @@ ifeq ($(AUDIO),ON)
 		DEFINES += -DCONFIG_AUDIO_AC3
 		CSRC_AUDIO += stream_filter_audio_ac3.c
 	endif
+	# atempo filter for audio speed control (always enabled with FFmpeg audio)
+	CSRC_AUDIO += stream_filter_audio_atempo.c
 endif
 
 ifeq ($(VIDEO),ON)

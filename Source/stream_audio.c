@@ -910,6 +910,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Do not send raw AC3 frames when IEC encapsulation fails; wait for the muxer
 							// to output a proper burst on the next iteration to avoid corrupt audio.
 							audio_frame.size = 0;
+						}
 					}
 				}
 				// Update audio time based on ACTUAL filtered output (not decoded bytes)

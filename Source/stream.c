@@ -530,6 +530,16 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 extern void _stream_resync( STREAM *s );
 
+static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
+{
+	if( !s || !s->video_sink || !s->video_sink->put_time || audio_time_ts < 0 )
+		return;
+
+	s->video_sink->put_time( s->video_sink, audio_time_ts );
+	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d\n",
+		audio_time_ts, audio_time_ts );
+}
+
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
@@ -599,9 +609,13 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	if( s->video->valid ) {
-		// Restart the sink/sync reference so `_real_time()` and the Android sink stay
-		// aligned with the freshly applied timeline mapping.
-		_stream_resync( s );
+		if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
+			_stream_anchor_video_sink_to_audio_clock( s, current_time_ts );
+		} else {
+			// Restart the sink/sync reference so `_real_time()` and the Android sink stay
+			// aligned with the freshly applied timeline mapping.
+			_stream_resync( s );
+		}
 	}
 
 	return 0;

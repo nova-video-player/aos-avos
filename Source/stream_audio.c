@@ -597,10 +597,29 @@ serprintf(" ae! ");
 				// This provides consistent audio boost/night mode for all sources
 				int run_filter = (!passthrough_active || ac3_recoding);
 				frame_channels = audio_frame.channels ? audio_frame.channels : s->audio->channels;
+
 				// Apply atempo speed control filter FIRST (changes audio duration)
-				if( s->audio_filter_atempo && audio_frame.size > 0 ) {
+				// Smart bypass: Only use atempo when all conditions are met:
+				// 1. Audio speed feature is enabled
+				// 2. User selected atempo (not AudioTrack PlaybackParams)
+				// 3. NOT in passthrough mode 1 or 2 (compressed audio to receiver)
+				int should_use_atempo = 1;
+
+				if (!audio_interface_is_audio_speed_enabled()) {
+					should_use_atempo = 0;  // Audio speed feature disabled
+				}
+
+				if (!audio_interface_is_using_atempo()) {
+					should_use_atempo = 0;  // User chose AudioTrack-based speed
+				}
+
+				if (passthrough == 1 || passthrough == 2) {
+					should_use_atempo = 0;  // Passthrough mode active
+				}
+
+				if (should_use_atempo && s->audio_filter_atempo && audio_frame.size > 0) {
 					DBG serprintf("stream_audio: applying atempo filter\n");
-					s->audio_filter_atempo->filter( s->audio_filter_atempo, &audio_frame );
+					s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame);
 				}
 
 				if( run_filter ) {

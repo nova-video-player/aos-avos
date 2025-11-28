@@ -186,13 +186,8 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
     if (speed < SPEED_MIN) speed = SPEED_MIN;
     if (speed > SPEED_MAX) speed = SPEED_MAX;
 
-    // Speed 1.0 = bypass (no filter graph needed)
-    if (fabsf(speed - 1.0f) < 0.001f) {
-        ctx->current_speed = 1.0f;
-        ctx->filter_initialized = 0;
-        DBGA serprintf("atempo: bypass mode (speed=1.0)\n");
-        return 0;
-    }
+    // Note: We no longer bypass at 1.0x speed. The filter is always active when called.
+    // Bypass logic is handled in stream_audio.c based on feature enablement and passthrough mode.
 
 	// Create new filter graph
 	ctx->filter_graph = avfilter_graph_alloc();
@@ -397,9 +392,10 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		}
 	}
 
-	// Bypass if speed is 1.0
-	if (fabsf(speed - 1.0f) < 0.001f || !ctx->filter_initialized) {
-		return 0;
+	// Ensure filter is initialized (should always be true if called)
+	if (!ctx->filter_initialized) {
+		serprintf("atempo: filter not initialized, cannot process\n");
+		return -1;
 	}
 
 	int ret;

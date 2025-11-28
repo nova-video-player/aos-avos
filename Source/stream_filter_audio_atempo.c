@@ -134,6 +134,44 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 {
 	int ret;
 
+	// Flush existing graph before destruction
+	if (ctx->filter_graph && ctx->abuffer_ctx && ctx->abuffersink_ctx) {
+		serprintf("atempo: flushing graph. FIFO size before: %d\n", av_audio_fifo_size(ctx->fifo));
+		// Push EOF to source
+		int ret = av_buffersrc_add_frame(ctx->abuffer_ctx, NULL);
+		if (ret < 0) {
+			serprintf("atempo: warning: failed to flush source buffer: %s\n", av_err2str(ret));
+		}
+
+		// Drain remaining frames to FIFO
+		int flushed_samples = 0;
+		while (1) {
+			ret = av_buffersink_get_frame(ctx->abuffersink_ctx, ctx->out_frame);
+			if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+				break;
+			}
+			if (ret < 0) {
+				serprintf("atempo: warning: error draining frame: %s\n", av_err2str(ret));
+				break;
+			}
+
+			// Write to FIFO
+			if (av_audio_fifo_space(ctx->fifo) < ctx->out_frame->nb_samples) {
+				if (av_audio_fifo_realloc(ctx->fifo,
+					av_audio_fifo_size(ctx->fifo) + ctx->out_frame->nb_samples) < 0) {
+					serprintf("atempo: failed to realloc FIFO during flush\n");
+					av_frame_unref(ctx->out_frame);
+					break;
+				}
+			}
+
+			av_audio_fifo_write(ctx->fifo, (void **)ctx->out_frame->data, ctx->out_frame->nb_samples);
+			flushed_samples += ctx->out_frame->nb_samples;
+			av_frame_unref(ctx->out_frame);
+		}
+		serprintf("atempo: flushed %d samples. FIFO size after: %d\n", flushed_samples, av_audio_fifo_size(ctx->fifo));
+	}
+
 	// Free existing graph
     if (ctx->filter_graph) {
         avfilter_graph_free(&ctx->filter_graph);
@@ -142,10 +180,7 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
     }
     ctx->atempo_ctx = NULL;
 
-	// Reset FIFO
-	if (ctx->fifo) {
-		av_audio_fifo_reset(ctx->fifo);
-	}
+	// Do NOT reset FIFO here - we want to preserve buffered audio across speed changes!
 
     // Clamp speed to supported range
     if (speed < SPEED_MIN) speed = SPEED_MIN;

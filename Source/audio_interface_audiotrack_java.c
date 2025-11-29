@@ -36,8 +36,8 @@ extern int libavos_get_ac3_recoding_enabled(void);
 extern int spdif_is_passthrough_on(void);
 #include "jni.h"
 
-#define DBG  if(0)
-#define DBG2 if(0)
+#define DBG  if(1)
+#define DBG2 if(1)
 #define ERR  if(1)
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
@@ -404,19 +404,31 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	uint32_t system_latency = call_int_method_current_vm( env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType );
 	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
 
-	DBG LOG( "audiotrack_update_latency: speed=%.2f, track_latency=%d, system_latency=%d, app_latency=%d, total_latency=%d, use track latency=%d",
-			 speed, track_latency, system_latency, app_latency, system_latency + app_latency , track_latency > 0);
+	// AudioTrack.getLatency() returns 0 on error or if unsupported/not ready
+	int use_track_latency = (track_latency > 0);
+	uint32_t calculated_latency = 0;
 
-	if( !at->passthrough && track_latency > 0 ) {
-		// AudioTrack.getLatency() by default (API 29+) when not in passthrough mode
-		// However, if track_latency is suspiciously low compared to our calculated buffer latency (e.g. with AV receivers),
-		// prefer the larger value to avoid video running ahead of audio.
-		uint32_t calculated_latency = system_latency + app_latency;
-		at->latency = (track_latency > calculated_latency) ? track_latency : calculated_latency;
+	if (use_track_latency) {
+		// Safety floor: AudioTrack.getLatency() should not be less than the known system+app latency.
+		// If it is, it's likely under-reporting (e.g. ignoring internal buffers or HDMI delays).
+		if (track_latency < (system_latency + app_latency)) {
+			calculated_latency = system_latency + app_latency;
+		} else {
+			calculated_latency = track_latency;
+		}
+		
+		// Heuristic: High latency devices (>200ms) often under-report significantly (e.g. Google Streamer 4K).
+		// We observed ~130ms persistent drift on Streamer (reported 468ms).
+		// Adding a bias helps align A/V without forcing users to set manual delay.
+		// We limit this to high-latency paths to avoid breaking low-latency (phone/shield) sync.
+		if (calculated_latency > 200) {
+			calculated_latency += 120;
+		}
 	} else {
-		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation (used for passthrough or when track_latency unavailable)
-		at->latency = system_latency + app_latency;
+		calculated_latency = system_latency + app_latency;
 	}
+
+	at->latency = calculated_latency;
 }
 
 static uint32_t audiotrack_default_channel_mask(int channels)

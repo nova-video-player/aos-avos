@@ -18,8 +18,11 @@
 #include "types.h"
 #include "debug.h"
 #include "util.h"
+#include "codec_utils.h"
 #include "stream.h"
+#include "stream_sync.h"
 #include "stream_alloc.h"
+#include "audio_interface.h"
 #include "astdlib.h"
 #include "athread.h"
 #include "rc_clocks.h"
@@ -133,6 +136,7 @@ typedef struct priv {
 
 	STREAM_DEC_VIDEO *dec;
 	int64_t render_offset_ns;
+	float last_av_speed;
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -258,6 +262,7 @@ static int videosink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void
 {
 	sink->ctx = ctx;
 	priv_t *p = (priv_t *) sink->priv;
+	p->last_av_speed = 1.0f;
 
 	pthread_mutex_lock(&p->locked.mtx);
 	int i;
@@ -342,6 +347,7 @@ static VIDEO_FRAME *videosink_get_frame(STREAM_SINK_VIDEO *sink, int index)
 static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
+	STREAM *s = (STREAM *)p->dec->ctx;
 
 	int dt = time    - p->venc_put_time;
 	int dr = atime() - p->venc_ref_time;
@@ -352,33 +358,55 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int diff = time - expected;
 	if (diff < 0) diff = -diff;
 
-	if( dr < sfdec_threshold && p->venc_put_time && time > p->venc_put_time && diff < 40 ) {
+	// Detect speed change (explicit discontinuity)
+	int speed_changed = 0;
+	float current_speed = audio_interface_get_audio_speed();
+	if (fabsf(current_speed - p->last_av_speed) > 0.001f) {
+		speed_changed = 1;
+		p->last_av_speed = current_speed;
+		DBGSI serprintf("videosink_put_time: speed changed to %.2f\n", current_speed);
+	}
+
+	if( !speed_changed && dr < sfdec_threshold && p->venc_put_time && time > p->venc_put_time && diff < 40 ) {
 		return 0;
 	}
 
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 
-	if ( !android_sync ) {
-		pthread_mutex_lock(&p->locked.mtx);
-		// Reset scheduling anchors for _compute_blit_wait_ms pacing logic.
-		// When speed changes, the timeline mapping is updated via stream_set_av_speed(),
-		// which calls this function to re-anchor the video sink. Without resetting these
-		// anchors, _compute_blit_wait_ms() would use stale offsets, causing A/V desync.
-		p->sched_start_off_ns  = (INT64)time * 1000000LL;
-		p->sched_start_mono_ns = _get_monotonic_ns();
-		p->sched_last_off_ns   = p->sched_start_off_ns;
-		p->sched_last_mono_ns  = p->sched_start_mono_ns;
-		p->sched_late          = 0;
-		pthread_mutex_unlock(&p->locked.mtx);
+	// Reset scheduling anchors if we are too far off (e.g. seek) or if speed changed explicitly.
+	// For android_sync=0, we use an adaptive threshold based on total AV latency.
+	// On high-latency devices (e.g. 468ms), latency/4 gives ~117ms tolerance.
+	// This filters out the observed ~100ms jitter/noise but catches larger drifts (like 130ms).
+	// On low-latency devices, it clamps to 40ms for tight sync.
+	// For android_sync=1, we use 500ms because videosink_thread has its own finer correction loop.
+	int threshold = 200;
+	if (android_sync) {
+		threshold = 500;
+	} else if (s) {
+		int latency = stream_sync_av_delay(s);
+		threshold = latency / 4;
+		if (threshold < 40) threshold = 40;
+	}
 
-		DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, off_ns=%lld, mono_ns=%lld\n",
-				time, p->sched_start_off_ns, p->sched_start_mono_ns);
+	if (speed_changed || abs(diff) > threshold) {
+		pthread_mutex_lock(&p->locked.mtx);
+		if ( !android_sync ) {
+			p->sched_start_off_ns  = (INT64)time * 1000000LL;
+			p->sched_start_mono_ns = _get_monotonic_ns();
+			p->sched_last_off_ns   = p->sched_start_off_ns;
+			p->sched_last_mono_ns  = p->sched_start_mono_ns;
+			p->sched_late          = 0;
+			DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d)\n", time, diff, speed_changed);
+		} else {
+			p->render_offset_ns = -1;
+			DBGSI serprintf("videosink_put_time: reset render_offset_ns (android_sync) diff=%d (speed_changed=%d)\n", diff, speed_changed);
+		}
+		pthread_mutex_unlock(&p->locked.mtx);
 	} else {
 		pthread_mutex_lock(&p->locked.mtx);
-		p->render_offset_ns = -1;
+		// No reset needed
 		pthread_mutex_unlock(&p->locked.mtx);
-		DBGSI serprintf("videosink_put_time: reset render_offset_ns (android_sync)\n");
 	}
 
 DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );

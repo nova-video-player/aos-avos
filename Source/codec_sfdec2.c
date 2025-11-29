@@ -345,12 +345,36 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	int dt = time    - p->venc_put_time;
 	int dr = atime() - p->venc_ref_time;
-	if( dr < sfdec_threshold && p->venc_put_time && time > p->venc_put_time ) {
+
+	// Allow updates if the deviation from the expected time is significant (> 40ms)
+	// This handles discontinuities (e.g. from atempo flush) even if updates are frequent.
+	int expected = p->venc_put_time + dr;
+	int diff = time - expected;
+	if (diff < 0) diff = -diff;
+
+	if( dr < sfdec_threshold && p->venc_put_time && time > p->venc_put_time && diff < 40 ) {
 		return 0;
 	}
 
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
+
+	if ( !android_sync ) {
+		pthread_mutex_lock(&p->locked.mtx);
+		// Reset scheduling anchors for _compute_blit_wait_ms pacing logic.
+		// When speed changes, the timeline mapping is updated via stream_set_av_speed(),
+		// which calls this function to re-anchor the video sink. Without resetting these
+		// anchors, _compute_blit_wait_ms() would use stale offsets, causing A/V desync.
+		p->sched_start_off_ns  = (INT64)time * 1000000LL;
+		p->sched_start_mono_ns = _get_monotonic_ns();
+		p->sched_last_off_ns   = p->sched_start_off_ns;
+		p->sched_last_mono_ns  = p->sched_start_mono_ns;
+		p->sched_late          = 0;
+		pthread_mutex_unlock(&p->locked.mtx);
+
+		DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, off_ns=%lld, mono_ns=%lld\n",
+				time, p->sched_start_off_ns, p->sched_start_mono_ns);
+	}
 
 DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 	return 0;

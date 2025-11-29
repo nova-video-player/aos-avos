@@ -408,8 +408,11 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 			 speed, track_latency, system_latency, app_latency, system_latency + app_latency , track_latency > 0);
 
 	if( !at->passthrough && track_latency > 0 ) {
-		// AudioTrack.getLatency() by default (API 29+) when not in passthrough mode since it induces a delay
-		at->latency = track_latency;
+		// AudioTrack.getLatency() by default (API 29+) when not in passthrough mode
+		// However, if track_latency is suspiciously low compared to our calculated buffer latency (e.g. with AV receivers),
+		// prefer the larger value to avoid video running ahead of audio.
+		uint32_t calculated_latency = system_latency + app_latency;
+		at->latency = (track_latency > calculated_latency) ? track_latency : calculated_latency;
 	} else {
 		// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation (used for passthrough or when track_latency unavailable)
 		at->latency = system_latency + app_latency;

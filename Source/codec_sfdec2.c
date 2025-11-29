@@ -561,8 +561,17 @@ DBGSI serprintf(" ok\n");
 			// We allow a large positive window because buffering (frames ahead of time) is good and shouldn't be squashed.
 			// We allow a negative window to let the player catch up (fast forward) if slightly behind.
 			if (raw_blit_duration > -1000 && raw_blit_duration < 5000) {
-				p->render_offset_ns = -1;
-				render_ts_ns = now_ns + (int64_t)raw_blit_duration * 1000000LL;
+				int64_t current_offset_ns = now_ns - (int64_t)venc_time * 1000000LL;
+				if (p->render_offset_ns == -1) {
+					p->render_offset_ns = current_offset_ns;
+				} else {
+					int64_t diff = current_offset_ns - p->render_offset_ns;
+					if (diff > 50000000LL || diff < -50000000LL) {
+						p->render_offset_ns = current_offset_ns;
+						DBGSI serprintf("android_sync: offset drift %lld ms, resetting\n", diff/1000000LL);
+					}
+				}
+				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
 			} else {
 				// Large desync detected (e.g. clock reset). Establish a local anchor.
 				if (p->render_offset_ns == -1) {

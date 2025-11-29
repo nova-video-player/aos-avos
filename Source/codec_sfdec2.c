@@ -374,6 +374,11 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 		DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, off_ns=%lld, mono_ns=%lld\n",
 				time, p->sched_start_off_ns, p->sched_start_mono_ns);
+	} else {
+		pthread_mutex_lock(&p->locked.mtx);
+		p->render_offset_ns = -1;
+		pthread_mutex_unlock(&p->locked.mtx);
+		DBGSI serprintf("videosink_put_time: reset render_offset_ns (android_sync)\n");
 	}
 
 DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );

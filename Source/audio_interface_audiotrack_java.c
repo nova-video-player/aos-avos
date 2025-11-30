@@ -428,6 +428,8 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 		calculated_latency = system_latency + app_latency;
 	}
 
+	DBG LOG("audiotrack_update_latency latency: %d ms (track=%d, system=%d, app=%d)", calculated_latency, track_latency, system_latency, app_latency);
+
 	at->latency = calculated_latency;
 }
 

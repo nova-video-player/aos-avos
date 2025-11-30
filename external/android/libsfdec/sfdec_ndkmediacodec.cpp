@@ -181,8 +181,8 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (input_size > 0)
         AMediaFormat_setInt32(sfdec->mFormat, "max-input-size", input_size);
 
-    // Some devices expose low-latency flags
-    AMediaFormat_setInt32(sfdec->mFormat, "low-latency", 1);
+    // "low-latency" is intended for camera/conference pipelines; leaving it off for local video playback to avoid vendor-specific modes.
+    // AMediaFormat_setInt32(sfdec->mFormat, "low-latency", 1);
 
     // Playback speed hint = video fps * playback speed (ceil)
     if (sfdec->video_frame_rate_den && sfdec->video_frame_rate_num) {

@@ -342,6 +342,15 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             nb_csd = set_buffer_config(extradata, extradata_size, format);
     }
     sp<Surface> nativeSurface(static_cast<android::Surface *>(sfdec->mNativeWindow.get()));
+    
+    // Some devices expose low-latency flags
+    dl_mc.AMessage_setInt32(format.get(), "low-latency", 1);
+
+    // Playback speed hint (1.0 = realtime)
+    dl_mc.AMessage_setInt32(format.get(), "operating-rate", 1);
+
+    // Priority hint (0 = realtime priority)
+    dl_mc.AMessage_setInt32(format.get(), "priority", 0);
 
     err = dl_mc.MediaCodec_configure(sfdec->mCodec.get(), format, nativeSurface, NULL, 0);
     CHECK_STATUS(err);

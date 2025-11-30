@@ -346,8 +346,16 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     // Some devices expose low-latency flags
     dl_mc.AMessage_setInt32(format.get(), "low-latency", 1);
 
-    // Playback speed hint (1.0 = realtime)
-    dl_mc.AMessage_setInt32(format.get(), "operating-rate", 1);
+    // Playback speed hint = video fps * playback speed (ceil)
+    if (sfdec->video_frame_rate_den && sfdec->video_frame_rate_num) {
+        int64_t rate_num = (int64_t)sfdec->video_frame_rate_num * sfdec->playback_speed_num;
+        int64_t rate_den = (int64_t)sfdec->video_frame_rate_den * sfdec->playback_speed_den;
+        if (rate_den > 0) {
+            int operating_rate = (int)((rate_num + rate_den - 1) / rate_den);
+            if (operating_rate > 0)
+                dl_mc.AMessage_setInt32(format.get(), "operating-rate", operating_rate);
+        }
+    }
 
     // Priority hint (0 = realtime priority)
     dl_mc.AMessage_setInt32(format.get(), "priority", 0);

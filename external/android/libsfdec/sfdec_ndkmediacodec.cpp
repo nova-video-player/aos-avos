@@ -180,12 +180,20 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     AMediaFormat_setInt32(sfdec->mFormat, "height", sfdec->height);
     if (input_size > 0)
         AMediaFormat_setInt32(sfdec->mFormat, "max-input-size", input_size);
-    
-        // Some devices expose low-latency flags
+
+    // Some devices expose low-latency flags
     AMediaFormat_setInt32(sfdec->mFormat, "low-latency", 1);
 
-    // Playback speed hint (1.0 = realtime)
-    AMediaFormat_setInt32(sfdec->mFormat, "operating-rate", 1);
+    // Playback speed hint = video fps * playback speed (ceil)
+    if (sfdec->video_frame_rate_den && sfdec->video_frame_rate_num) {
+        int64_t rate_num = (int64_t)sfdec->video_frame_rate_num * sfdec->playback_speed_num;
+        int64_t rate_den = (int64_t)sfdec->video_frame_rate_den * sfdec->playback_speed_den;
+        if (rate_den > 0) {
+            int operating_rate = (int)((rate_num + rate_den - 1) / rate_den);
+            if (operating_rate > 0)
+                AMediaFormat_setInt32(sfdec->mFormat, "operating-rate", operating_rate);
+        }
+    }
 
     // Priority hint (0 = realtime priority)
     AMediaFormat_setInt32(sfdec->mFormat, "priority", 0);

@@ -2489,7 +2489,10 @@ serprintf("STP: not open!\r\n");
 	}
 	// stop video sink
 	if( s->video_sink) {
-		s->video_sink->close( s->video_sink );
+		// Only close if not already closed by stream_close_video_dec
+		if( s->video_sink->is_open ) {
+			s->video_sink->close( s->video_sink );
+		}
 		if( s->video_sink->delete ) {
 			s->video_sink->delete( s->video_sink );
 		}

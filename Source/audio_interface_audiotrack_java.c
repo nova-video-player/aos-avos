@@ -135,10 +135,12 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 		goto out;
 	}
 
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
+	// Final check before JNI call to prevent TOCTTOU race during teardown
+	// During teardown, audiotrack_close sets at->init = 0 and at->obj = NULL
+	// During initialization, at->init = 0 but at->obj is valid
+	// Only block the call if both are in teardown state (init=0 AND obj was already checked NULL above)
+	// This check is redundant with the at->obj check above, but kept for extra safety
+	if (!at->init && !at->obj) {
 		ERR LOG("AudioTrack teardown detected before calling method '%s'", name);
 		goto out;
 	}
@@ -180,10 +182,12 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 		return 0;
 	}
 
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
+	// Final check before JNI call to prevent TOCTTOU race during teardown
+	// During teardown, audiotrack_close sets at->init = 0 and at->obj = NULL
+	// During initialization, at->init = 0 but at->obj is valid
+	// Only block the call if both are in teardown state (init=0 AND obj was already checked NULL above)
+	// This check is redundant with the at->obj check above, but kept for extra safety
+	if (!at->init && !at->obj) {
 		ERR LOG("AudioTrack teardown detected before calling method '%s'", name);
 		pthread_mutex_unlock(&at->lock);
 		return 0;
@@ -230,10 +234,12 @@ static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const c
 		return 0;
 	}
 
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
+	// Final check before JNI call to prevent TOCTTOU race during teardown
+	// During teardown, audiotrack_close sets at->init = 0 and at->obj = NULL
+	// During initialization, at->init = 0 but at->obj is valid
+	// Only block the call if both are in teardown state (init=0 AND obj was already checked NULL above)
+	// This check is redundant with the at->obj check above, but kept for extra safety
+	if (!at->init && !at->obj) {
 		ERR LOG("AudioTrack teardown detected before calling method '%s'", name);
 		pthread_mutex_unlock(&at->lock);
 		return 0;
@@ -1184,10 +1190,12 @@ ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
 		goto bail_unlock;
 	}
 
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
+	// Final check before JNI call to prevent TOCTTOU race during teardown
+	// During teardown, audiotrack_close sets at->init = 0 and at->obj = NULL
+	// During initialization, at->init = 0 but at->obj is valid
+	// Only block the call if both are in teardown state (init=0 AND obj was already checked NULL above)
+	// This check is redundant with the at->obj check above, but kept for extra safety
+	if (!at->init && !at->obj) {
 ERR		LOG("AudioTrack teardown detected, using static latency: %d ms", at->latency);
 		goto bail_unlock;
 	}

@@ -1316,7 +1316,8 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 	// Initialize sink properties from source (includes PCM forcing when needed)
 	stream_audio_copy_sink_from_source( s );
 
-	if( s->audio_sink->start( s ) ) {
+	// Set passthrough and start - ensures passthrough mode is correct before recreating AudioTrack
+	if( stream_audio_set_passthrough_and_start( s ) ) {
 		// no audio, close the codec
 		stream_close_audio_dec( s );
 		// drop audio
@@ -1408,7 +1409,8 @@ for( i = 0; i < s->av.as_max; i++ ) {
 		// Re-initialize sink properties from the new audio source (includes PCM forcing when needed)
 		stream_audio_copy_sink_from_source( s );
 
-		if( s->audio_sink->start( s ) ) {
+		// Set passthrough and start - ensures passthrough mode is correct before recreating AudioTrack
+		if( stream_audio_set_passthrough_and_start( s ) ) {
 			// no audio, close the codec
 			stream_close_audio_dec( s );
 			// drop audio
@@ -2471,6 +2473,15 @@ serprintf("STP: not open!\r\n");
 	// stop all threads
 	stream_close( s );
 
+	// stop audio decoder
+	stream_close_audio_dec( s );
+
+	stream_close_audio_filter( s );
+
+	// stop video decoder - MUST be before closing video sink
+	// because decoder cleanup needs to access frames to free AVFrame objects in frame->priv
+	stream_close_video_dec( s );
+
 	// stop audio sink
 	if( s->audio_sink) {
 		s->audio_sink->stop( s );
@@ -2484,14 +2495,6 @@ serprintf("STP: not open!\r\n");
 		}
 		s->video_sink = NULL;
 	}
-
-	// stop audio decoder
-	stream_close_audio_dec( s );
-
-	stream_close_audio_filter( s );
-
-	// stop video decoder
-	stream_close_video_dec( s );
 
 	// close the subtitle decoder
 	stream_close_sub_dec( s );

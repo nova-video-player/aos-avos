@@ -114,6 +114,13 @@ static int enable_dynamic_audio_delay = 1; /* enabled by default */
 static inline void call_void_method(audio_ctx_t *at, const char * name, const char * signature)
 {
 	DBG2 LOG();
+
+	// Check if AudioTrack object is valid before calling methods on it
+	if (!at->obj) {
+		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
+		return;
+	}
+
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
 
 	// Check if method exists - if not, clear exception and return
@@ -138,6 +145,13 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
 	DBG2 LOG();
+
+	// Check if AudioTrack object is valid before calling methods on it
+	if (!at->obj) {
+		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
+		return 0;
+	}
+
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
 
 	// Check if method exists - if not, clear exception and return 0
@@ -167,6 +181,13 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const char * name, const char * signature, ...)
 {
 	DBG2 LOG();
+
+	// Check if AudioTrack object is valid before calling methods on it
+	if (!at->obj) {
+		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
+		return 0;
+	}
+
 	jmethodID method = (*env)->GetMethodID(env, at->audiotrackClass, name, signature);
 
 	// Check if method exists - if not, clear exception and return 0
@@ -372,16 +393,22 @@ static int audiotrack_close(audio_ctx_t **pat)
 
 		call_void_method(at, "release", "()V");
 		(*at->env)->DeleteGlobalRef(at->env, at->obj);
+		at->obj = NULL;  // Prevent use-after-free
 		(*at->env)->DeleteGlobalRef(at->env, at->jbuffer);
+		at->jbuffer = NULL;
 		(*at->env)->DeleteGlobalRef(at->env, at->audiotrackClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audiosystemClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->playbackParamsClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audioAttributesBuilderClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audioFormatBuilderClass);
-		if (at->audioTimestamp)
+		if (at->audioTimestamp) {
 			(*at->env)->DeleteGlobalRef(at->env, at->audioTimestamp);
-		if (at->audioTimestampClass)
+			at->audioTimestamp = NULL;
+		}
+		if (at->audioTimestampClass) {
 			(*at->env)->DeleteGlobalRef(at->env, at->audioTimestampClass);
+			at->audioTimestampClass = NULL;
+		}
 		//if (at->willDetach)
 		//	(*myVm)->DetachCurrentThread(myVm);
 		at->init = 0;
@@ -1073,6 +1100,12 @@ DBG2		LOG("Failed to attach to current thread, using static latency: %d ms", at-
 		return at->latency;
 	}
 
+	// Check if AudioTrack object is still valid (could be NULL during teardown)
+	if (!at->obj) {
+ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
+		return at->latency;
+	}
+
 	// Call AudioTrack.getTimestamp(AudioTimestamp)
 	jboolean success = (*env)->CallBooleanMethod(env, at->obj, at->getTimestampMethodID, at->audioTimestamp);
 
@@ -1209,6 +1242,12 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		if (*myEnv == NULL) return 0;
 
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed attached to current thread" );
+
+		// Check if AudioTrack object is still valid (could be NULL during teardown)
+		if (!at->obj) {
+			ERR LOG("audiotrack_change_audio_speed: AudioTrack object is NULL, cannot change speed");
+			return 0;
+		}
 
 		// reuse already created audioTrack
 		jobject audioTrack = at->obj;

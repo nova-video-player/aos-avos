@@ -1872,7 +1872,10 @@ DBGS serprintf("opening parser: [%s] with %d MB\r\n", s->parser->name, s->buffer
 		if( s->flags & STREAM_MPEG_SKIP_PSI_PREPARSE ){
 			flags |= STREAM_PARSER_MPEG_SKIP_PSI_PREPARSE;
 		}
-		
+		if( s->flags & (STREAM_THUMB | STREAM_THUMB_PLAY) ){
+			flags |= STREAM_PARSER_THUMB;
+		}
+
 		s->num_parts = stream_check_parts( s->src.url );
 		if( s->num_parts > 1 ) {
 			stream_parse_parts( s );

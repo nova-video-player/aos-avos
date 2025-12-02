@@ -300,6 +300,13 @@ DBGP serprintf("bitrate  %d\r\n", fmt->bit_rate);
 		AVStream *st          = fmt->streams[i];
 		AVCodecParameters *codecpar = st->codecpar;
 		int discard = 1;
+
+		// For thumbnails: skip non-video streams early to save CPU
+		if ((priv->flags & STREAM_PARSER_THUMB) &&
+		    st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) {
+			continue;
+		}
+
 DBGP serprintf("Stream #%d: ", i);
 		if(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
 DBGP serprintf("VIDEO\r\n");
@@ -740,7 +747,13 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 		ff_p->fmt->flags |= AVFMT_FLAG_NOFILLIN;
 	}
 
-	av_dict_set(&ff_p->fmt_opts, "probesize", "10000000", 0);
+	// For thumbnails: use minimal probing to speed up processing
+	if (ff_p->flags & STREAM_PARSER_THUMB) {
+		av_dict_set(&ff_p->fmt_opts, "probesize", "500000", 0);      // 500KB instead of 10MB
+		av_dict_set(&ff_p->fmt_opts, "analyzeduration", "1000000", 0);  // 1 second max
+	} else {
+		av_dict_set(&ff_p->fmt_opts, "probesize", "10000000", 0);
+	}
 
 	if( avformat_open_input(&ff_p->fmt, s->src.url, NULL, &ff_p->fmt_opts ) != 0) {
 serprintf("FFMPEG: cannot open file\r\n");
@@ -750,10 +763,39 @@ serprintf("FFMPEG: cannot open file\r\n");
 DBGP serprintf("info\r\n");
 
 	// Retrieve stream information
-	if (avformat_find_stream_info(ff_p->fmt, NULL) < 0) {
-printf("FFMPEG: cannot find stream info\r\n");
+	if (ff_p->flags & STREAM_PARSER_THUMB) {
+		// For thumbnails: only analyze video stream, skip audio/subs for speed
+		int nb_streams = ff_p->fmt->nb_streams;
+		AVDictionary **opts = (AVDictionary **)acalloc(nb_streams, sizeof(AVDictionary *));
+		if (opts) {
+			for (int i = 0; i < nb_streams; i++) {
+				if (ff_p->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+					// Analyze video stream with minimal time
+					av_dict_set(&opts[i], "analyzeduration", "1000000", 0);  // 1 second max
+				} else {
+					// Skip audio/subtitle analysis completely
+					av_dict_set(&opts[i], "analyzeduration", "0", 0);
+					ff_p->fmt->streams[i]->discard = AVDISCARD_ALL;
+				}
+			}
+		}
+		if (avformat_find_stream_info(ff_p->fmt, opts) < 0) {
+			printf("FFMPEG: cannot find stream info\r\n");
+		}
+		// Clean up
+		if (opts) {
+			for (int i = 0; i < nb_streams; i++) {
+				av_dict_free(&opts[i]);
+			}
+			afree(opts);
+		}
+	} else {
+		// Normal mode: analyze all streams
+		if (avformat_find_stream_info(ff_p->fmt, NULL) < 0) {
+			printf("FFMPEG: cannot find stream info\r\n");
+		}
 	}
-	
+
 	_parse_format( s->etype, ff_p );
 
 	memcpy( &s->av, &ff_p->av, sizeof( AV_PROPERTIES ) );
@@ -1693,20 +1735,52 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 	av_init_props( priv );
 
 	int err = 0;
+	AVDictionary **opts = NULL;
+	int nb_streams = 0;
+
 	// Open video file
 	priv->fmt = avformat_alloc_context();
-	if( avformat_open_input(&priv->fmt, full_path, NULL, NULL ) != 0) {
+
+	// For metadata-only retrieval: use minimal probing to speed up file scanning
+	AVDictionary *fmt_opts = NULL;
+	av_dict_set(&fmt_opts, "probesize", "500000", 0);      // 500KB instead of 5MB default
+	av_dict_set(&fmt_opts, "analyzeduration", "1000000", 0);  // 1 second max
+
+	if( avformat_open_input(&priv->fmt, full_path, NULL, &fmt_opts ) != 0) {
 serprintf("FFMPEG: cannot open file\r\n");
+		av_dict_free(&fmt_opts);
 		err = 1;
 		goto ErrorExit;
 	}
+	av_dict_free(&fmt_opts);
 
 DBGP serprintf("info\r\n");
-	// Retrieve stream information
-	if (avformat_find_stream_info(priv->fmt, NULL) < 0) {
-printf("FFMPEG: cannot find stream info\r\n");
+	// Retrieve stream information with stream-specific optimization
+	// For file scanning: only analyze video stream thoroughly, minimize audio analysis
+	nb_streams = priv->fmt->nb_streams;
+	opts = (AVDictionary **)acalloc(nb_streams, sizeof(AVDictionary *));
+	if (opts) {
+		for (int i = 0; i < nb_streams; i++) {
+			if (priv->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+				// Analyze video stream with minimal time
+				av_dict_set(&opts[i], "analyzeduration", "1000000", 0);  // 1 second max
+			} else {
+				// Minimal analysis for audio/subtitles - just get basic info
+				av_dict_set(&opts[i], "analyzeduration", "500000", 0);  // 0.5 second
+			}
+		}
 	}
-	
+	if (avformat_find_stream_info(priv->fmt, opts) < 0) {
+		printf("FFMPEG: cannot find stream info\r\n");
+	}
+	// Clean up
+	if (opts) {
+		for (int i = 0; i < nb_streams; i++) {
+			av_dict_free(&opts[i]);
+		}
+		afree(opts);
+	}
+
 	_parse_format( info->etype, priv );
 
 	memcpy( &info->av, &priv->av, sizeof( AV_PROPERTIES ) );

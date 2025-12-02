@@ -974,10 +974,11 @@ void 	stream_buffer_free_all_data( STREAM_BUFFER *buffer, UINT64 pos, UINT buf )
 #define STREAM_INDEX_SIZE	(384 * 1024)
 
 #define	STREAM_PARSER_LIVE			0x0001	// the stream is live, not from HDD
-#define	STREAM_PARSER_NO_PREBUFFER		0x0002	// 
-#define	STREAM_PARSER_FILE_NONLOCAL		0x0004	// 
+#define	STREAM_PARSER_NO_PREBUFFER		0x0002	//
+#define	STREAM_PARSER_FILE_NONLOCAL		0x0004	//
 #define	STREAM_PARSER_TIMESHIFT			0x0008
 #define	STREAM_PARSER_MPEG_SKIP_PSI_PREPARSE	0x0010
+#define	STREAM_PARSER_THUMB			0x0020	// the stream is for thumbnail extraction only
 
 int  	stream_parser_open ( STREAM *s, int buffer_size, int flags );
 int  	stream_parser_close( STREAM *s );

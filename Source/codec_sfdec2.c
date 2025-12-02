@@ -74,6 +74,14 @@ DECLARE_DEBUG_TOGGLE("sffb", sfdec_force_blit );
 DECLARE_DEBUG_TOGGLE("sfnd", sfdec_no_drop );
 DECLARE_DEBUG_PARAM ("sfth", sfdec_threshold );
 
+// Helper: detect whether audio passthrough (IEC/encoded) is active
+static inline int _is_passthrough(STREAM *s) {
+	if (s && s->audio_sink && s->audio_sink->get_passthrough) {
+		return s->audio_sink->get_passthrough(s);
+	}
+	return 0;
+}
+
 enum {
 	THREAD_STATE_READING	= 0x01,
 	THREAD_STATE_RENDERING	= 0x02,
@@ -137,6 +145,7 @@ typedef struct priv {
 	STREAM_DEC_VIDEO *dec;
 	int64_t render_offset_ns;
 	float last_av_speed;
+	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -352,6 +361,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int dt = time    - p->venc_put_time;
 	int dr = atime() - p->venc_ref_time;
 
+	// Detect passthrough so we can avoid android_sync re-anchoring noise on encoded outputs.
+	int passthrough = _is_passthrough(s);
+
 	// Allow updates if the deviation from the expected time is significant (> 40ms)
 	// This handles discontinuities (e.g. from atempo flush) even if updates are frequent.
 	int expected = p->venc_put_time + dr;
@@ -398,13 +410,21 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->sched_last_mono_ns  = p->sched_start_mono_ns;
 			p->sched_late          = 0;
 			DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d)\n", time, diff, speed_changed);
-		} else {
+		} else if (speed_changed || !passthrough) {
+			// Reset for PCM always, or passthrough only on speed changes
 			p->render_offset_ns = -1;
-			DBGSI serprintf("videosink_put_time: reset render_offset_ns (android_sync) diff=%d (speed_changed=%d)\n", diff, speed_changed);
+			p->passthrough_cached = passthrough;
+			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d pt=%d\n",
+				diff, speed_changed, passthrough);
+		} else {
+			// Passthrough mode with drift (no speed change): skip re-anchoring
+			p->passthrough_cached = passthrough;
+			DBGSI serprintf("videosink_put_time: SKIP re-anchor (passthrough) diff=%d\n", diff);
 		}
 		pthread_mutex_unlock(&p->locked.mtx);
 	} else {
 		pthread_mutex_lock(&p->locked.mtx);
+		p->passthrough_cached = passthrough;
 		// No reset needed
 		pthread_mutex_unlock(&p->locked.mtx);
 	}
@@ -531,6 +551,7 @@ DBGSI serprintf("MediaCodec resume\n");
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
+		int passthrough = p->passthrough_cached;
 
 		if( android_sync ) {
 			// For android_sync, use the traditional blit_time calculation
@@ -592,12 +613,17 @@ DBGSI serprintf(" ok\n");
 				int64_t current_offset_ns = now_ns - (int64_t)venc_time * 1000000LL;
 				if (p->render_offset_ns == -1) {
 					p->render_offset_ns = current_offset_ns;
-				} else {
+					DBGSI serprintf("android_sync: initial anchor established offset=%lld ms pt=%d\n",
+						current_offset_ns/1000000LL, passthrough);
+				} else if (!passthrough) {
 					int64_t diff = current_offset_ns - p->render_offset_ns;
 					if (diff > 50000000LL || diff < -50000000LL) {
 						p->render_offset_ns = current_offset_ns;
 						DBGSI serprintf("android_sync: offset drift %lld ms, resetting\n", diff/1000000LL);
 					}
+				} else {
+					int64_t diff = current_offset_ns - p->render_offset_ns;
+					DBGSI serprintf("android_sync: offset drift %lld ms SKIPPED (passthrough)\n", diff/1000000LL);
 				}
 				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
 			} else {
@@ -947,6 +973,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->locked.run = 1;
 	p->prev_paused = 0;
 	p->render_offset_ns = -1;
+	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;

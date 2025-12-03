@@ -787,7 +787,6 @@ void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
-int     stream_audio_set_passthrough_and_start( STREAM *s );
 void    stream_audio_reset_ac3_passthrough_state(void);
 void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );

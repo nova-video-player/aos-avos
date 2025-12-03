@@ -169,36 +169,6 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 #endif
 }
 
-// *****************************************************************************
-//
-//	stream_audio_set_passthrough_and_start
-//
-//	Helper function to set passthrough mode and start the audio sink.
-//	This ensures passthrough is always set correctly before starting,
-//	preventing AudioTrack from being created with stale passthrough flags.
-//
-// *****************************************************************************
-int stream_audio_set_passthrough_and_start(STREAM *s)
-{
-	if (!s || !s->audio_sink) {
-		return -1;
-	}
-
-#ifdef CONFIG_SPDIF
-	AUDIO_PROPERTIES *sink = stream_audio_get_sink_props(s);
-	int passthrough_mode = 0;
-	if (spdif_is_passthrough_on() && sink && spdif_init(sink)) {
-		passthrough_mode = spdif_is_passthrough_on();
-		DBG serprintf("stream_audio_set_passthrough_and_start: passthrough enabled, mode=%d\n", passthrough_mode);
-	}
-	s->audio_sink->set_passthrough(s, passthrough_mode);
-#else
-	s->audio_sink->set_passthrough(s, 0);
-#endif
-
-	return s->audio_sink->start(s);
-}
-
 static int stream_audio_setup_ac3_sink(STREAM *s)
 {
 #ifdef CONFIG_SPDIF

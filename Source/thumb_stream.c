@@ -57,14 +57,15 @@ static int _open( STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx, i
 
 	video->colorspace = p->colorspace;
 
+	if (stream_alloc_frames(&p->frames, video->width, video->height, video->colorspace, STREAM_MEM_NRM, &num_frames) != 0) {
+		return 1;
+	}
 	p->num_frames = num_frames;
 
 	for( i = 0; i < p->num_frames; i++ ) {
 		p->frames[i] = frame_alloc_with_cs_and_mem( video->width, video->height, video->colorspace, STREAM_MEM_NRM, 1 );
 		if( !p->frames[i] ) {
 serprintf("cannot alloc frame %d\r\n", i);
-			// Free all previously allocated frames before returning
-			stream_free_frames(&p->frames, i);
 			return 1;
 		}
 		p->frames[i]->index   = i;
@@ -81,7 +82,6 @@ static int _close( STREAM_SINK_VIDEO *sink )
 	thumb_stream_t *p = sink->priv;
 
 	stream_free_frames(&(p->frames), p->num_frames);
-	sink->is_open = 0;
         return 0;
 }
 

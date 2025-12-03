@@ -71,7 +71,6 @@ struct audio_ctx {
 	int channel_count;
 	uint32_t latency;
 	int passthrough;
-	pthread_mutex_t lock;
 	JNIEnv * env;
 	int willDetach;
 	jobject obj;
@@ -116,12 +115,10 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 {
 	DBG2 LOG();
 
-	pthread_mutex_lock(&at->lock);
-
 	// Check if AudioTrack object is valid before calling methods on it
 	if (!at->obj) {
 		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
-		goto out;
+		return;
 	}
 
 	jmethodID method = (*at->env)->GetMethodID(at->env, at->audiotrackClass, name, signature);
@@ -132,15 +129,7 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 			(*at->env)->ExceptionClear(at->env);
 		}
 		DBG2 LOG("method '%s' not found", name);
-		goto out;
-	}
-
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
-		ERR LOG("AudioTrack teardown detected before calling method '%s'", name);
-		goto out;
+		return;
 	}
 
 	(*at->env)->CallVoidMethod(at->env, at->obj, method);
@@ -151,20 +140,15 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 		(*at->env)->ExceptionDescribe(at->env);
 		(*at->env)->ExceptionClear(at->env);
 	}
-out:
-	pthread_mutex_unlock(&at->lock);
 }
 
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
 	DBG2 LOG();
 
-	pthread_mutex_lock(&at->lock);
-
 	// Check if AudioTrack object is valid before calling methods on it
 	if (!at->obj) {
 		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
-		pthread_mutex_unlock(&at->lock);
 		return 0;
 	}
 
@@ -176,16 +160,6 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 			(*at->env)->ExceptionClear(at->env);
 		}
 		DBG2 LOG("method '%s' not found", name);
-		pthread_mutex_unlock(&at->lock);
-		return 0;
-	}
-
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
-		ERR LOG("AudioTrack teardown detected before calling method '%s'", name);
-		pthread_mutex_unlock(&at->lock);
 		return 0;
 	}
 
@@ -201,7 +175,6 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 		(*at->env)->ExceptionClear(at->env);
 	}
 
-	pthread_mutex_unlock(&at->lock);
 	return result;
 }
 
@@ -209,12 +182,9 @@ static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const c
 {
 	DBG2 LOG();
 
-	pthread_mutex_lock(&at->lock);
-
 	// Check if AudioTrack object is valid before calling methods on it
 	if (!at->obj) {
 		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
-		pthread_mutex_unlock(&at->lock);
 		return 0;
 	}
 
@@ -226,16 +196,6 @@ static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const c
 			(*env)->ExceptionClear(env);
 		}
 		DBG2 LOG("method '%s' not found", name);
-		pthread_mutex_unlock(&at->lock);
-		return 0;
-	}
-
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
-		ERR LOG("AudioTrack teardown detected before calling method '%s'", name);
-		pthread_mutex_unlock(&at->lock);
 		return 0;
 	}
 
@@ -251,7 +211,6 @@ static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const c
 		(*env)->ExceptionClear(env);
 	}
 
-	pthread_mutex_unlock(&at->lock);
 	return result;
 }
 
@@ -352,11 +311,6 @@ static audio_ctx_t *audiotrack_open(int mode)
 		ERR LOG("malloc failed");
 		return NULL;
 	}
-	if (pthread_mutex_init(&at->lock, NULL) != 0) {
-		ERR LOG("mutex init failed");
-		free(at);
-		return NULL;
-	}
 	// calloc zeroes memory, but explicitly initialize our error recovery flag
 	at->in_error_recovery = 0;
 	at->last_underrun_count = 0;
@@ -368,8 +322,6 @@ static audio_ctx_t *audiotrack_open(int mode)
 		DBG LOG("ERROR: audio_interface_audiotrack_java:audiotrack_open GetEnv failed");
 		if(((*myVm)->AttachCurrentThread(myVm, &(at->env), NULL)) != 0 ) {
 			ERR LOG("ERROR: Attach to JVM failed");
-			pthread_mutex_destroy(&at->lock);
-			free(at);
 			return 0;
 		}
 		else
@@ -434,44 +386,16 @@ static int audiotrack_close(audio_ctx_t **pat)
 	audio_ctx_t *at = *pat;
 
 	if (at->init) {
-		jobject obj_local;
-		jbyteArray jbuffer_local;
-
-		pthread_mutex_lock(&at->lock);
-		// Set init = 0 FIRST to prevent race with audio thread using at->obj
-		at->init = 0;
-		obj_local = at->obj;
-		at->obj = NULL;
-		jbuffer_local = at->jbuffer;
-		at->jbuffer = NULL;
-		pthread_mutex_unlock(&at->lock);
-
 		attach_thread(at);
-		if (obj_local) {
-			// Query underrun count one last time using the preserved object
-			jmethodID underrun_id = (*at->env)->GetMethodID(at->env, at->audiotrackClass, "getUnderrunCount", "()I");
-			if (underrun_id && !(*at->env)->ExceptionCheck(at->env)) {
-				jint underrun_count = (*at->env)->CallIntMethod(at->env, obj_local, underrun_id);
-				if ((*at->env)->ExceptionCheck(at->env)) {
-					(*at->env)->ExceptionClear(at->env);
-				} else if (underrun_count > 0) {
-					ERR LOG("Underrun count: %d", underrun_count);
-				}
-			} else if ((*at->env)->ExceptionCheck(at->env)) {
-				(*at->env)->ExceptionClear(at->env);
-			}
+		int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
+		if (underrun_count > 0)
+			ERR LOG("Underrun count: %d", underrun_count);
 
-			jmethodID release_id = (*at->env)->GetMethodID(at->env, at->audiotrackClass, "release", "()V");
-			if (release_id) {
-				(*at->env)->CallVoidMethod(at->env, obj_local, release_id);
-			} else if ((*at->env)->ExceptionCheck(at->env)) {
-				(*at->env)->ExceptionClear(at->env);
-			}
-			(*at->env)->DeleteGlobalRef(at->env, obj_local);
-		}
-		if (jbuffer_local) {
-			(*at->env)->DeleteGlobalRef(at->env, jbuffer_local);
-		}
+		call_void_method(at, "release", "()V");
+		(*at->env)->DeleteGlobalRef(at->env, at->obj);
+		at->obj = NULL;  // Prevent use-after-free
+		(*at->env)->DeleteGlobalRef(at->env, at->jbuffer);
+		at->jbuffer = NULL;
 		(*at->env)->DeleteGlobalRef(at->env, at->audiotrackClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->audiosystemClass);
 		(*at->env)->DeleteGlobalRef(at->env, at->playbackParamsClass);
@@ -487,8 +411,8 @@ static int audiotrack_close(audio_ctx_t **pat)
 		}
 		//if (at->willDetach)
 		//	(*myVm)->DetachCurrentThread(myVm);
+		at->init = 0;
 	}
-	pthread_mutex_destroy(&at->lock);
 	free(at);
 	pat = NULL;
 	return 0;
@@ -1176,20 +1100,10 @@ DBG2		LOG("Failed to attach to current thread, using static latency: %d ms", at-
 		return at->latency;
 	}
 
-	pthread_mutex_lock(&at->lock);
-
 	// Check if AudioTrack object is still valid (could be NULL during teardown)
 	if (!at->obj) {
 ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
-		goto bail_unlock;
-	}
-
-	// Final check of at->init immediately before JNI call to prevent TOCTTOU race
-	// Since audiotrack_close sets at->init = 0 BEFORE deleting at->obj,
-	// checking at->init here ensures at->obj is still valid
-	if (!at->init) {
-ERR		LOG("AudioTrack teardown detected, using static latency: %d ms", at->latency);
-		goto bail_unlock;
+		return at->latency;
 	}
 
 	// Call AudioTrack.getTimestamp(AudioTimestamp)
@@ -1199,13 +1113,13 @@ ERR		LOG("AudioTrack teardown detected, using static latency: %d ms", at->latenc
 	if ((*env)->ExceptionCheck(env)) {
 		(*env)->ExceptionClear(env);
 		DBG2 LOG("Exception in getTimestamp, using static latency: %d ms", at->latency);
-		goto bail_unlock;
+		return at->latency;
 	}
 
 	if (!success) {
 		// getTimestamp failed (can happen during warmup or if not supported), use static latency
 DBG2		LOG("getTimestamp returned false, using static latency: %d ms", at->latency);
-		goto bail_unlock;
+		return at->latency;
 	}
 
 	// Extract framePosition and nanoTime from AudioTimestamp using cached field IDs
@@ -1214,7 +1128,7 @@ DBG2		LOG("getTimestamp returned false, using static latency: %d ms", at->latenc
 
 	if (framePosition < 0) {
 DBG2		LOG("Negative frame position, using static latency: %d ms", at->latency);
-		goto bail_unlock;
+		return at->latency;
 	}
 
 	uint64_t frames_presented = (uint64_t)framePosition;
@@ -1259,12 +1173,7 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
 		delay_ms, (unsigned long long)frames_written_adjusted, (unsigned long long)frames_presented, (long long)frames_pending);
 
-	pthread_mutex_unlock(&at->lock);
 	return delay_ms;
-
-bail_unlock:
-	pthread_mutex_unlock(&at->lock);
-	return at->latency;
 }
 
 static void audiotrack_flush_output(audio_ctx_t *at)

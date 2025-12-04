@@ -1102,14 +1102,14 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 	frame->deinterlace = 0;
 #endif
 
-#ifdef CONFIG_LIBYUV
+	#ifdef CONFIG_LIBYUV
 	int (*convert_libyuv)(const uint8_t*, int, const uint8_t*, int, const uint8_t*, int, uint8_t*, int, int, int) = NULL;
 	switch( frame->colorspace ) {
-        case AV_IMAGE_YUV_422:
-                switch( pixfmt ) {
-                case PIXFMT_YUV420P:
-                        convert_420P_to_UYVY( src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] / 2 );
-                        break;
+	        case AV_IMAGE_YUV_422:
+	                switch( pixfmt ) {
+	                case PIXFMT_YUV420P:
+	                        convert_420P_to_UYVY( src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] / 2 );
+	                        break;
                 case PIXFMT_YUV420P10LE:
                         convert_420P10b_to_UYVY( src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] / 2 );
                         break;
@@ -1149,51 +1149,89 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
                         break;
                 }
                 break;
-        case AV_IMAGE_BGRA_32:
-                switch( pixfmt ) {
-                case PIXFMT_YUV420P:
-                        convert_libyuv = I420ToARGB;
-                        break;
-                case PIXFMT_YUV422P:
-                        convert_libyuv = I422ToARGB;
-                        break;
-                case PIXFMT_YUV444P:
-                        convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	        case AV_IMAGE_BGRA_32:
+	                switch( pixfmt ) {
+	                case PIXFMT_YUV420P:
+	                        convert_libyuv = I420ToARGB;
+	                        break;
+	                case PIXFMT_YUV422P:
+	                        convert_libyuv = I422ToARGB;
+	                        break;
+	                case PIXFMT_YUV444P:
+	                        convert_libyuv = I444ToARGB;
+				break;
+	                case PIXFMT_NV12:
+	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
+	                                return;
+	                        NV12ToARGB( src_data[0] + start * src_linesize[0], src_linesize[0],
+	                                    src_data[1] + (start / 2) * src_linesize[1], src_linesize[1],
+	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                    width, height );
+	                        break;
+	                case PIXFMT_QCOM_NV12_TILED:
+	                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
+	                        break;
+	                case PIXFMT_YUV420P10LE:
+	                        if (!src_data[0] || !src_data[1] || !src_data[2] || !frame->data[0])
+	                                return;
+	                        I010ToARGB( (uint16_t*)(src_data[0] + start * src_linesize[0]), src_linesize[0] / 2,
+	                                    (uint16_t*)(src_data[1] + (start / 2) * src_linesize[1]), src_linesize[1] / 2,
+	                                    (uint16_t*)(src_data[2] + (start / 2) * src_linesize[2]), src_linesize[2] / 2,
+	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                    width, height );
+	                        break;
+	                case PIXFMT_P010:
+	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
+	                                return;
+	                        P010ToARGBMatrix( (uint16_t*)(src_data[0] + start * src_linesize[0]), src_linesize[0] / 2,
+	                                           (uint16_t*)(src_data[1] + (start / 2) * src_linesize[1]), src_linesize[1] / 2,
+	                                           frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                           &kYuvI601Constants, width, height );
+	                        break;
+	                }
 			break;
-                case PIXFMT_NV12:
-                        convert_NV12_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
-                        break;
-                case PIXFMT_QCOM_NV12_TILED:
-                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
-                        break;
-                case PIXFMT_YUV420P10LE:
-                        convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
-                        break;
-                }
-		break;
-	case AV_IMAGE_RGBX_32:
-                switch( pixfmt ) {
-                case PIXFMT_YUV420P:
-                        convert_libyuv = I420ToABGR;
-                        break;
-                case PIXFMT_YUV422P:
-			convert_libyuv = I422ToABGR;
-                        break;
-                case PIXFMT_YUV444P:
-                        convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
-                        break;
-                case PIXFMT_NV12:
-                        convert_NV12_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
-                        break;
-                case PIXFMT_QCOM_NV12_TILED:
-                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
-                        break;
-                case PIXFMT_YUV420P10LE:
-                        convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
-                        break;
-                }
-		break;
-	}
+		case AV_IMAGE_RGBX_32:
+	                switch( pixfmt ) {
+	                case PIXFMT_YUV420P:
+	                        convert_libyuv = I420ToABGR;
+	                        break;
+	                case PIXFMT_YUV422P:
+				convert_libyuv = I422ToABGR;
+	                        break;
+	                case PIXFMT_YUV444P:
+	                        convert_libyuv = I444ToABGR;
+	                        break;
+	                case PIXFMT_NV12:
+	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
+	                                return;
+	                        NV12ToABGR( src_data[0] + start * src_linesize[0], src_linesize[0],
+	                                    src_data[1] + (start / 2) * src_linesize[1], src_linesize[1],
+	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                    width, height );
+	                        break;
+	                case PIXFMT_QCOM_NV12_TILED:
+	                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
+	                        break;
+	                case PIXFMT_YUV420P10LE:
+	                        if (!src_data[0] || !src_data[1] || !src_data[2] || !frame->data[0])
+	                                return;
+	                        I010ToABGR( (uint16_t*)(src_data[0] + start * src_linesize[0]), src_linesize[0] / 2,
+	                                    (uint16_t*)(src_data[1] + (start / 2) * src_linesize[1]), src_linesize[1] / 2,
+	                                    (uint16_t*)(src_data[2] + (start / 2) * src_linesize[2]), src_linesize[2] / 2,
+	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                    width, height );
+	                        break;
+	                case PIXFMT_P010:
+	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
+	                                return;
+	                        P010ToARGBMatrix( (uint16_t*)(src_data[0] + start * src_linesize[0]), src_linesize[0] / 2,
+	                                           (uint16_t*)(src_data[1] + (start / 2) * src_linesize[1]), src_linesize[1] / 2,
+	                                           frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                           &kYuvI601ConstantsVU, width, height );
+	                        break;
+	                }
+			break;
+		}
 	if (convert_libyuv) {
 		// Validate parameters to prevent buffer overflows and segfaults
 		if (!src_data[0] || !src_data[1] || !src_data[2] || !frame->data[0] ||

@@ -541,6 +541,7 @@ enum {
 	SUB_FORMAT_EXT,		// external subs from separate files
 	SUB_FORMAT_MOV_TEXT,
 	SUB_FORMAT_PGS,
+	SUB_FORMAT_WEBVTT,
 };
 
 #define AUDIO_TRACK_MAX		16

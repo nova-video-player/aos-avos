@@ -71,6 +71,9 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	} else if (sub->format == SUB_FORMAT_PGS) {
 		DBGS serprintf("codec_ffsub: ffsub: Open pgs\n");
 		myCodec = avcodec_find_decoder(AV_CODEC_ID_HDMV_PGS_SUBTITLE);
+	} else if (sub->format == SUB_FORMAT_WEBVTT) {
+		DBGS serprintf("codec_ffsub: ffsub: Open webvtt\n");
+		myCodec = avcodec_find_decoder(AV_CODEC_ID_WEBVTT);
 	} else {
 		DBGS serprintf("codec_ffsub: ffsub: Unknown subtitle format %d\n", sub->format);
 		return 1;
@@ -412,3 +415,4 @@ STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec, "TEXT" );
 //STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec, "SSA" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_PGS, _new_dec, "PGS" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_DVD_GFX, _new_dec, "vobsub" );
+STREAM_REGISTER_DEC_SUB( SUB_FORMAT_WEBVTT, _new_dec, "WEBVTT" );

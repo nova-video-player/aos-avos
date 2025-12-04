@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "jni.h"
 #include "libavos.h"
@@ -486,12 +487,28 @@ jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out
 {
     jintArray array;
     jint *ints;
+    size_t ints_len;
 
     LOGV("avos_bitmap: %dx%d - %d -> %dx%d\n",
         avos_bitmap->width, avos_bitmap->height, avos_bitmap->linestep,
         out_width, out_height);
 
-    array = (*env)->NewIntArray(env, avos_bitmap->data_size);
+    if (!avos_bitmap || !avos_bitmap->data || avos_bitmap->data_size == 0) {
+        LOGE("create_bitmap: invalid bitmap input");
+        return NULL;
+    }
+
+    if ((avos_bitmap->data_size % sizeof(jint)) != 0) {
+        LOGE("create_bitmap: data_size %u not multiple of %zu", avos_bitmap->data_size, sizeof(jint));
+        return NULL;
+    }
+    ints_len = avos_bitmap->data_size / sizeof(jint);
+    if (ints_len > INT_MAX) {
+        LOGE("create_bitmap: data too large (%zu ints)", ints_len);
+        return NULL;
+    }
+
+    array = (*env)->NewIntArray(env, (jsize)ints_len);
     if (!array)
         return NULL;
     ints = (*env)->GetIntArrayElements(env, array, NULL);

@@ -82,6 +82,8 @@ static int _close( STREAM_SINK_VIDEO *sink )
 	thumb_stream_t *p = sink->priv;
 
 	stream_free_frames(&(p->frames), p->num_frames);
+	p->num_frames = 0;
+	sink->is_open = 0;
         return 0;
 }
 

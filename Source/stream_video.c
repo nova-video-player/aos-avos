@@ -2474,14 +2474,20 @@ serprintf("STP: not open!\r\n");
 	// stop all threads
 	stream_close( s );
 
+	// stop video decoder
+	stream_close_video_dec( s );
+
 	// stop audio sink
 	if( s->audio_sink) {
 		s->audio_sink->stop( s );
 		s->audio_sink->close( s );
 	}
-	// stop video sink
+
+	// stop video sink (after decoder cleanup so sink-owned frames remain valid)
 	if( s->video_sink) {
-		s->video_sink->close( s->video_sink );
+		if( s->video_sink->is_open ) {
+			s->video_sink->close( s->video_sink );
+		}
 		if( s->video_sink->delete ) {
 			s->video_sink->delete( s->video_sink );
 		}
@@ -2492,9 +2498,6 @@ serprintf("STP: not open!\r\n");
 	stream_close_audio_dec( s );
 
 	stream_close_audio_filter( s );
-
-	// stop video decoder
-	stream_close_video_dec( s );
 
 	// close the subtitle decoder
 	stream_close_sub_dec( s );

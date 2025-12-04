@@ -424,6 +424,8 @@ serprintf("ffmpeg_video_codec_prepare\n");
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
 		f->priv = NULL;
+		// clear decoder ownership; set only when we clone an AVFrame
+		f->dec  = NULL;
 	}
 
 	return 0;
@@ -435,9 +437,10 @@ serprintf("ffmpeg_video_codec_cleanup\n");
 	int i;
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
-		if (f && f->priv) {
+		if (f && f->priv && f->dec == dec) {
 			av_frame_free((AVFrame**)&f->priv);
 			f->priv = NULL;
+			f->dec  = NULL;
 		}
 	}
 
@@ -712,11 +715,14 @@ DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avf
 	if( dst ) {
 		if( p->mt_ctx ) {
 			codec_convert_mt( p->mt_ctx, map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
-		} else {	
+		} else {
 			codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
 		}
 	}
-	av_frame_free((AVFrame**)&src->priv);
+	if( src->priv && src->dec == dec ) {
+		av_frame_free((AVFrame**)&src->priv);
+		src->dec = NULL;
+	}
 
 	return 0;
 }

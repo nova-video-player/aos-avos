@@ -376,6 +376,50 @@ static void convert_NV12_to_RGB( int colorspace, unsigned char *src_data[], int 
 	}
 }
 
+static void convert_P010_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
+{
+	if( !src_data[0] || !src_data[1] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) ) {
+		return;
+	}
+
+#ifdef CONFIG_NEON
+	if( use_neon ) {
+		// No dedicated NEON path for P010, fall back to scalar conversion
+	}
+#endif
+
+	int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUV10btoBGRA32 : convertYUV10btoRGBX32;
+	int y;
+	for( y = start; y < start + height; y += 2 ) {
+		int x;
+
+		UINT16 *Y1 = (UINT16*)src_data[0] + y      * src_linesize[0] / 2;
+		UINT16 *Y2 = (UINT16*)src_data[0] +(y + 1) * src_linesize[0] / 2;
+		UINT16 *UV = (UINT16*)src_data[1] + y / 2  * src_linesize[1] / 2;
+		UINT32 *dst = (UINT32*)data + y * linesize;
+
+		for( x = 0; x < width; x += 2 ) {
+			UINT16 U = *UV++ >> 6;
+			UINT16 V = *UV++ >> 6;
+
+			UINT16 y1 = *Y1++ >> 6;
+			UINT16 y2 = *Y2++ >> 6;
+
+			dst[0] =        convert(y1 - 64, U - 512, V - 512);
+			dst[linesize] = convert(y2 - 64, U - 512, V - 512);
+
+			UINT16 y1b = *Y1++ >> 6;
+			UINT16 y2b = *Y2++ >> 6;
+
+			dst++;
+			dst[0] =        convert(y1b - 64, U - 512, V - 512);
+			dst[linesize] = convert(y2b - 64, U - 512, V - 512);
+
+			dst++;
+		}
+	}
+}
+
 static void convert_420P_to_UYVY( unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
 {
 	if( !src_data[0] || !src_data[1] || !src_data[2] )
@@ -1044,7 +1088,8 @@ int color_conversion_supported(int colorspace, int pixfmt)
 	case AV_IMAGE_BGRA_32:
 	case AV_IMAGE_RGBX_32:
 		return (pixfmt == PIXFMT_YUV420P) || (pixfmt == PIXFMT_YUV422P) || (pixfmt == PIXFMT_YUV444P) ||
-		       (pixfmt == PIXFMT_NV12) || (pixfmt == PIXFMT_QCOM_NV12_TILED) || (pixfmt == PIXFMT_YUV420P10LE);
+		       (pixfmt == PIXFMT_NV12) || (pixfmt == PIXFMT_QCOM_NV12_TILED) || (pixfmt == PIXFMT_YUV420P10LE) ||
+		       (pixfmt == PIXFMT_P010);
 	}
 	return 0;
 }
@@ -1210,11 +1255,11 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 			break;
 		}
 		break;
-	case AV_IMAGE_BGRA_32:
+		case AV_IMAGE_BGRA_32:
 	case AV_IMAGE_RGBX_32:
-		switch( pixfmt ) {
-		case PIXFMT_YUV420P:
-			convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
+			switch( pixfmt ) {
+			case PIXFMT_YUV420P:
+				convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
 			break;
 		case PIXFMT_YUV422P:
 			convert_422P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
@@ -1225,17 +1270,20 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 		case PIXFMT_NV12:
 			convert_NV12_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 			break;
-		case PIXFMT_QCOM_NV12_TILED:
-			convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
-			break;
-		case PIXFMT_YUV420P10LE:
-			convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+			case PIXFMT_QCOM_NV12_TILED:
+				convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
+				break;
+			case PIXFMT_YUV420P10LE:
+				convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+				break;
+			case PIXFMT_P010:
+				convert_P010_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+				break;
+			}
 			break;
 		}
-		break;
+	#endif
 	}
-#endif
-}
 
 void codec_convert_pixel_format( int pixfmt, unsigned char *src_data[], int src_linesize[], int width, int height, VIDEO_FRAME *frame )
 {

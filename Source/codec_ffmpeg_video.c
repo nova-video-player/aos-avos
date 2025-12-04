@@ -488,6 +488,9 @@ static int map_pixfmt( int pix_fmt )
 		return PIXFMT_YUV420P10LE;
 	case AV_PIX_FMT_YUV444P:
 		return PIXFMT_YUV444P;
+	case AV_PIX_FMT_P010:   // resolves to native-endian P010
+	case AV_PIX_FMT_P010BE: // explicit big-endian variant
+		return PIXFMT_P010;
 	default:
 		return PIXFMT_YUV420P;
 	}

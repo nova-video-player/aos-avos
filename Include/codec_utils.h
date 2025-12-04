@@ -26,6 +26,7 @@ enum PIXFMT {
 	PIXFMT_YUV444P,
 	PIXFMT_NV12,
 	PIXFMT_QCOM_NV12_TILED,
+	PIXFMT_P010,
 };
 
 static inline int avimage2pixfmt(int avimage)

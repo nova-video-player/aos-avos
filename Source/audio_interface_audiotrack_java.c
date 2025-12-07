@@ -1114,8 +1114,17 @@ ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
 
 	int fallback_delay = audiotrack_delay_from_playhead(at, env);
 
+	// Re-check AudioTrack just before calling into Java to avoid races with teardown
+	jobject track_obj = at->obj;
+	if (!track_obj) {
+ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback latency: %d ms", fallback_delay);
+		at->ts_success_streak = 0;
+		at->ts_use_timestamp = 0;
+		return fallback_delay;
+	}
+
 	// Call AudioTrack.getTimestamp(AudioTimestamp)
-	jboolean success = (*env)->CallBooleanMethod(env, at->obj, at->getTimestampMethodID, at->audioTimestamp);
+	jboolean success = (*env)->CallBooleanMethod(env, track_obj, at->getTimestampMethodID, at->audioTimestamp);
 
 	// Check for exceptions
 	if ((*env)->ExceptionCheck(env)) {

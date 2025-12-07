@@ -92,9 +92,13 @@ struct audio_ctx {
 	jfieldID nanoTimeFieldID;
 	int in_error_recovery; // Flag to indicate we're in error recovery mode
 	int last_underrun_count;
+	int ts_success_streak;           // consecutive good AudioTrack timestamps
+	int ts_use_timestamp;            // 0 until getTimestamp is proven stable
 };
 
 static int audiotrack_log_underruns = 0;
+
+static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
@@ -314,6 +318,8 @@ static audio_ctx_t *audiotrack_open(int mode)
 	// calloc zeroes memory, but explicitly initialize our error recovery flag
 	at->in_error_recovery = 0;
 	at->last_underrun_count = 0;
+	at->ts_success_streak = 0;
+	at->ts_use_timestamp = 0;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -1106,6 +1112,8 @@ ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
 		return at->latency;
 	}
 
+	int fallback_delay = audiotrack_delay_from_playhead(at, env);
+
 	// Call AudioTrack.getTimestamp(AudioTimestamp)
 	jboolean success = (*env)->CallBooleanMethod(env, at->obj, at->getTimestampMethodID, at->audioTimestamp);
 
@@ -1113,13 +1121,17 @@ ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
 	if ((*env)->ExceptionCheck(env)) {
 		(*env)->ExceptionClear(env);
 		DBG2 LOG("Exception in getTimestamp, using static latency: %d ms", at->latency);
-		return at->latency;
+		at->ts_success_streak = 0;
+		at->ts_use_timestamp = 0;
+		return fallback_delay;
 	}
 
 	if (!success) {
 		// getTimestamp failed (can happen during warmup or if not supported), use static latency
-DBG2		LOG("getTimestamp returned false, using static latency: %d ms", at->latency);
-		return at->latency;
+DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d ms", fallback_delay);
+		at->ts_success_streak = 0;
+		at->ts_use_timestamp = 0;
+		return fallback_delay;
 	}
 
 	// Extract framePosition and nanoTime from AudioTimestamp using cached field IDs
@@ -1163,12 +1175,24 @@ DBG2		LOG("Timestamp reset detected, offset=%llu", (unsigned long long)at->times
 	// Guard against unrealistic estimates (e.g., during startup) and fallback to static latency
 	if (delay_ms < 0 || delay_ms > 2000) {
 DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay_ms, at->latency);
-		delay_ms = at->latency;
+		at->ts_success_streak = 0;
+		at->ts_use_timestamp = 0;
+		return fallback_delay;
 	}
+
+	// Require a few consecutive stable timestamps before trusting them to avoid startup jumps
+	at->ts_success_streak++;
+	if (at->ts_success_streak >= 3)
+		at->ts_use_timestamp = 1;
 
 	// Cache the timestamp for debugging/monitoring
 	at->last_timestamp_ns = nanoTime;
 	at->last_timestamp_frames = frames_presented;
+
+	if (!at->ts_use_timestamp) {
+DBG2		LOG("Dynamic latency warming up (streak %d), using fallback playback-head latency: %d ms", at->ts_success_streak, fallback_delay);
+		return fallback_delay;
+	}
 
 DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
 		delay_ms, (unsigned long long)frames_written_adjusted, (unsigned long long)frames_presented, (long long)frames_pending);
@@ -1193,6 +1217,46 @@ ERR		LOG("track not valid, error");
 	at->last_timestamp_ns = 0;
 	at->last_timestamp_frames = 0;
 	at->timestamp_written_offset = 0;
+	at->ts_success_streak = 0;
+	at->ts_use_timestamp = 0;
+}
+
+// Compute latency using playback head position as a safe fallback when getTimestamp is
+// unavailable or unstable. This mirrors VLC's fallback behavior and avoids trusting
+// bad timestamps during warmup.
+static int audiotrack_delay_from_playhead(audio_ctx_t *at, JNIEnv *env_local)
+{
+	if (!env_local || !at) {
+		return 0;
+	}
+
+	jint playback_frames = call_int_method_with_env(at, env_local, "getPlaybackHeadPosition", "()I");
+	if (playback_frames <= 0) {
+DBG2		LOG("getPlaybackHeadPosition returned %d, using static latency: %d ms", playback_frames, at->latency);
+		return at->latency;
+	}
+
+	uint64_t frames_presented = (uint64_t)playback_frames;
+	if (frames_presented < at->last_timestamp_frames && at->i_samples_written > frames_presented) {
+		at->timestamp_written_offset = at->i_samples_written - frames_presented;
+DBG2		LOG("Playback head reset detected, offset=%llu", (unsigned long long)at->timestamp_written_offset);
+	}
+
+	uint64_t frames_written_adjusted = 0;
+	if (at->i_samples_written > at->timestamp_written_offset) {
+		frames_written_adjusted = at->i_samples_written - at->timestamp_written_offset;
+	}
+
+	int64_t frames_pending = (int64_t)frames_written_adjusted - (int64_t)frames_presented;
+	if (frames_pending < 0)
+		frames_pending = 0;
+
+	int delay_ms = (int)((frames_pending * 1000) / at->rate);
+	if (delay_ms < 0 || delay_ms > 2000) {
+DBG2		LOG("Playback-head latency %d ms out of range, using static latency: %d ms", delay_ms, at->latency);
+		delay_ms = at->latency;
+	}
+	return delay_ms;
 }
 
 static int audiotrack_preload(audio_ctx_t *at)

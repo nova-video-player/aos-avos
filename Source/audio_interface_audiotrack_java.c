@@ -449,14 +449,6 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 		} else {
 			calculated_latency = track_latency;
 		}
-		
-		// Heuristic: High latency devices (>200ms) often under-report significantly (e.g. Google Streamer 4K).
-		// We observed ~130ms persistent drift on Streamer (reported 468ms).
-		// Adding a bias helps align A/V without forcing users to set manual delay.
-		// We limit this to high-latency paths to avoid breaking low-latency (phone/shield) sync.
-		if (calculated_latency > 200) {
-			calculated_latency += 120;
-		}
 	} else {
 		calculated_latency = system_latency + app_latency;
 	}

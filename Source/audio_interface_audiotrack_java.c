@@ -534,46 +534,46 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		frame_size = (bits / 8) * channels; // keep PCM-equivalent frame size for latency calc
 
 		switch( at->format ) {
-		case WAVE_FORMAT_AC3:
-			track_format = 5; // AudioFormat.ENCODING_AC3
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			// Keep content rate (typically 48kHz from demuxer)
-			break;
-	case WAVE_FORMAT_EAC3:
-	case WAVE_FORMAT_E_AC3_JOC:
-		track_format = 6; // AudioFormat.ENCODING_E_AC3
-		track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-		output_channels = 2;
-			// Keep content rate (typically 48kHz), not IEC container rate (192kHz)
-			break;
-		case WAVE_FORMAT_DTS:
-			track_format = 7; // AudioFormat.ENCODING_DTS
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			break;
-		case WAVE_FORMAT_DTS_HD_MA:
-		case WAVE_FORMAT_DTS_HD:
-			track_format = 8; // AudioFormat.ENCODING_DTS_HD
-			if (get_hdmi_supports_iec_8ch192khz()) {
-				track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-				output_channels = 8;
-			} else {
+			case WAVE_FORMAT_AC3:
+				track_format = 5; // AudioFormat.ENCODING_AC3
 				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 				output_channels = 2;
-			}
-			break;
-		case WAVE_FORMAT_TRUEHD:
-			track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
-			// Android encapsulates the bitstream internally, so force stereo just like AC3/EAC3.
-			// Using a 7.1 mask here makes AudioSystem reject the track when HDMI is set to "Auto"
-			// (Chromecast/Google TV case), resulting in complete silence.
-			track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-			output_channels = 2;
-			break;
-		default:
-			// Fallback to IEC61937 for unknown formats
-			track_format = 13; // AudioFormat.ENCODING_IEC61937
+				// Keep content rate (typically 48kHz from demuxer)
+				break;
+			case WAVE_FORMAT_EAC3:
+			case WAVE_FORMAT_E_AC3_JOC:
+				track_format = 6; // AudioFormat.ENCODING_E_AC3
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
+				// Keep content rate (typically 48kHz), not IEC container rate (192kHz)
+				break;
+			case WAVE_FORMAT_DTS:
+				track_format = 7; // AudioFormat.ENCODING_DTS
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
+				break;
+			case WAVE_FORMAT_DTS_HD_MA:
+			case WAVE_FORMAT_DTS_HD:
+				track_format = 8; // AudioFormat.ENCODING_DTS_HD
+				if (get_hdmi_supports_iec_8ch192khz()) {
+					track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
+					output_channels = 8;
+				} else {
+					track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+					output_channels = 2;
+				}
+				break;
+			case WAVE_FORMAT_TRUEHD:
+				track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
+				// Android encapsulates the bitstream internally, so force stereo just like AC3/EAC3.
+				// Using a 7.1 mask here makes AudioSystem reject the track when HDMI is set to "Auto"
+				// (Chromecast/Google TV case), resulting in complete silence.
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
+				break;
+			default:
+				// Fallback to IEC61937 for unknown formats
+				track_format = 13; // AudioFormat.ENCODING_IEC61937
 		}
 		DBG LOG("Mode 2: codec-specific encoding=%d for format=%04X, channels=%d, rate=%d",
 			track_format, at->format, output_channels, rate);
@@ -586,8 +586,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
                 output_channels = 2;
                 rate = 48000;
                 break;
-	    case WAVE_FORMAT_EAC3:
-	    case WAVE_FORMAT_E_AC3_JOC:
+			case WAVE_FORMAT_EAC3:
+			case WAVE_FORMAT_E_AC3_JOC:
                 track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
                 output_channels = 2;
                 rate = 192000;

@@ -45,6 +45,31 @@ extern int stream_pdrop_threshold;
 
 static volatile int	stream_dbg_delay = 0;
 
+static int stream_use_xbmc_smoothing = 0;
+
+static int stream_calc_lwma(int current, int *history, int *count)
+{
+	if (*count < 3) {
+		history[*count] = current;
+		(*count)++;
+	} else {
+		history[0] = history[1];
+		history[1] = history[2];
+		history[2] = current;
+	}
+
+	long long sum = 0;
+	int i;
+	for (i = 0; i < *count; i++) {
+		sum += (long long)(i + 1) * history[i];
+	}
+
+	int n = *count;
+	if (n == 0) return current;
+
+	return (int)(sum * 2 / (n * (n + 1)));
+}
+
 // ************************************************************
 //
 //	stream_sync_restart
@@ -57,6 +82,9 @@ int stream_sync_restart( STREAM *s )
 	s->drop          = 0;
 	s->drop_P        = 0;
 	s->drop_B        = 0;
+	
+	s->delay_history_count = 0;
+	s->av_delay_history_count = 0;
 
 	return 0;
 }
@@ -74,6 +102,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->video_time     = -1;
 	s->audio_time     = -1;
 	s->audio_ref_time = -1;
+	s->smoothed_av_delay = -1;
 
 	if( s->video->valid ) {
 		s->video_time = time;
@@ -210,9 +239,20 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		return 0;
 	}
 
+	int current_av_delay = stream_sync_av_delay( s );
+	if( s->smoothed_av_delay == -1 ) {
+		s->smoothed_av_delay = current_av_delay;
+	} else {
+		if (stream_use_xbmc_smoothing) {
+			s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
+		} else {
+			s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+		}
+	}
+
 	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
-			s->video_sink->put_time( s->video_sink, audio_time - stream_sync_av_delay( s ) - RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int ) );
+			s->video_sink->put_time( s->video_sink, audio_time - s->smoothed_av_delay - RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int ) );
 		}
 	}
 
@@ -369,7 +409,11 @@ DBGVY serprintf("(D %d)", diff );
 	} else {
 		// to avoid oscillations, we use moving average to allow convergence and grant stability
 		// 900 s->delay_fb is used for a exponential moving average window and thus has no scale
-		s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000;
+		if (stream_use_xbmc_smoothing) {
+			s->delay = stream_calc_lwma(diff, s->delay_history, &s->delay_history_count);
+		} else {
+			s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000;
+		}
 	}
 	s->delay_valid = 1;
 	
@@ -483,6 +527,13 @@ serprintf("dbg_delay %5d\n", stream_dbg_delay );
 DECLARE_DEBUG_COMMAND("sep", 	_stream_delay_plus   );
 DECLARE_DEBUG_COMMAND("sem", 	_stream_delay_minus  );
 DECLARE_DEBUG_COMMAND("ses", 	_stream_delay_set    );
+
+static void _stream_toggle_xbmc( int argc, char *argv[] )
+{
+	stream_use_xbmc_smoothing = !stream_use_xbmc_smoothing;
+	serprintf("stream_use_xbmc_smoothing: %d\n", stream_use_xbmc_smoothing );
+}
+DECLARE_DEBUG_COMMAND("sxbmc", _stream_toggle_xbmc );
 #endif
 
 #endif

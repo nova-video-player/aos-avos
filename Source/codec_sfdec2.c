@@ -396,7 +396,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	if (android_sync) {
 		threshold = 500;
 	} else if (s) {
-		int latency = stream_sync_av_delay(s);
+		int latency = (s->smoothed_av_delay > -1) ? s->smoothed_av_delay : stream_sync_av_delay(s);
 		threshold = latency / 4;
 		if (threshold < 40) threshold = 40;
 	}

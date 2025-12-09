@@ -282,7 +282,7 @@ static inline void attach_thread(audio_ctx_t *at) {
 static inline JNIEnv * attach_thread_current_vm() {
 	JNIEnv *myEnv = NULL;
 	if ((*myVm)->GetEnv(myVm, (void**)&(myEnv), JNI_VERSION_1_4) != JNI_OK) {
-		DBG serprintf("ERROR: audio_interface_audiotrack_java:attach_thread_current_vm GetEnv failed\n");
+		DBG2 serprintf("audio_interface_audiotrack_java:attach_thread_current_vm thread not attached, attaching now\n");
 		if(((*myVm)->AttachCurrentThread(myVm, &(myEnv), NULL)) != 0 ) {
 			ERR serprintf("ERROR: audio_interface_audiotrack_java:attach_thread_current_vm Attach to JVM failed\n");
 			return NULL;
@@ -325,7 +325,7 @@ static audio_ctx_t *audiotrack_open(int mode)
 
 	//let's attach to the java VM
 	if ((*myVm)->GetEnv(myVm, (void**)&(at->env), JNI_VERSION_1_4) != JNI_OK) {
-		DBG LOG("ERROR: audio_interface_audiotrack_java:audiotrack_open GetEnv failed");
+		DBG2 LOG("Thread not attached to JVM, attaching now");
 		if(((*myVm)->AttachCurrentThread(myVm, &(at->env), NULL)) != 0 ) {
 			ERR LOG("ERROR: Attach to JVM failed");
 			return 0;

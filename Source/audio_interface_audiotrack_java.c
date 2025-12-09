@@ -1041,12 +1041,25 @@ DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d
 		}
 	}
 
-	if (ret == -6 /* ERROR_DEAD_OBJECT */) {
-ERR		LOG("audiotrack_write: ERROR_DEAD_OBJECT (-6) -> recovering track");
+	// Handle dead/broken AudioTrack: write() returns 0 or ERROR_DEAD_OBJECT (-6)
+	// Both indicate the AudioTrack is in an unusable state and needs to be recreated.
+	// Returning 0 immediately prevents tight loops that cause ANRs on devices with
+	// slow/broken audio HALs (e.g., MediaTek HAL timeouts on Google TV devices).
+	if (ret == 0 || ret == -6 /* ERROR_DEAD_OBJECT */) {
+		if (ret == 0) {
+ERR			LOG("audiotrack_write: write returned 0 (AudioTrack dead/broken) -> recovering track");
+		} else {
+ERR			LOG("audiotrack_write: ERROR_DEAD_OBJECT (-6) -> recovering track");
+		}
 		// Set error recovery flag
 		at->in_error_recovery = 1;
+		// Sleep briefly to avoid tight loop during recovery and give AudioFlinger time to stabilize
+		msec_sleep(100);
 		// Recreate the AudioTrack by passing current values
 		audiotrack_set_passthrough(at, at->passthrough);
+		// Return -1 to signal fatal write failure to upper layer
+		// This prevents the infinite loop in stream_audio.c where size -= 0 never decreases
+		return -1;
 	} else if (ret < 0) {
 ERR		LOG("audiotrack_write: ERROR code %d returned from Java write()", ret);
 	}

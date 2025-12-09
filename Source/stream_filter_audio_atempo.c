@@ -383,19 +383,17 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	float speed = audio_interface_is_audio_speed_enabled() ?
 		audio_interface_get_audio_speed() : 1.0f;
 
-	// Rebuild filter graph if speed changed
-	if (fabsf(ctx->current_speed - speed) > 0.001f) {
-		DBGA serprintf("atempo: speed changed %.3f -> %.3f\n", ctx->current_speed, speed);
+	// Initialize filter graph on first call or rebuild if speed changed
+	if (!ctx->filter_initialized || fabsf(ctx->current_speed - speed) > 0.001f) {
+		if (!ctx->filter_initialized) {
+			DBGA serprintf("atempo: initializing filter graph with speed %.3f\n", speed);
+		} else {
+			DBGA serprintf("atempo: speed changed %.3f -> %.3f\n", ctx->current_speed, speed);
+		}
 		if (rebuild_filter_graph(ctx, speed) < 0) {
 			serprintf("atempo: failed to rebuild filter graph\n");
 			return -1;
 		}
-	}
-
-	// Ensure filter is initialized (should always be true if called)
-	if (!ctx->filter_initialized) {
-		serprintf("atempo: filter not initialized, cannot process\n");
-		return -1;
 	}
 
 	int ret;

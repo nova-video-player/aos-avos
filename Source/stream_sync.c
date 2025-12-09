@@ -256,6 +256,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		}
 	}
 
+	DBGY serprintf("smoothed_av_delay: %d (raw: %d)\n", s->smoothed_av_delay, current_av_delay);
+
 	s->sync_a_time = audio_time;
 	
 	if( !s->sync_audio || s->play_n_audio_frames || stream_no_sync ) {

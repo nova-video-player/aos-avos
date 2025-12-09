@@ -146,6 +146,7 @@ typedef struct priv {
 	int64_t render_offset_ns;
 	float last_av_speed;
 	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
+	int speed_change_pending_frames; // Count down frames for tighter threshold after speed change
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -272,6 +273,7 @@ static int videosink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void
 	sink->ctx = ctx;
 	priv_t *p = (priv_t *) sink->priv;
 	p->last_av_speed = 1.0f;
+	p->speed_change_pending_frames = 0;
 
 	pthread_mutex_lock(&p->locked.mtx);
 	int i;
@@ -376,6 +378,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	if (fabsf(current_speed - p->last_av_speed) > 0.001f) {
 		speed_changed = 1;
 		p->last_av_speed = current_speed;
+		p->speed_change_pending_frames = 5; // Apply tighter threshold for next 5 frames
 		DBGSI serprintf("videosink_put_time: speed changed to %.2f\n", current_speed);
 	}
 
@@ -392,16 +395,20 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// This filters out the observed ~100ms jitter/noise but catches larger drifts (like 130ms).
 	// On low-latency devices, it clamps to 40ms for tight sync.
 	// For android_sync=1, we use 500ms because videosink_thread has its own finer correction loop.
-	int threshold = 200;
+	int base_threshold = 200;
 	if (android_sync) {
-		threshold = 500;
+		base_threshold = 500;
 	} else if (s) {
-		int latency = (s->smoothed_av_delay > -1) ? s->smoothed_av_delay : stream_sync_av_delay(s);
-		threshold = latency / 4;
-		if (threshold < 40) threshold = 40;
+		base_threshold = 200; // Fixed threshold as per user request for android_sync=0
 	}
 
-	if (speed_changed || abs(diff) > threshold) {
+	int effective_reanchor_threshold = base_threshold;
+	if (p->speed_change_pending_frames > 0) {
+		effective_reanchor_threshold = 40; // Tighter threshold for speed changes
+		p->speed_change_pending_frames--;
+	}
+
+	if (speed_changed || abs(diff) > effective_reanchor_threshold) {
 		pthread_mutex_lock(&p->locked.mtx);
 		if ( !android_sync ) {
 			p->sched_start_off_ns  = (INT64)time * 1000000LL;
@@ -974,6 +981,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->prev_paused = 0;
 	p->render_offset_ns = -1;
 	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
+	p->speed_change_pending_frames = 0;
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;

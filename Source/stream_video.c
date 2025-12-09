@@ -2246,7 +2246,7 @@ serprintf("cannot start audio!\n");
  		}
 
 		// delay_fb is used in stream_sync as averaging weight s->delay = (s->delay * s->delay_fb + diff * (1000 - s->delay_fb)) / 1000;
-		s->delay_fb = 960; // unnormalized exponential moving average window memory factor (no unit)
+		s->delay_fb = 900; // unnormalized exponential moving average window memory factor (no unit)
 DBGS serprintf("\r\nAUDIO DELAY(ms): adec %d  asink %d  vsink %d  tot %d  delay_fb %d  smode %s  vtime %s\r\n", 
 				adec_delay, asink_delay, vsink_delay, stream_sync_av_delay( s ), s->delay_fb,
 				s->sync_mode == STREAM_SYNC_SAMPLES ? "SAMPLES" : "CDATA",

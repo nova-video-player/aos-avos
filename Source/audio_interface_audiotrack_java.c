@@ -1319,7 +1319,9 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 		return 0;
 	}
 
-	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
+	int using_atempo = audio_interface_is_using_atempo();
+
+	if(audio_interface_is_audio_speed_enabled() && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
 
 		JNIEnv *myEnv = attach_thread_current_vm();

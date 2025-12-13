@@ -1313,6 +1313,12 @@ DBG	LOG();
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 {
+	// Bail out if context is not initialized or was released
+	if( !at || !at->init ) {
+		ERR LOG("audiotrack_change_audio_speed: AudioTrack context not initialized");
+		return 0;
+	}
+
 	if(audio_interface_is_audio_speed_enabled() && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
 
@@ -1338,44 +1344,61 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 										->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
 													   "()Landroid/media/PlaybackParams;" ) );
 
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed playbackparams fetched" );
-
-		// change that audioparam's speed
-		( *myEnv )
-			->CallObjectMethod(
-				myEnv, playbackParams,
-				( *myEnv )
-					->GetMethodID( myEnv, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
-				speed );
-
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed setspeed done" );
-
 		int failed = 0;
 		jthrowable exception = ( *myEnv )->ExceptionOccurred( myEnv );
 		if( exception ) {
-			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setSpeed call" );
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during getPlaybackParams" );
 			( *myEnv )->ExceptionDescribe( myEnv );
 			( *myEnv )->ExceptionClear( myEnv );
 			failed = 1;
 		}
 
-		// set audiotrack's audioparams
-		( *myEnv )
-			->CallVoidMethod( myEnv, audioTrack,
-							  ( *myEnv )
-								  ->GetMethodID( myEnv, at->audiotrackClass, "setPlaybackParams",
-												 "(Landroid/media/PlaybackParams;)V" ),
-							  playbackParams );
-
-		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
-
-		// Catch exceptions from setPlaybackParams (e.g., speed or params out of range)
-		exception = ( *myEnv )->ExceptionOccurred( myEnv );
-		if( exception ) {
-			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setPlaybackParams" );
-			( *myEnv )->ExceptionDescribe( myEnv );
-			( *myEnv )->ExceptionClear( myEnv );
+		if( playbackParams == NULL ) {
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getPlaybackParams returned NULL" );
 			failed = 1;
+		}
+
+		if( !failed ) {
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed playbackparams fetched" );
+
+			// change that audioparam's speed
+			( *myEnv )
+				->CallObjectMethod(
+					myEnv, playbackParams,
+					( *myEnv )
+						->GetMethodID( myEnv, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;" ),
+					speed );
+
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed setspeed done" );
+
+			exception = ( *myEnv )->ExceptionOccurred( myEnv );
+			if( exception ) {
+				ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setSpeed call" );
+				( *myEnv )->ExceptionDescribe( myEnv );
+				( *myEnv )->ExceptionClear( myEnv );
+				failed = 1;
+			}
+		}
+
+		// set audiotrack's audioparams
+		if( !failed ) {
+			( *myEnv )
+				->CallVoidMethod( myEnv, audioTrack,
+								  ( *myEnv )
+									  ->GetMethodID( myEnv, at->audiotrackClass, "setPlaybackParams",
+													 "(Landroid/media/PlaybackParams;)V" ),
+								  playbackParams );
+
+			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
+
+			// Catch exceptions from setPlaybackParams (e.g., speed or params out of range)
+			exception = ( *myEnv )->ExceptionOccurred( myEnv );
+			if( exception ) {
+				ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setPlaybackParams" );
+				( *myEnv )->ExceptionDescribe( myEnv );
+				( *myEnv )->ExceptionClear( myEnv );
+				failed = 1;
+			}
 		}
 
 		int status =

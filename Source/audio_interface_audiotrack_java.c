@@ -1369,6 +1369,15 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audioparams set" );
 
+		// Catch exceptions from setPlaybackParams (e.g., speed or params out of range)
+		exception = ( *myEnv )->ExceptionOccurred( myEnv );
+		if( exception ) {
+			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed exception during setPlaybackParams" );
+			( *myEnv )->ExceptionDescribe( myEnv );
+			( *myEnv )->ExceptionClear( myEnv );
+			failed = 1;
+		}
+
 		int status =
 			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
 									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );

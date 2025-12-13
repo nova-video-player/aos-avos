@@ -394,22 +394,25 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// This filters out the observed ~100ms jitter/noise but catches larger drifts (like 130ms).
 	// On low-latency devices, it clamps to 40ms for tight sync.
 	// For android_sync=1, we use 500ms because videosink_thread has its own finer correction loop.
-	// Test: use the same forgiving threshold as android_sync=1 (500ms) even when android_sync=0
-	int base_threshold = 500;
-	if( !android_sync ) {
-		if( s && s->audio_ctx ) {
-			int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
-			if( audio_latency_ms < 0 ) {
-				audio_latency_ms = 0;
-			}
+	// Threshold strategy:
+	// - android_sync=1: fixed 500ms
+	// - android_sync=0:
+	//   * during speed change/grace: tight diff and smoothed-delay triggers
+	//   * steady state: adaptive threshold scaled to latency, clamped [200, 500], plus smoothed-delay fallback
+	int base_threshold = android_sync ? 500 : 200;
+	if( !android_sync && !(speed_changed || p->post_speed_grace_frames > 0) && s && s->audio_ctx ) {
+		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
+		if( audio_latency_ms < 0 ) {
+			audio_latency_ms = 0;
+		}
+		// Scale with latency (k ~0.5), clamp to [200, 500]
 		int adaptive = audio_latency_ms / 2;
 		if( adaptive < 200 ) {
 			adaptive = 200;
+		} else if( adaptive > 500 ) {
+			adaptive = 500;
 		}
 		base_threshold = adaptive;
-		} else {
-			base_threshold = 200;
-		}
 	}
 
 	int abs_diff = diff;
@@ -422,9 +425,28 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->post_speed_grace_frames = 20;
 	}
 
-	// If drift explodes, allow reanchor even during grace to avoid runaway desync
+	// If drift explodes, allow reanchor even during grace to avoid runaway desync.
 	int allow_reanchor = speed_changed || (abs_diff > base_threshold * 2) ||
 	                     (p->post_speed_grace_frames <= 0 && abs_diff > base_threshold);
+	// For android_sync=0, use smoothed AV delay as a fallback:
+	// - during/after speed changes: trigger if >150ms
+	// - steady state: trigger if > max(250ms, base_threshold)
+	if( !android_sync && s ) {
+		int smoothed = s->smoothed_av_delay;
+		if( (speed_changed || p->post_speed_grace_frames > 0) ) {
+			if( smoothed > 150 ) {
+				allow_reanchor = 1;
+			}
+		} else {
+			int smoothed_trigger = base_threshold;
+			if( smoothed_trigger < 250 ) {
+				smoothed_trigger = 250;
+			}
+			if( smoothed > smoothed_trigger ) {
+				allow_reanchor = 1;
+			}
+		}
+	}
 
 	if( p->post_speed_grace_frames > 0 && !speed_changed ) {
 		p->post_speed_grace_frames--;

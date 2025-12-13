@@ -561,7 +561,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 	}
 	//int high_latency = (audio_latency_ms >= 350); // heuristic cut-over
-        high_latency = 0; // Disable seek based audio speed for high latency device but keep the logic just in case
+        int high_latency = 0; // Disable seek based audio speed for high latency device but keep the logic just in case
 
 	// Check if video is actively playing.
 	int video_active = (s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid);

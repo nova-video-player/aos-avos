@@ -556,8 +556,19 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	s->video_speed_num = target_num;
 	s->video_speed_den = target_den;
 
-	if( s->video_dec && s->video_dec->set_playback_speed ) {
+	int audio_latency_ms = -1;
+	if( s && s->audio_ctx ) {
+		audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
+	}
+	int high_latency = (audio_latency_ms >= 350); // heuristic cut-over
+
+	// Check if video is actively playing.
+	int video_active = (s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid);
+
+	if( video_active ) {
 		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
+		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d high_latency=%d)\n",
+			av_speed, video_active, high_latency );
 	}
 
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
@@ -569,16 +580,14 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		stream_current_time_rst = 0;
 	}
 
-	DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d\n", current_time_ts, stream_current_time_rst );
+	DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d (audio_latency_ms=%d high_latency=%d video_active=%d)\n",
+		current_time_ts, stream_current_time_rst, audio_latency_ms, high_latency, video_active );
 
 	int using_atempo = (s->audio_filter_atempo != NULL);
 	audio_interface_set_using_atempo( using_atempo );
 
 	float applied_speed = av_speed;
 	if( using_atempo ) {
-		// With the software atempo filter we keep AudioTrack at 1.0x and change the
-		// parser timeline instead, so every playback restart must rebuild the
-		// RST->TS mapping even if the requested speed matches the previously cached one.
 		float clamped_speed = av_speed;
 		if( clamped_speed < 0.25f ) {
 			clamped_speed = 0.25f;
@@ -606,6 +615,14 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
 		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
+	}
+
+	if( high_latency && s->parser && s->parser->seekable && s->parser->seekable( s ) &&
+	    stream_current_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
+		DBG serprintf( "stream:stream_set_av_speed high-latency seek realignment to rst=%d (ts=%d)\n",
+			stream_current_time_rst, current_time_ts );
+		stream_seek_time( s, stream_current_time_rst, STREAM_SEEK_BACKWARD, 0 );
+		return 0;
 	}
 
 	if( s->video->valid ) {

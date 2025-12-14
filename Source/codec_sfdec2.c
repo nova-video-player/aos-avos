@@ -670,9 +670,27 @@ DBGSI serprintf(" ok\n");
 						current_offset_ns/1000000LL, passthrough);
 				} else if (!passthrough) {
 					int64_t diff = current_offset_ns - p->render_offset_ns;
-					if (diff > 50000000LL || diff < -50000000LL) {
+					// Adapt drift tolerance to device latency: base 50ms, loosen on high latency up to 200ms
+					int drift_tol_ms = 50;
+					if( s && s->audio_ctx ) {
+						int lat_ms = audio_interface_get_delay( s->audio_ctx );
+						if( lat_ms < 0 ) {
+							lat_ms = 0;
+						}
+						// Allow larger jitter on high-latency devices: use half the latency,
+						// clamped to [200ms, 500ms]
+						int adaptive = lat_ms / 2;
+						if( adaptive < 200 ) {
+							adaptive = 200;
+						} else if( adaptive > 500 ) {
+							adaptive = 500;
+						}
+						drift_tol_ms = adaptive;
+					}
+					int64_t drift_tol_ns = (int64_t)drift_tol_ms * 1000000LL;
+					if (diff > drift_tol_ns || diff < -drift_tol_ns) {
 						p->render_offset_ns = current_offset_ns;
-						DBGSI serprintf("android_sync: offset drift %lld ms, resetting\n", diff/1000000LL);
+						DBGSI serprintf("android_sync: offset drift %lld ms (tol=%d ms), resetting\n", diff/1000000LL, drift_tol_ms);
 					}
 				} else {
 					int64_t diff = current_offset_ns - p->render_offset_ns;

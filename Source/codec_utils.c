@@ -1172,13 +1172,7 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 	                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV420P10LE:
-	                        if (!src_data[0] || !src_data[1] || !src_data[2] || !frame->data[0])
-	                                return;
-	                        I010ToARGB( (uint16_t*)(src_data[0] + start * src_linesize[0]), src_linesize[0] / 2,
-	                                    (uint16_t*)(src_data[1] + (start / 2) * src_linesize[1]), src_linesize[1] / 2,
-	                                    (uint16_t*)(src_data[2] + (start / 2) * src_linesize[2]), src_linesize[2] / 2,
-	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
-	                                    width, height );
+	                        convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] );
 	                        break;
 	                case PIXFMT_P010:
 	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
@@ -1213,13 +1207,7 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 	                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV420P10LE:
-	                        if (!src_data[0] || !src_data[1] || !src_data[2] || !frame->data[0])
-	                                return;
-	                        I010ToABGR( (uint16_t*)(src_data[0] + start * src_linesize[0]), src_linesize[0] / 2,
-	                                    (uint16_t*)(src_data[1] + (start / 2) * src_linesize[1]), src_linesize[1] / 2,
-	                                    (uint16_t*)(src_data[2] + (start / 2) * src_linesize[2]), src_linesize[2] / 2,
-	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
-	                                    width, height );
+	                        convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] );
 	                        break;
 	                case PIXFMT_P010:
 	                        if (!src_data[0] || !src_data[1] || !frame->data[0])

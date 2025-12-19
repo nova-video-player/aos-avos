@@ -30,10 +30,12 @@ using namespace android;
 #define DLHELPER_HEADER "dlhelper_mc.h"
 #include "dlhelper.h"
 
+#include "debug.h"
+
 #include "sfdec_common.h"
 //#include "dump.h"
 
-#define DBG if (0)
+#define DBG if( 0 || Debug[DBG_SINK] > 1 )
 
 #undef LOG
 #define LOG(fmt, ...) do { \

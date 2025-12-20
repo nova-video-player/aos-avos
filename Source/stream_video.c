@@ -2605,6 +2605,9 @@ DBGS serprintf("stream_pause\r\n");
 		}
 
 		stream_audio_mute( s );
+		if ( s->audio_ctx && s->audio_sink_open ) {
+			audio_interface_pause( s->audio_ctx );
+		}
 
 		s->paused = 1;
 	}
@@ -2628,14 +2631,23 @@ serprintf("UNP: not_open\r\n");
 	if ( !was_paused ) {
 DBGS serprintf("stream_un_pause\r\n");
 
-		_stream_resync( s );
+		float audio_speed = audio_interface_get_audio_speed();
+		int using_atempo = audio_interface_is_using_atempo();
+		if ( using_atempo || fabsf(audio_speed - 1.0f) > 1e-6f ) {
+			s->sink_ref_time = -1;
+			stream_sync_restart( s );
+			if ( s->video_sink && s->audio && s->audio->valid && s->audio_time != -1 ) {
+				stream_sync_audio( s, s->audio_time );
+			}
+		} else {
+			_stream_resync( s );
+		}
 
 		// when we unpause, we re-fill the audio sink with 0 samples
 		// so that we are back to the same a2v sync as before
-		float audio_speed = audio_interface_get_audio_speed();
-		int using_atempo = audio_interface_is_using_atempo();
-		if ( stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL &&
-			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f ) {
+		int do_audio_preload = stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL &&
+			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f;
+		if ( do_audio_preload ) {
 			s->audio_preload = 1;
 		} else {
 			s->audio_preload = 0;
@@ -2646,6 +2658,10 @@ DBGS serprintf("stream_un_pause\r\n");
 
 		if ( s->speed == STREAM_SPEED_NORMAL ) {
 			stream_audio_unmute( s );
+		}
+
+		if ( !do_audio_preload && s->audio_ctx && s->audio_sink_open ) {
+			audio_interface_unpause( s->audio_ctx );
 		}
 
 		if ( s->parser && s->parser->pause ) {

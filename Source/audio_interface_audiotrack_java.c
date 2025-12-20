@@ -146,6 +146,38 @@ static inline void call_void_method(audio_ctx_t *at, const char * name, const ch
 	}
 }
 
+static inline void call_void_method_with_env(audio_ctx_t *at, JNIEnv *env, const char *name, const char *signature)
+{
+	DBG2 LOG();
+
+	if (!env) {
+		ERR LOG("call_void_method_with_env: NULL env for method '%s'", name);
+		return;
+	}
+	if (!at->obj) {
+		ERR LOG("AudioTrack object is NULL, cannot call method '%s'", name);
+		return;
+	}
+
+	jmethodID method = (*env)->GetMethodID(env, at->audiotrackClass, name, signature);
+	if (method == NULL || (*env)->ExceptionCheck(env)) {
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionClear(env);
+		}
+		DBG2 LOG("method '%s' not found", name);
+		return;
+	}
+
+	(*env)->CallVoidMethod(env, at->obj, method);
+
+	jthrowable exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR LOG("!!!EXCEPTION");
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+	}
+}
+
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
 	DBG2 LOG();
@@ -1031,12 +1063,35 @@ ERR		LOG("audiotrack_start: track not valid, error");
 		return -1;
 	}
 
-	attach_thread(at);
-
-	// Call AudioTrack.play()
-	call_void_method(at, "play", "()V");
+	JNIEnv *env_local = attach_thread_current_vm();
+	if (!env_local) {
+		return -1;
+	}
+	call_void_method_with_env(at, env_local, "play", "()V");
 
 	return 0;
+}
+
+static int audiotrack_pause(audio_ctx_t *at)
+{
+DBG	LOG("audiotrack_pause: format=%04X, passthrough=%d", at->format, at->passthrough);
+	if (!at->init) {
+ERR		LOG("audiotrack_pause: track not valid, error");
+		return -1;
+	}
+
+	JNIEnv *env_local = attach_thread_current_vm();
+	if (!env_local) {
+		return -1;
+	}
+	call_void_method_with_env(at, env_local, "pause", "()V");
+
+	return 0;
+}
+
+static int audiotrack_unpause(audio_ctx_t *at)
+{
+	return audiotrack_start(at);
 }
 
 static int audiotrack_stop(audio_ctx_t *at)
@@ -1047,8 +1102,11 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	attach_thread(at);
-	call_void_method(at, "stop", "()V");
+	JNIEnv *env_local = attach_thread_current_vm();
+	if (!env_local) {
+		return -1;
+	}
+	call_void_method_with_env(at, env_local, "stop", "()V");
 	at->timestamp_written_offset = at->i_samples_written;
 	at->last_timestamp_frames = 0;
 	at->last_timestamp_ns = 0;
@@ -1500,6 +1558,8 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.close = audiotrack_close,
 	.start = audiotrack_start,
 	.stop = audiotrack_stop,
+	.pause = audiotrack_pause,
+	.unpause = audiotrack_unpause,
 	.can_write = audiotrack_can_write,
 	.write = audiotrack_write,
 	.set_output_params = audiotrack_set_output_params,

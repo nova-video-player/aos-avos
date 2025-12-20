@@ -309,6 +309,16 @@ ERR		LOG("track not valid, error");
 	return 0;
 }
 
+static int audiotrack_pause(audio_ctx_t *at)
+{
+	return audiotrack_stop(at);
+}
+
+static int audiotrack_unpause(audio_ctx_t *at)
+{
+	return audiotrack_start(at);
+}
+
 static int audiotrack_can_write(audio_ctx_t *at, int len)
 {
 	return 1;
@@ -400,6 +410,8 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_new = {
 	.close = audiotrack_close,
 	.start = audiotrack_start,
 	.stop = audiotrack_stop,
+	.pause = audiotrack_pause,
+	.unpause = audiotrack_unpause,
 	.can_write = audiotrack_can_write,
 	.write = audiotrack_write,
 	.set_output_params = audiotrack_set_output_params,

@@ -428,23 +428,13 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// If drift explodes, allow reanchor even during grace to avoid runaway desync.
 	int allow_reanchor = speed_changed || (abs_diff > base_threshold * 2) ||
 	                     (p->post_speed_grace_frames <= 0 && abs_diff > base_threshold);
-	// For android_sync=0, use smoothed AV delay as a fallback:
-	// - during/after speed changes: trigger if >150ms
-	// - steady state: trigger if > max(250ms, base_threshold)
-	if( !android_sync && s ) {
+	// For android_sync=0, use smoothed AV delay ONLY during speed-change transients.
+	// In steady state, smoothed_av_delay reflects stable audio buffering (often 300-400ms)
+	// on high-latency devices and should not force re-anchoring.
+	if( !android_sync && s && (speed_changed || p->post_speed_grace_frames > 0) ) {
 		int smoothed = s->smoothed_av_delay;
-		if( (speed_changed || p->post_speed_grace_frames > 0) ) {
-			if( smoothed > 150 ) {
-				allow_reanchor = 1;
-			}
-		} else {
-			int smoothed_trigger = base_threshold;
-			if( smoothed_trigger < 250 ) {
-				smoothed_trigger = 250;
-			}
-			if( smoothed > smoothed_trigger ) {
-				allow_reanchor = 1;
-			}
+		if( smoothed > 150 ) {
+			allow_reanchor = 1;
 		}
 	}
 
@@ -640,7 +630,27 @@ DBGCV CLOG("stop thread 2");
 				}
 			}
 		// Android sync will happily drop the frames for us
-		} else if ( !android_sync && (blit_duration < -40 && p->dropped < 5) ) {
+		} else if ( !android_sync ) {
+			int audio_delay = 0;
+			int smoothed_delay = 0;
+			if( s ) {
+				smoothed_delay = s->smoothed_av_delay;
+				if( s->audio_ctx ) {
+					audio_delay = audio_interface_get_delay( s->audio_ctx );
+				}
+			}
+			if( audio_delay < 0 ) {
+				audio_delay = 0;
+			}
+			if( smoothed_delay < 0 ) {
+				smoothed_delay = 0;
+			}
+			int latency_ms = MAX( audio_delay, smoothed_delay );
+			int late_threshold = -40;
+			if( latency_ms > 200 ) {
+				late_threshold = -MAX( 40, latency_ms );
+			}
+			if( blit_duration < late_threshold && p->dropped < 5 ) {
 			if( 1 ) {
 				// drop frames if thread is stopped or we are too late (more than 40ms) 
 				// but don't drop too many consecutives frames
@@ -648,8 +658,17 @@ DBGCV CLOG("stop thread 2");
 				p->dropped ++;
 				f->blit_time = -1;
 			}
-DBGSI serprintf(" DROP\n");
+			int audio_time = -1;
+			int video_time = -1;
+			float speed = audio_interface_get_audio_speed();
+			if( s ) {
+				audio_time = s->audio_time;
+				video_time = s->video_time;
+			}
+DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d smoothed=%d audio_delay=%d latency=%d threshold=%d speed=%.3f dropped=%d\n",
+	blit_duration, f->index, f->time, venc_time, audio_time, video_time, smoothed_delay, audio_delay, latency_ms, late_threshold, speed, p->dropped);
 //CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d", f->index, (venc_time - f->blit_time), f->blit_time, venc_time, f->time);
+			}
 		} else {
 DBGSI serprintf(" ok\n");
 		}

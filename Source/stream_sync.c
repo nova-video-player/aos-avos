@@ -165,8 +165,10 @@ int stream_sync_av_delay( STREAM *s )
 #endif
 
 	// atempo filter runs independently of other filters (controls playback speed)
+	int atempo_delay = 0;
 	if( s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
-		filter_delay += s->audio_filter_atempo->delay( s->audio_filter_atempo );
+		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+		filter_delay += atempo_delay;
 	}
 
 	// Filters run in: normal PCM mode OR AC3 recoding mode (all formats)
@@ -199,9 +201,17 @@ int stream_sync_av_delay( STREAM *s )
 		// In sample-based sync, the audio sink's sample counter is the master clock.
 		// The codec_delay is upstream from the sink and not part of this clock,
 		// so it's excluded to prevent an incorrect sync bias.
-		return /*codec_delay +*/ filter_delay + sink_delay - video_delay;
+		int total_delay = /*codec_delay +*/ filter_delay + sink_delay - video_delay;
+DBGY		serprintf("stream_sync_av_delay: samples mode codec=%d filter=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
+			codec_delay, filter_delay, atempo_delay, sink_delay, video_delay, total_delay,
+			audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL, passthrough, ac3_recoding);
+		return total_delay;
 	} else {
-		return codec_delay + filter_delay + sink_delay - video_delay;
+		int total_delay = codec_delay + filter_delay + sink_delay - video_delay;
+DBGY		serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
+			codec_delay, filter_delay, atempo_delay, sink_delay, video_delay, total_delay,
+			audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL, passthrough, ac3_recoding);
+		return total_delay;
 	}
 }
 
@@ -224,7 +234,12 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	//                  = video_time - audio_time + codec_delay + filter_delay + sink_delay - video_delay
 	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
 	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
-	return ( video_time - audio_time ) + stream_sync_av_delay( s ) + RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
+	int sync_delay = stream_sync_av_delay( s );
+	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
+DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
+		video_time, audio_time, sync_delay, s->av_delay, stream_dbg_delay, diff,
+		audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL);
+	return diff;
 }
 
 // ************************************************************
@@ -539,5 +554,3 @@ DECLARE_DEBUG_COMMAND("sxbmc", _stream_toggle_xbmc );
 #endif
 
 #endif
-
-

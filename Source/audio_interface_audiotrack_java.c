@@ -478,9 +478,15 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	uint32_t track_chanmask;
 	audio_format_t track_format;
 	int status = 0;
+	int prev_rate = at->rate;
+	int prev_channels = at->channel_count;
+	int prev_format = at->format;
+	int prev_passthrough = at->passthrough;
+	size_t prev_frame_size = at->frame_size;
 
 	float as = get_effective_audio_speed();
 	int is_audio_speed_enabled = audio_interface_is_audio_speed_enabled();
+	int using_atempo = audio_interface_is_using_atempo();
 
 	// For AC3 recoding, force format to WAVE_FORMAT_AC3 regardless of input format
 	// This ensures AudioTrack is created with AC3 format (2000) instead of original format (e.g., EAC3 18247)
@@ -617,11 +623,65 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		frame_size = (bits / 8) * output_channels;
 	}
 
+	int same_config = 0;
+	if (at->init &&
+		prev_rate == rate &&
+		prev_channels == output_channels &&
+		prev_format == format &&
+		prev_passthrough == at->passthrough &&
+		prev_frame_size == frame_size) {
+		same_config = 1;
+	}
+
 	audio_rate = rate;
 	at->rate = rate;
 	at->channel_count = output_channels;
 	at->frame_size = frame_size;
 	channels = output_channels;
+
+	if (same_config) {
+		DBG LOG("audiotrack_set_output_params: reusing existing track (rate=%d ch=%d fmt=%d passthrough=%d speed=%.3f using_atempo=%d)",
+			rate, output_channels, format, at->passthrough, as, using_atempo);
+		if (!using_atempo && is_audio_speed_enabled && at->passthrough == 0 &&
+			device_get_android_api() >= 23 && fabsf(as - 1.0f) > 1e-6f && at->obj) {
+			jobject playbackParams;
+			jthrowable exception;
+
+			DBG LOG("audiotrack_set_output_params: updating PlaybackParams on existing track");
+			playbackParams = (*at->env)->CallObjectMethod(at->env, at->obj,
+				(*at->env)->GetMethodID(at->env, at->audiotrackClass, "getPlaybackParams", "()Landroid/media/PlaybackParams;"));
+			exception = (*at->env)->ExceptionOccurred(at->env);
+			if (exception) {
+				ERR LOG("exception during getPlaybackParams on existing track");
+				(*at->env)->ExceptionDescribe(at->env);
+				(*at->env)->ExceptionClear(at->env);
+			} else {
+				(*at->env)->CallObjectMethod(at->env, playbackParams,
+					(*at->env)->GetMethodID(at->env, at->playbackParamsClass, "setSpeed", "(F)Landroid/media/PlaybackParams;"), as);
+				exception = (*at->env)->ExceptionOccurred(at->env);
+				if (exception) {
+					ERR LOG("exception during setSpeed on existing track");
+					(*at->env)->ExceptionDescribe(at->env);
+					(*at->env)->ExceptionClear(at->env);
+				} else {
+					(*at->env)->CallVoidMethod(at->env, at->obj,
+						(*at->env)->GetMethodID(at->env, at->audiotrackClass, "setPlaybackParams", "(Landroid/media/PlaybackParams;)V"), playbackParams);
+					exception = (*at->env)->ExceptionOccurred(at->env);
+					if (exception) {
+						ERR LOG("exception during setPlaybackParams on existing track");
+						(*at->env)->ExceptionDescribe(at->env);
+						(*at->env)->ExceptionClear(at->env);
+					} else {
+						DBG LOG("audiotrack_set_output_params: PlaybackParams updated on existing track");
+						return 0;
+					}
+				}
+			}
+		} else {
+			return 0;
+		}
+		// Fall through to recreate if PlaybackParams update failed.
+	}
 
 	int reinit = 0;
 	if( at->init ) {
@@ -646,7 +706,6 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	mode = 1; /*MODE_STREAM*/
 
 	// When using atempo filter, AudioTrack always plays at 1.0x, so no need for larger buffers
-	int using_atempo = audio_interface_is_using_atempo();
 	DBG LOG( "audiotrack_set_output_params: track_format=%d, track_chanmask=0x%x, channelConfig=0x%x (format=%d, passthrough=%d, channels=%d)",
 	         track_format, track_chanmask, channelConfig, at->format, at->passthrough, channels );
 

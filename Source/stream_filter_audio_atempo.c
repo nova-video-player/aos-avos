@@ -59,7 +59,7 @@
 #include <libavutil/audio_fifo.h>
 
 #define DBGA if(Debug[DBG_AUD])
-#define DBG if(0)
+#define DBG if(Debug[DBG_AUD])
 
 // atempo filter constraints (FFmpeg limitation per filter instance)
 #define ATEMPO_MIN 0.5f

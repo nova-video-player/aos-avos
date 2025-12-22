@@ -136,7 +136,8 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 
 	// Flush existing graph before destruction
 	if (ctx->filter_graph && ctx->abuffer_ctx && ctx->abuffersink_ctx) {
-		serprintf("atempo: flushing graph. FIFO size before: %d\n", av_audio_fifo_size(ctx->fifo));
+		DBGA serprintf("atempo: flushing graph. speed=%.3f current=%.3f FIFO size before: %d\n",
+			speed, ctx->current_speed, av_audio_fifo_size(ctx->fifo));
 		// Push EOF to source
 		int ret = av_buffersrc_add_frame(ctx->abuffer_ctx, NULL);
 		if (ret < 0) {
@@ -386,9 +387,11 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	// Initialize filter graph on first call or rebuild if speed changed
 	if (!ctx->filter_initialized || fabsf(ctx->current_speed - speed) > 0.001f) {
 		if (!ctx->filter_initialized) {
-			DBGA serprintf("atempo: initializing filter graph with speed %.3f\n", speed);
+			DBGA serprintf("atempo: initializing filter graph with speed %.3f (fifo=%d)\n",
+				speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
 		} else {
-			DBGA serprintf("atempo: speed changed %.3f -> %.3f\n", ctx->current_speed, speed);
+			DBGA serprintf("atempo: speed changed %.3f -> %.3f (fifo=%d)\n",
+				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
 		}
 		if (rebuild_filter_graph(ctx, speed) < 0) {
 			serprintf("atempo: failed to rebuild filter graph\n");

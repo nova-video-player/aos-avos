@@ -473,6 +473,7 @@ DBGS serprintf("~");
 					msec_sleep( 10 );
 					stream_yield_RT();
 				}
+				stream_maybe_apply_pending_av_speed( s );
 
 				out_of_audio = 0;
 

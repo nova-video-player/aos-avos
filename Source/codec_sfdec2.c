@@ -1286,7 +1286,9 @@ static int videodec_set_playback_speed(struct STREAM_DEC_VIDEO *dec, int den, in
 	    	p->playback_speed_den = den;
 	    if( num )
 	    	p->playback_speed_num = num;
-	    return sfdec_set_playback_speed(p->sfdec, den, num);
+	    int rc = sfdec_set_playback_speed(p->sfdec, den, num);
+	    DBGSI serprintf("sfdec2: set_playback_speed den=%d num=%d rc=%d\n", den, num, rc);
+	    return rc;
 }
 
 

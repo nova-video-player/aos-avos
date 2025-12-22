@@ -235,10 +235,11 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
 	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
 	int sync_delay = stream_sync_av_delay( s );
+	int using_atempo = (s->audio_filter_atempo != NULL);
 	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
 DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
 		video_time, audio_time, sync_delay, s->av_delay, stream_dbg_delay, diff,
-		audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL);
+		audio_interface_get_audio_speed(), using_atempo);
 	return diff;
 }
 

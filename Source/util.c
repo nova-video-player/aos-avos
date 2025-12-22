@@ -584,6 +584,9 @@ void timeline_map_apply( double rst_anchor_ms, double ts_anchor_ms, float speed 
 		speed = 1.0f;
 	}
 
+	DBG serprintf( "timeline_map_apply: rst=%.3f ts=%.3f speed=%.3f\n",
+		rst_anchor_ms, ts_anchor_ms, speed );
+
 	timeline_state_t new_state;
 	new_state.rst_anchor = rst_anchor_ms;
 	new_state.ts_anchor = ts_anchor_ms;

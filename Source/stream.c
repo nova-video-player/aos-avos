@@ -739,8 +739,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
 			// Align to what will be heard (audio_time minus buffered delay), not raw audio_time.
 			int anchor_delay = s->smoothed_av_delay;
+			int sync_delay = stream_sync_av_delay( s );
 			if( anchor_delay < 0 ) {
-				anchor_delay = stream_sync_av_delay( s );
+				anchor_delay = sync_delay;
 			}
 			int anchor_time = s->audio_time - anchor_delay -
 				RST_TO_TS_DELTA( s->av_delay, int );
@@ -750,8 +751,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			if( s->video_sink && s->video_sink->put_time ) {
 				s->video_sink->put_time( s->video_sink, anchor_time );
 			}
-			DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d\n",
-				s->audio_time, anchor_time );
+			DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d smoothed=%d sync_delay=%d\n",
+				s->audio_time, anchor_time, s->smoothed_av_delay, sync_delay );
 		} else {
 			// Restart the sink/sync reference so `_real_time()` and the Android sink stay
 			// aligned with the freshly applied timeline mapping.

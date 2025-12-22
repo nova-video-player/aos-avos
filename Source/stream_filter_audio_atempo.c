@@ -27,7 +27,7 @@
  * - Works on all Android API levels (no PlaybackParams dependency)
  * - Handles PCM audio in various sample formats
  * - Dynamic filter chaining keeps each atempo instance within its supported range
- * - Automatic filter graph rebuilding on speed changes
+ * - Runtime tempo updates (no graph rebuild on speed changes)
  *
  * Architecture:
  * - When atempo is active, timeline mapping is DISABLED
@@ -90,6 +90,31 @@ struct ctx {
     uint8_t *output_buffer;             // Temporary buffer for filtered PCM
     int output_buffer_size;             // Size of temporary buffer in bytes
 };
+
+static int atempo_update_speed(struct ctx *ctx, float speed)
+{
+	if (!ctx || !ctx->filter_graph || !ctx->atempo_ctx) {
+		return -1;
+	}
+
+	char arg[32];
+	char res[128];
+	snprintf(arg, sizeof(arg), "%.6f", speed);
+
+	int rc = avfilter_graph_send_command(ctx->filter_graph, "atempo0", "tempo",
+		arg, res, sizeof(res), 0);
+	if (rc < 0) {
+		DBGA serprintf("atempo: runtime tempo update failed speed=%.3f rc=%d\n", speed, rc);
+		return rc;
+	}
+
+	DBGA serprintf("atempo: runtime tempo update %.3f -> %.3f\n", ctx->current_speed, speed);
+	DBGA serprintf("atempo: runtime tempo fifo_samples=%d fifo_ms=%d\n",
+		ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1,
+		ctx->fifo ? (av_audio_fifo_size(ctx->fifo) * 1000) / ctx->sample_rate : -1);
+	ctx->current_speed = speed;
+	return 0;
+}
 
 static void ctx_free(struct ctx *ctx)
 {
@@ -383,19 +408,32 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	// Get current speed from audio interface
 	float speed = audio_interface_is_audio_speed_enabled() ?
 		audio_interface_get_audio_speed() : 1.0f;
+	if (speed < SPEED_MIN) {
+		speed = SPEED_MIN;
+	} else if (speed > SPEED_MAX) {
+		speed = SPEED_MAX;
+	}
 
-	// Initialize filter graph on first call or rebuild if speed changed
+	// Initialize filter graph on first call or update speed at runtime
 	if (!ctx->filter_initialized || fabsf(ctx->current_speed - speed) > 0.001f) {
 		if (!ctx->filter_initialized) {
 			DBGA serprintf("atempo: initializing filter graph with speed %.3f (fifo=%d)\n",
 				speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
+		}
+		if (!ctx->filter_initialized) {
+			if (rebuild_filter_graph(ctx, speed) < 0) {
+				serprintf("atempo: failed to rebuild filter graph\n");
+				return -1;
+			}
 		} else {
 			DBGA serprintf("atempo: speed changed %.3f -> %.3f (fifo=%d)\n",
 				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
-		}
-		if (rebuild_filter_graph(ctx, speed) < 0) {
-			serprintf("atempo: failed to rebuild filter graph\n");
-			return -1;
+			if (atempo_update_speed(ctx, speed) < 0) {
+				if (rebuild_filter_graph(ctx, speed) < 0) {
+					serprintf("atempo: failed to rebuild filter graph\n");
+					return -1;
+				}
+			}
 		}
 	}
 

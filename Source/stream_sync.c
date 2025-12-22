@@ -170,6 +170,9 @@ int stream_sync_av_delay( STREAM *s )
 		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
 		filter_delay += atempo_delay;
 	}
+	DBGY serprintf("stream_sync_av_delay: atempo_delay=%d filter_atempo=%p delay_fn=%p\n",
+		atempo_delay, s->audio_filter_atempo,
+		s->audio_filter_atempo ? s->audio_filter_atempo->delay : NULL);
 
 	// Filters run in: normal PCM mode OR AC3 recoding mode (all formats)
 	int run_filter = (!passthrough || ac3_recoding);

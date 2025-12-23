@@ -1296,8 +1296,15 @@ DBG2		LOG("Timestamp reset detected, offset=%llu", (unsigned long long)at->times
 	int64_t frames_pending = (int64_t)frames_written_adjusted - (int64_t)frames_presented;
 
 	if (frames_pending < 0) {
-		// This can happen if framePosition wraps around (32-bit) or during initialization
-		frames_pending = 0;
+		// Presented cannot exceed written in steady state. Treat as a bad timestamp
+		// sample (e.g., wraparound or reset) and fallback to the playhead estimate.
+DBG2		LOG("Bad timestamp sample (presented > written): presented=%llu written=%llu, using fallback latency: %d ms",
+			(unsigned long long)frames_presented,
+			(unsigned long long)frames_written_adjusted,
+			fallback_delay);
+		at->ts_success_streak = 0;
+		at->ts_use_timestamp = 0;
+		return fallback_delay;
 	}
 
 	// Convert frames to milliseconds: frames / (rate / 1000) = frames * 1000 / rate

@@ -3607,10 +3607,6 @@ DECODE_AGAIN:
 		pthread_mutex_unlock( &s->video_sink_mutex );
 	}
 
-	if( s->pending_av_speed_valid ) {
-		stream_maybe_apply_pending_av_speed( s );
-	}
-
 	_do_stuff( s );
 
 	if( !s->play_n_video_frames ) {

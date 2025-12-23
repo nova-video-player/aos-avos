@@ -821,8 +821,6 @@ int	stream_set_progress_handler ( STREAM *s, PROGRESS_HANDLER progress   );
 int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
 int	stream_set_av_speed         ( STREAM *s, float av_speed );
-int	stream_can_apply_av_speed   ( STREAM *s );
-void	stream_maybe_apply_pending_av_speed( STREAM *s );
 
 int 	stream_set_crypt( STREAM *s, int crypt, void *key );
 void 	stream_set_size( STREAM *s, UINT64 size );

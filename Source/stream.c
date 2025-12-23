@@ -530,87 +530,6 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 extern void _stream_resync( STREAM *s );
 
-static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
-{
-	if( !s || !s->video_sink || !s->video_sink->put_time || audio_time_ts < 0 )
-		return;
-
-	s->video_sink->put_time( s->video_sink, audio_time_ts );
-	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d\n",
-		audio_time_ts, audio_time_ts );
-}
-
-int stream_can_apply_av_speed( STREAM *s )
-{
-	if( !s ) {
-		return 0;
-	}
-
-	if( s->paused ) {
-		return 1;
-	}
-
-	if( !s->video || !s->video->valid ) {
-		return 1;
-	}
-
-	if( s->video_sink_count > 0 ) {
-		return 0;
-	}
-
-	if( frame_q_count( &s->disp_q ) > 0 ) {
-		return 0;
-	}
-
-	return 1;
-}
-
-static const int stream_av_speed_debounce_ms = 200;
-
-void stream_maybe_apply_pending_av_speed( STREAM *s )
-{
-	if( !s || !s->pending_av_speed_valid ) {
-		return;
-	}
-	DBG serprintf( "stream:stream_set_av_speed check pending=%.3f\n", s->pending_av_speed );
-
-	if( s->pending_av_speed_request_ms > 0 ) {
-		int now = atime();
-		if( now - s->pending_av_speed_request_ms < stream_av_speed_debounce_ms ) {
-			DBG serprintf( "stream:stream_set_av_speed waiting debounce now=%d req_ms=%d delta=%dms\n",
-				now, s->pending_av_speed_request_ms, now - s->pending_av_speed_request_ms );
-			return;
-		}
-	}
-
-	if( !stream_can_apply_av_speed( s ) ) {
-		DBG serprintf( "stream:stream_set_av_speed waiting drain sink=%d disp_q=%d\n",
-			s->video_sink_count, frame_q_count( &s->disp_q ) );
-		return;
-	}
-
-	if( s->video && s->video->valid && s->video_time != -1 && s->pending_av_speed_anchor_ts > 0 ) {
-		int margin = s->video->msPerFrame > 0 ? s->video->msPerFrame : 40;
-		if( margin > 100 ) {
-			margin = 100;
-		}
-		if( s->video_time < (s->pending_av_speed_anchor_ts - margin) ) {
-			DBG serprintf( "stream:stream_set_av_speed waiting anchor v=%d anchor=%d margin=%d\n",
-				s->video_time, s->pending_av_speed_anchor_ts, margin );
-			return;
-		}
-	}
-
-	float pending = s->pending_av_speed;
-	s->pending_av_speed_valid = 0;
-	s->pending_av_speed_request_ms = 0;
-	DBG serprintf( "stream:stream_set_av_speed applying deferred speed=%.3f (v=%d a=%d delay=%d)\n",
-		pending, s->video_time, s->audio_time, s->smoothed_av_delay );
-	s->applying_pending_av_speed = 1;
-	stream_set_av_speed( s, pending );
-	s->applying_pending_av_speed = 0;
-}
-
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
@@ -642,36 +561,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}
-
-	// Defer atempo speed changes so old timeline frames drain before re-anchoring.
-	if( using_atempo && !s->applying_pending_av_speed ) {
-		if( s->pending_av_speed_valid ) {
-			float previous = s->pending_av_speed;
-			s->pending_av_speed = av_speed;
-		DBG serprintf( "stream:stream_set_av_speed coalesced speed=%.3f->%.3f (sink=%d disp_q=%d anchor_ts=%d v=%d a=%d delay=%d)\n",
-			previous, av_speed, s->video_sink_count, frame_q_count( &s->disp_q ),
-			s->pending_av_speed_anchor_ts, s->video_time, s->audio_time, s->smoothed_av_delay );
-		return 0;
-	}
-
-		int anchor_delay = s->smoothed_av_delay;
-		if( anchor_delay < 0 ) {
-			anchor_delay = stream_sync_av_delay( s );
-		}
-		int anchor_ts = current_time_ts - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
-		if( anchor_ts < 0 ) {
-			anchor_ts = 0;
-		}
-		s->pending_av_speed = av_speed;
-		s->pending_av_speed_valid = 1;
-		s->pending_av_speed_anchor_ts = anchor_ts;
-		s->pending_av_speed_request_ms = atime();
-		DBG serprintf( "stream:stream_set_av_speed deferring speed=%.3f (sink=%d disp_q=%d anchor_ts=%d v=%d a=%d delay=%d)\n",
-			av_speed, s->video_sink_count, frame_q_count( &s->disp_q ), anchor_ts,
-			s->video_time, s->audio_time, s->smoothed_av_delay );
-		return 0;
-	}
-	s->pending_av_speed_valid = 0;
 
 	int target_num = (int)( av_speed * 100 + 0.5f );
 	int target_den = 100;

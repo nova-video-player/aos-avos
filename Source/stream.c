@@ -73,6 +73,49 @@ static int default_stream_buffer_size = 24;
 // 1024 * 1536 * 4 = 6 * 1024 * 1024
 static int default_video_mindata_size = VIDEO_MINDATA_SIZE;
 
+static int stream_should_defer_av_speed( STREAM *s, int anchor_ts )
+{
+	if( !s || !s->video || !s->video->valid ) {
+		return 0;
+	}
+	if( s->paused ) {
+		return 0;
+	}
+	if( s->video_time >= 0 && anchor_ts >= 0 ) {
+		int video_ts = (int)rst_to_ts_time( (double)s->video_time );
+		if( video_ts + 50 < anchor_ts ) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void stream_maybe_apply_pending_av_speed( STREAM *s )
+{
+	if( !s || !s->pending_av_speed_valid ) {
+		return;
+	}
+	int anchor_ts = s->pending_av_speed_anchor_ts;
+	if( !s->paused && stream_should_defer_av_speed( s, anchor_ts ) ) {
+		int now_ms = atime();
+		int elapsed = (s->pending_av_speed_request_ms > 0) ?
+			(now_ms - s->pending_av_speed_request_ms) : 0;
+		// Debounce rapid key presses to avoid thrashing.
+		if( elapsed < 250 ) {
+			return;
+		}
+		return;
+	}
+	float target_speed = s->pending_av_speed;
+	s->pending_av_speed_valid = 0;
+	s->pending_av_speed_request_ms = 0;
+	s->applying_pending_av_speed = 1;
+	DBG serprintf( "stream:stream_set_av_speed applying deferred speed=%.3f anchor_ts=%d\n",
+		target_speed, s->pending_av_speed_anchor_ts );
+	stream_set_av_speed( s, target_speed );
+	s->applying_pending_av_speed = 0;
+}
+
 
 // ************************************************************
 //
@@ -584,6 +627,24 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		current_time_ts, stream_current_time_rst, audio_latency_ms, high_latency, video_active );
 
 	float applied_speed = av_speed;
+	if( using_atempo && !high_latency ) {
+		if( !s->applying_pending_av_speed && s->audio_time >= 0 &&
+		    stream_should_defer_av_speed( s, current_time_ts ) ) {
+			if( s->pending_av_speed_valid ) {
+				DBG serprintf( "stream:stream_set_av_speed coalesce pending speed=%.3f -> %.3f\n",
+					s->pending_av_speed, av_speed );
+			} else {
+				DBG serprintf( "stream:stream_set_av_speed defer speed=%.3f\n", av_speed );
+			}
+			s->pending_av_speed = av_speed;
+			s->pending_av_speed_valid = 1;
+			s->pending_av_speed_anchor_ts = current_time_ts;
+			if( !s->pending_av_speed_request_ms ) {
+				s->pending_av_speed_request_ms = atime();
+			}
+			return 0;
+		}
+	}
 	if( using_atempo ) {
 		float clamped_speed = av_speed;
 		if( clamped_speed < 0.25f ) {

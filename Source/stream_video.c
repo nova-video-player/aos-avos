@@ -3612,6 +3612,7 @@ DECODE_AGAIN:
 	}
 
 	_do_stuff( s );
+	stream_maybe_apply_pending_av_speed( s );
 
 	if( !s->play_n_video_frames ) {
 		// return if paused
@@ -4005,6 +4006,7 @@ static void _stream_player_async( STREAM *s )
 	}
 	
 	_do_stuff( s );
+	stream_maybe_apply_pending_av_speed( s );
 
 	if( !s->play_n_video_frames ) {
 		// return if paused

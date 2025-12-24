@@ -457,14 +457,29 @@ serprintf("audio_skip(%d)!\r\n", cdata.time);
 
 				if( s->sync_mode == STREAM_SYNC_SAMPLES && s->speed == STREAM_SPEED_NORMAL ) {
 					if( s->audio_ref_time == -1 && cdata.time != STREAM_NO_PTS_VALUE ) {
-						s->audio_ref_time = cdata.time;
+						int ref_time = cdata.time;
+						if( s->audio_filter_atempo ) {
+							ref_time = (int)rst_to_ts_time( (double)ref_time );
+						}
+						s->audio_ref_time = ref_time;
 						s->audio_samples  = 0;
-						_set_audio_time( s, cdata.time );
+						_set_audio_time( s, ref_time );
 DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 					}
 				} else {
 					if( cdata.time != STREAM_NO_PTS_VALUE ) {
-						_set_audio_time( s, cdata.time );
+						int time_ts = cdata.time;
+						if( s->audio_filter_atempo ) {
+							time_ts = (int)rst_to_ts_time( (double)time_ts );
+							// In atempo mode, only seed audio_time once; after that,
+							// sample-driven updates keep it in TS domain.
+							if( s->audio_time != -1 ) {
+								time_ts = -1;
+							}
+						}
+						if( time_ts != -1 ) {
+							_set_audio_time( s, time_ts );
+						}
 					}
 				}
 
@@ -999,6 +1014,27 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						audio_frame.format, audio_frame.size);
 					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG serprintf("stream_audio: sink->write returned %d\n", size_written);
+					if( size_written <= 0 ) {
+						// AudioTrack can occasionally return 0 or -1 (buffer full / transient error).
+						// Avoid a tight loop that grows the remaining size and causes audible dropouts.
+						static const int max_write_retries = 10;
+						static const int retry_sleep_ms = 5;
+						int retries = 0;
+						while( size_written <= 0 && retries < max_write_retries ) {
+							retries++;
+							stream_yield_RT();
+							msec_sleep( retry_sleep_ms );
+							size_written = s->audio_sink->write( s, &audio_frame );
+							DBG serprintf("stream_audio: retry write returned %d (retry %d)\n",
+								size_written, retries);
+						}
+						if( size_written <= 0 ) {
+							ERR serprintf("stream_audio: write failed after %d retries, dropping %d bytes\n",
+								max_write_retries, audio_frame.size);
+							// Drop remaining data for this chunk to avoid stalling audio.
+							break;
+						}
+					}
 
 					if( s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time

@@ -605,6 +605,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		current_time_ts = 0;
 	}
 
+	int heard_audio_ts = current_time_ts;
+
 	// Calculate the "Real Stream Time" (media position) at the anchor point.
 	// For atempo, we trust the audio TS and define the media position based on the NEW speed.
 	// This "re-zeros" any accumulated drift from previous speed segments.
@@ -618,8 +620,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}
-
-	int heard_audio_ts = current_time_ts;
 
 
 	int target_num = (int)( av_speed * 100 + 0.5f );

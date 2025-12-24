@@ -604,18 +604,22 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( current_time_ts < 0 ) {
 		current_time_ts = 0;
 	}
-	// For atempo, current_time_ts is the heard audio position in TS.
-	// The new timeline map should have RST=TS at the anchor (identity mapping at that point).
-	// For non-atempo, convert TS back to RST using old map for continuity.
+
+	// Calculate the "Real Stream Time" (media position) at the anchor point.
+	// For atempo, we want an identity mapping at the anchor (RST=TS).
+	// For non-atempo, we convert using the OLD map to maintain continuity.
 	int stream_current_time_rst;
 	if( using_atempo ) {
-		stream_current_time_rst = current_time_ts;  // Identity at anchor
+		stream_current_time_rst = current_time_ts;
 	} else {
 		stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
 	}
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}
+
+	int heard_audio_ts = current_time_ts;
+
 
 	int target_num = (int)( av_speed * 100 + 0.5f );
 	int target_den = 100;
@@ -667,9 +671,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		audio_interface_set_audio_speed( clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed apply atempo speed=%.3f (audio_time=%d video_time=%d)\n",
 			clamped_speed, s->audio_time, s->video_time );
-		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, clamped_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)heard_audio_ts, clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
-				   stream_current_time_rst, current_time_ts, clamped_speed );
+				   stream_current_time_rst, heard_audio_ts, clamped_speed );
 		applied_speed = clamped_speed;
 	} else {
 		float previous_speed = audio_interface_get_audio_speed();
@@ -677,7 +681,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
-					   stream_current_time_rst, current_time_ts, applied_speed, rc );
+					   stream_current_time_rst, heard_audio_ts, applied_speed, rc );
 			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
 				serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
 					   av_speed, applied_speed, rc );
@@ -686,31 +690,30 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			applied_speed = previous_speed;
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
-		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)heard_audio_ts, applied_speed );
 	}
 
 	if( high_latency && s->parser && s->parser->seekable && s->parser->seekable( s ) &&
 	    stream_current_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
 		DBG serprintf( "stream:stream_set_av_speed high-latency seek realignment to rst=%d (ts=%d)\n",
-			stream_current_time_rst, current_time_ts );
+			stream_current_time_rst, heard_audio_ts );
 		stream_seek_time( s, stream_current_time_rst, STREAM_SEEK_BACKWARD, 0 );
 		return 0;
 	}
 
 	if( s->video->valid ) {
 		if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
-			// Use the same "heard audio" position (current_time_ts) for sink anchoring.
-			// This was already computed above as audio_time - anchor_delay, ensuring
-			// timeline and sink anchors are unified to the same TS position.
-			int anchor_time = current_time_ts - RST_TO_TS_DELTA( s->av_delay, int );
+			// Use the same "heard audio" position (heard_audio_ts) for sink anchoring.
+			// This was already computed above, ensuring timeline and sink anchors are unified.
+			int anchor_time = heard_audio_ts - RST_TO_TS_DELTA( s->av_delay, int );
 			if( anchor_time < 0 ) {
 				anchor_time = 0;
 			}
 			if( s->video_sink && s->video_sink->put_time ) {
 				s->video_sink->put_time( s->video_sink, anchor_time );
 			}
-			DBG serprintf( "stream:stream_set_av_speed anchored video sink to heard_ts=%d put_time=%d (unified anchor)\n",
-				current_time_ts, anchor_time );
+			DBG serprintf( "stream:stream_set_av_speed anchored video sink to unified heard_ts=%d put_time=%d\n",
+				heard_audio_ts, anchor_time );
 		} else {
 			// Restart the sink/sync reference so `_real_time()` and the Android sink stay
 			// aligned with the freshly applied timeline mapping.

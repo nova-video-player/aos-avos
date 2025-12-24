@@ -151,13 +151,10 @@ int stream_sync_av_delay( STREAM *s )
 		return 0;
 	} 
 	
-	// audio data passes through decoder, filters, and sink
-	// audio decoder delay is measured in media time; in atempo mode convert to TS.
+	// audio decoder delay is measured in media time (RST)
 	int codec_delay = s->audio_dec ? s->audio_dec->delay( s->audio ) : 0;
 
-	// filter delay is a mix of media-time (most filters) and TS (atempo output),
-	// so we keep atempo separate to scale correctly in TS.
-	// Only count delays from filters that are actually being applied
+	// filter delay is a mix of media-time (most filters) and TS (atempo output)
 	int filter_delay = 0;
 	int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	int ac3_recoding = 0;
@@ -165,20 +162,16 @@ int stream_sync_av_delay( STREAM *s )
 	ac3_recoding = libavos_get_ac3_recoding_enabled();
 #endif
 
-	// atempo filter runs independently of other filters (controls playback speed)
+	// atempo filter delay is already in the TS (wall-clock) domain
 	int atempo_delay = 0;
 	if( s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
 		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
-		filter_delay += atempo_delay;
 	}
-	DBGY serprintf("stream_sync_av_delay: atempo_delay=%d filter_atempo=%p delay_fn=%p\n",
-		atempo_delay, s->audio_filter_atempo,
-		s->audio_filter_atempo ? s->audio_filter_atempo->delay : NULL);
 
-	// Filters run in: normal PCM mode OR AC3 recoding mode (all formats)
+	// Filters run in: normal PCM mode OR AC3 recoding mode
 	int run_filter = (!passthrough || ac3_recoding);
 	if( run_filter ) {
-		// Sum delays from filters that are actually applied
+		// Sum delays from RST-domain filters
 		if( s->audio_filter_compress && s->audio_filter_compress->delay ) {
 			filter_delay += s->audio_filter_compress->delay( s->audio_filter_compress );
 		}
@@ -190,45 +183,38 @@ int stream_sync_av_delay( STREAM *s )
 		}
 	}
 
-	int using_atempo = (s->audio_filter_atempo != NULL);
-	if( using_atempo ) {
-		// Scale media-time delays into TS for consistent comparisons.
-		int other_filter_delay = filter_delay - atempo_delay;
-		if( other_filter_delay < 0 ) {
-			other_filter_delay = 0;
-		}
-		codec_delay = RST_TO_TS_DELTA( codec_delay, int );
-		other_filter_delay = RST_TO_TS_DELTA( other_filter_delay, int );
-		filter_delay = other_filter_delay + atempo_delay;
-	}
+	// Domain Conversion: ensure everything is in the TS (wall-clock) domain.
+	// codec_delay and other_filter_delay are RST; sink and atempo are TS.
+	int codec_delay_ts = RST_TO_TS_DELTA( codec_delay, int );
+	int filter_delay_ts = RST_TO_TS_DELTA( filter_delay, int ) + atempo_delay;
 
-	// world time audio sink delay (audiotrack system_delay on android) not dependant on audio speed
+	// world time audio sink delay (AudioTrack latency) is already TS (wall-clock)
 	int sink_delay = s->audio_sink ? s->audio_sink->delay( s ) : 0;
-	// wold time video sink delay not dependant on audio speed
+	
+	// world time video sink delay is already TS (wall-clock)
 	int video_delay;
 	if( s->vtime_post_sink ) {
-		// we sample after the sink, so the time stamps are the one we get out of the sink
 		video_delay = 0;
 	} else {
-		// we sample before the sink, so the video frames have to pass through the sink
 	  	video_delay = ( s->video_sink && s->video_sink->delay )  ? s->video_sink->delay( s->video_sink ) : 0;
  	}
+
+	int total_delay = codec_delay_ts + filter_delay_ts + sink_delay - video_delay;
+
 	if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 		// In sample-based sync, the audio sink's sample counter is the master clock.
-		// The codec_delay is upstream from the sink and not part of this clock,
-		// so it's excluded to prevent an incorrect sync bias.
-		int total_delay = /*codec_delay +*/ filter_delay + sink_delay - video_delay;
-DBGY		serprintf("stream_sync_av_delay: samples mode codec=%d filter=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
-			codec_delay, filter_delay, atempo_delay, sink_delay, video_delay, total_delay,
-			audio_interface_get_audio_speed(), using_atempo, passthrough, ac3_recoding);
-		return total_delay;
+		// The codec_delay is upstream from the sink and not part of this clock.
+		total_delay -= codec_delay_ts;
+DBGY		serprintf("stream_sync_av_delay: samples mode codec_ts=%d filter_ts=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f\n",
+			codec_delay_ts, filter_delay_ts, atempo_delay, sink_delay, video_delay, total_delay,
+			audio_interface_get_audio_speed());
 	} else {
-		int total_delay = codec_delay + filter_delay + sink_delay - video_delay;
-DBGY		serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
-			codec_delay, filter_delay, atempo_delay, sink_delay, video_delay, total_delay,
-			audio_interface_get_audio_speed(), using_atempo, passthrough, ac3_recoding);
-		return total_delay;
+DBGY		serprintf("stream_sync_av_delay: codec_ts=%d filter_ts=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f\n",
+			codec_delay_ts, filter_delay_ts, atempo_delay, sink_delay, video_delay, total_delay,
+			audio_interface_get_audio_speed());
 	}
+	return total_delay;
+}
 }
 
 // ************************************************************
@@ -242,35 +228,31 @@ DBGY		serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d vi
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
-	// Computes video presentation time - audio presentation time
-	// Positive value means video is ahead of audio, negative means audio is ahead
-	// Formula accounts for buffering delays: audio/video timestamps represent generation time,
-	// but actual presentation happens later after passing through decoder/filter/sink pipelines
-	// So the formula is: ( video_time - video_delay ) - ( audio_time - ( codec_delay + filter_delay + sink_delay ) )
-	//                  = video_time - audio_time + codec_delay + filter_delay + sink_delay - video_delay
-	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
-	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
 	int sync_delay = stream_sync_av_delay( s );
 	int using_atempo = (s->audio_filter_atempo != NULL);
-	int video_ts = -1;
 	int offset_ts = RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
-	int diff_delay = sync_delay;
-	if( using_atempo && s->smoothed_av_delay >= 0 ) {
-		// Prefer the smoothed delay to represent "heard audio" in TS.
-		if( s->smoothed_av_delay > diff_delay ) {
-			diff_delay = s->smoothed_av_delay;
-		}
-	}
 	int diff;
+
 	if( using_atempo ) {
-		video_ts = (int)rst_to_ts_time( (double)video_time );
-		diff = ( video_ts - audio_time ) + diff_delay + offset_ts;
+		// Convert video_time (RST) to TS domain for comparison
+		int video_ts = (int)rst_to_ts_time( (double)video_time );
+		
+		// Use smoothed delay for stability, incorporating user offset.
+		// Formula: Video_ts - ( Audio_ts - Latency )
+		// We take the MAX of (latency + offset) and smoothed latency to avoid 
+		// negative bias during jittery transitions.
+		int used_delay = MAX( sync_delay + offset_ts, s->smoothed_av_delay );
+
+		diff = video_ts - ( audio_time - used_delay );
 	} else {
-		diff = ( video_time - audio_time ) + diff_delay + offset_ts;
+		// Original logic for non-atempo mode: everything is in RST.
+		// Use s->delay (smoothed sync error) for non-atempo continuity.
+		diff = video_time - ( audio_time - s->delay - ( s->av_delay + stream_dbg_delay ) );
 	}
-DBGY	serprintf("stream_av_diff: v=%d v_ts=%d a=%d sync_delay=%d used_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
-		video_time, video_ts, audio_time, sync_delay, diff_delay, s->av_delay, stream_dbg_delay, diff,
-		audio_interface_get_audio_speed(), using_atempo);
+
+	DBGY serprintf("stream_av_diff: v=%d a=%d diff=%d speed=%.3f using_atempo=%d\n",
+		video_time, audio_time, diff, audio_interface_get_audio_speed(), using_atempo);
+	
 	return diff;
 }
 

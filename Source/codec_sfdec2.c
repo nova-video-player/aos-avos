@@ -409,27 +409,25 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// Reset scheduling anchors if we are too far off (e.g. seek) or if speed changed explicitly.
 	// For android_sync=0, we use an adaptive threshold based on total AV latency.
-	// On high-latency devices (e.g. 468ms), latency/4 gives ~117ms tolerance.
-	// This filters out the observed ~100ms jitter/noise but catches larger drifts (like 130ms).
-	// On low-latency devices, it clamps to 40ms for tight sync.
-	// For android_sync=1, we use 500ms because videosink_thread has its own finer correction loop.
+	// On high-latency devices, measuring latency/2 gives a safe tolerance window.
+	// This filters out observed jitter while catching true drift.
 	// Threshold strategy:
 	// - android_sync=1: fixed 500ms
 	// - android_sync=0:
 	//   * during speed change/grace: tight diff and smoothed-delay triggers
-	//   * steady state: adaptive threshold scaled to latency, clamped [200, 500], plus smoothed-delay fallback
-	int base_threshold = android_sync ? 500 : 200;
+	//   * steady state: adaptive threshold scaled to latency, clamped [250, 750]
+	int base_threshold = android_sync ? 500 : 250;
 	if( !android_sync && !(speed_changed || p->post_speed_grace_frames > 0) && s && s->audio_ctx ) {
 		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 		if( audio_latency_ms < 0 ) {
 			audio_latency_ms = 0;
 		}
-		// Scale with latency (k ~0.5), clamp to [200, 500]
+		// Scale with latency (k ~0.5), clamp to [250, 750]
 		int adaptive = audio_latency_ms / 2;
-		if( adaptive < 200 ) {
-			adaptive = 200;
-		} else if( adaptive > 500 ) {
-			adaptive = 500;
+		if( adaptive < 250 ) {
+			adaptive = 250;
+		} else if( adaptive > 750 ) {
+			adaptive = 750;
 		}
 		base_threshold = adaptive;
 	}

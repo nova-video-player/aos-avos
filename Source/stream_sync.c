@@ -215,7 +215,6 @@ DBGY		serprintf("stream_sync_av_delay: codec_ts=%d filter_ts=%d (atempo=%d) sink
 	}
 	return total_delay;
 }
-}
 
 // ************************************************************
 //

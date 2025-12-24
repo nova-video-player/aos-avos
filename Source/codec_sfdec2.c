@@ -398,11 +398,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// Threshold strategy:
 	// - android_sync=1: fixed 500ms
 	// - android_sync=0:
-	//   * during speed change/grace: tight diff trigger
 	//   * steady state (normal): adaptive threshold scaled to latency, clamped [250, 750]
 	//   * steady state (atempo): Authoritative tight 50ms threshold (scaled by speed)
 	int base_threshold = android_sync ? 500 : 250;
-	if( !android_sync && !(speed_changed || p->post_speed_grace_frames > 0) && s && s->audio_ctx ) {
+	if( !android_sync && s && s->audio_ctx ) {
 		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 		if( audio_latency_ms < 0 ) {
 			audio_latency_ms = 0;
@@ -422,29 +421,31 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 	}
 
-	// Steady state "Trust" logic for android_sync=0:
-	// If we are not in a speed transition and drift is within the tight threshold,
-	// do NOT perform a Hard Reset of the wall-clock anchors. The soft nudge to 
-	// venc_put_time above is enough to track minor jitter.
-	if( !android_sync && !speed_changed && p->post_speed_grace_frames <= 0 && 
-	    abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
+	// 1. Initial Speed Change: Establish master anchor and start grace period.
+	if( speed_changed ) {
+		p->post_speed_grace_frames = 20;
+		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor\n");
+	} 
+	// 2. Grace Period: Trust the master anchor established above. Strictly block resets.
+	else if( !android_sync && p->post_speed_grace_frames > 0 ) {
+		p->post_speed_grace_frames--;
 		pthread_mutex_lock(&p->locked.mtx);
 		p->passthrough_cached = passthrough;
 		pthread_mutex_unlock(&p->locked.mtx);
+		// Return 0: trust current scheduling anchors during transition
+		return 0;
+	}
+	// 3. Steady State: Skip Hard Reset if drift is within the tight threshold.
+	else if( !android_sync && abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
+		pthread_mutex_lock(&p->locked.mtx);
+		p->passthrough_cached = passthrough;
+		pthread_mutex_unlock(&p->locked.mtx);
+		// Return 0: minor jitter handled by soft venc_put_time update above.
 		return 0;
 	}
 
-	// Grace window after speed change
-	if( speed_changed ) {
-		p->post_speed_grace_frames = 20;
-	}
-
-	// Re-anchor (Hard Reset) if speed changed OR drift exceeds our strict threshold.
+	// Re-anchor (Hard Reset) only if speed changed OR drift exceeds our strict threshold.
 	int allow_reanchor = speed_changed || (abs_diff > base_threshold);
-
-	if( p->post_speed_grace_frames > 0 && !speed_changed ) {
-		p->post_speed_grace_frames--;
-	}
 
 	if (allow_reanchor) {
 		pthread_mutex_lock(&p->locked.mtx);

@@ -485,7 +485,7 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 
 				while( !_abort( s ) && stream_sync_audio( s, s->audio_time ) ) {
 DBGS serprintf("~");
-					msec_sleep( 10 );
+					msec_sleep( 2 );
 					stream_yield_RT();
 				}
 				out_of_audio = 0;

@@ -427,7 +427,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor\n");
 	} 
 	// 2. Grace Period: Trust the master anchor established above. Strictly block resets.
-	else if( !android_sync && p->post_speed_grace_frames > 0 ) {
+	// NOTE: We allow the reset to proceed if frames_left is exactly 20, ensuring the 
+	// very first call after a speed change (the authoritative anchor) is applied.
+	else if( !android_sync && p->post_speed_grace_frames > 0 && p->post_speed_grace_frames < 20 ) {
 		p->post_speed_grace_frames--;
 		pthread_mutex_lock(&p->locked.mtx);
 		p->passthrough_cached = passthrough;

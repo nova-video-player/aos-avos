@@ -606,9 +606,15 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	// Calculate the "Real Stream Time" (media position) at the anchor point.
-	// We convert the playback time (TS) back to media time (RST) using the 
-	// CURRENT mapping before we apply the new one. This ensures media continuity.
-	int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+	// For atempo, we trust the audio TS and define the media position based on the NEW speed.
+	// This "re-zeros" any accumulated drift from previous speed segments.
+	int stream_current_time_rst;
+	if (using_atempo) {
+		stream_current_time_rst = (int)( (double)heard_audio_ts * av_speed );
+	} else {
+		stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+	}
+
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}

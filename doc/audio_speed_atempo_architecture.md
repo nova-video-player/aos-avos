@@ -296,6 +296,26 @@ Example at 48 kHz, 1.5x speed:
 - atempo_delay = 5120 samples = 107ms
 - real_delay = 107 / 1.5 = ~71ms
 
+### 7. A/V Diff Uses "Heard Audio" (TS)
+
+When atempo is active, `audio_time` is already in TS (wall-clock) and
+`video_time` is in RST. The sync diff must compare **video_ts** against the
+audio timeline **as heard by the user**, not the audio write-head.
+
+Implementation uses:
+
+```c
+video_ts = rst_to_ts_time(video_time);
+diff = video_ts - audio_time + used_delay;
+```
+
+Where `used_delay` is the larger of:
+- `stream_sync_av_delay()` (raw sink + filter delay, TS), and
+- `smoothed_av_delay` (stabilized estimate of heard audio delay).
+
+This avoids a persistent negative bias (~200ms on low-latency devices) that
+appears when raw delay is too small after a speed change.
+
 ## atempo Filter Implementation
 
 ### FFmpeg Filter Graph

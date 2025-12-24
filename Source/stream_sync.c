@@ -254,15 +254,22 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	int using_atempo = (s->audio_filter_atempo != NULL);
 	int video_ts = -1;
 	int offset_ts = RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
+	int diff_delay = sync_delay;
+	if( using_atempo && s->smoothed_av_delay >= 0 ) {
+		// Prefer the smoothed delay to represent "heard audio" in TS.
+		if( s->smoothed_av_delay > diff_delay ) {
+			diff_delay = s->smoothed_av_delay;
+		}
+	}
 	int diff;
 	if( using_atempo ) {
 		video_ts = (int)rst_to_ts_time( (double)video_time );
-		diff = ( video_ts - audio_time ) + sync_delay + offset_ts;
+		diff = ( video_ts - audio_time ) + diff_delay + offset_ts;
 	} else {
-		diff = ( video_time - audio_time ) + sync_delay + offset_ts;
+		diff = ( video_time - audio_time ) + diff_delay + offset_ts;
 	}
-DBGY	serprintf("stream_av_diff: v=%d v_ts=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
-		video_time, video_ts, audio_time, sync_delay, s->av_delay, stream_dbg_delay, diff,
+DBGY	serprintf("stream_av_diff: v=%d v_ts=%d a=%d sync_delay=%d used_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
+		video_time, video_ts, audio_time, sync_delay, diff_delay, s->av_delay, stream_dbg_delay, diff,
 		audio_interface_get_audio_speed(), using_atempo);
 	return diff;
 }
@@ -327,10 +334,24 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	// if audio is in the future, delay it (but only if significantly ahead)
 	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
 
-	// In atempo mode, audio is the master clock - allow it to lead by up to 500ms wall-clock
-	// to prevent runaway buffering while respecting audio-master behavior.
-	// diff is already in TS (wall-clock) domain when atempo is active, so use a fixed TS threshold.
-	int threshold_ts = s->audio_filter_atempo ? -500 : 0;
+	// In atempo mode, audio is the master clock - but throttle based on device latency.
+	// diff is already in TS (wall-clock) domain when atempo is active.
+	// Use adaptive threshold: allow audio to lead by ~2x buffering delay, clamped to reasonable range.
+	int threshold_ts = 0;
+	if( s->audio_filter_atempo ) {
+		// Base threshold on actual device latency (smoothed_av_delay)
+		int latency_based = -(s->smoothed_av_delay * 2 + 50);
+		// Clamp to reasonable range: -150ms (low latency) to -350ms (high latency)
+		if( latency_based < -350 ) {
+			latency_based = -350;
+		}
+		if( latency_based > -150 ) {
+			latency_based = -150;
+		}
+		threshold_ts = latency_based;
+		DBGY serprintf("stream_sync_audio: atempo diff=%d threshold=%dms (smoothed=%dms v=%d a=%d)\n",
+			diff, threshold_ts, s->smoothed_av_delay, s->sync_v_time, s->sync_a_time);
+	}
 
 	// Only block audio if it's significantly ahead (more than threshold)
 	if( diff < threshold_ts ) {
@@ -338,9 +359,12 @@ DBGY serprintf("{{A %d}} ", diff );
 		s->sync_video = 0;
 		return 1;
 	}
-	// allow audio to play from now on
-	s->sync_audio = 0;
-	
+	// In normal mode: allow audio to play from now on (disable continuous checking).
+	// In atempo mode: keep checking every frame to prevent runaway drift.
+	if( !s->audio_filter_atempo ) {
+		s->sync_audio = 0;
+	}
+
 	return 0;
 }
 

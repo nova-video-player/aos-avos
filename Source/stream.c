@@ -594,13 +594,25 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
 	if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
-		// In atempo mode, audio_time is the master TS clock for timeline anchoring.
-		current_time_ts = s->audio_time;
+		// In atempo mode, anchor to the "heard" audio position (audio_time - buffered delay).
+		// This ensures timeline and sink anchors are unified, preventing offset drift.
+		int anchor_delay = (s->smoothed_av_delay > 0) ? s->smoothed_av_delay : stream_sync_av_delay(s);
+		current_time_ts = s->audio_time - anchor_delay;
+		DBG serprintf( "stream:stream_set_av_speed atempo anchor: audio_time=%d anchor_delay=%d heard_ts=%d\n",
+			s->audio_time, anchor_delay, current_time_ts );
 	}
 	if( current_time_ts < 0 ) {
 		current_time_ts = 0;
 	}
-	int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+	// For atempo, current_time_ts is the heard audio position in TS.
+	// The new timeline map should have RST=TS at the anchor (identity mapping at that point).
+	// For non-atempo, convert TS back to RST using old map for continuity.
+	int stream_current_time_rst;
+	if( using_atempo ) {
+		stream_current_time_rst = current_time_ts;  // Identity at anchor
+	} else {
+		stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+	}
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}
@@ -687,22 +699,18 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 
 	if( s->video->valid ) {
 		if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
-			// Align to what will be heard (audio_time minus buffered delay), not raw audio_time.
-			int anchor_delay = s->smoothed_av_delay;
-			int sync_delay = stream_sync_av_delay( s );
-			if( anchor_delay < 0 ) {
-				anchor_delay = sync_delay;
-			}
-			int anchor_time = s->audio_time - anchor_delay -
-				RST_TO_TS_DELTA( s->av_delay, int );
+			// Use the same "heard audio" position (current_time_ts) for sink anchoring.
+			// This was already computed above as audio_time - anchor_delay, ensuring
+			// timeline and sink anchors are unified to the same TS position.
+			int anchor_time = current_time_ts - RST_TO_TS_DELTA( s->av_delay, int );
 			if( anchor_time < 0 ) {
 				anchor_time = 0;
 			}
 			if( s->video_sink && s->video_sink->put_time ) {
 				s->video_sink->put_time( s->video_sink, anchor_time );
 			}
-			DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d smoothed=%d sync_delay=%d\n",
-				s->audio_time, anchor_time, s->smoothed_av_delay, sync_delay );
+			DBG serprintf( "stream:stream_set_av_speed anchored video sink to heard_ts=%d put_time=%d (unified anchor)\n",
+				current_time_ts, anchor_time );
 		} else {
 			// Restart the sink/sync reference so `_real_time()` and the Android sink stay
 			// aligned with the freshly applied timeline mapping.

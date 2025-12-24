@@ -393,13 +393,15 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		abs_diff = -abs_diff;
 	}
 
-	int using_atempo = (s && s->audio_filter_atempo != NULL);
+	// Atempo is active if speed is non-1.0. We use this instead of checking the filter 
+	// existence to ensure stability during the transition period.
+	int using_atempo = (fabsf(current_speed - 1.0f) > 0.001f);
 
 	// Threshold strategy:
 	// - android_sync=1: fixed 500ms
 	// - android_sync=0:
 	//   * steady state (normal): adaptive threshold scaled to latency, clamped [250, 750]
-	//   * steady state (atempo): Authoritative tight 50ms threshold (scaled by speed)
+	//   * steady state (atempo): Authoritative massive 500ms threshold
 	int base_threshold = android_sync ? 500 : 250;
 	if( !android_sync && s && s->audio_ctx ) {
 		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
@@ -408,11 +410,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 
 		if (using_atempo) {
-			// Atempo is authoritative. Use a tight 50ms baseline.
-			int adaptive = (int)( 50.0f * current_speed );
-			if( adaptive < 50 ) adaptive = 50;
-			if( adaptive > 150 ) adaptive = 150;
-			base_threshold = adaptive;
+			// In atempo mode, we trust the master clock.
+			base_threshold = 500;
 		} else {
 			int adaptive = audio_latency_ms / 2;
 			if( adaptive < 250 ) adaptive = 250;
@@ -423,22 +422,22 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// 1. Initial Speed Change: Establish master anchor and start grace period.
 	if( speed_changed ) {
-		p->post_speed_grace_frames = 20;
+		p->post_speed_grace_frames = 50; // Extended grace for bursty catch-up
 		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor\n");
 	} 
 	// 2. Grace Period & Steady State Deference:
 	// For atempo, we trust the master clock established during speed change.
-	// We strictly block independent Hard Resets during the grace period and steady state,
-	// unless drift is massive (> 500ms).
+	// We strictly block independent Hard Resets unless drift is massive (> 500ms).
 	else if( !android_sync && using_atempo ) {
 		if (p->post_speed_grace_frames > 0) {
 			p->post_speed_grace_frames--;
 		}
 		
-		if (abs_diff < 500 && p->sched_start_off_ns != 0) {
+		if (abs_diff < base_threshold && p->sched_start_off_ns != 0) {
 			pthread_mutex_lock(&p->locked.mtx);
 			p->passthrough_cached = passthrough;
 			pthread_mutex_unlock(&p->locked.mtx);
+			// Defer to master clock
 			return 0;
 		}
 	}
@@ -459,7 +458,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 
 	// Re-anchor (Hard Reset) only if speed changed OR drift exceeds our strict thresholds.
-	int allow_reanchor = speed_changed || (abs_diff > (using_atempo ? 500 : base_threshold));
+	int allow_reanchor = speed_changed || (abs_diff > base_threshold);
 
 	if (allow_reanchor) {
 		pthread_mutex_lock(&p->locked.mtx);

@@ -317,17 +317,17 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 
 	// In atempo mode, audio is the master clock - but throttle based on device latency.
 	// diff is already in TS (wall-clock) domain when atempo is active.
-	// Use adaptive threshold: allow audio to lead by ~2x buffering delay, clamped to reasonable range.
+	// Use adaptive threshold: allow audio to lead by ~2x buffering delay + 100ms margin.
 	int threshold_ts = 0;
 	if( s->audio_filter_atempo ) {
 		// Base threshold on actual device latency (smoothed_av_delay)
-		int latency_based = -(s->smoothed_av_delay * 2 + 50);
-		// Clamp to reasonable range: -150ms (low latency) to -350ms (high latency)
-		if( latency_based < -350 ) {
-			latency_based = -350;
+		int latency_based = -(s->smoothed_av_delay * 2 + 100);
+		// Clamp to reasonable range: -250ms (low latency) to -500ms (high latency)
+		if( latency_based < -500 ) {
+			latency_based = -500;
 		}
-		if( latency_based > -150 ) {
-			latency_based = -150;
+		if( latency_based > -250 ) {
+			latency_based = -250;
 		}
 		threshold_ts = latency_based;
 		DBGY serprintf("stream_sync_audio: atempo diff=%d threshold=%dms (smoothed=%dms v=%d a=%d)\n",
@@ -340,11 +340,8 @@ DBGY serprintf("{{A %d}} ", diff );
 		s->sync_video = 0;
 		return 1;
 	}
-	// In normal mode: allow audio to play from now on (disable continuous checking).
-	// In atempo mode: keep checking every frame to prevent runaway drift.
-	if( !s->audio_filter_atempo ) {
-		s->sync_audio = 0;
-	}
+	// allow audio to play from now on
+	s->sync_audio = 0;
 
 	return 0;
 }

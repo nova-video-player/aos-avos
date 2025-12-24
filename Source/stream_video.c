@@ -2715,10 +2715,12 @@ static int _real_time( STREAM *s, int frame_time )
 
 	switch( s->speed ) {
 	case STREAM_SPEED_NORMAL: {
-		// For variable speed, we pass the TS value directly to the sink.
-		// `s->vid_ref_time + (frame_time - s->vid_ref_time)` simplifies to `frame_time`.
-		// return s->vid_ref_time + RST_TO_TS( frame_time - s->vid_ref_time, int );
-		return frame_time;
+		// For variable speed with atempo, convert RST frame_time to TS via timeline map.
+		// The sink needs TS timestamps to pace frames correctly in wall-clock domain.
+		int ts_time = RST_TO_TS_TIME( frame_time, int );
+		DBG2 serprintf( "_real_time: converting frame_time=%d(RST) -> ts_time=%d(TS) speed=%.3f\n",
+			frame_time, ts_time, audio_interface_get_audio_speed() );
+		return ts_time;
 	} break;
 
 	case STREAM_SPEED_SLOW_2: mul = 2; break;
@@ -2933,7 +2935,8 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
-					s->video_time += RST_TO_TS_DELTA(s->video->msPerFrame, int);
+					// video_time must stay in RST domain (unscaled media time)
+					s->video_time += s->video->msPerFrame;
 				}
 			} else if( s->drop < 0 ) {
 				// double one frame
@@ -2944,7 +2947,8 @@ DBGY serprintf("[-%8d] ", frame->time );
 					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
-					s->video_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
+					// video_time must stay in RST domain (unscaled media time)
+					s->video_time -= s->video->msPerFrame;
 				}
 			} else {	
 DBGY serprintf("[ %8d] ", frame->time );

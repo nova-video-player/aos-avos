@@ -403,21 +403,36 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// - android_sync=1: fixed 500ms
 	// - android_sync=0:
 	//   * during speed change/grace: tight diff and smoothed-delay triggers
-	//   * steady state: adaptive threshold scaled to latency, clamped [250, 750]
+	//   * steady state (normal): adaptive threshold scaled to latency, clamped [250, 750]
+	//   * steady state (atempo): TIGHT adaptive threshold, clamped [60, 150] (scaled by speed)
 	int base_threshold = android_sync ? 500 : 250;
 	if( !android_sync && !(speed_changed || p->post_speed_grace_frames > 0) && s && s->audio_ctx ) {
 		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 		if( audio_latency_ms < 0 ) {
 			audio_latency_ms = 0;
 		}
-		// Scale with latency (k ~0.5), clamp to [250, 750]
-		int adaptive = audio_latency_ms / 2;
-		if( adaptive < 250 ) {
-			adaptive = 250;
-		} else if( adaptive > 750 ) {
-			adaptive = 750;
+
+		if (using_atempo) {
+			// Atempo requires tight precision. Base threshold on latency/4, clamp to [60, 150].
+			// Loosen slightly as speed increases to account for compounding cadence errors.
+			float speed = current_speed;
+			int adaptive = (int)( (audio_latency_ms / 4) * speed );
+			if( adaptive < 60 ) {
+				adaptive = 60;
+			} else if( adaptive > 150 ) {
+				adaptive = 150;
+			}
+			base_threshold = adaptive;
+		} else {
+			// Legacy non-atempo mode: scale with latency (k ~0.5), clamp to [250, 750]
+			int adaptive = audio_latency_ms / 2;
+			if( adaptive < 250 ) {
+				adaptive = 250;
+			} else if( adaptive > 750 ) {
+				adaptive = 750;
+			}
+			base_threshold = adaptive;
 		}
-		base_threshold = adaptive;
 	}
 
 	// Grace window after speed change: suppress threshold-based reanchors for a few frames

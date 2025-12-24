@@ -413,12 +413,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 
 		if (using_atempo) {
-			// Atempo requires tight precision. Base threshold on latency/4, clamp to [60, 150].
-			// Loosen slightly as speed increases to account for compounding cadence errors.
-			float speed = current_speed;
-			int adaptive = (int)( (audio_latency_ms / 4) * speed );
-			if( adaptive < 60 ) {
-				adaptive = 60;
+			// Atempo is authoritative and monotonic. Use a tight 50ms jitter-based threshold.
+			// Scale by speed to maintain a consistent ~2 frame tolerance window.
+			int adaptive = (int)( 50.0f * current_speed );
+			// Clamp to [50, 150] to prevent runaway desync while allowing for high-speed cadance.
+			if( adaptive < 50 ) {
+				adaptive = 50;
 			} else if( adaptive > 150 ) {
 				adaptive = 150;
 			}

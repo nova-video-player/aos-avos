@@ -426,36 +426,39 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->post_speed_grace_frames = 20;
 		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor\n");
 	} 
-	// 2. Grace Period: Trust the master anchor established above. Strictly block resets.
-	// NOTE: We allow the reset to proceed if frames_left is exactly 20, ensuring the 
-	// very first call after a speed change (the authoritative anchor) is applied.
-	else if( !android_sync && p->post_speed_grace_frames > 0 && p->post_speed_grace_frames < 20 ) {
+	// 2. Grace Period & Steady State Deference:
+	// For atempo, we trust the master clock established during speed change.
+	// We strictly block independent Hard Resets during the grace period and steady state,
+	// unless drift is massive (> 500ms).
+	else if( !android_sync && using_atempo ) {
+		if (p->post_speed_grace_frames > 0) {
+			p->post_speed_grace_frames--;
+		}
+		
+		if (abs_diff < 500 && p->sched_start_off_ns != 0) {
+			pthread_mutex_lock(&p->locked.mtx);
+			p->passthrough_cached = passthrough;
+			pthread_mutex_unlock(&p->locked.mtx);
+			return 0;
+		}
+	}
+	// 3. Normal Mode Grace Period: Strictly block resets during transition.
+	else if( !android_sync && p->post_speed_grace_frames > 0 ) {
 		p->post_speed_grace_frames--;
 		pthread_mutex_lock(&p->locked.mtx);
 		p->passthrough_cached = passthrough;
 		pthread_mutex_unlock(&p->locked.mtx);
-		// Return 0: trust current scheduling anchors during transition
 		return 0;
 	}
-	// 3. Steady State Atempo: DEFER to the master clock.
-	// Since TS timestamps are already audio-anchored by the player thread, 
-	// independent re-anchoring only adds noise and causes discontinuities.
-	// We only allow a Hard Reset if drift is massive (> 500ms).
-	else if( !android_sync && using_atempo && abs_diff < 500 && p->sched_start_off_ns != 0 ) {
-		pthread_mutex_lock(&p->locked.mtx);
-		p->passthrough_cached = passthrough;
-		pthread_mutex_unlock(&p->locked.mtx);
-		return 0;
-	}
-	// 4. Steady State Normal: Use the tight adaptive threshold.
-	else if( !android_sync && !using_atempo && abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
+	// 4. Normal Mode Steady State: Use tight adaptive threshold.
+	else if( !android_sync && abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
 		pthread_mutex_lock(&p->locked.mtx);
 		p->passthrough_cached = passthrough;
 		pthread_mutex_unlock(&p->locked.mtx);
 		return 0;
 	}
 
-	// Re-anchor (Hard Reset) only if speed changed OR drift exceeds our deference thresholds.
+	// Re-anchor (Hard Reset) only if speed changed OR drift exceeds our strict thresholds.
 	int allow_reanchor = speed_changed || (abs_diff > (using_atempo ? 500 : base_threshold));
 
 	if (allow_reanchor) {

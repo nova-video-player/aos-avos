@@ -650,11 +650,21 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	int video_active = (s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid);
 
 	if( video_active ) {
+		// Pre-anchor: flush video queue to drop stale RST frames that were decoded for the old speed.
+		if( using_atempo && s->video_dec->flush_buffers ) {
+			s->video_dec->flush_buffers( s->video_dec );
+		}
+
 		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d (v=%d a=%d delay=%d)\n",
 			target_den, target_num, s->video_time, s->audio_time, s->smoothed_av_delay );
 		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
 		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d high_latency=%d)\n",
 			av_speed, video_active, high_latency );
+
+		// Reset video_time to match the new heard_ts anchor.
+		if (using_atempo) {
+			s->video_time = stream_current_time_rst;
+		}
 	}
 
 	s->video_speed_num = target_num;

@@ -61,6 +61,7 @@ typedef struct STREAM_DEC_VIDEO {
 	DEC_VIDEO_GET_OUT get_out;
 	DEC_VIDEO_SEEK    seek;
 	DEC_VIDEO_FLUSH   flush;
+	DEC_VIDEO_FLUSH   flush_buffers;
 	DEC_VIDEO_GET_RC  get_rc;
 	DEC_VIDEO_RENDER  render;
 	DEC_VIDEO_NEED_REALLOC need_realloc;

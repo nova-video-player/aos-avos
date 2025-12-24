@@ -146,7 +146,6 @@ typedef struct priv {
 	int64_t render_offset_ns;
 	float last_av_speed;
 	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
-	int post_speed_grace_frames;
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -273,7 +272,9 @@ static int videosink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void
 	sink->ctx = ctx;
 	priv_t *p = (priv_t *) sink->priv;
 	p->last_av_speed = 1.0f;
-	p->post_speed_grace_frames = 0;
+	if (ctx) {
+		((STREAM *)ctx)->post_speed_grace_frames = 0;
+	}
 
 	pthread_mutex_lock(&p->locked.mtx);
 	int i;
@@ -423,16 +424,16 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// 1. Initial Speed Change: Establish master anchor and start grace period.
 	if( speed_changed ) {
-		p->post_speed_grace_frames = 40; // Extended grace for bursty catch-up
-		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor (grace=%d)\n", p->post_speed_grace_frames);
+		s->post_speed_grace_frames = 60; // Extended grace for bursty catch-up
+		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor (grace=%d)\n", s->post_speed_grace_frames);
 	} 
 	// 2. Grace Period & Steady State Deference:
 	// For atempo, we trust the master clock established during speed change.
 	// We strictly block independent Hard Resets unless drift is massive.
 	else if( !android_sync && using_atempo ) {
-		if (p->post_speed_grace_frames > 0) {
-			p->post_speed_grace_frames--;
-			DBGSI serprintf("videosink_put_time: speed-stable-frames: %d\n", p->post_speed_grace_frames);
+		if (s->post_speed_grace_frames > 0) {
+			s->post_speed_grace_frames--;
+			DBGSI serprintf("videosink_put_time: speed-stable-frames: %d (grace-active suppress)\n", s->post_speed_grace_frames);
 		}
 		
 		if (abs_diff < base_threshold && p->sched_start_off_ns != 0) {
@@ -444,8 +445,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 	}
 	// 3. Normal Mode Grace Period: Strictly block resets during transition.
-	else if( !android_sync && p->post_speed_grace_frames > 0 ) {
-		p->post_speed_grace_frames--;
+	else if( !android_sync && s->post_speed_grace_frames > 0 ) {
+		s->post_speed_grace_frames--;
 		pthread_mutex_lock(&p->locked.mtx);
 		p->passthrough_cached = passthrough;
 		pthread_mutex_unlock(&p->locked.mtx);
@@ -1082,7 +1083,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->prev_paused = 0;
 	p->render_offset_ns = -1;
 	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
-	p->post_speed_grace_frames = 0;
+	if (dec->ctx) {
+		((STREAM *)dec->ctx)->post_speed_grace_frames = 0;
+	}
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;
@@ -1268,6 +1271,11 @@ DBGCV CLOG("MediaCodec seek reset");
 	return 0;
 }
 
+static int videodec_flush_buffers(STREAM_DEC_VIDEO *dec)
+{
+	return videodec_flush(dec);
+}
+
 static int videodec_get_rc(STREAM_DEC_VIDEO *dec, STREAM_RC *rc)
 {
 	if( !rc )
@@ -1326,6 +1334,7 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	dec->put_out	= videodec_put_out;
 	dec->get_out	= videodec_get_out;
 	dec->flush	= videodec_flush;
+	dec->flush_buffers = videodec_flush_buffers;
 	dec->get_rc	= videodec_get_rc;
 	dec->get_sink	= videodec_get_sink;
 	dec->async	= 1;

@@ -246,6 +246,11 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 		// Stability clamp: take the MAX of measured latency and (smoothed latency - 50ms).
 		int used_delay = MAX( sync_delay, s->smoothed_av_delay - 50 ) + offset_ts;
 
+		// Grace bias: during speed change transition, atempo introduces a ~100ms spike.
+		if( s->post_speed_grace_frames > 0 ) {
+			used_delay += 100;
+		}
+
 		diff = video_ts - ( audio_time - used_delay );
 	} else {
 		// Original logic for non-atempo mode: everything is in RST.

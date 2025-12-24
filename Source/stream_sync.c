@@ -166,6 +166,11 @@ int stream_sync_av_delay( STREAM *s )
 	int atempo_delay = 0;
 	if( s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
 		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+		// Defensive fallback: if atempo is active but reports 0 delay (warmup phase),
+		// use a standard estimate based on 48kHz WSOLA (approx 100ms).
+		if( atempo_delay == 0 ) {
+			atempo_delay = 100;
+		}
 	}
 
 	// Filters run in: normal PCM mode OR AC3 recoding mode

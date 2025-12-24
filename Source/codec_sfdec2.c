@@ -395,18 +395,6 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	int using_atempo = (s && s->audio_filter_atempo != NULL);
 
-	// Steady state atempo awareness for android_sync=0:
-	// If playback is stable (no speed change, grace period over) and drift is within 
-	// reasonable limits (500ms), trust the master anchors and skip the Hard Reset 
-	// of scheduling variables. Soft nudges (venc_put_time) were already applied above.
-	if( !android_sync && using_atempo && !speed_changed && p->post_speed_grace_frames <= 0 && 
-	    abs_diff < 500 && p->sched_start_off_ns != 0 ) {
-		pthread_mutex_lock(&p->locked.mtx);
-		p->passthrough_cached = passthrough;
-		pthread_mutex_unlock(&p->locked.mtx);
-		return 0;
-	}
-
 	// Reset scheduling anchors if we are too far off (e.g. seek) or if speed changed explicitly.
 	// For android_sync=0, we use an adaptive threshold based on total AV latency.
 	// On high-latency devices, measuring latency/2 gives a safe tolerance window.
@@ -443,8 +431,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// For android_sync=0, use smoothed AV delay ONLY during speed-change transients.
 	// In steady state, smoothed_av_delay reflects stable audio buffering (often 300-400ms)
 	// on high-latency devices and should not force re-anchoring.
-	// If using_atempo, we trust the master anchor and disable this reactive secondary trigger.
-	if( !android_sync && s && !using_atempo && (speed_changed || p->post_speed_grace_frames > 0) ) {
+	if( !android_sync && s && (speed_changed || p->post_speed_grace_frames > 0) ) {
 		int smoothed = s->smoothed_av_delay;
 		if( smoothed > 150 ) {
 			allow_reanchor = 1;

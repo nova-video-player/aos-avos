@@ -638,24 +638,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		current_time_ts, stream_current_time_rst, audio_latency_ms, high_latency, video_active );
 
 	float applied_speed = av_speed;
-	if( using_atempo && !high_latency ) {
-		if( !s->applying_pending_av_speed && s->audio_time >= 0 &&
-		    stream_should_defer_av_speed( s, current_time_ts ) ) {
-			if( s->pending_av_speed_valid ) {
-				DBG serprintf( "stream:stream_set_av_speed coalesce pending speed=%.3f -> %.3f\n",
-					s->pending_av_speed, av_speed );
-			} else {
-				DBG serprintf( "stream:stream_set_av_speed defer speed=%.3f\n", av_speed );
-			}
-			s->pending_av_speed = av_speed;
-			s->pending_av_speed_valid = 1;
-			s->pending_av_speed_anchor_ts = current_time_ts;
-			if( !s->pending_av_speed_request_ms ) {
-				s->pending_av_speed_request_ms = atime();
-			}
-			return 0;
-		}
-	}
 	if( using_atempo ) {
 		float clamped_speed = av_speed;
 		if( clamped_speed < 0.25f ) {

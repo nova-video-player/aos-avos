@@ -395,16 +395,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	int using_atempo = (s && s->audio_filter_atempo != NULL);
 
-	// Reset scheduling anchors if we are too far off (e.g. seek) or if speed changed explicitly.
-	// For android_sync=0, we use an adaptive threshold based on total AV latency.
-	// On high-latency devices, measuring latency/2 gives a safe tolerance window.
-	// This filters out observed jitter while catching true drift.
 	// Threshold strategy:
 	// - android_sync=1: fixed 500ms
 	// - android_sync=0:
-	//   * during speed change/grace: tight diff and smoothed-delay triggers
+	//   * during speed change/grace: tight diff trigger
 	//   * steady state (normal): adaptive threshold scaled to latency, clamped [250, 750]
-	//   * steady state (atempo): TIGHT adaptive threshold, clamped [60, 150] (scaled by speed)
+	//   * steady state (atempo): Authoritative tight 50ms threshold (scaled by speed)
 	int base_threshold = android_sync ? 500 : 250;
 	if( !android_sync && !(speed_changed || p->post_speed_grace_frames > 0) && s && s->audio_ctx ) {
 		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
@@ -413,50 +409,41 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 
 		if (using_atempo) {
-			// Atempo is authoritative and monotonic. Use a tight 50ms jitter-based threshold.
-			// Scale by speed to maintain a consistent ~2 frame tolerance window.
+			// Atempo is authoritative. Use a tight 50ms baseline.
 			int adaptive = (int)( 50.0f * current_speed );
-			// Clamp to [50, 150] to prevent runaway desync while allowing for high-speed cadance.
-			if( adaptive < 50 ) {
-				adaptive = 50;
-			} else if( adaptive > 150 ) {
-				adaptive = 150;
-			}
+			if( adaptive < 50 ) adaptive = 50;
+			if( adaptive > 150 ) adaptive = 150;
 			base_threshold = adaptive;
 		} else {
-			// Legacy non-atempo mode: scale with latency (k ~0.5), clamp to [250, 750]
 			int adaptive = audio_latency_ms / 2;
-			if( adaptive < 250 ) {
-				adaptive = 250;
-			} else if( adaptive > 750 ) {
-				adaptive = 750;
-			}
+			if( adaptive < 250 ) adaptive = 250;
+			if( adaptive > 750 ) adaptive = 750;
 			base_threshold = adaptive;
 		}
 	}
 
-	// Grace window after speed change: suppress threshold-based reanchors for a few frames
+	// Steady state "Trust" logic for android_sync=0:
+	// If we are not in a speed transition and drift is within the tight threshold,
+	// do NOT perform a Hard Reset of the wall-clock anchors. The soft nudge to 
+	// venc_put_time above is enough to track minor jitter.
+	if( !android_sync && !speed_changed && p->post_speed_grace_frames <= 0 && 
+	    abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
+		pthread_mutex_lock(&p->locked.mtx);
+		p->passthrough_cached = passthrough;
+		pthread_mutex_unlock(&p->locked.mtx);
+		return 0;
+	}
+
+	// Grace window after speed change
 	if( speed_changed ) {
 		p->post_speed_grace_frames = 20;
 	}
 
-	// If drift explodes, allow reanchor even during grace to avoid runaway desync.
-	int allow_reanchor = speed_changed || (abs_diff > base_threshold * 2) ||
-	                     (p->post_speed_grace_frames <= 0 && abs_diff > base_threshold);
-	// For android_sync=0, use smoothed AV delay ONLY during speed-change transients.
-	// In steady state, smoothed_av_delay reflects stable audio buffering (often 300-400ms)
-	// on high-latency devices and should not force re-anchoring.
-	if( !android_sync && s && (speed_changed || p->post_speed_grace_frames > 0) ) {
-		int smoothed = s->smoothed_av_delay;
-		if( smoothed > 150 ) {
-			allow_reanchor = 1;
-		}
-	}
+	// Re-anchor (Hard Reset) if speed changed OR drift exceeds our strict threshold.
+	int allow_reanchor = speed_changed || (abs_diff > base_threshold);
 
 	if( p->post_speed_grace_frames > 0 && !speed_changed ) {
 		p->post_speed_grace_frames--;
-		DBGSI serprintf("videosink_put_time: grace window active, suppress reanchor diff=%d frames_left=%d\n",
-			diff, p->post_speed_grace_frames);
 	}
 
 	if (allow_reanchor) {

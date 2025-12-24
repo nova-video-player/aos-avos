@@ -606,14 +606,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	// Calculate the "Real Stream Time" (media position) at the anchor point.
-	// For atempo, we want an identity mapping at the anchor (RST=TS).
-	// For non-atempo, we convert using the OLD map to maintain continuity.
-	int stream_current_time_rst;
-	if( using_atempo ) {
-		stream_current_time_rst = current_time_ts;
-	} else {
-		stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
-	}
+	// We convert the playback time (TS) back to media time (RST) using the 
+	// CURRENT mapping before we apply the new one. This ensures media continuity.
+	int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}

@@ -238,9 +238,8 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 		
 		// Use smoothed delay for stability, incorporating user offset.
 		// Formula: Video_ts - ( Audio_ts - Latency )
-		// We take the MAX of (latency + offset) and smoothed latency to avoid 
-		// negative bias during jittery transitions.
-		int used_delay = MAX( sync_delay + offset_ts, s->smoothed_av_delay );
+		// We take the MAX of measured latency and smoothed latency, then add the user offset.
+		int used_delay = MAX( sync_delay, s->smoothed_av_delay ) + offset_ts;
 
 		diff = video_ts - ( audio_time - used_delay );
 	} else {
@@ -322,12 +321,13 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	if( s->audio_filter_atempo ) {
 		// Base threshold on actual device latency (smoothed_av_delay)
 		int latency_based = -(s->smoothed_av_delay * 2 + 100);
-		// Clamp to reasonable range: -250ms (low latency) to -500ms (high latency)
-		if( latency_based < -500 ) {
-			latency_based = -500;
+		// Clamp to reasonable range: -350ms (low latency) to -750ms (high latency)
+		// This window must be large to avoid micro-interruptions during transitions.
+		if( latency_based < -750 ) {
+			latency_based = -750;
 		}
-		if( latency_based > -250 ) {
-			latency_based = -250;
+		if( latency_based > -350 ) {
+			latency_based = -350;
 		}
 		threshold_ts = latency_based;
 		DBGY serprintf("stream_sync_audio: atempo diff=%d threshold=%dms (smoothed=%dms v=%d a=%d)\n",
@@ -340,8 +340,11 @@ DBGY serprintf("{{A %d}} ", diff );
 		s->sync_video = 0;
 		return 1;
 	}
-	// allow audio to play from now on
-	s->sync_audio = 0;
+	// In atempo mode: keep checking every frame to prevent runaway drift.
+	// In normal mode: allow audio to play from now on (disable continuous checking).
+	if( !s->audio_filter_atempo ) {
+		s->sync_audio = 0;
+	}
 
 	return 0;
 }

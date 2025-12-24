@@ -437,12 +437,21 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		// Return 0: trust current scheduling anchors during transition
 		return 0;
 	}
-	// 3. Steady State: Skip Hard Reset if drift is within the tight threshold.
-	else if( !android_sync && abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
+	// 3. Steady State: 
+	// For atempo, we DEFER to the master clock. Since TS timestamps are already 
+	// audio-anchored by the player thread, independent re-anchoring only adds noise.
+	// We only re-anchor if drift is massive (> 500ms), otherwise we stay locked.
+	else if( !android_sync && using_atempo && abs_diff < 500 && p->sched_start_off_ns != 0 ) {
 		pthread_mutex_lock(&p->locked.mtx);
 		p->passthrough_cached = passthrough;
 		pthread_mutex_unlock(&p->locked.mtx);
-		// Return 0: minor jitter handled by soft venc_put_time update above.
+		return 0;
+	}
+	// For normal mode, use the tight adaptive threshold.
+	else if( !android_sync && !using_atempo && abs_diff < base_threshold && p->sched_start_off_ns != 0 ) {
+		pthread_mutex_lock(&p->locked.mtx);
+		p->passthrough_cached = passthrough;
+		pthread_mutex_unlock(&p->locked.mtx);
 		return 0;
 	}
 

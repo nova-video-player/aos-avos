@@ -630,6 +630,7 @@ typedef struct STREAM {
 	int		pending_av_speed_anchor_ts;
 	int		pending_av_speed_request_ms;
 	int		applying_pending_av_speed;
+	int		last_speed_change_ms;
 	STREAM_RC 	video_rc;
 	
 	STREAM_VIDEO_MANGLER   *video_mangler;

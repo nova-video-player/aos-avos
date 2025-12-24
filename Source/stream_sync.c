@@ -243,8 +243,8 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 		
 		// Use smoothed delay for stability, incorporating user offset.
 		// Formula: Video_ts - ( Audio_ts - Latency )
-		// We take the MAX of measured latency and smoothed latency, then add the user offset.
-		int used_delay = MAX( sync_delay, s->smoothed_av_delay ) + offset_ts;
+		// Stability clamp: take the MAX of measured latency and (smoothed latency - 50ms).
+		int used_delay = MAX( sync_delay, s->smoothed_av_delay - 50 ) + offset_ts;
 
 		diff = video_ts - ( audio_time - used_delay );
 	} else {

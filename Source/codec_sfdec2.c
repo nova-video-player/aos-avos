@@ -411,7 +411,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 		if (using_atempo) {
 			// In atempo mode, we trust the master clock.
-			base_threshold = 500;
+			int adaptive = (int)( (float)s->smoothed_av_delay * 1.5f );
+			base_threshold = MAX( 500, adaptive );
 		} else {
 			int adaptive = audio_latency_ms / 2;
 			if( adaptive < 250 ) adaptive = 250;
@@ -422,15 +423,16 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// 1. Initial Speed Change: Establish master anchor and start grace period.
 	if( speed_changed ) {
-		p->post_speed_grace_frames = 50; // Extended grace for bursty catch-up
-		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor\n");
+		p->post_speed_grace_frames = 40; // Extended grace for bursty catch-up
+		DBGSI serprintf("videosink_put_time: speed change detected, establishing master anchor (grace=%d)\n", p->post_speed_grace_frames);
 	} 
 	// 2. Grace Period & Steady State Deference:
 	// For atempo, we trust the master clock established during speed change.
-	// We strictly block independent Hard Resets unless drift is massive (> 500ms).
+	// We strictly block independent Hard Resets unless drift is massive.
 	else if( !android_sync && using_atempo ) {
 		if (p->post_speed_grace_frames > 0) {
 			p->post_speed_grace_frames--;
+			DBGSI serprintf("videosink_put_time: speed-stable-frames: %d\n", p->post_speed_grace_frames);
 		}
 		
 		if (abs_diff < base_threshold && p->sched_start_off_ns != 0) {

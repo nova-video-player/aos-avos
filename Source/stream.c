@@ -83,7 +83,8 @@ static int stream_should_defer_av_speed( STREAM *s, int anchor_ts )
 	}
 	if( s->video_time >= 0 && anchor_ts >= 0 ) {
 		int video_ts = (int)rst_to_ts_time( (double)s->video_time );
-		if( video_ts + 50 < anchor_ts ) {
+		// Drain margin: wait until video has processed enough frames to cover the transition.
+		if( video_ts < anchor_ts + 100 ) {
 			return 1;
 		}
 	}
@@ -95,23 +96,22 @@ void stream_maybe_apply_pending_av_speed( STREAM *s )
 	if( !s || !s->pending_av_speed_valid ) {
 		return;
 	}
-	int anchor_ts = s->pending_av_speed_anchor_ts;
-	if( !s->paused && stream_should_defer_av_speed( s, anchor_ts ) ) {
-		int now_ms = atime();
-		int elapsed = (s->pending_av_speed_request_ms > 0) ?
-			(now_ms - s->pending_av_speed_request_ms) : 0;
-		// Debounce rapid key presses to avoid thrashing.
-		if( elapsed < 250 ) {
-			return;
-		}
+	
+	// Delegate all deferral and rate-limiting logic to stream_set_av_speed.
+	// This ensures consistency between manual and deferred applications.
+	float target_speed = s->pending_av_speed;
+	
+	// We check if it can be applied now.
+	int now_ms = atime();
+	int time_since_last = now_ms - s->last_speed_change_ms;
+	if( !s->paused && (time_since_last < 1000 || stream_should_defer_av_speed( s, s->pending_av_speed_anchor_ts )) ) {
 		return;
 	}
-	float target_speed = s->pending_av_speed;
+
 	s->pending_av_speed_valid = 0;
 	s->pending_av_speed_request_ms = 0;
 	s->applying_pending_av_speed = 1;
-	DBG serprintf( "stream:stream_set_av_speed applying deferred speed=%.3f anchor_ts=%d\n",
-		target_speed, s->pending_av_speed_anchor_ts );
+	DBG serprintf( "stream:stream_set_av_speed applying deferred speed=%.3f\n", target_speed );
 	stream_set_av_speed( s, target_speed );
 	s->applying_pending_av_speed = 0;
 }
@@ -593,6 +593,26 @@ int stream_set_av_speed( STREAM *s, float av_speed )
         int high_latency = 0; // Disable seek based audio speed for high latency device but keep the logic just in case
 
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
+
+	// Always defer rapid changes (>1/s); coalesce to latest; apply only when video_ts >= heard_ts + 100ms
+	int now_ms = atime();
+	int time_since_last = now_ms - s->last_speed_change_ms;
+	if( !s->applying_pending_av_speed && !s->paused && 
+	    (time_since_last < 1000 || stream_should_defer_av_speed( s, current_time_ts )) ) {
+		if( s->pending_av_speed_valid ) {
+			DBG serprintf( "stream:stream_set_av_speed coalesce pending speed=%.3f -> %.3f\n",
+				s->pending_av_speed, av_speed );
+		} else {
+			DBG serprintf( "stream:stream_set_av_speed defer speed=%.3f (elapsed=%dms)\n", 
+				av_speed, time_since_last );
+		}
+		s->pending_av_speed = av_speed;
+		s->pending_av_speed_valid = 1;
+		s->pending_av_speed_anchor_ts = current_time_ts;
+		s->pending_av_speed_request_ms = now_ms;
+		return 0;
+	}
+
 	if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
 		// In atempo mode, anchor to the "heard" audio position (audio_time - buffered delay).
 		// This ensures timeline and sink anchors are unified, preventing offset drift.
@@ -639,6 +659,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 
 	s->video_speed_num = target_num;
 	s->video_speed_den = target_den;
+	s->last_speed_change_ms = atime();
 
 	DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d (audio_latency_ms=%d high_latency=%d video_active=%d)\n",
 		current_time_ts, stream_current_time_rst, audio_latency_ms, high_latency, video_active );

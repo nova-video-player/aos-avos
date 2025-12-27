@@ -146,7 +146,7 @@ typedef struct priv {
 	int64_t render_offset_ns;
 	float last_av_speed;
 	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
-	int post_speed_grace_frames;
+	int grace_until_ms;
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -273,7 +273,7 @@ static int videosink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void
 	sink->ctx = ctx;
 	priv_t *p = (priv_t *) sink->priv;
 	p->last_av_speed = 1.0f;
-	p->post_speed_grace_frames = 0;
+	p->grace_until_ms = 0;
 
 	pthread_mutex_lock(&p->locked.mtx);
 	int i;
@@ -360,8 +360,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	priv_t *p = (priv_t *) sink->priv;
 	STREAM *s = (STREAM *)p->dec->ctx;
 
+	int now_ms = atime();
 	int dt = time    - p->venc_put_time;
-	int dr = atime() - p->venc_ref_time;
+	int dr = now_ms - p->venc_ref_time;
 	int passthrough = _is_passthrough(s);
 	p->passthrough_cached = passthrough;
 
@@ -372,20 +373,38 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		speed_changed = 1;
 		p->last_av_speed = current_speed;
 		DBGSI serprintf("videosink_put_time: speed changed to %.2f\n", current_speed);
+		p->grace_until_ms = now_ms + 1000;
 	}
 
 	int expected = p->venc_put_time + dr;
 	int diff = time - expected;
 	int abs_diff = diff < 0 ? -diff : diff;
 	const int drift_threshold_ms = 200;
+	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
+	if( discontinuity ) {
+		p->grace_until_ms = now_ms + 1000;
+	}
+
+	if( !speed_changed && !discontinuity && p->venc_put_time && time < p->venc_put_time ) {
+		time = p->venc_put_time;
+		diff = time - expected;
+		abs_diff = diff < 0 ? -diff : diff;
+	}
 
 	if( !speed_changed && dr < sfdec_threshold && p->venc_put_time &&
 		time > p->venc_put_time && abs_diff < drift_threshold_ms ) {
 		return 0;
 	}
 
-	int allow_reanchor = speed_changed || abs_diff >= drift_threshold_ms ||
-		(p->venc_put_time && time < p->venc_put_time);
+	if( !p->venc_put_time ) {
+		p->grace_until_ms = now_ms + 1000;
+	}
+	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
+
+	int allow_reanchor = speed_changed || discontinuity;
+	if( in_grace && !speed_changed && !discontinuity ) {
+		allow_reanchor = 0;
+	}
 
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
@@ -565,6 +584,11 @@ DBGCV CLOG("stop thread 2");
 			}
 		// Android sync will happily drop the frames for us
 		} else if ( !android_sync ) {
+			int in_grace = (p->grace_until_ms > 0 && atime() < p->grace_until_ms);
+			if( in_grace ) {
+DBGSI serprintf(" grace\n");
+				goto render_now;
+			}
 			int audio_delay = 0;
 			int smoothed_delay = 0;
 			if( s ) {
@@ -599,6 +623,13 @@ DBGCV CLOG("stop thread 2");
 				audio_time = s->audio_time;
 				video_time = s->video_time;
 			}
+			if( fabsf( speed - 1.0f ) < 1e-6f && s && s->video ) {
+				int frame_ms = s->video->msPerFrame > 0 ? s->video->msPerFrame : 0;
+				int relaxed = -MAX( 50, frame_ms * 4 );
+				if( late_threshold > relaxed ) {
+					late_threshold = relaxed;
+				}
+			}
 DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d smoothed=%d audio_delay=%d latency=%d threshold=%d speed=%.3f dropped=%d\n",
 	blit_duration, f->index, f->time, venc_time, audio_time, video_time, smoothed_delay, audio_delay, latency_ms, late_threshold, speed, p->dropped);
 //CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d", f->index, (venc_time - f->blit_time), f->blit_time, venc_time, f->time);
@@ -607,6 +638,7 @@ DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d 
 DBGSI serprintf(" ok\n");
 		}
 
+render_now:
 		if( android_sync ) {
 			// Calculate raw blit duration (unclamped)
 			int raw_blit_duration = f->blit_time - venc_time;
@@ -998,7 +1030,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->prev_paused = 0;
 	p->render_offset_ns = -1;
 	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
-	p->post_speed_grace_frames = 0;
+	p->grace_until_ms = 0;
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;

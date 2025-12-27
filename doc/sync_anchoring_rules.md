@@ -87,6 +87,15 @@
 - This is why `smoothed_av_delay` is preferred when valid: it damps jitter in the audio chain delay and keeps the audible anchor stable.
 - `smoothed_av_delay` is computed in `stream_sync_audio()` using low‑pass filtering: either a LWMA (`stream_calc_lwma`) or an exponential smoother `smoothed = (prev * delay_fb + current * (1000 - delay_fb)) / 1000`.
 
+## 1.0x Stutter Observations and Remedies
+
+- **Low‑latency devices (e.g., Shield)**: Stutter showed up as periodic sink drops (`DROP blit=...`) in `codec_sfdec2` while audio latency was stable (~70–120ms). The drop policy was too aggressive for steady 1.0x cadence.
+- **High‑latency devices (e.g., Google streamer 4K)**: Stutter appeared as anchor jitter during AudioTrack warm‑up and latency ramps (headpos=0 → delay jumps). This caused backward anchor resets and pacing discontinuities without explicit drops.
+
+**Remedies applied (android_sync=0, sfdec2):**
+- **Grace window (1s)** after startup, seek, speed change, or discontinuity: suppress reanchor resets and frame drops while AudioTrack latency stabilizes.
+- **Monotonic anchor**: prevent backward anchor movement during steady playback; only allow resets on explicit speed change or large discontinuity.
+
 ## Filters and Time Domains
 
 - Audio filters (including atempo) operate on raw PCM samples, not timestamps. They are unaffected by RST/TS/WC mappings.

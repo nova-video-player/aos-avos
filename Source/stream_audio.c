@@ -328,6 +328,9 @@ static void _wait( STREAM *s, int wait )
 				}
 				stream_yield_RT();
 			}
+			if( _abort( s ) ) {
+				return;
+			}
 			_add_audio_time( s, RST_TO_TS_DELTA(to_wait, int) );
 
 			s->audio_sink->write( s, &frame );
@@ -346,6 +349,10 @@ DBGA serprintf("_write_zero_data %d -> %d\r\n", time, bytes );
 	while( !s->audio_sink->can_write( s,  bytes ) ) {
 DBGA serprintf("x");
 		msec_sleep( 1 );
+	}
+	if( _abort( s ) ) {
+		afree(zero);
+		return;
 	}
 DBGA serprintf("-Z-");
 	AUDIO_FRAME frame = { 0 };
@@ -980,6 +987,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
 				while( size > 0 ) {
+					if( _abort( s ) ) {
+						return;
+					}
 					audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
 
 					// no error, output PCM
@@ -996,12 +1006,24 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 						stream_yield_RT();
 					}
+					if( _abort( s ) ) {
+						return;
+					}
 					DBG serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
 					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG serprintf("stream_audio: sink->write returned %d\n", size_written);
 
-					if( s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
+					if( _abort( s ) ) {
+						return;
+					}
+					if( size_written <= 0 ) {
+						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
+						size = 0;
+						break;
+					}
+
+					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time
 						if( s->audio->samplesPerSec ) {
 							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / s->audio->bytesPerFrame;

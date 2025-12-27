@@ -19,6 +19,7 @@
 #include "debug.h"
 #include "util.h"
 #include "stream.h"
+#include "stream_sync.h"
 
 #ifdef CONFIG_AUDIO_AC3
 extern int libavos_get_ac3_recoding_enabled(void);
@@ -87,6 +88,30 @@ int stream_sync_restart( STREAM *s )
 	s->av_delay_history_count = 0;
 
 	return 0;
+}
+
+// ************************************************************
+//
+//	stream_get_heard_audio_ts
+//
+// ************************************************************
+int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
+{
+	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
+		return fallback_ts;
+	}
+
+	int anchor_delay = s->smoothed_av_delay;
+	if( anchor_delay < 0 ) {
+		anchor_delay = stream_sync_av_delay( s );
+	}
+
+	int heard_ts = s->audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+	if( heard_ts < 0 ) {
+		heard_ts = 0;
+	}
+
+	return heard_ts;
 }
 
 // ************************************************************
@@ -271,7 +296,12 @@ int stream_sync_audio( STREAM *s, int audio_time )
 
 	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
-			s->video_sink->put_time( s->video_sink, audio_time - s->smoothed_av_delay - RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int ) );
+			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
+			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
+			if( anchor_ts < 0 ) {
+				anchor_ts = 0;
+			}
+			s->video_sink->put_time( s->video_sink, anchor_ts );
 		}
 	}
 

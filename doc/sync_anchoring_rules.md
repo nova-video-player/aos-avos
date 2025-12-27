@@ -23,6 +23,7 @@
 - Use `s->smoothed_av_delay` when valid; otherwise fall back to `stream_sync_av_delay()`.
 - Clamp to zero; never allow negative anchors.
 - `heard_audio_ts` is an audio‑side anchor (audible time). Video TS is aligned to it via delay compensation in `stream_sync_av_delay()`.
+- `heard_audio_ts` is computed centrally via `stream_get_heard_audio_ts()` and should not be re‑implemented elsewhere.
 
 ## Mapping Rules
 

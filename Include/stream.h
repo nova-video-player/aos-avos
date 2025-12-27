@@ -797,6 +797,7 @@ int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
 void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
+int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
 void    stream_audio_reset_ac3_passthrough_state(void);

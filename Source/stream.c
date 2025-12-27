@@ -530,25 +530,6 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 extern void _stream_resync( STREAM *s );
 
-static int _stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
-{
-	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
-		return fallback_ts;
-	}
-
-	int anchor_delay = s->smoothed_av_delay;
-	if( anchor_delay < 0 ) {
-		anchor_delay = stream_sync_av_delay( s );
-	}
-
-	int heard_ts = s->audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
-	if( heard_ts < 0 ) {
-		heard_ts = 0;
-	}
-
-	return heard_ts;
-}
-
 static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
 {
 	if( !s || !s->video_sink || !s->video_sink->put_time || audio_time_ts < 0 )
@@ -651,7 +632,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( current_time_ts < 0 ) {
 		current_time_ts = 0;
 	}
-	int anchor_ts = _stream_get_heard_audio_ts( s, current_time_ts );
+	int anchor_ts = stream_get_heard_audio_ts( s, current_time_ts );
 	int stream_current_time_rst = TS_TO_RST_TIME( anchor_ts, int );
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;

@@ -2770,18 +2770,7 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 		if( s->video_sink->put_time ) {
 			// For Android sinks: anchor the sink clock to what will be heard.
 			// The sink's WC pacing is derived from this TS anchor.
-			int anchor_ts = frame->time;
-			if( s->audio && s->audio->valid && s->audio_time >= 0 ) {
-				int anchor_delay = s->smoothed_av_delay;
-				if( anchor_delay < 0 ) {
-					anchor_delay = stream_sync_av_delay( s );
-				}
-				anchor_ts = s->audio_time - anchor_delay -
-					RST_TO_TS_DELTA( s->av_delay, int );
-				if( anchor_ts < 0 ) {
-					anchor_ts = 0;
-				}
-			}
+			int anchor_ts = stream_get_heard_audio_ts( s, frame->time );
 			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time  = frame->time;
 			s->video_sink->put_time( s->video_sink, anchor_ts );

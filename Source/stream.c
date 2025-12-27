@@ -530,6 +530,25 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 // ************************************************************
 extern void _stream_resync( STREAM *s );
 
+static int _stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
+{
+	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
+		return fallback_ts;
+	}
+
+	int anchor_delay = s->smoothed_av_delay;
+	if( anchor_delay < 0 ) {
+		anchor_delay = stream_sync_av_delay( s );
+	}
+
+	int heard_ts = s->audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+	if( heard_ts < 0 ) {
+		heard_ts = 0;
+	}
+
+	return heard_ts;
+}
+
 static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
 {
 	if( !s || !s->video_sink || !s->video_sink->put_time || audio_time_ts < 0 )
@@ -627,50 +646,17 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( s && s->audio_ctx ) {
 		audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 	}
-	//int high_latency = (audio_latency_ms >= 350); // heuristic cut-over
-        int high_latency = 0; // Disable seek based audio speed for high latency device but keep the logic just in case
 
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
-	if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
-		// In atempo mode, audio_time is the master TS clock for timeline anchoring.
-		current_time_ts = s->audio_time;
-	}
 	if( current_time_ts < 0 ) {
 		current_time_ts = 0;
 	}
-	int stream_current_time_rst = TS_TO_RST_TIME( current_time_ts, int );
+	int anchor_ts = _stream_get_heard_audio_ts( s, current_time_ts );
+	int stream_current_time_rst = TS_TO_RST_TIME( anchor_ts, int );
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}
 
-	// Defer atempo speed changes so old timeline frames drain before re-anchoring.
-	if( using_atempo && !s->applying_pending_av_speed ) {
-		if( s->pending_av_speed_valid ) {
-			float previous = s->pending_av_speed;
-			s->pending_av_speed = av_speed;
-		DBG serprintf( "stream:stream_set_av_speed coalesced speed=%.3f->%.3f (sink=%d disp_q=%d anchor_ts=%d v=%d a=%d delay=%d)\n",
-			previous, av_speed, s->video_sink_count, frame_q_count( &s->disp_q ),
-			s->pending_av_speed_anchor_ts, s->video_time, s->audio_time, s->smoothed_av_delay );
-		return 0;
-	}
-
-		int anchor_delay = s->smoothed_av_delay;
-		if( anchor_delay < 0 ) {
-			anchor_delay = stream_sync_av_delay( s );
-		}
-		int anchor_ts = current_time_ts - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
-		if( anchor_ts < 0 ) {
-			anchor_ts = 0;
-		}
-		s->pending_av_speed = av_speed;
-		s->pending_av_speed_valid = 1;
-		s->pending_av_speed_anchor_ts = anchor_ts;
-		s->pending_av_speed_request_ms = atime();
-		DBG serprintf( "stream:stream_set_av_speed deferring speed=%.3f (sink=%d disp_q=%d anchor_ts=%d v=%d a=%d delay=%d)\n",
-			av_speed, s->video_sink_count, frame_q_count( &s->disp_q ), anchor_ts,
-			s->video_time, s->audio_time, s->smoothed_av_delay );
-		return 0;
-	}
 	s->pending_av_speed_valid = 0;
 
 	int target_num = (int)( av_speed * 100 + 0.5f );
@@ -684,15 +670,15 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d (v=%d a=%d delay=%d)\n",
 			target_den, target_num, s->video_time, s->audio_time, s->smoothed_av_delay );
 		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
-		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d high_latency=%d)\n",
-			av_speed, video_active, high_latency );
+		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d)\n",
+			av_speed, video_active );
 	}
 
 	s->video_speed_num = target_num;
 	s->video_speed_den = target_den;
 
-	DBG serprintf( "stream:stream_set_av_speed current_time_ts=%d, current_time_rst=%d (audio_latency_ms=%d high_latency=%d video_active=%d)\n",
-		current_time_ts, stream_current_time_rst, audio_latency_ms, high_latency, video_active );
+	DBG serprintf( "stream:stream_set_av_speed anchor_ts=%d, anchor_rst=%d (audio_latency_ms=%d video_active=%d)\n",
+		anchor_ts, stream_current_time_rst, audio_latency_ms, video_active );
 
 	float applied_speed = av_speed;
 	if( using_atempo ) {
@@ -705,9 +691,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		audio_interface_set_audio_speed( clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed apply atempo speed=%.3f (audio_time=%d video_time=%d)\n",
 			clamped_speed, s->audio_time, s->video_time );
-		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, clamped_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)anchor_ts, clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
-				   stream_current_time_rst, current_time_ts, clamped_speed );
+				   stream_current_time_rst, anchor_ts, clamped_speed );
 		applied_speed = clamped_speed;
 	} else {
 		float previous_speed = audio_interface_get_audio_speed();
@@ -715,7 +701,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
-					   stream_current_time_rst, current_time_ts, applied_speed, rc );
+					   stream_current_time_rst, anchor_ts, applied_speed, rc );
 			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
 				serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
 					   av_speed, applied_speed, rc );
@@ -724,40 +710,11 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			applied_speed = previous_speed;
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
-		timeline_map_apply( (double)stream_current_time_rst, (double)current_time_ts, applied_speed );
-	}
-
-	if( high_latency && s->parser && s->parser->seekable && s->parser->seekable( s ) &&
-	    stream_current_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
-		DBG serprintf( "stream:stream_set_av_speed high-latency seek realignment to rst=%d (ts=%d)\n",
-			stream_current_time_rst, current_time_ts );
-		stream_seek_time( s, stream_current_time_rst, STREAM_SEEK_BACKWARD, 0 );
-		return 0;
+		timeline_map_apply( (double)stream_current_time_rst, (double)anchor_ts, applied_speed );
 	}
 
 	if( s->video->valid ) {
-		if( using_atempo && s->audio && s->audio->valid && s->audio_time != -1 ) {
-			// Align to what will be heard (audio_time minus buffered delay), not raw audio_time.
-			int anchor_delay = s->smoothed_av_delay;
-			int sync_delay = stream_sync_av_delay( s );
-			if( anchor_delay < 0 ) {
-				anchor_delay = sync_delay;
-			}
-			int anchor_time = s->audio_time - anchor_delay -
-				RST_TO_TS_DELTA( s->av_delay, int );
-			if( anchor_time < 0 ) {
-				anchor_time = 0;
-			}
-			if( s->video_sink && s->video_sink->put_time ) {
-				s->video_sink->put_time( s->video_sink, anchor_time );
-			}
-			DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d smoothed=%d sync_delay=%d\n",
-				s->audio_time, anchor_time, s->smoothed_av_delay, sync_delay );
-		} else {
-			// Restart the sink/sync reference so `_real_time()` and the Android sink stay
-			// aligned with the freshly applied timeline mapping.
-			_stream_resync( s );
-		}
+		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
 	}
 
 	return 0;

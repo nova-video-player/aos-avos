@@ -2768,22 +2768,23 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 		// Seek-based approach: no frame rescaling needed
 
 		if( s->video_sink->put_time ) {
-			// For Android sinks: establish reference that matches sink's timing model
-			// Android sink does: venc_time = venc_put_time + (atime() - venc_ref_time)
-			// We set sink_ref_time to match what we pass to put_time for consistent timing
-			// Calculate proper sink_ref_time to maintain timing relationship
-			// Use small reference time with audio, frame time without audio
-
-			// Establish a new anchor point between the Wall Clock (WC) and Real Stream Time (RST) domains.
-			// This is not a direct assignment between different time domains, but a *declaration*.
-			// It defines the WC reference (`s->sink_ref_time`) to be numerically equal to the first
-			// frame's RST (`frame->time`). All subsequent blit_time values will be calculated
-			// relative to this new, consistent frame of reference.
-			// TODO for seamless audio speed: this strategy is not valid for a seamless audio speed change without the seek reset
-			s->sink_ref_time = frame->time;
+			// For Android sinks: anchor the sink clock to what will be heard.
+			// The sink's WC pacing is derived from this TS anchor.
+			int anchor_ts = frame->time;
+			if( s->audio && s->audio->valid && s->audio_time >= 0 ) {
+				int anchor_delay = s->smoothed_av_delay;
+				if( anchor_delay < 0 ) {
+					anchor_delay = stream_sync_av_delay( s );
+				}
+				anchor_ts = s->audio_time - anchor_delay -
+					RST_TO_TS_DELTA( s->av_delay, int );
+				if( anchor_ts < 0 ) {
+					anchor_ts = 0;
+				}
+			}
+			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time  = frame->time;
-			// set the time to 0 to prevent video from playing and let the audio thread update it
-			s->video_sink->put_time( s->video_sink, s->audio->valid ? 1 : frame->time );
+			s->video_sink->put_time( s->video_sink, anchor_ts );
 
 			DBG serprintf(
 				"SINK_REF_ESTABLISHED: sink_ref_time=%d, vid_ref_time=%d, frame_time=%d, put_time=%d (put_time mode)\n",
@@ -2813,11 +2814,9 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
 	if( s->video_sink->put_time ) {
-		// Android put_time mode: _real_time() now returns WC domain for blit_duration calculations
-		// Android sinks calculate: blit_duration = frame->blit_time(WC) - venc_time(WC) - delay
-		// This ensures both values are in wall clock domain for proper timing
+		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;
-		DBG2 serprintf( "_put_frame_in_sink: frame_time=%d(RST), real_time=%d(WC), blit_time=%d(WC)\n", time,
+		DBG2 serprintf( "_put_frame_in_sink: frame_time=%d(TS), real_time=%d(TS), blit_time=%d(TS)\n", time,
 						real_time_calc, frame->blit_time );
 	} else {
 		// Legacy mode: WC conversion with preroll compensation

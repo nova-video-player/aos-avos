@@ -362,15 +362,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	int dt = time    - p->venc_put_time;
 	int dr = atime() - p->venc_ref_time;
-
-	// Detect passthrough so we can avoid android_sync re-anchoring noise on encoded outputs.
 	int passthrough = _is_passthrough(s);
-
-	// Allow updates if the deviation from the expected time is significant (> 40ms)
-	// This handles discontinuities (e.g. from atempo flush) even if updates are frequent.
-	int expected = p->venc_put_time + dr;
-	int diff = time - expected;
-	if (diff < 0) diff = -diff;
+	p->passthrough_cached = passthrough;
 
 	// Detect speed change (explicit discontinuity)
 	int speed_changed = 0;
@@ -381,69 +374,21 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		DBGSI serprintf("videosink_put_time: speed changed to %.2f\n", current_speed);
 	}
 
-	if( !speed_changed && dr < sfdec_threshold && p->venc_put_time && time > p->venc_put_time && diff < 40 ) {
+	int expected = p->venc_put_time + dr;
+	int diff = time - expected;
+	int abs_diff = diff < 0 ? -diff : diff;
+	const int drift_threshold_ms = 200;
+
+	if( !speed_changed && dr < sfdec_threshold && p->venc_put_time &&
+		time > p->venc_put_time && abs_diff < drift_threshold_ms ) {
 		return 0;
 	}
 
+	int allow_reanchor = speed_changed || abs_diff >= drift_threshold_ms ||
+		(p->venc_put_time && time < p->venc_put_time);
+
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
-
-	// Reset scheduling anchors if we are too far off (e.g. seek) or if speed changed explicitly.
-	// For android_sync=0, we use an adaptive threshold based on total AV latency.
-	// On high-latency devices (e.g. 468ms), latency/4 gives ~117ms tolerance.
-	// This filters out the observed ~100ms jitter/noise but catches larger drifts (like 130ms).
-	// On low-latency devices, it clamps to 40ms for tight sync.
-	// For android_sync=1, we use 500ms because videosink_thread has its own finer correction loop.
-	// Threshold strategy:
-	// - android_sync=1: fixed 500ms
-	// - android_sync=0:
-	//   * during speed change/grace: tight diff and smoothed-delay triggers
-	//   * steady state: adaptive threshold scaled to latency, clamped [200, 500], plus smoothed-delay fallback
-	int base_threshold = android_sync ? 500 : 200;
-	if( !android_sync && !(speed_changed || p->post_speed_grace_frames > 0) && s && s->audio_ctx ) {
-		int audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
-		if( audio_latency_ms < 0 ) {
-			audio_latency_ms = 0;
-		}
-		// Scale with latency (k ~0.5), clamp to [200, 500]
-		int adaptive = audio_latency_ms / 2;
-		if( adaptive < 200 ) {
-			adaptive = 200;
-		} else if( adaptive > 500 ) {
-			adaptive = 500;
-		}
-		base_threshold = adaptive;
-	}
-
-	int abs_diff = diff;
-	if( abs_diff < 0 ) {
-		abs_diff = -abs_diff;
-	}
-
-	// Grace window after speed change: suppress threshold-based reanchors for a few frames
-	if( speed_changed ) {
-		p->post_speed_grace_frames = 20;
-	}
-
-	// If drift explodes, allow reanchor even during grace to avoid runaway desync.
-	int allow_reanchor = speed_changed || (abs_diff > base_threshold * 2) ||
-	                     (p->post_speed_grace_frames <= 0 && abs_diff > base_threshold);
-	// For android_sync=0, use smoothed AV delay ONLY during speed-change transients.
-	// In steady state, smoothed_av_delay reflects stable audio buffering (often 300-400ms)
-	// on high-latency devices and should not force re-anchoring.
-	if( !android_sync && s && (speed_changed || p->post_speed_grace_frames > 0) ) {
-		int smoothed = s->smoothed_av_delay;
-		if( smoothed > 150 ) {
-			allow_reanchor = 1;
-		}
-	}
-
-	if( p->post_speed_grace_frames > 0 && !speed_changed ) {
-		p->post_speed_grace_frames--;
-		DBGSI serprintf("videosink_put_time: grace window active, suppress reanchor diff=%d frames_left=%d\n",
-			diff, p->post_speed_grace_frames);
-	}
-
 	if (allow_reanchor) {
 		pthread_mutex_lock(&p->locked.mtx);
 		if ( !android_sync ) {
@@ -453,22 +398,11 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->sched_last_mono_ns  = p->sched_start_mono_ns;
 			p->sched_late          = 0;
 			DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d)\n", time, diff, speed_changed);
-		} else if (speed_changed || !passthrough) {
-			// Reset for PCM always, or passthrough only on speed changes
-			p->render_offset_ns = -1;
-			p->passthrough_cached = passthrough;
-			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d pt=%d\n",
-				diff, speed_changed, passthrough);
 		} else {
-			// Passthrough mode with drift (no speed change): skip re-anchoring
-			p->passthrough_cached = passthrough;
-			DBGSI serprintf("videosink_put_time: SKIP re-anchor (passthrough) diff=%d\n", diff);
+			p->render_offset_ns = -1;
+			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d\n",
+				diff, speed_changed);
 		}
-		pthread_mutex_unlock(&p->locked.mtx);
-	} else {
-		pthread_mutex_lock(&p->locked.mtx);
-		p->passthrough_cached = passthrough;
-		// No reset needed
 		pthread_mutex_unlock(&p->locked.mtx);
 	}
 

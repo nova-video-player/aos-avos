@@ -87,6 +87,12 @@
 - This is why `smoothed_av_delay` is preferred when valid: it damps jitter in the audio chain delay and keeps the audible anchor stable.
 - `smoothed_av_delay` is computed in `stream_sync_audio()` using low‑pass filtering: either a LWMA (`stream_calc_lwma`) or an exponential smoother `smoothed = (prev * delay_fb + current * (1000 - delay_fb)) / 1000`.
 
+## Filters and Time Domains
+
+- Audio filters (including atempo) operate on raw PCM samples, not timestamps. They are unaffected by RST/TS/WC mappings.
+- Time domains only affect timestamp accounting and A/V sync math; filter processing remains monotonic in the physical sample stream.
+- Therefore, discontinuities in delay estimates impact anchoring/sync, not filter sample order.
+
 ## FFmpeg atempo Delay Behavior
 
 - `af_atempo.c` updates tempo via `process_command()` which calls `yae_update()` to reset fragment origins; it does not expose an explicit delay value.
@@ -94,3 +100,4 @@
   - FIFO output samples (can drop to 0 if the FIFO is empty or reset),
   - WSOLA internal delay computed from fragment size and scaled by `1 / speed` (goes to 0 when speed returns to 1.0).
 - If the atempo graph is rebuilt or flushed, FIFO contents are reset, so the computed delay can jump toward zero. This is expected and is another reason to anchor with `smoothed_av_delay` rather than raw delay.
+- To avoid transient zeros during speed changes, `_delay()` rate-limits downward jumps using a WSOLA-based stabilization window (derived from internal delay + FIFO).

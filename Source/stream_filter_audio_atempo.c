@@ -47,6 +47,7 @@
 #include "debug.h"
 #include "astdlib.h"
 #include "util.h"
+#include "atime.h"
 
 #ifdef CONFIG_FFMPEG_AUDIO
 #include <libavfilter/avfilter.h>
@@ -89,6 +90,9 @@ struct ctx {
 
     uint8_t *output_buffer;             // Temporary buffer for filtered PCM
     int output_buffer_size;             // Size of temporary buffer in bytes
+
+	int last_delay_ms;                  // Last reported delay (ms)
+	int last_speed_change_ms;           // Timestamp of last speed change (ms)
 };
 
 static int atempo_update_speed(struct ctx *ctx, float speed)
@@ -425,6 +429,8 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 				serprintf("atempo: failed to rebuild filter graph\n");
 				return -1;
 			}
+			ctx->last_speed_change_ms = 0;
+			ctx->last_delay_ms = -1;
 		} else {
 			DBGA serprintf("atempo: speed changed %.3f -> %.3f (fifo=%d)\n",
 				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
@@ -434,6 +440,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 					return -1;
 				}
 			}
+			ctx->last_speed_change_ms = atime();
 		}
 	}
 
@@ -566,13 +573,16 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 
 	// Total delay in milliseconds (in real-world time, not scaled by speed)
 	int delay_ms = 0;
+	int fifo_ms = 0;
+	int atempo_internal_ms = 0;
 
 	// 1. FIFO output buffer delay (samples already processed by atempo)
 	if (ctx->fifo) {
 		int fifo_samples = av_audio_fifo_size(ctx->fifo);
 		// FIFO contains output samples (after speed change)
 		// These represent real-world delay regardless of speed
-		delay_ms += (fifo_samples * 1000) / ctx->sample_rate;
+		fifo_ms = (fifo_samples * 1000) / ctx->sample_rate;
+		delay_ms += fifo_ms;
 	}
 
 	// 2. atempo filter internal delay (only when active)
@@ -591,15 +601,40 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 		int atempo_delay_ms = (atempo_delay_samples * 1000) / ctx->sample_rate;
 
 		// Scale by speed: at 1.5x, input delay is compressed to 2/3 real time
-		delay_ms += (int)((float)atempo_delay_ms / ctx->current_speed);
+		atempo_internal_ms = (int)((float)atempo_delay_ms / ctx->current_speed);
+		delay_ms += atempo_internal_ms;
+	}
+
+	// Limit downward delay jumps after a speed change (WSOLA needs time to stabilize).
+	if (ctx->last_speed_change_ms > 0 && ctx->last_delay_ms >= 0) {
+		int now_ms = atime();
+		int elapsed_ms = now_ms - ctx->last_speed_change_ms;
+		int min_stable_ms = atempo_internal_ms;
+		if (fifo_ms > min_stable_ms) {
+			min_stable_ms = fifo_ms;
+		}
+		if (min_stable_ms < 1) {
+			min_stable_ms = 1;
+		}
+		if (elapsed_ms < min_stable_ms && delay_ms < ctx->last_delay_ms) {
+			int max_drop = (ctx->last_delay_ms * elapsed_ms) / min_stable_ms;
+			int floor = ctx->last_delay_ms - max_drop;
+			if (delay_ms < floor) {
+				delay_ms = floor;
+			}
+		}
+		if (elapsed_ms >= min_stable_ms) {
+			ctx->last_speed_change_ms = 0;
+		}
 	}
 
 	DBG serprintf("atempo: delay=%d ms (fifo_ms=%d, atempo_ms=%d, speed=%.2f)\n",
 		delay_ms,
-		ctx->fifo ? (av_audio_fifo_size(ctx->fifo) * 1000) / ctx->sample_rate : 0,
-		delay_ms - (ctx->fifo ? (av_audio_fifo_size(ctx->fifo) * 1000) / ctx->sample_rate : 0),
+		fifo_ms,
+		atempo_internal_ms,
 		ctx->current_speed);
 
+	ctx->last_delay_ms = delay_ms;
 	return delay_ms;
 }
 

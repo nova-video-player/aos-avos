@@ -625,11 +625,6 @@ typedef struct STREAM {
 	int		video_dec_open;
 	int		video_speed_num;
 	int		video_speed_den;
-	float		pending_av_speed;
-	int		pending_av_speed_valid;
-	int		pending_av_speed_anchor_ts;
-	int		pending_av_speed_request_ms;
-	int		applying_pending_av_speed;
 	STREAM_RC 	video_rc;
 	
 	STREAM_VIDEO_MANGLER   *video_mangler;
@@ -823,7 +818,6 @@ int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
 int	stream_set_av_speed         ( STREAM *s, float av_speed );
 int	stream_can_apply_av_speed   ( STREAM *s );
-void	stream_maybe_apply_pending_av_speed( STREAM *s );
 
 int 	stream_set_crypt( STREAM *s, int crypt, void *key );
 void 	stream_set_size( STREAM *s, UINT64 size );

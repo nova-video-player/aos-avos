@@ -540,31 +540,6 @@ static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_
 		audio_time_ts, audio_time_ts );
 }
 
-int stream_can_apply_av_speed( STREAM *s )
-{
-	if( !s ) {
-		return 0;
-	}
-
-	if( s->paused ) {
-		return 1;
-	}
-
-	if( !s->video || !s->video->valid ) {
-		return 1;
-	}
-
-	if( s->video_sink_count > 0 ) {
-		return 0;
-	}
-
-	if( frame_q_count( &s->disp_q ) > 0 ) {
-		return 0;
-	}
-
-	return 1;
-}
-
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;

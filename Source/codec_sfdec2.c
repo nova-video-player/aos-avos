@@ -1294,6 +1294,11 @@ void set_android_sync(int sync)
 	android_sync = sync;
 }
 
+int get_android_sync(void)
+{
+	return android_sync;
+}
+
 #define OMXC_REGISTER( format, mangler ) \
 STREAM_REGISTER_DEC_VIDEO( format, 0, MAXW, MAXH, SFDEC_MEDIACODEC, new_dec, "sfdec2", mangler );
 

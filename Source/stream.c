@@ -34,6 +34,10 @@
 #include <signal.h>
 #include <math.h>
 
+#ifdef CONFIG_ANDROID
+int get_android_sync(void);
+#endif
+
 #ifdef CONFIG_STREAM
 #define DBGV if(Debug[DBG_VID])
 #define DBGS if(Debug[DBG_STREAM])
@@ -619,6 +623,18 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
 		timeline_map_apply( (double)stream_current_time_rst, (double)anchor_ts, applied_speed );
+	}
+
+	int seek_time_ts = RST_TO_TS_TIME( stream_get_current_time( s, NULL ), int );
+	if( seek_time_ts <= 0 ) {
+		seek_time_ts = anchor_ts >= 0 ? anchor_ts : current_time_ts;
+	}
+	if( using_atempo && !get_android_sync() && s->parser && s->parser->seekable && s->parser->seekable( s ) &&
+		seek_time_ts > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
+		DBG serprintf( "stream:stream_set_av_speed high-latency seek realignment to ts=%d (anchor_ts=%d current_ts=%d)\n",
+			seek_time_ts, anchor_ts, current_time_ts );
+		stream_seek_time( s, seek_time_ts, STREAM_SEEK_BACKWARD, STREAM_SEEK_STRICT );
+		return 0;
 	}
 
 	if( s->video->valid ) {

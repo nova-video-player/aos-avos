@@ -4039,6 +4039,10 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 				if(( s->play_n_old_time && out_frame->time >= s->play_n_old_time   ) || // seek back
 				   (!s->play_n_old_time && out_frame->time <  s->play_n_video_time )) { // seek forward
 					// discard the frame to decode queue
+					if( s->play_n_video_frames == 10 ) {
+						DBG serprintf("SEEK_DROP: frame_ts=%d target_ts=%d old_ts=%d\n",
+							out_frame->time, s->play_n_video_time, s->play_n_old_time);
+					}
 DBGQ serprintf("DIS %08d|%08d|%08d [%2d<", out_frame->time, s->play_n_video_time, s->play_n_old_time, out_frame->index );
 					frame_q_put( &s->decode_q, out_frame );
 DBGQ serprintf(">%2d] ", frame_q_count( &s->decode_q ) );
@@ -4046,6 +4050,10 @@ DBGQ serprintf(">%2d] ", frame_q_count( &s->decode_q ) );
 				}
 			} 
 			if( out_frame ) {
+				if( s->play_n_video_frames == 10 && s->play_n_video_time != -1 ) {
+					DBG serprintf("SEEK_HIT: frame_ts=%d target_ts=%d old_ts=%d\n",
+						out_frame->time, s->play_n_video_time, s->play_n_old_time);
+				}
 				out_frame->deinterlace = 0;
 				if ((out_frame->interlaced != VIDEO_PROGRESSIVE) && stream_force_sw_deinterlacing) {
 					int deinterlacing_limit = (out_frame->interlaced == VIDEO_INTERLACED_ONE_FIELD) ? stream_deinterlacing_max_height / 2 : stream_deinterlacing_max_height;
@@ -4321,7 +4329,13 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 	_stream_resync( s );
 	
 	// init the AV sync machinery to have a clean start of the video
-	stream_sync_init( s, sc.time );
+	{
+		int sync_time = sc.time;
+		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
+			sync_time = s->seek_target_sync_time;
+		}
+		stream_sync_init( s, sync_time );
+	}
 
 	// un_pause the stream
 	_seek_un_pause( s, was_paused );
@@ -4415,13 +4429,22 @@ serprintf("STUFF_ZERO!\n");
 	if( s->video->valid ) {
 DBGV serprintf("play one frame\n");
 		s->play_n_video_one = 1;
-		_stream_play_n_frames( s, 10, sc.time, old_time );
+		if( !s->seek_skip_initial_play ) {
+			_stream_play_n_frames( s, 10, sc.time, old_time );
+		}
+		s->seek_skip_initial_play = 0;
 		s->seek_epoch++;
 		s->seek_frame = 0;
 	}
 
 	// init the AV sync machinery to have a clean start of the video
-	stream_sync_init( s, sc.time );
+	{
+		int sync_time = sc.time;
+		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
+			sync_time = s->seek_target_sync_time;
+		}
+		stream_sync_init( s, sync_time );
+	}
 	
 DBGS serprintf("\nseeked to frame %d  time %d|%d   pos %lld|%lld <------------ took %3d/%3d\n", sc.frame, s->video_time, s->audio_time, s->video_pos, s->audio_pos, atime() - start1, atime()- start2 );
 	
@@ -4460,6 +4483,10 @@ serprintf("STREAM_seek: aborted\r\n");
 int stream_seek_time( STREAM *s, int time, int dir, int flags )
 {
 	int real_time;
+	if( s ) {
+		s->seek_audio_drop = 0;
+		s->seek_audio_target_ts = 0;
+	}
 	
 	if( time < 0 )
 		time = 0;
@@ -4467,6 +4494,37 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 	real_time = _stream_get_real_time( s, time );
 	
 	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
+}
+
+int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir, int flags )
+{
+	if( s ) {
+		s->seek_skip_initial_play = 1;
+		s->seek_use_target_sync = 1;
+		s->seek_target_sync_time = target_ts;
+	}
+	int ret = stream_seek_time( s, time, dir, flags );
+	if( ret ) {
+		if( s ) {
+			s->seek_use_target_sync = 0;
+		}
+		return ret;
+	}
+	if( !s || !s->open || !s->video || !s->video->valid ) {
+		return ret;
+	}
+	if( target_ts < 0 ) {
+		target_ts = 0;
+	}
+	if( s->seek_audio_target_ts <= 0 ) {
+		s->seek_audio_target_ts = target_ts;
+	}
+	s->seek_audio_drop = 1;
+	s->seek_force_video_drop = 1;
+	_stream_play_n_frames( s, 10, target_ts, 0 );
+	s->seek_force_video_drop = 0;
+	s->seek_use_target_sync = 0;
+	return ret;
 }
 
 // *****************************************************************************
@@ -4516,6 +4574,7 @@ static void _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 {
 	char hms_buf[32];
 	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
+	DBG serprintf("_stream_play_n_frames: target_ts=%d old_ts=%d\n", time, old_time);
 
 	int timeout = atime() + 1000; // 1 second before we stop waiting
 serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
@@ -4528,7 +4587,7 @@ serprintf("PNF: not open!\r\n");
 	_stream_resync( s );
 
 	s->play_n_video_frames = n;
-	s->play_n_video_time   = s->video_dec && s->video_dec->seek ? -1 : time;
+	s->play_n_video_time   = (s->video_dec && s->video_dec->seek && !s->seek_force_video_drop) ? -1 : time;
 	if( old_time > time ) {
 		// seek back
 		s->play_n_old_time = old_time; 

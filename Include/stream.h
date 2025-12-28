@@ -709,6 +709,12 @@ typedef struct STREAM {
 	int		play_n_audio_frames;
 	int		play_n_video_time;
 	int		play_n_old_time;
+	int		seek_audio_target_ts;
+	int		seek_audio_drop;
+	int		seek_force_video_drop;
+	int		seek_skip_initial_play;
+	int		seek_use_target_sync;
+	int		seek_target_sync_time;
 	int		seek_frame;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 
@@ -780,6 +786,7 @@ enum {
 int	stream_seekable  ( STREAM *s );
 int	stream_pauseable ( STREAM *s );
 int	stream_seek_time ( STREAM *s, int time,  int dir, int flags );
+int	stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir, int flags );
 int	stream_seek_pos  ( STREAM *s, int pos,   int dir, int flags );
 int	stream_seek_frame( STREAM *s, int frame, int dir, int force_reload );
 int	stream_set_speed( STREAM *s, STREAM_SPEED speed );

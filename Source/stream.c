@@ -625,15 +625,63 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		timeline_map_apply( (double)stream_current_time_rst, (double)anchor_ts, applied_speed );
 	}
 
-	int seek_time_ts = RST_TO_TS_TIME( stream_get_current_time( s, NULL ), int );
+	int seek_time_ts = anchor_ts;
+	int lead_ms = 0;
+	if( s->video && s->video->msPerFrame > 0 ) {
+		lead_ms = s->video->msPerFrame * 4;
+	}
+	if( lead_ms > 0 ) {
+		seek_time_ts += lead_ms;
+	}
 	if( seek_time_ts <= 0 ) {
-		seek_time_ts = anchor_ts >= 0 ? anchor_ts : current_time_ts;
+		seek_time_ts = current_time_ts;
+	}
+	int seek_time_rst = seek_time_ts > 0 ? TS_TO_RST_TIME( seek_time_ts, int ) : -1;
+	if( seek_time_rst <= 0 ) {
+		seek_time_rst = stream_get_current_time( s, NULL );
+		if( seek_time_rst <= 0 && seek_time_ts > 0 ) {
+			seek_time_rst = TS_TO_RST_TIME( seek_time_ts, int );
+		}
 	}
 	if( using_atempo && !get_android_sync() && s->parser && s->parser->seekable && s->parser->seekable( s ) &&
-		seek_time_ts > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
-		DBG serprintf( "stream:stream_set_av_speed high-latency seek realignment to ts=%d (anchor_ts=%d current_ts=%d)\n",
-			seek_time_ts, anchor_ts, current_time_ts );
-		stream_seek_time( s, seek_time_ts, STREAM_SEEK_BACKWARD, STREAM_SEEK_STRICT );
+		seek_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
+		// Avoid frame-accurate seek at startup to prevent keyframe-gap jumps.
+		if( seek_time_ts < 1000 ) {
+			if( s->video->valid ) {
+				_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+			}
+			return 0;
+		}
+		int anchor_delay = s->smoothed_av_delay;
+		int raw_delay = stream_sync_av_delay( s );
+		if( anchor_delay < 0 ) {
+			anchor_delay = raw_delay;
+		}
+		int seek_delay = MIN( anchor_delay, raw_delay );
+		if( s->video && s->video->msPerFrame > 0 ) {
+			seek_delay -= s->video->msPerFrame * 2;
+			if( seek_delay < 0 ) {
+				seek_delay = 0;
+			}
+		}
+		int av_delay_ts = RST_TO_TS_DELTA( s->av_delay, int );
+		int audio_target_ts = s->audio_time + lead_ms;
+		seek_time_ts = s->audio_time - seek_delay - av_delay_ts + lead_ms;
+		if( seek_time_ts <= 0 ) {
+			seek_time_ts = anchor_ts + lead_ms;
+		}
+		seek_time_rst = TS_TO_RST_TIME( seek_time_ts, int );
+		if( seek_time_rst <= 0 ) {
+			seek_time_rst = stream_get_current_time( s, NULL );
+		}
+		if( audio_target_ts < 0 ) {
+			audio_target_ts = anchor_ts;
+		}
+		s->seek_audio_target_ts = audio_target_ts;
+		s->seek_audio_drop = 1;
+		DBG serprintf( "stream:stream_set_av_speed high-latency seek realignment to rst=%d ts=%d (anchor_ts=%d current_ts=%d video_ts=%d)\n",
+			seek_time_rst, seek_time_ts, anchor_ts, current_time_ts, s->video_time );
+		stream_seek_time_frame_accurate( s, seek_time_rst, seek_time_ts, STREAM_SEEK_BACKWARD, STREAM_SEEK_STRICT );
 		return 0;
 	}
 

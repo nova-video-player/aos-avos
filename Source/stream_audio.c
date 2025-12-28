@@ -439,6 +439,19 @@ DBGV serprintf("drop audio chunk: time %d\r\n", cdata.time );
 DBGV serprintf("audio in the past! %d\r\n", cdata.time );			
 					continue;
 				}
+				if( s->seek_audio_drop && cdata.time != STREAM_NO_PTS_VALUE &&
+					cdata.time < s->seek_audio_target_ts ) {
+					DBG serprintf("AUDIO_SEEK_DROP: time=%d target=%d\n",
+						cdata.time, s->seek_audio_target_ts);
+					continue;
+				}
+				if( s->seek_audio_drop && cdata.time != STREAM_NO_PTS_VALUE &&
+					cdata.time >= s->seek_audio_target_ts ) {
+					DBG serprintf("AUDIO_SEEK_HIT: time=%d target=%d\n",
+						cdata.time, s->seek_audio_target_ts);
+					s->seek_audio_drop = 0;
+					s->seek_audio_target_ts = 0;
+				}
 
 				if( stream_force_audio_props ) {
 					cdata.changed = stream_force_audio_props;

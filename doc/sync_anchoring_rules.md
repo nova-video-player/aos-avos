@@ -11,7 +11,7 @@
 
 ## Time Domain Anchors (Single per Sink)
 
-- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor only from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a single fixed threshold.
+- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor only from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards.
 
 - **android_sync=1** (`sfdec_ndkmediacodec.cpp`): Owns single TS↔WC via `start_off` (TS first-frame) / `start_monotonic` (WC start). Stream/sink layers must not manage WC anchors; MediaCodec handles resets/projection.
 
@@ -38,6 +38,7 @@
 3) Apply mapping: `timeline_map_apply(anchor_rst, heard_audio_ts, new_speed)`.
 4) Anchor the sink: `video_sink->put_time(heard_audio_ts)` so the TS↔WC anchor matches what is heard.
 5) Sinks keep pacing off their own WC reference (`venc_ref_time` or `start_monotonic`) using the new TS anchor.
+6) **android_sync=0 + atempo**: optionally issue a frame‑accurate realignment seek (see below) to pull video/audio back to the audible TS without flushing.
 
 ## Android Path (sfdec2)
 
@@ -50,6 +51,7 @@
 - **No draining**: Queues are not flushed or drained on speed change. In‑flight audio/video retains its original TS.
 - **Audio in flight**: Samples already in the audio sink continue at the old tempo. New tempo applies to decoded output after the change. The mapping anchor is set to `heard_audio_ts` so the timeline pins to what is actually audible.
 - **Video in flight**: Frames already queued keep their TS and remain ordered. The sink is re‑anchored to `heard_audio_ts`, so pacing stays aligned without flushing.
+- **Speed‑change seek (android_sync=0 + atempo)**: Seek to a keyframe (RST), then drop decoded video frames and audio chunks until the shared target TS is reached. This keeps the target monotonic while minimizing visible jumps.
 
 ## Time Continuity Guarantee
 
@@ -68,13 +70,14 @@
 
 - There are no special‑case code paths for high‑latency devices; behavior is unified.
 - High latency only increases `stream_sync_av_delay()` (and thus `heard_audio_ts`), so anchors shift earlier to match what is actually heard.
-- Reanchor thresholds are fixed; no adaptive thresholds or seek‑realignment heuristics are applied.
+- Reanchor thresholds are fixed; **speed‑change** realignment may use a seek‑and‑drop path (android_sync=0 + atempo) to converge faster after large latency ramps.
 
 ## Pause/Resume and Seek
 
 - **Pause**: WC continues to advance; TS does not. On resume the sink is re‑anchored to `heard_audio_ts`, so the wall‑clock gap is ignored.
 - **Resume**: `heard_audio_ts` is computed from the paused audio clock minus chain delay; `video_sink->put_time(heard_audio_ts)` resets the TS↔WC anchor.
 - **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and the sink is re‑anchored to the new `heard_audio_ts` so playback resumes without a TS discontinuity.
+- **Speed‑change realignment seek**: Uses `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` so the parser seeks to a keyframe, then `_stream_play_n_frames` drops frames until `ts_target`. Audio chunks are dropped until the same `ts_target`.
 
 ## Speed Change Cadence
 

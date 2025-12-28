@@ -146,13 +146,15 @@ if (using_atempo) {
     audio_interface_set_audio_speed(clamped_speed);
 
     // ENABLE timeline mapping with atempo speed
+    // Anchor on heard_audio_ts for continuity with what is actually heard.
     timeline_map_apply((double)stream_current_time_rst,
-                      (double)current_time_ts,
+                      (double)anchor_ts,
                       clamped_speed);
 }
 ```
 
 **Key:** Timeline mapping is enabled, NOT disabled. This creates the TS domain that matches physical playback time.
+**Current behavior:** On android_sync=0, a frame‑accurate seek may be triggered after applying the new mapping to realign both audio/video to the audible target TS (see Seeking and Speed Changes).
 
 ### 2. Parser Timestamp Scaling (`stream_parser_ffmpeg.c`)
 
@@ -385,16 +387,22 @@ Timeline mapping anchors are re-established after seek completes.
 
 ### Speed Changes (`stream_set_av_speed`)
 
-1. Capture current position (TS and RST)
+1. Capture current position (`heard_audio_ts` + derived `anchor_rst`)
 2. Apply new timeline mapping with new anchor:
    ```c
-   timeline_map_apply(stream_current_time_rst,
-                     current_time_ts,
+   timeline_map_apply(anchor_rst,
+                     heard_audio_ts,
                      new_speed);
    ```
-3. Update atempo filter speed (rebuilds filter graph)
+3. Update atempo filter speed (runtime update; rebuild only on failure)
 4. No pipeline flush required
 5. Continuity maintained via anchors
+6. **android_sync=0 + atempo realignment:** optionally call
+   `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` to
+   seek to the nearest keyframe and drop frames until `ts_target`. Audio
+   chunks are dropped until the same `ts_target` so both streams resume in
+   lock‑step. The pure “anchor‑only” path remains valid and can be used to
+   disable realignment if needed.
 
 ## Time Domain Variable Reference
 
@@ -412,6 +420,7 @@ Timeline mapping anchors are re-established after seek completes.
 | `s->video->msPerFrame` | RST | Unscaled frame duration |
 | `stream_get_current_time()` | RST | Returns UI position (converts from TS) |
 | `stream_seek_time()` | RST | Accepts UI seek position |
+| `stream_seek_time_frame_accurate()` | RST+TS | Seek to RST keyframe, then drop to TS target |
 
 ## Performance Characteristics
 

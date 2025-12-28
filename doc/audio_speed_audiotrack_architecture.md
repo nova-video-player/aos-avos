@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a unique video synchronization mechanism in the sink. Speed changes are now applied seamlessly by retargeting the timeline mapping instead of issuing a self-seek.
+This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a unique video synchronization mechanism in the sink. In the AudioTrack PlaybackParams path, speed changes are applied seamlessly by retargeting the timeline mapping without a self-seek. (The atempo path may optionally use a frame-accurate seek; see the atempo architecture doc.)
 
 ## Time Domains
 
@@ -44,6 +44,7 @@ Speed changes no longer flush the pipeline. Instead, the player maintains an anc
 - `rst_to_ts_delta` / `ts_to_rst_delta` rescale pure durations without touching the anchors.
 
 Whenever `stream_set_av_speed` succeeds (or the audio hardware reports a quantised ratio), the current playback position is captured and used as the new anchor so in-flight buffers keep their ordering.
+This AudioTrack path intentionally avoids seek-based realignment; the optional frame‑accurate seek is restricted to the atempo path when explicitly enabled.
 
 ### A/V Synchronization and Video Pacing
 
@@ -75,9 +76,9 @@ Container-level metadata like `duration` and `start_time` are read in their orig
 | `frame->time` | `ts` | The timestamp of a video frame in the time-scaled domain. |
 | `cdata->time` | `ts` | Timestamp of a data chunk from the parser in the time-scaled domain. |
 | `s->cdata_now.time`| `ts` | The timestamp of the current data chunk being processed. |
-| `sc.time` | `ts` | Timestamp of a `STREAM_CHUNK`, typically set during parsing or seeking. |
+| `sc.time` | `rst` | Seek result time from the parser; used to reset stream state before TS scaling resumes. |
 | `frame->duration` | `ts` | The scaled duration of a single video frame. |
-| `frame->blit_time`| `wc` | The target wall-clock presentation time for a video frame, sent to the sink. |
+| `frame->blit_time`| `ts` | The target presentation time for a video frame, numerically comparable to WC. |
 | `venc_time` | `wc` | The video sink's internal wall-clock timer, used for pacing against `blit_time`. |
 | `s->delay` | `ts` | The smoothed A/V difference, calculated and stored as a `ts` duration. |
 | `s->av_delay` | `rst` | A user-configured A/V offset, in real-world milliseconds. |

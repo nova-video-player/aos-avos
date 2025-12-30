@@ -147,6 +147,8 @@ typedef struct priv {
 	float last_av_speed;
 	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
 	int grace_until_ms;
+	int drift_dir;
+	int drift_streak;
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -206,7 +208,11 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f)
 
 	if( !asap && delta < 0 ) {
 		p->sched_late++;
-		p->sched_start_mono_ns += 100 * NSEC_PER_MSEC;
+		if( p->sched_late >= 3 ) {
+			int frame_ms = (f && f->duration > 0) ? f->duration : 16;
+			int step_ms = frame_ms * 2;
+			p->sched_start_mono_ns += (INT64)step_ms * NSEC_PER_MSEC;
+		}
 	} else {
 		p->sched_late = 0;
 	}
@@ -380,7 +386,15 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int diff = time - expected;
 	int abs_diff = diff < 0 ? -diff : diff;
 	const int drift_threshold_ms = 200;
+	const int hard_discont_ms = 1000;
+	int delay_valid = 1;
+	if (s && s->audio_ctx) {
+		delay_valid = audio_interface_is_delay_valid(s->audio_ctx);
+	}
 	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
+	if (!delay_valid && abs_diff < hard_discont_ms) {
+		discontinuity = 0;
+	}
 	if( discontinuity ) {
 		p->grace_until_ms = now_ms + 1000;
 	}
@@ -401,7 +415,20 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
-	int allow_reanchor = speed_changed || discontinuity;
+	if (abs_diff >= drift_threshold_ms && delay_valid) {
+		int dir = (diff >= 0) ? 1 : -1;
+		if (dir == p->drift_dir) {
+			p->drift_streak++;
+		} else {
+			p->drift_dir = dir;
+			p->drift_streak = 1;
+		}
+	} else {
+		p->drift_streak = 0;
+		p->drift_dir = 0;
+	}
+
+	int allow_reanchor = speed_changed || (discontinuity && p->drift_streak >= 3);
 	if( in_grace && !speed_changed && !discontinuity ) {
 		allow_reanchor = 0;
 	}
@@ -548,12 +575,19 @@ DBGSI serprintf("MediaCodec resume\n");
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
 		int passthrough = p->passthrough_cached;
+		int delay_valid = 1;
+		if( s && s->audio_ctx ) {
+			delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+		}
 
 		if( android_sync ) {
 			// For android_sync, use the traditional blit_time calculation
 			blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
 		} else if( sfdec_force_blit ) {
 			blit_duration = 0;
+		} else if( !delay_valid ) {
+			// No reliable audio timing: pace by WC using frame timestamps
+			blit_duration = _compute_blit_wait_ms( p, f );
 		} else {
 			// For non-android_sync, use the pacing logic that mimics MediaCodec's behavior
 			blit_duration = _compute_blit_wait_ms( p, f );
@@ -584,6 +618,10 @@ DBGCV CLOG("stop thread 2");
 			}
 		// Android sync will happily drop the frames for us
 		} else if ( !android_sync ) {
+			if( !delay_valid ) {
+DBGSI			serprintf(" timing invalid, skip drop\n");
+				goto render_now;
+			}
 			int in_grace = (p->grace_until_ms > 0 && atime() < p->grace_until_ms);
 			if( in_grace ) {
 DBGSI serprintf(" grace\n");
@@ -643,6 +681,14 @@ render_now:
 			// Calculate raw blit duration (unclamped)
 			int raw_blit_duration = f->blit_time - venc_time;
 			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+			int frame_ms = (f && f->duration > 0) ? f->duration : 16;
+			if( raw_blit_duration > frame_ms * 2 || raw_blit_duration < -frame_ms * 2 ) {
+				int audio_time = s ? s->audio_time : -1;
+				int video_time = s ? s->video_time : -1;
+				int sync_delay = (s && s->audio_ctx) ? audio_interface_get_delay( s->audio_ctx ) : -1;
+				DBGSI serprintf("android_sync: large wait raw=%dms frame=%dms blit=%d venc=%d a=%d v=%d sync_delay=%d\n",
+					raw_blit_duration, frame_ms, f->blit_time, venc_time, audio_time, video_time, sync_delay);
+			}
 
 			// If we are within a reasonable sync window (e.g. -1s to +5s), use the player clock
 			// We allow a large positive window because buffering (frames ahead of time) is good and shouldn't be squashed.
@@ -674,6 +720,9 @@ render_now:
 					}
 					int64_t drift_tol_ns = (int64_t)drift_tol_ms * 1000000LL;
 					if (diff > drift_tol_ns || diff < -drift_tol_ns) {
+						DBGSI serprintf("android_sync: offset drift reset blit=%d venc=%d raw=%dms off=%lld->%lld diff=%lldms tol=%dms\n",
+							f->blit_time, venc_time, raw_blit_duration,
+							p->render_offset_ns/1000000LL, current_offset_ns/1000000LL, diff/1000000LL, drift_tol_ms);
 						p->render_offset_ns = current_offset_ns;
 						DBGSI serprintf("android_sync: offset drift %lld ms (tol=%d ms), resetting\n", diff/1000000LL, drift_tol_ms);
 					}

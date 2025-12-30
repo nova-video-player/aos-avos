@@ -488,5 +488,6 @@ const audio_interface_impl_t audio_interface_impl_opensles = {
 	.flush_output = opensles_flush_output,
 	.preload = opensles_preload,
 	.mute = opensles_mute,
-	.unmute = opensles_unmute
+	.unmute = opensles_unmute,
+	.delay_valid = NULL,
 };

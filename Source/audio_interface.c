@@ -197,6 +197,14 @@ int audio_interface_get_delay(audio_ctx_t *ctx)
 	return impl->get_delay(ctx);
 }
 
+int audio_interface_is_delay_valid(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->delay_valid) {
+		return 1;
+	}
+	return impl->delay_valid(ctx);
+}
+
 void audio_interface_flush_output(audio_ctx_t *ctx) 
 {
 	impl->flush_output(ctx);

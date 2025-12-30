@@ -18,6 +18,7 @@
 #include "types.h"
 #include "debug.h"
 #include "util.h"
+#include "audio_interface.h"
 #include "stream.h"
 #include "stream_sync.h"
 
@@ -283,18 +284,21 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		return 0;
 	}
 
+	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 	int current_av_delay = stream_sync_av_delay( s );
-	if( s->smoothed_av_delay == -1 ) {
-		s->smoothed_av_delay = current_av_delay;
-	} else {
-		if (stream_use_xbmc_smoothing) {
-			s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
+	if( delay_valid ) {
+		if( s->smoothed_av_delay == -1 ) {
+			s->smoothed_av_delay = current_av_delay;
 		} else {
-			s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+			if (stream_use_xbmc_smoothing) {
+				s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
+			} else {
+				s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+			}
 		}
 	}
 
-	if( s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
+	if( delay_valid && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
@@ -384,6 +388,11 @@ int stream_sync_video( STREAM *s, int video_time )
 		
 	// audio is paused, ignore
 	if( stream_audio_paused ) {
+		return 0;
+	}
+
+	if( s->audio_ctx && !audio_interface_is_delay_valid( s->audio_ctx ) ) {
+DBGY		serprintf("sync_video: timing unavailable, free-run video\n");
 		return 0;
 	}
 	

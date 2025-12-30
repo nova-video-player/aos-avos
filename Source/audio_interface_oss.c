@@ -404,4 +404,5 @@ const audio_interface_impl_t audio_interface_impl_oss = {
 	.get_session_id    = oss_get_session_id,
 	.set_passthrough   = oss_set_passthrough,
 	.get_passthrough   = oss_get_passthrough,
+	.delay_valid       = NULL,
 };

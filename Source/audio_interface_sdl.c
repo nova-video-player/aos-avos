@@ -422,6 +422,7 @@ const audio_interface_impl_t audio_interface_impl_sdl = {
 	.write = sdl_write,
 	.set_output_params = sdl_set_output_params,
 	.get_delay = sdl_get_delay,
+	.get_latency = NULL,
 	.flush_output = sdl_flush_output,
 	.preload = sdl_preload,
 	.mute = sdl_mute,

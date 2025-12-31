@@ -485,6 +485,7 @@ const audio_interface_impl_t audio_interface_impl_opensles = {
 	.write = opensles_write,
 	.set_output_params = opensles_set_output_params,
 	.get_delay = opensles_get_delay,
+	.get_latency = NULL,
 	.flush_output = opensles_flush_output,
 	.preload = opensles_preload,
 	.mute = opensles_mute,

@@ -107,6 +107,7 @@ static int audiotrack_log_underruns = 0;
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
+static int audiotrack_get_latency(audio_ctx_t *at);
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
@@ -1462,6 +1463,14 @@ static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_
 	return 1;
 }
 
+static int audiotrack_get_latency(audio_ctx_t *at)
+{
+	if (!at || !at->init) {
+		return -1;
+	}
+	return (int)at->latency;
+}
+
 // Compute latency using playback head position as a safe fallback when getTimestamp is
 // unavailable or unstable. This mirrors VLC's fallback behavior and avoids trusting
 // bad timestamps during warmup.
@@ -1679,6 +1688,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.write = audiotrack_write,
 	.set_output_params = audiotrack_set_output_params,
 	.get_delay = audiotrack_get_delay,
+	.get_latency = audiotrack_get_latency,
 	.flush_output = audiotrack_flush_output,
 	.preload = audiotrack_preload,
 	.get_session_id = audiotrack_get_session_id,

@@ -81,6 +81,8 @@ int stream_sync_restart( STREAM *s )
 {
 	s->delay         = 0;
 	s->delay_valid   = 0;
+	s->last_good_delay_ms = 0;
+	s->last_good_delay_valid = 0;
 	s->drop          = 0;
 	s->drop_P        = 0;
 	s->drop_B        = 0;
@@ -96,16 +98,48 @@ int stream_sync_restart( STREAM *s )
 //	stream_get_heard_audio_ts
 //
 // ************************************************************
+static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
+{
+	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : 1;
+	int delay = stream_sync_av_delay(s);
+	int anchor_valid = delay_valid;
+
+#ifdef CONFIG_ANDROID
+	if (!delay_valid) {
+		if (s->last_good_delay_valid) {
+			delay = s->last_good_delay_ms;
+			anchor_valid = 1;
+		} else if (allow_static && s->audio_ctx) {
+			int static_latency = audio_interface_get_latency(s->audio_ctx);
+			if (static_latency > 0) {
+				delay = static_latency;
+				anchor_valid = 1;
+			}
+		}
+	}
+#else
+	(void)allow_static;
+#endif
+
+	if (valid) {
+		*valid = anchor_valid;
+	}
+	return delay;
+}
+
 int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
 		return fallback_ts;
 	}
 
-	int anchor_delay = s->smoothed_av_delay;
-	if( anchor_delay < 0 ) {
-		anchor_delay = stream_sync_av_delay( s );
-	}
+#ifdef CONFIG_ANDROID
+	int allow_static = 1;
+#else
+	int allow_static = 0;
+#endif
+	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
+		_get_anchor_delay_ms(s, NULL, allow_static);
 
 	int heard_ts = s->audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
 	if( heard_ts < 0 ) {
@@ -129,6 +163,8 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_time     = -1;
 	s->audio_ref_time = -1;
 	s->smoothed_av_delay = -1;
+	s->last_good_delay_ms = 0;
+	s->last_good_delay_valid = 0;
 
 	if( s->video->valid ) {
 		s->video_time = time;
@@ -264,6 +300,18 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
 	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
 	int sync_delay = stream_sync_av_delay( s );
+#ifdef CONFIG_ANDROID
+	if( sync_delay <= 0 ) {
+		if( s->smoothed_av_delay > 0 ) {
+			sync_delay = s->smoothed_av_delay;
+		} else if( s->audio_ctx ) {
+			int static_latency = audio_interface_get_latency( s->audio_ctx );
+			if( static_latency > 0 ) {
+				sync_delay = static_latency;
+			}
+		}
+	}
+#endif
 	int using_atempo = (s->audio_filter_atempo != NULL);
 	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
 DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
@@ -284,9 +332,23 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		return 0;
 	}
 
+#ifdef CONFIG_ANDROID
+	int allow_static = 1;
+#else
+	int allow_static = 0;
+#endif
+	int anchor_valid = 1;
 	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
-	int current_av_delay = stream_sync_av_delay( s );
+	int current_av_delay = _get_anchor_delay_ms(s, &anchor_valid, allow_static);
+	static int last_anchor_delay = -1;
+	int delay_jump = 0;
+	if (current_av_delay >= 0 && last_anchor_delay >= 0 &&
+		abs(current_av_delay - last_anchor_delay) >= 100) {
+		delay_jump = 1;
+	}
 	if( delay_valid ) {
+		s->last_good_delay_ms = current_av_delay;
+		s->last_good_delay_valid = 1;
 		if( s->smoothed_av_delay == -1 ) {
 			s->smoothed_av_delay = current_av_delay;
 		} else {
@@ -296,19 +358,26 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
 			}
 		}
+	} else if (s->smoothed_av_delay == -1 && anchor_valid) {
+		s->smoothed_av_delay = current_av_delay;
 	}
 
-	if( delay_valid && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
+	if( anchor_valid && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
+			if( allow_static && !delay_valid && !delay_jump && s->sink_ref_time != -1 ) {
+				goto skip_anchor;
+			}
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
 			if( anchor_ts < 0 ) {
 				anchor_ts = 0;
 			}
 			s->video_sink->put_time( s->video_sink, anchor_ts );
+			last_anchor_delay = current_av_delay;
 		}
 	}
 
+skip_anchor:
 	DBGY serprintf("smoothed_av_delay: %d (raw: %d)\n", s->smoothed_av_delay, current_av_delay);
 
 	s->sync_a_time = audio_time;

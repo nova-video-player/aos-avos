@@ -304,6 +304,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack = {
 	.write = audiotrack_write,
 	.set_output_params = audiotrack_set_output_params,
 	.get_delay = audiotrack_get_delay,
+	.get_latency = NULL,
 	.flush_output = audiotrack_flush_output,
 	.preload = audiotrack_preload,
 	.get_session_id = audiotrack_get_session_id,

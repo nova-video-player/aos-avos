@@ -399,6 +399,7 @@ const audio_interface_impl_t audio_interface_impl_oss = {
 	.write             = oss_write,
 	.set_output_params = oss_set_output_params,
 	.get_delay         = oss_get_delay,
+	.get_latency       = NULL,
 	.flush_output      = oss_flush_output,
 	.preload           = oss_preload,
 	.get_session_id    = oss_get_session_id,

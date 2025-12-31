@@ -107,6 +107,7 @@ const audio_interface_impl_t audio_interface_impl_null = {
 	.write = null_write,
 	.set_output_params = null_set_output_params,
 	.get_delay = null_get_delay,
+	.get_latency = NULL,
 	.flush_output = null_flush_output,
 	.preload = null_preload,
 	.delay_valid = NULL,

@@ -483,6 +483,8 @@ typedef struct STREAM {
 	int 		delay_valid;
 	int 		delay_fb;
 	int		smoothed_av_delay;
+	int		last_good_delay_ms;
+	int		last_good_delay_valid;
 	
 	int		delay_history[3];
 	int		delay_history_count;

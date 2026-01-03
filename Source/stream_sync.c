@@ -22,6 +22,10 @@
 #include "stream.h"
 #include "stream_sync.h"
 
+#ifdef CONFIG_ANDROID
+int get_android_sync(void);
+#endif
+
 #ifdef CONFIG_AUDIO_AC3
 extern int libavos_get_ac3_recoding_enabled(void);
 #endif
@@ -368,6 +372,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				goto skip_anchor;
 			}
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
+DBGY			serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d\n",
+				audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts);
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
 			if( anchor_ts < 0 ) {
 				anchor_ts = 0;
@@ -441,6 +447,12 @@ int stream_sync_video( STREAM *s, int video_time )
 	}
 
 	s->sync_v_time = video_time;
+
+#ifdef CONFIG_ANDROID
+	if( get_android_sync() ) {
+		return 0;
+	}
+#endif
 
 	if( !s->sync_video || s->speed != STREAM_SPEED_NORMAL || s->play_n_video_frames || stream_no_sync ) {
 		return 0;

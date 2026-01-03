@@ -372,6 +372,43 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int passthrough = _is_passthrough(s);
 	p->passthrough_cached = passthrough;
 
+	if (android_sync) {
+		if (p->venc_put_time && time < p->venc_put_time) {
+			time = p->venc_put_time;
+		}
+		int64_t prev_offset_ms = -1;
+		int anchor_gap_ms = 0;
+		if (p->venc_put_time > 0 && p->venc_ref_time > 0) {
+			prev_offset_ms = (int64_t)p->venc_ref_time - (int64_t)p->venc_put_time;
+			anchor_gap_ms = now_ms - p->venc_ref_time;
+		}
+		if (!p->venc_put_time || time > p->venc_put_time) {
+			p->venc_put_time = time;
+			if (prev_offset_ms >= 0 && anchor_gap_ms > 100) {
+				// Google Streamer 4K: Audio anchors can arrive ~200ms late,
+				// which jumps the TS↔WC offset forward and stalls MediaCodec.
+				// Keep the previous offset to preserve smooth pacing.
+				p->venc_ref_time = (int)(time + prev_offset_ms);
+DBGSI			serprintf("android_sync: late anchor gap=%dms, keep offset=%lld\n",
+					anchor_gap_ms, prev_offset_ms);
+			} else {
+				p->venc_ref_time = now_ms;
+			}
+		}
+		if (prev_offset_ms >= 0 && p->venc_put_time > 0 && p->venc_ref_time > 0) {
+			int64_t new_offset_ms = (int64_t)p->venc_ref_time - (int64_t)p->venc_put_time;
+			int64_t diff_ms = new_offset_ms - prev_offset_ms;
+			if (diff_ms > 50 || diff_ms < -50) {
+				DBGSI serprintf("android_sync: offset jump prev=%lld new=%lld diff=%lld\n",
+					prev_offset_ms, new_offset_ms, diff_ms);
+			}
+		}
+DBGSI serprintf("android_sync: put_time=%d ref_ms=%d dt=%d dr=%d\n",
+			time, now_ms, dt, dr);
+DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
+		return 0;
+	}
+
 	// Detect speed change (explicit discontinuity)
 	int speed_changed = 0;
 	float current_speed = audio_interface_get_audio_speed();
@@ -570,7 +607,6 @@ DBGSI serprintf("MediaCodec resume\n");
  		int venc_time = _get_time(p);
  		int blit_duration;
 
-		// Use MediaCodec's projection (nanosecond snapping) by not providing an absolute timestamp here.
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
@@ -581,8 +617,7 @@ DBGSI serprintf("MediaCodec resume\n");
 		}
 
 		if( android_sync ) {
-			// For android_sync, use the traditional blit_time calculation
-			blit_duration = sfdec_force_blit ? 0 : f->blit_time - venc_time;
+			blit_duration = 0;
 		} else if( sfdec_force_blit ) {
 			blit_duration = 0;
 		} else if( !delay_valid ) {
@@ -678,67 +713,15 @@ DBGSI serprintf(" ok\n");
 
 render_now:
 		if( android_sync ) {
-			// Calculate raw blit duration (unclamped)
-			int raw_blit_duration = f->blit_time - venc_time;
-			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-			int frame_ms = (f && f->duration > 0) ? f->duration : 16;
-			if( raw_blit_duration > frame_ms * 2 || raw_blit_duration < -frame_ms * 2 ) {
-				int audio_time = s ? s->audio_time : -1;
-				int video_time = s ? s->video_time : -1;
-				int sync_delay = (s && s->audio_ctx) ? audio_interface_get_delay( s->audio_ctx ) : -1;
-				DBGSI serprintf("android_sync: large wait raw=%dms frame=%dms blit=%d venc=%d a=%d v=%d sync_delay=%d\n",
-					raw_blit_duration, frame_ms, f->blit_time, venc_time, audio_time, video_time, sync_delay);
-			}
-
-			// If we are within a reasonable sync window (e.g. -1s to +5s), use the player clock
-			// We allow a large positive window because buffering (frames ahead of time) is good and shouldn't be squashed.
-			// We allow a negative window to let the player catch up (fast forward) if slightly behind.
-			if (raw_blit_duration > -1000 && raw_blit_duration < 5000) {
-				int64_t current_offset_ns = now_ns - (int64_t)venc_time * 1000000LL;
-				if (p->render_offset_ns == -1) {
-					p->render_offset_ns = current_offset_ns;
-					DBGSI serprintf("android_sync: initial anchor established offset=%lld ms pt=%d\n",
-						current_offset_ns/1000000LL, passthrough);
-				} else if (!passthrough) {
-					int64_t diff = current_offset_ns - p->render_offset_ns;
-					// Adapt drift tolerance to device latency: base 50ms, loosen on high latency up to 200ms
-					int drift_tol_ms = 50;
-					if( s && s->audio_ctx ) {
-						int lat_ms = audio_interface_get_delay( s->audio_ctx );
-						if( lat_ms < 0 ) {
-							lat_ms = 0;
-						}
-						// Allow larger jitter on high-latency devices: use half the latency,
-						// clamped to [200ms, 500ms]
-						int adaptive = lat_ms / 2;
-						if( adaptive < 200 ) {
-							adaptive = 200;
-						} else if( adaptive > 500 ) {
-							adaptive = 500;
-						}
-						drift_tol_ms = adaptive;
-					}
-					int64_t drift_tol_ns = (int64_t)drift_tol_ms * 1000000LL;
-					if (diff > drift_tol_ns || diff < -drift_tol_ns) {
-						DBGSI serprintf("android_sync: offset drift reset blit=%d venc=%d raw=%dms off=%lld->%lld diff=%lldms tol=%dms\n",
-							f->blit_time, venc_time, raw_blit_duration,
-							p->render_offset_ns/1000000LL, current_offset_ns/1000000LL, diff/1000000LL, drift_tol_ms);
-						p->render_offset_ns = current_offset_ns;
-						DBGSI serprintf("android_sync: offset drift %lld ms (tol=%d ms), resetting\n", diff/1000000LL, drift_tol_ms);
-					}
-				} else {
-					int64_t diff = current_offset_ns - p->render_offset_ns;
-					DBGSI serprintf("android_sync: offset drift %lld ms SKIPPED (passthrough)\n", diff/1000000LL);
-				}
-				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
+			if (p->venc_put_time > 0 && p->venc_ref_time > 0) {
+				int64_t offset_ns = (int64_t)p->venc_ref_time * 1000000LL -
+					(int64_t)p->venc_put_time * 1000000LL;
+				render_ts_ns = (int64_t)f->time * 1000000LL + offset_ns;
+DBGSI serprintf("android_sync: render_ts=%lld f_time=%d venc_put=%d venc_ref=%d\n",
+					render_ts_ns, f->time, p->venc_put_time, p->venc_ref_time);
 			} else {
-				// Large desync detected (e.g. clock reset). Establish a local anchor.
-				if (p->render_offset_ns == -1) {
-					// Anchor the current frame to play in 50ms
-					p->render_offset_ns = now_ns - (int64_t)f->time * 1000000LL + 50000000LL;
-					DBGSI serprintf("android_sync: re-anchoring. raw_dur=%d, offset=%lld\n", raw_blit_duration, p->render_offset_ns);
-				}
-				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
+DBGSI serprintf("android_sync: missing anchor f_time=%d venc_put=%d venc_ref=%d\n",
+					f->time, p->venc_put_time, p->venc_ref_time);
 			}
 		}
 

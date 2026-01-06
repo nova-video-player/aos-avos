@@ -334,20 +334,21 @@ abuffer → atempo → abuffersink
 ```c
 // In stream_filter_audio_atempo.c:_filter()
 float speed = audio_interface_get_audio_speed();
+int speed_enabled = audio_interface_is_audio_speed_enabled();
 
-if (fabsf(speed - 1.0f) < 0.001f || !ctx->filter_initialized) {
-    return 0;  // Bypass - no processing
+if (!speed_enabled || !ctx->filter_initialized) {
+    return 0;  // Bypass when audio-speed feature is disabled
 }
 ```
 
 At 1.0x speed:
-- Filter object exists but does nothing
-- No CPU overhead
-- Samples pass through unchanged
+- If audio-speed is enabled, the filter remains active (neutral tempo) to keep
+  consistent latency accounting.
+- If audio-speed is disabled, the filter is bypassed entirely.
 
 ## Video Synchronization
 
-### Video Sink Pacing (`stream_sink_video_android.c`)
+### Video Sink Pacing (`codec_sfdec2.c`)
 
 Audio is the master clock. Video sync uses feedback control:
 

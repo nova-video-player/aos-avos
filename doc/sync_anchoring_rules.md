@@ -8,12 +8,14 @@
 - **Monotonic clock variables (WC)**: `CLOCK_MONOTONIC` timestamps are used for wall‑clock pacing because they never jump due to system time changes. They provide stable elapsed‑time deltas for TS↔WC anchoring.
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
 - **`smoothed_av_delay`**: A low‑pass filtered estimate of audio‑video offset (TS) used as a stable proxy for the audible delay. When it is invalid, fall back to `stream_sync_av_delay()`.
+- **`put_time_mode`**: Enabled when a sink exposes `put_time()`. In this mode the sync layer keeps audio as the master (via `heard_audio_ts`) but does not disable sync on early frames; the sink owns TS↔WC pacing.
 
 ## Time Domain Anchors (Single per Sink)
 
 - **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor only from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards.
 
 - **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC), then supplies `render_ts_ns` to MediaCodec. `sfdec_ndkmediacodec.cpp` internal anchors (`start_off`, `start_monotonic`) are bypassed when `render_ts_ns` is provided.
+- **Anchor validity**: For android_sync=1, update `venc_ref_time` only when the TS anchor advances. Reusing the same TS must not refresh WC.
 
 **Unification**: `stream_set_av_speed()` computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. No other layers touch WC anchors.
 
@@ -45,6 +47,7 @@
 - **Sink selection**: On Android, the active video sink is `sfdec2` (`codec_sfdec2.c`). The sink is created via `stream_get_default_video_sink()` but the name logged is `sfdec2`.
 - **android_sync=0**: `codec_sfdec2.c` owns TS↔WC anchoring (`venc_put_time`, `venc_ref_time`) and pacing (blit wait/drop). `stream_sync.c` still computes A/V delay and audio master timing, but the sink uses its own WC anchor to schedule frames.
 - **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from `venc_put_time/venc_ref_time` and always passes it to MediaCodec. `stream_sync_video()` is bypassed to avoid blocking the video thread; only the audio‑driven anchor remains.
+- **put_time_mode**: When the sink provides `put_time()`, the sync layer uses `heard_audio_ts` for the diff calculation but leaves pacing to the sink. Early frames are allowed to flow until the anchor is valid (warmup frames).
 
 ## In-Flight Data During Speed Changes
 
@@ -99,6 +102,10 @@
 **Remedies applied (android_sync=0, sfdec2):**
 - **Grace window (1s)** after startup, seek, speed change, or discontinuity: suppress reanchor resets and frame drops while AudioTrack latency stabilizes.
 - **Monotonic anchor**: prevent backward anchor movement during steady playback; only allow resets on explicit speed change or large discontinuity.
+
+**Remedies applied (android_sync=1, MediaCodec):**
+- **Anchor validity guard**: keep `venc_ref_time` stable when `venc_put_time` does not advance to avoid WC jumps.
+- **Warmup frames**: allow a small number of frames before audio anchor becomes valid, then use `heard_audio_ts` for anchoring.
 
 ## Filters and Time Domains
 

@@ -31,6 +31,7 @@
 #include "color.h"
 #include "astdlib.h"
 #include "stream_sync.h"
+
 #include "cbe.h"
 #include "browse.h"
 #include "frame_q.h"
@@ -730,6 +731,8 @@ DBGS serprintf("slideshow!\r\n" );
 serprintf("error, could not open video sink!\r\n");
 				goto next;
 			}
+			s->put_time_mode = (s->video_sink->put_time != NULL);
+			serprintf("put_time_mode=%d (sink=%s)\n", s->put_time_mode, s->video_sink->name);
 		}
 		if ( s->video->valid) {
 			if( s->use_sink_frames ) {
@@ -775,6 +778,7 @@ serprintf("error, could not cleanup video dec!\n");
 			if (s->video_sink->is_open) {
 				s->video_sink->close(s->video_sink);
 			}
+			s->put_time_mode = 0;
 		}
 	} 
 ErrorExit:
@@ -2493,6 +2497,7 @@ serprintf("STP: not open!\r\n");
 			s->video_sink->delete( s->video_sink );
 		}
 		s->video_sink = NULL;
+		s->put_time_mode = 0;
 	}
 
 	// stop audio decoder
@@ -2611,6 +2616,7 @@ DBGS serprintf("stream_pause\r\n");
 		}
 
 		s->paused = 1;
+		sfdec2_android_sync_on_pause( s, 1 );
 	}
 
 	_stream_wait_for_idle( s, 1000 );
@@ -2631,6 +2637,7 @@ serprintf("UNP: not_open\r\n");
 	}
 	if ( !was_paused ) {
 DBGS serprintf("stream_un_pause\r\n");
+		sfdec2_android_sync_on_pause( s, 0 );
 
 		float audio_speed = audio_interface_get_audio_speed();
 		int using_atempo = audio_interface_is_using_atempo();
@@ -2769,7 +2776,11 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 
 		if( s->video_sink->put_time ) {
 			// For Android sinks: anchor the sink clock to what will be heard.
-			// The sink's WC pacing is derived from this TS anchor.
+			// After seek, defer anchoring until we have a post-seek audio timestamp
+			// to avoid seeding the sink clock from a stale reference.
+			if( s->sync_a_time == -1 ) {
+				return;
+			}
 			int anchor_ts = stream_get_heard_audio_ts( s, frame->time );
 			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time  = frame->time;
@@ -3908,6 +3919,7 @@ static int check_realloc( STREAM *s )
 			pthread_mutex_unlock( &s->video_sink_mutex );
 			return 1;
 		}
+		s->put_time_mode = (s->video_sink->put_time != NULL);
 		_query_sink_frames( s );
 
 		pthread_mutex_unlock( &s->video_sink_mutex );
@@ -3933,6 +3945,7 @@ static int _handle_video_codec_error( STREAM *s )
 			}
 			s->video_sink = NULL;
 		}
+		s->put_time_mode = 0;
 	}
 
 	int cpu = s->video_dec->cpu;	
@@ -4334,6 +4347,20 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
 			sync_time = s->seek_target_sync_time;
 		}
+		if( s->video_sink && s->video_sink->put_time && s->seek_epoch == 0 && s->video_time < 0 ) {
+			// Initial start/resume: rebase once using current delay fallback.
+			int allow_static = 0;
+#ifdef CONFIG_ANDROID
+			allow_static = 1;
+#endif
+			int anchor_delay = stream_get_anchor_delay_ms( s, allow_static );
+			if( anchor_delay > 0 ) {
+				sync_time -= anchor_delay + RST_TO_TS_DELTA( s->av_delay, int );
+				if( sync_time < 0 ) {
+					sync_time = 0;
+				}
+			}
+		}
 		stream_sync_init( s, sync_time );
 	}
 
@@ -4356,6 +4383,9 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int was_paused;
 	int start1   = atime();
 	int old_time = s->video_time;
+	int last_good_delay_ms = s->last_good_delay_ms;
+	int last_good_delay_valid = s->last_good_delay_valid;
+	int first_start = (old_time < 0 && s->seek_epoch == 0);
 
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
@@ -4399,9 +4429,11 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 	_video_init( s, sc.time );
 
 	stream_audio_flush( s );
-
 	if( err ) {
 		stream_sync_init( s, sc.time );
+		// Preserve audio delay fallback across seek re-init (broken timing devices).
+		s->last_good_delay_ms = last_good_delay_ms;
+		s->last_good_delay_valid = last_good_delay_valid;
 		// un_pause the stream
 		_seek_un_pause( s, was_paused );
 		return err;	
@@ -4421,10 +4453,14 @@ serprintf("STUFF_ZERO!\n");
 			thread_state_set( &s->parser_tstate,  THREAD_RUNNING );
 		}
 	}
-	
+
 	int start2 = atime();
-	
+
 	thread_state_set( &s->parser_tstate,  THREAD_RUNNING );
+
+	// Clear sync markers before probing frames; audio_time is still pre-seek here.
+	s->sync_a_time = -1;
+	s->sync_v_time = -1;
 
 	if( s->video->valid ) {
 DBGV serprintf("play one frame\n");
@@ -4443,8 +4479,32 @@ DBGV serprintf("play one frame\n");
 		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
 			sync_time = s->seek_target_sync_time;
 		}
+		if( s->video_sink && s->video_sink->put_time && first_start ) {
+			// Initial start/resume: rebase once using current delay fallback.
+			int allow_static = 0;
+#ifdef CONFIG_ANDROID
+			allow_static = 1;
+#endif
+			int anchor_delay = stream_get_anchor_delay_ms( s, allow_static );
+			if( anchor_delay > 0 ) {
+				sync_time -= anchor_delay + RST_TO_TS_DELTA( s->av_delay, int );
+				if( sync_time < 0 ) {
+					sync_time = 0;
+				}
+			}
+		}
 		stream_sync_init( s, sync_time );
+		// Preserve audio delay fallback across seek re-init (broken timing devices).
+		s->last_good_delay_ms = last_good_delay_ms;
+		s->last_good_delay_valid = last_good_delay_valid;
 	}
+	// After seek, drop audio frames until we reach the target TS to avoid anchoring on late audio.
+	if( s->audio && s->audio->valid ) {
+		s->seek_audio_target_ts = sc.time;
+		s->seek_audio_drop = 1;
+		DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
+	}
+	sfdec2_android_sync_on_seek( s );
 	
 DBGS serprintf("\nseeked to frame %d  time %d|%d   pos %lld|%lld <------------ took %3d/%3d\n", sc.frame, s->video_time, s->audio_time, s->video_pos, s->audio_pos, atime() - start1, atime()- start2 );
 	

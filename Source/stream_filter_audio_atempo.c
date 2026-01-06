@@ -570,6 +570,9 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 	if (!ctx) {
 		return 0;
 	}
+	if (!ctx->enabled) {
+		return 0;
+	}
 
 	// Total delay in milliseconds (in real-world time, not scaled by speed)
 	int delay_ms = 0;

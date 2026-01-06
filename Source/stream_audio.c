@@ -436,7 +436,7 @@ DBGV serprintf("drop audio chunk: time %d\r\n", cdata.time );
 			if( cdata.valid ) {
 				if( cdata.time != STREAM_NO_PTS_VALUE && cdata.time < 0 ) {
 					// drop this shit!
-DBGV serprintf("audio in the past! %d\r\n", cdata.time );			
+DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 					continue;
 				}
 				if( s->seek_audio_drop && cdata.time != STREAM_NO_PTS_VALUE &&
@@ -444,6 +444,10 @@ DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 					DBG serprintf("AUDIO_SEEK_DROP: time=%d target=%d\n",
 						cdata.time, s->seek_audio_target_ts);
 					continue;
+				}
+				if( s->seek_audio_drop && cdata.time == STREAM_NO_PTS_VALUE ) {
+					DBG serprintf("AUDIO_SEEK_DROP_SKIP: no pts, target=%d\n",
+						s->seek_audio_target_ts);
 				}
 				if( s->seek_audio_drop && cdata.time != STREAM_NO_PTS_VALUE &&
 					cdata.time >= s->seek_audio_target_ts ) {
@@ -595,11 +599,12 @@ serprintf(" ae! ");
 			file_write( s->dump_pcm_fd, audio_frame.data, audio_frame.size );
 		}
 
-		int original_format = 0;
-		int original_channels = 0;
-		int original_rate = 0;
-		int original_bits = 0;
-		int frame_channels = 0;
+	int original_format = 0;
+	int original_channels = 0;
+	int original_rate = 0;
+	int original_bits = 0;
+	int frame_channels = 0;
+	int use_atempo = 0;
 
 		if( s->audio_sink ) {
 			AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
@@ -623,21 +628,18 @@ serprintf(" ae! ");
 				// 1. Audio speed feature is enabled
 				// 2. User selected atempo (not AudioTrack PlaybackParams)
 				// 3. NOT in passthrough mode 1 or 2 (compressed audio to receiver)
-				int should_use_atempo = 1;
-
+				use_atempo = (s->audio_filter_atempo != NULL);
 				if (!audio_interface_is_audio_speed_enabled()) {
-					should_use_atempo = 0;  // Audio speed feature disabled
+					use_atempo = 0;  // Audio speed feature disabled
 				}
-
 				if (!audio_interface_is_using_atempo()) {
-					should_use_atempo = 0;  // User chose AudioTrack-based speed
+					use_atempo = 0;  // User chose AudioTrack-based speed
 				}
-
 				if (passthrough == 1 || passthrough == 2) {
-					should_use_atempo = 0;  // Passthrough mode active
+					use_atempo = 0;  // Passthrough mode active
 				}
 
-				if (should_use_atempo && s->audio_filter_atempo && audio_frame.size > 0) {
+				if (use_atempo && audio_frame.size > 0) {
 					DBG serprintf("stream_audio: applying atempo filter\n");
 					s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame);
 				}
@@ -972,8 +974,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Option B: atempo output is already in TS domain (physical playback time)
 							// Don't double-scale by applying RST_TO_TS_DELTA when atempo is active
 							// If filter exists, we're in Option B mode (timeline mapping enabled)
-							int using_atempo = (s->audio_filter_atempo != NULL);
-							if( using_atempo ) {
+							if( use_atempo ) {
 								// atempo output duration = physical samples @ 1.0x = TS domain
 								_add_audio_time( s, output_time_ms );
 								DBG serprintf("stream_audio: atempo output, audio_time +%d ms (TS domain, no scaling)\n",
@@ -985,14 +986,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									RST_TO_TS_DELTA(output_time_ms, int));
 							}
 							DBG serprintf("stream_audio: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f output_ms=%d bytes=%d bps=%d ch=%d rate=%d\n",
-								prev_audio_time, s->audio_time, using_atempo, audio_interface_get_audio_speed(),
+								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(),
 								output_time_ms, effective_size, bytes_per_sample, channels, sample_rate);
 						} else if( s->audio->bytesPerSec ) {
 							// Fallback: use decoded bytes (original behavior)
 							_add_audio_time( s, RST_TO_TS_DELTA(decoded_bytes * 1000 / s->audio->bytesPerSec, int) );
 							DBG serprintf("stream_audio: audio_time fallback prev=%d now=%d decoded_bytes=%d bytesPerSec=%d using_atempo=%d speed=%.3f\n",
 								prev_audio_time, s->audio_time, decoded_bytes, s->audio->bytesPerSec,
-								s->audio_filter_atempo != NULL, audio_interface_get_audio_speed());
+								use_atempo, audio_interface_get_audio_speed());
 						}
 					}
 				}
@@ -1044,8 +1045,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							int prev_audio_time = s->audio_time;
 
 							// Check if atempo filter is active - output samples are already in TS domain (physical time)
-							int using_atempo = (s->audio_filter_atempo != NULL);
-							if( using_atempo ) {
+							int use_atempo = (s->audio_filter_atempo != NULL);
+							if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
+								use_atempo = 0;
+							}
+							if( use_atempo ) {
 								// atempo output = physical samples @ 1.0x = TS domain, no scaling needed
 								_set_audio_time( s, s->audio_ref_time + delta );
 								DBG serprintf("stream_audio SAMPLES: atempo active, audio_time = %d + %d (no scaling)\n",
@@ -1057,7 +1061,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									s->audio_ref_time, delta);
 							}
 							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d\n",
-								prev_audio_time, s->audio_time, using_atempo, audio_interface_get_audio_speed(), delta);
+								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta);
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}

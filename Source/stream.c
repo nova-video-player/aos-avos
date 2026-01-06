@@ -554,6 +554,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	int using_atempo = (s->audio_filter_atempo != NULL);
+	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
+		using_atempo = 0;
+	}
 	audio_interface_set_using_atempo( using_atempo );
 
 	int audio_latency_ms = -1;

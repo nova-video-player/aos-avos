@@ -469,6 +469,7 @@ typedef struct STREAM {
 	int 		sink_delay_count;	// delay between video and it's sink
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
+	int		put_time_mode;		// video sink uses put_time pacing
 
 	int 		audio_time;
 	int 		audio_ref_time;
@@ -718,6 +719,7 @@ typedef struct STREAM {
 	int		seek_use_target_sync;
 	int		seek_target_sync_time;
 	int		seek_frame;
+	int		warmup_video_frames;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 
 	ID3_TAG		tag;
@@ -802,12 +804,15 @@ void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
+int	stream_get_anchor_delay_ms( STREAM *s, int allow_static );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
 void    stream_audio_reset_ac3_passthrough_state(void);
 void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
 void	stream_un_pause ( STREAM *s, int was_paused );
+void    sfdec2_android_sync_on_pause( STREAM *s, int paused );
+void    sfdec2_android_sync_on_seek( STREAM *s );
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );
 int     stream_get_current_time ( STREAM *s, int *total_time );

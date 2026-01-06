@@ -131,6 +131,11 @@ static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
 	return delay;
 }
 
+int stream_get_anchor_delay_ms( STREAM *s, int allow_static )
+{
+	return _get_anchor_delay_ms( s, NULL, allow_static );
+}
+
 int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
@@ -138,18 +143,24 @@ int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 	}
 
 #ifdef CONFIG_ANDROID
-	int allow_static = 1;
 #else
 	int allow_static = 0;
 #endif
+	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
+#ifdef CONFIG_ANDROID
+	int allow_static = 1;
+#endif
 	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
 		_get_anchor_delay_ms(s, NULL, allow_static);
+DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d delay_valid=%d anchor_delay=%d av_delay=%d\n",
+		s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, s->av_delay);
 
 	int heard_ts = s->audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
 	if( heard_ts < 0 ) {
 		heard_ts = 0;
 	}
 
+DBGY	serprintf("heard_ts_calc: audio_time=%d heard_ts=%d\n", s->audio_time, heard_ts);
 	return heard_ts;
 }
 
@@ -169,6 +180,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->smoothed_av_delay = -1;
 	s->last_good_delay_ms = 0;
 	s->last_good_delay_valid = 0;
+	s->warmup_video_frames = 0;
 
 	if( s->video->valid ) {
 		s->video_time = time;
@@ -232,13 +244,17 @@ int stream_sync_av_delay( STREAM *s )
 
 	// atempo filter runs independently of other filters (controls playback speed)
 	int atempo_delay = 0;
-	if( s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
+	int use_atempo = (s->audio_filter_atempo != NULL);
+	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
+		use_atempo = 0;
+	}
+	if( use_atempo && s->audio_filter_atempo->delay ) {
 		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
 		filter_delay += atempo_delay;
 	}
-	DBGY serprintf("stream_sync_av_delay: atempo_delay=%d filter_atempo=%p delay_fn=%p\n",
+	DBGY serprintf("stream_sync_av_delay: atempo_delay=%d filter_atempo=%p delay_fn=%p enabled=%d\n",
 		atempo_delay, s->audio_filter_atempo,
-		s->audio_filter_atempo ? s->audio_filter_atempo->delay : NULL);
+		s->audio_filter_atempo ? s->audio_filter_atempo->delay : NULL, use_atempo);
 
 	// Filters run in: normal PCM mode OR AC3 recoding mode (all formats)
 	int run_filter = (!passthrough || ac3_recoding);
@@ -295,6 +311,11 @@ DBGY		serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d vi
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
+	if( s && !s->put_time_mode && s->video_sink && s->video_sink->put_time ) {
+		// Lazy init: ensure put_time_mode is active once the sink is available.
+		s->put_time_mode = 1;
+	}
+DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 	// Computes video presentation time - audio presentation time
 	// Positive value means video is ahead of audio, negative means audio is ahead
 	// Formula accounts for buffering delays: audio/video timestamps represent generation time,
@@ -304,8 +325,18 @@ static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
 	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
 	int sync_delay = stream_sync_av_delay( s );
+	int use_heard_time = 0;
+	if( s->put_time_mode ) {
+		// In put_time mode, audio_time is anchored to heard time via stream_get_heard_audio_ts.
+		// Avoid double-counting delay in the diff by using the same heard-time reference.
+		int heard_audio_ts = stream_get_heard_audio_ts( s, audio_time );
+		audio_time = heard_audio_ts;
+		sync_delay = 0;
+		use_heard_time = 1;
+	}
 #ifdef CONFIG_ANDROID
-	if( sync_delay <= 0 ) {
+	if( !use_heard_time && sync_delay <= 0 ) {
+		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 		if( s->smoothed_av_delay > 0 ) {
 			sync_delay = s->smoothed_av_delay;
 		} else if( s->audio_ctx ) {
@@ -335,6 +366,12 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	if (!s) {
 		return 0;
 	}
+	if( s->sync_a_time == -1 && audio_time != -1 ) {
+		DBG serprintf(
+			"FIRST_AUDIO_POST_SEEK: audio_time=%d video_time=%d seek_epoch=%d target_sync=%d use_target=%d drop=%d target_ts=%d\n",
+			audio_time, s->video_time, s->seek_epoch, s->seek_target_sync_time,
+			s->seek_use_target_sync, s->seek_audio_drop, s->seek_audio_target_ts );
+	}
 
 #ifdef CONFIG_ANDROID
 	int allow_static = 1;
@@ -344,11 +381,22 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	int anchor_valid = 1;
 	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 	int current_av_delay = _get_anchor_delay_ms(s, &anchor_valid, allow_static);
+	int anchor_delay = current_av_delay;
+	if( !delay_valid && s->last_good_delay_valid ) {
+		// After seek, prefer last known good delay over static latency.
+		current_av_delay = s->last_good_delay_ms;
+		anchor_delay = current_av_delay;
+		anchor_valid = 1;
+	}
 	static int last_anchor_delay = -1;
 	int delay_jump = 0;
 	if (current_av_delay >= 0 && last_anchor_delay >= 0 &&
 		abs(current_av_delay - last_anchor_delay) >= 100) {
 		delay_jump = 1;
+	}
+	if( !get_android_sync() && !delay_valid && !anchor_valid ) {
+		// No usable timing (no dynamic and no static/last-good); disable delay compensation.
+		current_av_delay = 0;
 	}
 	if( delay_valid ) {
 		s->last_good_delay_ms = current_av_delay;
@@ -362,28 +410,39 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
 			}
 		}
-	} else if (s->smoothed_av_delay == -1 && anchor_valid) {
-		s->smoothed_av_delay = current_av_delay;
+	} else if( anchor_valid && current_av_delay > 0 ) {
+		// Preserve static/last-good delay across timing-invalid periods (e.g., after seek).
+		s->last_good_delay_ms = current_av_delay;
+		s->last_good_delay_valid = 1;
+		if( s->smoothed_av_delay == -1 ) {
+			s->smoothed_av_delay = current_av_delay;
+		}
+	}
+	if( anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
+		int anchor_ts_raw = audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+		if( anchor_ts_raw < 0 ) {
+DBGY			serprintf("anchor_wait: audio_time=%d delay=%d av_delay=%d\n",
+				audio_time, anchor_delay, s->av_delay);
+			// Defer anchoring until we reach audible time to avoid seeding a zero anchor.
+			return 0;
+		}
 	}
 
 	if( anchor_valid && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
-			if( allow_static && !delay_valid && !delay_jump && s->sink_ref_time != -1 ) {
-				goto skip_anchor;
-			}
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
 DBGY			serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d\n",
 				audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts);
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
-			if( anchor_ts < 0 ) {
-				anchor_ts = 0;
-			}
 			s->video_sink->put_time( s->video_sink, anchor_ts );
+			// Audio-driven anchor is authoritative in put_time mode.
+			// Prevent the video path from re-anchoring to a different reference.
+			s->sink_ref_time = anchor_ts;
+			s->vid_ref_time = s->video_time;
 			last_anchor_delay = current_av_delay;
 		}
 	}
 
-skip_anchor:
 	DBGY serprintf("smoothed_av_delay: %d (raw: %d)\n", s->smoothed_av_delay, current_av_delay);
 
 	s->sync_a_time = audio_time;
@@ -409,16 +468,24 @@ skip_anchor:
 
 DBGY serprintf("{SSA %d}} ", audio_time );
 	// both audio and video need to have a valid timestamp before we can start
-	if( s->sync_v_time == -1 || s->sync_a_time == -1 )
+	int audio_time_for_diff = s->sync_a_time;
+	if( s->put_time_mode && s->audio_time != -1 ) {
+		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
+		audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
+	}
+	if( s->sync_v_time == -1 || audio_time_for_diff == -1 )
 		return 1;
 	
 	// if audio is in the future, delay it (but only if significantly ahead)
-	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
+	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
 
 	// Only block audio if it's significantly ahead (more than threshold)
 	if( diff < 0 ) {
 DBGY serprintf("{{A %d}} ", diff );
-		s->sync_video = 0;
+		// In put_time mode, keep video gating active; audio sets the anchor.
+		if( !s->put_time_mode ) {
+			s->sync_video = 0;
+		}
 		return 1;
 	}
 	// allow audio to play from now on
@@ -472,18 +539,43 @@ int stream_sync_video( STREAM *s, int video_time )
 		return 0;
 	}
 
+#ifdef CONFIG_ANDROID
+	{
+		int allow_static = 1;
+		int anchor_valid = 1;
+		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
+		if( !anchor_valid ) {
+DBGY			serprintf("sync_video: timing unavailable, free-run video\n");
+			return 0;
+		}
+	}
+#else
 	if( s->audio_ctx && !audio_interface_is_delay_valid( s->audio_ctx ) ) {
 DBGY		serprintf("sync_video: timing unavailable, free-run video\n");
 		return 0;
 	}
+#endif
 	
 DBGY serprintf("{SSV %d}} ", video_time );
 	// both audio and video need to have a valid timestamp before we can start
-	if( s->sync_v_time == -1 || s->sync_a_time == -1 )
+	int audio_time_for_diff = s->sync_a_time;
+	if( s->put_time_mode && s->audio_time != -1 ) {
+		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
+		audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
+	}
+	if( s->sync_v_time == -1 || audio_time_for_diff == -1 )
 		return 1;
+	if( s->put_time_mode && audio_time_for_diff <= 0 ) {
+		// Startup/resume warm-up: allow a few frames before audible time exists.
+		if( s->warmup_video_frames < 5 ) {
+			s->warmup_video_frames++;
+			return 0;
+		}
+		return 1;
+	}
 
 	// if video is in the future, delay it
-	int diff = _stream_av_diff( s, s->sync_v_time, s->sync_a_time );
+	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
 	// if we sample post sink, allow us to start 500ms early
 	int max_rst = s->vtime_post_sink ? 500 : 0;
 
@@ -495,7 +587,9 @@ DBGY serprintf( "{{V %d}} ", diff );
 	}
 
 	// allow video to play from now on
-	s->sync_video = 0;
+	if( !s->put_time_mode ) {
+		s->sync_video = 0;
+	}
 	
 	return 0;
 }

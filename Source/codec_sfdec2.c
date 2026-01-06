@@ -18,6 +18,7 @@
 #include "types.h"
 #include "debug.h"
 #include "util.h"
+#include <string.h>
 #include "codec_utils.h"
 #include "stream.h"
 #include "stream_sync.h"
@@ -141,6 +142,9 @@ typedef struct priv {
 	INT64 sched_last_mono_ns;
 	int sched_late;
 	int prev_paused;
+	int pause_start_ms;
+	int pause_armed;
+	int venc_anchor_valid;
 
 	STREAM_DEC_VIDEO *dec;
 	int64_t render_offset_ns;
@@ -373,17 +377,18 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	p->passthrough_cached = passthrough;
 
 	if (android_sync) {
-		if (p->venc_put_time && time < p->venc_put_time) {
+		if (p->venc_anchor_valid && time < p->venc_put_time) {
 			time = p->venc_put_time;
 		}
 		int64_t prev_offset_ms = -1;
 		int anchor_gap_ms = 0;
-		if (p->venc_put_time > 0 && p->venc_ref_time > 0) {
+		if (p->venc_anchor_valid && p->venc_ref_time > 0) {
 			prev_offset_ms = (int64_t)p->venc_ref_time - (int64_t)p->venc_put_time;
 			anchor_gap_ms = now_ms - p->venc_ref_time;
 		}
-		if (!p->venc_put_time || time > p->venc_put_time) {
+		if (!p->venc_anchor_valid || time > p->venc_put_time) {
 			p->venc_put_time = time;
+			p->venc_anchor_valid = 1;
 			if (prev_offset_ms >= 0 && anchor_gap_ms > 100) {
 				// Google Streamer 4K: Audio anchors can arrive ~200ms late,
 				// which jumps the TS↔WC offset forward and stalls MediaCodec.
@@ -395,7 +400,7 @@ DBGSI			serprintf("android_sync: late anchor gap=%dms, keep offset=%lld\n",
 				p->venc_ref_time = now_ms;
 			}
 		}
-		if (prev_offset_ms >= 0 && p->venc_put_time > 0 && p->venc_ref_time > 0) {
+		if (prev_offset_ms >= 0 && p->venc_anchor_valid && p->venc_ref_time > 0) {
 			int64_t new_offset_ms = (int64_t)p->venc_ref_time - (int64_t)p->venc_put_time;
 			int64_t diff_ms = new_offset_ms - prev_offset_ms;
 			if (diff_ms > 50 || diff_ms < -50) {
@@ -428,7 +433,7 @@ DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 	if (s && s->audio_ctx) {
 		delay_valid = audio_interface_is_delay_valid(s->audio_ctx);
 	}
-	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
+	int discontinuity = p->venc_anchor_valid && abs_diff >= drift_threshold_ms;
 	if (!delay_valid && abs_diff < hard_discont_ms) {
 		discontinuity = 0;
 	}
@@ -436,18 +441,18 @@ DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 		p->grace_until_ms = now_ms + 1000;
 	}
 
-	if( !speed_changed && !discontinuity && p->venc_put_time && time < p->venc_put_time ) {
+	if( !speed_changed && !discontinuity && p->venc_anchor_valid && time < p->venc_put_time ) {
 		time = p->venc_put_time;
 		diff = time - expected;
 		abs_diff = diff < 0 ? -diff : diff;
 	}
 
-	if( !speed_changed && dr < sfdec_threshold && p->venc_put_time &&
+	if( !speed_changed && dr < sfdec_threshold && p->venc_anchor_valid &&
 		time > p->venc_put_time && abs_diff < drift_threshold_ms ) {
 		return 0;
 	}
 
-	if( !p->venc_put_time ) {
+	if( !p->venc_anchor_valid ) {
 		p->grace_until_ms = now_ms + 1000;
 	}
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
@@ -472,6 +477,7 @@ DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
+	p->venc_anchor_valid = 1;
 	if (allow_reanchor) {
 		pthread_mutex_lock(&p->locked.mtx);
 		if ( !android_sync ) {
@@ -713,7 +719,7 @@ DBGSI serprintf(" ok\n");
 
 render_now:
 		if( android_sync ) {
-			if (p->venc_put_time > 0 && p->venc_ref_time > 0) {
+			if (p->venc_anchor_valid && p->venc_ref_time > 0) {
 				int64_t offset_ns = (int64_t)p->venc_ref_time * 1000000LL -
 					(int64_t)p->venc_put_time * 1000000LL;
 				render_ts_ns = (int64_t)f->time * 1000000LL + offset_ns;
@@ -1060,6 +1066,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->locked.rotation = video->rotation;
 	p->locked.run = 1;
 	p->prev_paused = 0;
+	p->pause_start_ms = 0;
+	p->pause_armed = 0;
+	p->venc_anchor_valid = 0;
 	p->render_offset_ns = -1;
 	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
 	p->grace_until_ms = 0;
@@ -1318,6 +1327,67 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	}
 
 	return dec;
+}
+
+void sfdec2_android_sync_on_pause( STREAM *s, int paused )
+{
+	if( !s || !android_sync || !s->video_sink || !s->video_sink->priv )
+		return;
+	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
+		return;
+
+	priv_t *p = (priv_t*) s->video_sink->priv;
+	pthread_mutex_lock( &p->locked.mtx );
+	if( paused ) {
+		int active = (s->audio_time > 0 || s->video_time > 0);
+		if( !active ) {
+			p->pause_start_ms = 0;
+			p->pause_armed = 0;
+			pthread_mutex_unlock( &p->locked.mtx );
+			return;
+		}
+		p->pause_start_ms = atime();
+		p->pause_armed = 1;
+DBGSI		serprintf("android_sync: pause start at %d\n", p->pause_start_ms);
+		pthread_mutex_unlock( &p->locked.mtx );
+		return;
+	}
+
+	if( !p->pause_armed ) {
+		p->pause_start_ms = 0;
+		pthread_mutex_unlock( &p->locked.mtx );
+		return;
+	}
+
+	// Shift ref_time by paused duration to avoid fast catch-up on resume.
+				if( p->pause_start_ms > 0 && p->venc_ref_time > 0 && p->venc_anchor_valid ) {
+		int pause_ms = atime() - p->pause_start_ms;
+		if( pause_ms > 0 ) {
+			p->venc_ref_time += pause_ms;
+DBGSI			serprintf("android_sync: resume shift ref_time by %dms -> %d\n",
+				pause_ms, p->venc_ref_time);
+		}
+	}
+	p->pause_start_ms = 0;
+	p->pause_armed = 0;
+	pthread_mutex_unlock( &p->locked.mtx );
+}
+
+void sfdec2_android_sync_on_seek( STREAM *s )
+{
+	if( !s || !android_sync || !s->video_sink || !s->video_sink->priv )
+		return;
+	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
+		return;
+
+	priv_t *p = (priv_t*) s->video_sink->priv;
+	pthread_mutex_lock( &p->locked.mtx );
+	p->venc_put_time = 0;
+	p->venc_ref_time = 0;
+	p->venc_anchor_valid = 0;
+	p->render_offset_ns = -1;
+DBGSI	serprintf("android_sync: seek reset anchors\n");
+	pthread_mutex_unlock( &p->locked.mtx );
 }
 
 void set_android_sync(int sync)

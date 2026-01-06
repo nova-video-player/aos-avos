@@ -1078,6 +1078,13 @@ DBGP2 serprintf("pkt [%4d] st %d  size %10d  pos %8lld  %08X  ",
 			ff_p->packet_count++, stream, packet.size, packet.pos, packet.data );
 	
 	if( s->audio->valid && stream == s->audio->stream ) {
+		DBG serprintf("FFMPEG:AUDIO pkt st=%d pts=%lld dts=%lld pos=%lld size=%d seek=%d\n",
+			stream,
+			(long long)GET_AUDIO_TS( packet.pts ),
+			(long long)GET_AUDIO_TS( packet.dts ),
+			(long long)packet.pos,
+			packet.size,
+			s->seek);
 DBGP2 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X\r\n", GET_AUDIO_TS( packet.dts ), GET_AUDIO_TS( packet.pts ), packet.data[0], packet.data[1],packet.data[2],packet.data[3] );
 DBGC1 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X  %d\r\n", GET_AUDIO_TS( packet.dts ), GET_AUDIO_TS( packet.pts ), packet.data[0], packet.data[1],packet.data[2],packet.data[3], packet.size );
 		// add audio packet

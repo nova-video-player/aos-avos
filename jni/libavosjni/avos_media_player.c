@@ -594,41 +594,41 @@ Java_com_archos_medialib_AvosMediaPlayer_nativeSetStartTime(JNIEnv *env, jobject
 int
 Java_com_archos_medialib_AvosMediaPlayer_getCurrentPosition(JNIEnv *env, jobject thiz)
 {
-    uint32_t ret = 0;
+    int64_t ret = 0;
     avos_mp_t *mp = get_mp_or_throw(env, thiz);
     if (!mp) return 0;
     CHECK(avos->getpos(mp, &ret));
-    return ret;
+    return (int)ret;
 }
 
 int
 Java_com_archos_medialib_AvosMediaPlayer_getBufferPosition(JNIEnv *env, jobject thiz)
 {
-    uint32_t ret = 0;
+    int64_t ret = 0;
     avos_mp_t *mp = get_mp_or_throw(env, thiz);
     if (!mp) return 0;
     CHECK(avos->getpos(mp, &ret));
-    return ret;
+    return (int)ret;
 }
 
 int
 Java_com_archos_medialib_AvosMediaPlayer_getRelativePosition(JNIEnv *env, jobject thiz)
 {
-    uint32_t ret = 0;
+    int64_t ret = 0;
     avos_mp_t *mp = get_mp_or_throw(env, thiz);
     if (!mp) return 0;
     CHECK(avos->getpos(mp, &ret));
-    return ret;
+    return (int)ret;
 }
 
 int
 Java_com_archos_medialib_AvosMediaPlayer_getDuration(JNIEnv *env, jobject thiz)
 {
-    uint32_t ret = 0;
+    int64_t ret = 0;
     avos_mp_t *mp = get_mp_or_throw(env, thiz);
     if (!mp) return 0;
     CHECK(avos->getduration(mp, &ret));
-    return ret;
+    return (int)ret;
 }
 
 void

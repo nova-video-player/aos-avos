@@ -41,7 +41,7 @@ struct avos_mp_video {
 	int abort;
 	int last_seekable;
 	int last_pauseable;
-	int last_duration;
+	int64_t last_duration;
 	int buffered_pos;
 	int send_sub;
 	int width;
@@ -318,7 +318,11 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 
 	video->last_seekable = stream_seekable(video->s);
 	video->last_pauseable = stream_pauseable(video->s);
-	stream_get_current_time(video->s, &video->last_duration);
+	{
+		int temp_duration;
+		stream_get_current_time(video->s, &temp_duration);
+		video->last_duration = temp_duration;
+	}
 
 	vp = &video->s->av.video[0];
 	video->aspect_n = vp->aspect_n;
@@ -403,9 +407,11 @@ int avos_mp_video_seek(avos_mp_t *mp, avos_mp_video_t *video, uint32_t pos)
 	return AVOS_ERR_OK;
 }
 
-int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret)
+int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, int64_t *ret)
 {
-	*ret = stream_get_current_time(video->s, &video->last_duration);
+	int temp_duration;
+	*ret = stream_get_current_time(video->s, &temp_duration);
+	video->last_duration = temp_duration;
 	is_stream_seekable(mp, video);
 	is_stream_pauseable(mp, video);
 	if (video->last_duration == 0) {
@@ -420,9 +426,11 @@ int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret)
 	return AVOS_ERR_OK;
 }
 
-int avos_mp_video_getduration(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret)
+int avos_mp_video_getduration(avos_mp_t *mp, avos_mp_video_t *video, int64_t *ret)
 {
-	stream_get_current_time(video->s, &video->last_duration);
+	int temp_duration;
+	stream_get_current_time(video->s, &temp_duration);
+	video->last_duration = temp_duration;
 	*ret = video->last_duration;
 	return AVOS_ERR_OK;
 }

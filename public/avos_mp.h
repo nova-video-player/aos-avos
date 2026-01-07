@@ -47,8 +47,8 @@ typedef struct avos_mp_handle_t {
 	int (*seek)		(avos_mp_t *mp, uint32_t msec);
 	int (*seek_async)	(avos_mp_t *mp, uint32_t msec);
 	int (*setstarttime)	(avos_mp_t *mp, uint32_t msec);
-	int (*getpos)		(avos_mp_t *mp, uint32_t *ret);
-	int (*getduration)	(avos_mp_t *mp, uint32_t *ret);
+	int (*getpos)		(avos_mp_t *mp, int64_t *ret);
+	int (*getduration)	(avos_mp_t *mp, int64_t *ret);
 	int (*setlooping)	(avos_mp_t *mp, int looping);
 	int (*islooping)	(avos_mp_t *mp, int *ret);
 	int (*getaudiosessionid)(avos_mp_t *mp, int *ret);

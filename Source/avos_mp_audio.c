@@ -41,7 +41,7 @@ struct avos_mp_audio {
 	int was_paused;
 	int last_seekable;
 	int last_pauseable;
-	int last_duration;
+	int64_t last_duration;
 	avos_mp_audio_track_t current_track;
 	avos_mp_audio_track_t next_track;
 	pthread_mutex_t mtx;
@@ -75,7 +75,11 @@ static void send_audio_track_info(avos_mp_t *mp, avos_mp_audio_t *audio)
 
 	audio->last_pauseable = 1;
 	audio->last_seekable = audio_seekable(&audio->a);
-	audio_get_current_time(&audio->a, &audio->last_duration);
+	{
+		int temp_duration;
+		audio_get_current_time(&audio->a, &temp_duration);
+		audio->last_duration = temp_duration;
+	}
 
 	memcpy(&av.audio[0], audio->a.audio, sizeof(AUDIO_PROPERTIES));
 	av.as_max = 1;
@@ -313,21 +317,21 @@ int avos_mp_audio_seek(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t msec)
 	return AVOS_ERR;
 }
 
-int avos_mp_audio_getpos(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t *ret)
+int avos_mp_audio_getpos(avos_mp_t *mp, avos_mp_audio_t *audio, int64_t *ret)
 {
-/* no more audio support 
+/* no more audio support
 	int total;
 
-	*ret = audio_get_current_time(&audio->a, &total); 
+	*ret = audio_get_current_time(&audio->a, &total);
 	return AVOS_ERR_OK;
 */
 	*ret = 0;
 	return AVOS_ERR;
 }
 
-int avos_mp_audio_getduration(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t *ret)
+int avos_mp_audio_getduration(avos_mp_t *mp, avos_mp_audio_t *audio, int64_t *ret)
 {
-/* no more audio support 
+/* no more audio support
 	*ret = audio->last_duration;
 	return AVOS_ERR_OK;
 */

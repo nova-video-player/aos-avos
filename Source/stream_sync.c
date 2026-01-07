@@ -252,7 +252,7 @@ DBGY		serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d vi
 //	and real world hardware delays
 //
 // ************************************************************
-static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
+static int _stream_av_diff( STREAM *s, int64_t video_time, int64_t audio_time )
 {
 	// Computes video presentation time - audio presentation time
 	// Positive value means video is ahead of audio, negative means audio is ahead
@@ -276,7 +276,7 @@ DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d
 //	stream_sync_audio
 //
 // ************************************************************
-int stream_sync_audio( STREAM *s, int audio_time )
+int stream_sync_audio( STREAM *s, int64_t audio_time )
 {
 	// Defensive check: validate stream pointer to prevent JNI abort crashes
 	if (!s) {
@@ -353,7 +353,7 @@ DBGY serprintf("{{A %d}} ", diff );
 //	stream_sync_video
 //
 // ************************************************************
-int stream_sync_video( STREAM *s, int video_time )
+int stream_sync_video( STREAM *s, int64_t video_time )
 {
 	// Defensive check: validate stream pointer to prevent JNI abort crashes
 	if (!s) {

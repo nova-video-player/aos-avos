@@ -20,8 +20,8 @@
 int  stream_sync_init( STREAM *s, int time );
 int  stream_sync_restart( STREAM *s );
 int  stream_sync_av_delay( STREAM *s );
-int  stream_sync_audio( STREAM *s, int audio_time );
-int  stream_sync_video( STREAM *s, int video_time );
+int  stream_sync_audio( STREAM *s, int64_t audio_time );
+int  stream_sync_video( STREAM *s, int64_t video_time );
 void stream_sync( STREAM *s );
 
 #endif

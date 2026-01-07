@@ -74,8 +74,8 @@ struct avos_mp {
 
 	struct {
 		int isplaying;
-		int duration;
-		int pos;
+		int64_t duration;
+		int64_t pos;
 	} last;
 
 	metadata_buffer_t *metadata_buffer;
@@ -98,8 +98,8 @@ int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_video_pause(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_video_isplaying(avos_mp_t *mp, avos_mp_video_t *video, int *ret);
 int avos_mp_video_seek(avos_mp_t *mp, avos_mp_video_t *video, uint32_t msec);
-int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
-int avos_mp_video_getduration(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
+int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, int64_t *ret);
+int avos_mp_video_getduration(avos_mp_t *mp, avos_mp_video_t *video, int64_t *ret);
 int avos_mp_video_getaudiosessionid(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
 int avos_mp_video_setaudiotrack(avos_mp_t *mp, avos_mp_video_t *video, int track, int *ret);
 int avos_mp_video_checksubtitles(avos_mp_t *mp, avos_mp_video_t *video);
@@ -115,8 +115,8 @@ int avos_mp_audio_start(avos_mp_t *mp, avos_mp_audio_t *audio);
 int avos_mp_audio_pause(avos_mp_t *mp, avos_mp_audio_t *audio);
 int avos_mp_audio_isplaying(avos_mp_t *mp, avos_mp_audio_t *audio, int *ret);
 int avos_mp_audio_seek(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t msec);
-int avos_mp_audio_getpos(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t *ret);
-int avos_mp_audio_getduration(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t *ret);
+int avos_mp_audio_getpos(avos_mp_t *mp, avos_mp_audio_t *audio, int64_t *ret);
+int avos_mp_audio_getduration(avos_mp_t *mp, avos_mp_audio_t *audio, int64_t *ret);
 int avos_mp_audio_getaudiosessionid(avos_mp_t *mp, avos_mp_audio_t *audio, uint32_t *ret);
 int avos_mp_audio_setnextrack(avos_mp_t *mp, avos_mp_audio_t *audio, const char *url);
 
@@ -160,7 +160,7 @@ avos_mp_audio_t *avos_mp_getaudio(avos_mp_t *mp)
 	return (avos_mp_audio_t *)mp->media;
 }
 
-int avos_mp_fillmetadata(avos_mp_t *mp, int type, uint64_t size, ID3_TAG *id3_tag, AV_PROPERTIES *av, const char *mimetype, int duration, int seekable, int pauseable, int decoder)
+int avos_mp_fillmetadata(avos_mp_t *mp, int type, uint64_t size, ID3_TAG *id3_tag, AV_PROPERTIES *av, const char *mimetype, int64_t duration, int seekable, int pauseable, int decoder)
 {
 #define ADD_STR(_id, _str) do { \
 	if (avos_metadata_append_str(buffer, (_id), (_str)) == -1) \
@@ -752,7 +752,7 @@ static int avos_mp_setstarttime(avos_mp_t *mp, uint32_t msec)
 	return AVOS_ERR_OK;
 }
 
-static int avos_mp_getpos(avos_mp_t *mp, uint32_t *ret)
+static int avos_mp_getpos(avos_mp_t *mp, int64_t *ret)
 {
 	if (async_cmd_is_running(mp)) {
 		*ret = mp->last.pos;
@@ -760,11 +760,11 @@ static int avos_mp_getpos(avos_mp_t *mp, uint32_t *ret)
 		AVOS_MP_COMMON(getpos, mp, ret);
 		mp->last.pos = *ret;
 	}
-	//MPLOGV("%d", *ret);
+	//MPLOGV("%lld", (long long)*ret);
 	return AVOS_ERR_OK;
 }
 
-static int avos_mp_getduration(avos_mp_t *mp, uint32_t *ret)
+static int avos_mp_getduration(avos_mp_t *mp, int64_t *ret)
 {
 	if (async_cmd_is_running(mp)) {
 		*ret = mp->last.duration;
@@ -772,7 +772,7 @@ static int avos_mp_getduration(avos_mp_t *mp, uint32_t *ret)
 		AVOS_MP_COMMON(getduration, mp, ret);
 		mp->last.duration = *ret;
 	}
-	MPLOGV("%d", *ret);
+	MPLOGV("%lld", (long long)*ret);
 	return AVOS_ERR_OK;
 }
 

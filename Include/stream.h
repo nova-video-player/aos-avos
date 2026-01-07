@@ -456,8 +456,8 @@ typedef struct STREAM {
 	int		aspect_d;		// aspect ratio set by user
 	
 	UINT64		size;
-	
-	int 		duration;
+
+	int64_t 	duration;
 	int 		no_duration;		// this stream has no duration!
 	
 	int		frame_count;
@@ -470,12 +470,12 @@ typedef struct STREAM {
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
 
-	int 		audio_time;
-	int 		audio_ref_time;
-	int 		audio_samples;
+	int64_t 	audio_time;
+	int64_t 	audio_ref_time;
+	int64_t 	audio_samples;
 	UINT64		audio_pos;
-	
-	int 		video_time;
+
+	int64_t 	video_time;
 	UINT64		video_pos;
 	int 		video_drop;
 	
@@ -699,8 +699,8 @@ typedef struct STREAM {
 
 	int		sync_audio;
 	int		sync_video;
-	int 		sync_v_time;
-	int 		sync_a_time;
+	int64_t 	sync_v_time;
+	int64_t 	sync_a_time;
 	int		audio_preload;
 	int		audio_stuff_zero;
 		
@@ -887,8 +887,8 @@ void 	*stream_audio_dec_thread( void *data );
 
 void 	stream_audio_flush( STREAM *s );
 
-int	stream_sync_video( STREAM *s, int video_time );
-int	stream_sync_audio( STREAM *s, int audio_time );
+int	stream_sync_video( STREAM *s, int64_t video_time );
+int	stream_sync_audio( STREAM *s, int64_t audio_time );
 
 int 	stream_lock_frame       ( STREAM *s, void *tag );
 VIDEO_FRAME *stream_unlock_frame( STREAM *s, void *tag );

@@ -412,6 +412,8 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	// Get current speed from audio interface
 	float speed = audio_interface_is_audio_speed_enabled() ?
 		audio_interface_get_audio_speed() : 1.0f;
+	// Keep enabled state in sync with runtime audio speed selection.
+	ctx->enabled = audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo();
 	if (speed < SPEED_MIN) {
 		speed = SPEED_MIN;
 	} else if (speed > SPEED_MAX) {
@@ -588,8 +590,8 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 		delay_ms += fifo_ms;
 	}
 
-	// 2. atempo filter internal delay (only when active)
-	if (ctx->filter_initialized && fabsf(ctx->current_speed - 1.0f) > 0.001f) {
+	// 2. atempo filter internal delay (active even at 1.0x while filter is enabled)
+	if (ctx->filter_initialized) {
 		// atempo uses fragment size = sample_rate / 24 (rounded to power of 2)
 		// Typical delay is 2-3 fragments due to WSOLA overlap-add algorithm
 		int fragment_size = ctx->sample_rate / 24;

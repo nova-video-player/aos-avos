@@ -38,6 +38,8 @@
 #include "wmv.h"
 #include "h264.h"
 #include "hevc.h"
+
+int get_android_sync(void);
 #include "mpg4.h"
 #include "dts.h"
 #include "fb.h"
@@ -242,7 +244,12 @@ static void _video_init( STREAM *s, int time )
 		s->video_dec->seek( s->video_dec, time );
 	}
 	if( s->video_sink && s->video_sink->put_time ) {
-		s->video_sink->put_time( s->video_sink, time );
+		// For android_sync=1 with audio, defer anchoring until audio_time exists.
+		if( get_android_sync() && s->audio && s->audio->valid && s->audio_time < 0 ) {
+			DBG serprintf("video_init: defer put_time (audio_time=%d)\n", s->audio_time);
+		} else {
+			s->video_sink->put_time( s->video_sink, time );
+		}
 	}
 
 	clear_avg( &v_avg );

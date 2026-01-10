@@ -418,12 +418,12 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			s->smoothed_av_delay = current_av_delay;
 		}
 	}
-	if( anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
+	if( !get_android_sync() && anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		int anchor_ts_raw = audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
 		if( anchor_ts_raw < 0 ) {
 DBGY			serprintf("anchor_wait: audio_time=%d delay=%d av_delay=%d\n",
 				audio_time, anchor_delay, s->av_delay);
-			// Defer anchoring until we reach audible time to avoid seeding a zero anchor.
+			// Non-android_sync: defer anchoring until audible time exists.
 			return 0;
 		}
 	}
@@ -431,6 +431,15 @@ DBGY			serprintf("anchor_wait: audio_time=%d delay=%d av_delay=%d\n",
 	if( anchor_valid && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
+#ifdef CONFIG_ANDROID
+			// android_sync=1: allow negative heard_ts for internal anchoring at startup.
+			if( get_android_sync() && anchor_delay > 0 ) {
+				int raw_anchor_ts = audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+				if( raw_anchor_ts < 0 ) {
+					anchor_ts = raw_anchor_ts;
+				}
+			}
+#endif
 DBGY			serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d\n",
 				audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts);
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );

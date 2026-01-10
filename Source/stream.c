@@ -210,6 +210,8 @@ static void _stream_reset( STREAM *s )
 	// set pointer for "audio"/"video"
 	av_init_props( s );
 	memset( &s->audio_sink_props, 0, sizeof( AUDIO_PROPERTIES ) );
+	// Ensure we don't carry a stale delay across new streams.
+	s->smoothed_av_delay = -1;
 }
 
 static int stream_buffer_sec  = 64;
@@ -689,7 +691,17 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	if( s->video->valid ) {
-		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+		if( get_android_sync() ) {
+			// For android_sync=1, always seed the anchor when audio_time exists.
+			// stream_sync_audio will override to audio_time if heard_ts is invalid.
+			if( s->audio_time != -1 ) {
+				_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+			} else {
+				DBG serprintf( "stream:stream_set_av_speed defer anchor (audio_time=%d)\n", s->audio_time );
+			}
+		} else {
+			_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+		}
 	}
 
 	return 0;

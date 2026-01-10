@@ -565,6 +565,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( s && s->audio_ctx ) {
 		audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 	}
+	float previous_speed = audio_interface_get_audio_speed();
 
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
 	if( current_time_ts < 0 ) {
@@ -613,7 +614,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 				   stream_current_time_rst, anchor_ts, clamped_speed );
 		applied_speed = clamped_speed;
 	} else {
-		float previous_speed = audio_interface_get_audio_speed();
 		if( is_audio_speed_changed( av_speed ) ) {
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();

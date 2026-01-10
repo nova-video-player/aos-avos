@@ -4506,8 +4506,11 @@ DBGV serprintf("play one frame\n");
 		s->last_good_delay_valid = last_good_delay_valid;
 	}
 	// After seek, drop audio frames until we reach the target TS to avoid anchoring on late audio.
+	// If a target was pre-armed (e.g., speed-change realignment), preserve it.
 	if( s->audio && s->audio->valid ) {
-		s->seek_audio_target_ts = sc.time;
+		if( s->seek_audio_target_ts <= 0 ) {
+			s->seek_audio_target_ts = sc.time;
+		}
 		s->seek_audio_drop = 1;
 		DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
 	}
@@ -4551,8 +4554,11 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 {
 	int real_time;
 	if( s ) {
-		s->seek_audio_drop = 0;
-		s->seek_audio_target_ts = 0;
+		// Preserve pre-armed audio drop target (e.g. frame-accurate seek realignment).
+		if( !(s->seek_use_target_sync && s->seek_audio_target_ts > 0) ) {
+			s->seek_audio_drop = 0;
+			s->seek_audio_target_ts = 0;
+		}
 	}
 	
 	if( time < 0 )

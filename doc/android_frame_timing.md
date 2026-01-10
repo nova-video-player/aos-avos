@@ -4,23 +4,23 @@
 
 Enabling `android_sync` hands video pacing to the Android `MediaCodec` renderer instead of the AVOS video sink. The goal is to let the platform handle frame queuing/dropping while the player stays in the time‑scaled (`ts`) domain used for audio speed changes.
 
-## How the Sink Bypass Works (`Source/codec_sfdec2.c`)
+## How the Sink Delegates Pacing (`Source/codec_sfdec2.c`)
 
-- `videosink_thread` normally decides whether to sleep, render, or drop based on `blit_duration = frame->blit_time - venc_time`.
-- When `android_sync` is set, the code shifts `blit_duration` by `-200ms` (`Source/codec_sfdec2.c:404-410`). The negative bias keeps the `blit_duration > 0` branch from running, so the sink never blocks waiting for wall clock alignment.
-- The late-frame drop logic is also skipped because it is guarded by `!android_sync` (`Source/codec_sfdec2.c:437-448`). Every decoded frame is forwarded directly to `sfdec_buf_render`.
-- The actual render call is made with `asap = 0` (`Source/codec_sfdec2.c:459-466`), signalling that MediaCodec should schedule presentation based on the timestamps it already knows.
+- The sink always calls `sfdec_buf_render` with a non‑zero `render_ts_ns`.
+- `render_ts_ns` is derived from a single render offset: `render_ts_ns = f->time * 1e6 + render_offset_ns`.
+- The render offset is initialized once at startup:
+  - Use dynamic delay if AudioTrack timing is valid.
+  - Otherwise use static latency to provide a stable initial alignment.
+- When dynamic delay becomes valid, the offset is **slewed** toward the new target in small steps to avoid a visible speed jump.
 
-In short, the sink’s tests for “wait” and “drop” are bypassed; MediaCodec becomes responsible for pacing.
+In short, the sink never blocks or drops; MediaCodec schedules frames using the provided timestamps.
 
 ## Frame Snapping and Wall-Clock Mapping (`external/android/libsfdec/sfdec_ndkmediacodec.cpp`)
 
-When the sink delegates, `sfdec_buf_render` performs two key tasks before posting a buffer with `AMediaCodec_releaseOutputBufferAtTime`:
-
-1. **Frame snapping** – The MediaCodec output timestamp (`timestamp_us`) is in the time-scaled domain because the parser already applied `RST_TO_TS`. The helper multiplies the stream frame rate by the current playback speed (`sfdec->playback_speed_*`) and snaps `timestamp_us` onto that grid (`external/android/libsfdec/sfdec_ndkmediacodec.cpp:347-365`). This keeps per-frame spacing consistent after a speed change.
-2. **Wall-clock projection** – The code maintains a `(start_off, start_monotonic)` pair. It projects the snapped timestamp into `CLOCK_MONOTONIC` by `ts = timestamp_us*1000 - start_off + start_monotonic` (`external/android/libsfdec/sfdec_ndkmediacodec.cpp:376-414`). Large gaps or drift (>500 ms) reset the anchors, and late frames push `start_monotonic` back by 100 ms to re-align to audio.
-
-The release path chooses `releaseOutputBufferAtTime` unless a reset was just triggered, in which case it falls back to immediate rendering.
+When `render_ts_ns` is provided, MediaCodec uses it directly for presentation.
+`sfdec_ndkmediacodec.cpp` still snaps timestamps for consistency across speed
+changes, but the internal `(start_off, start_monotonic)` anchoring is bypassed
+because `render_ts_ns > 0` is always supplied.
 
 ## Audio Speed Interaction
 
@@ -30,6 +30,9 @@ The release path chooses `releaseOutputBufferAtTime` unless a reset was just tri
 
 ## Operational Notes and Caveats
 
-- The `-200 ms` bias assumes MediaCodec keeps roughly 100 ms of internal lead; if that assumption drifts, the sink will still refuse to wait, so any underrun must be handled by MediaCodec’s own drop heuristics.
-- Because the drop path is disabled in the sink, catastrophic decoder slowness can only be mitigated by the `start_monotonic += 100 ms` back-off inside MediaCodec, which may introduce visible judder before playback recovers.
-- Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield incorrect snapping after a speed change, causing jitter in the scheduled timestamps.
+- The render offset is initialized from static latency when AudioTrack timing is
+  invalid; this provides a stable A/V alignment while dynamic delay ramps up.
+- The offset slews toward the dynamic delay to avoid visible acceleration or
+  stutter when timing becomes valid.
+- Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
+  incorrect snapping after a speed change, causing jitter in scheduled timestamps.

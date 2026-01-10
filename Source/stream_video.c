@@ -4506,13 +4506,17 @@ DBGV serprintf("play one frame\n");
 		s->last_good_delay_valid = last_good_delay_valid;
 	}
 	// After seek, drop audio frames until we reach the target TS to avoid anchoring on late audio.
+	// Skip on initial start/resume when audio hasn't started to avoid silent startup.
 	// If a target was pre-armed (e.g., speed-change realignment), preserve it.
 	if( s->audio && s->audio->valid ) {
-		if( s->seek_audio_target_ts <= 0 ) {
-			s->seek_audio_target_ts = sc.time;
+		int allow_drop = (s->audio_time >= 0) || s->seek_use_target_sync;
+		if( allow_drop ) {
+			if( s->seek_audio_target_ts <= 0 ) {
+				s->seek_audio_target_ts = sc.time;
+			}
+			s->seek_audio_drop = 1;
+			DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
 		}
-		s->seek_audio_drop = 1;
-		DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
 	}
 	sfdec2_android_sync_on_seek( s );
 	

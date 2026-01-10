@@ -212,6 +212,7 @@ void libavos_enable_audio_speed(int enable)
 
 void libavos_disable_atempo_filter(int disable)
 {
+	audio_interface_set_using_atempo(disable ? 0 : 1);
 	stream_disable_atempo_filter(disable);
 }
 

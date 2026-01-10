@@ -566,6 +566,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
 	}
 	float previous_speed = audio_interface_get_audio_speed();
+	int speed_changed = is_audio_speed_changed( av_speed );
 
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
 	if( current_time_ts < 0 ) {
@@ -614,7 +615,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 				   stream_current_time_rst, anchor_ts, clamped_speed );
 		applied_speed = clamped_speed;
 	} else {
-		if( is_audio_speed_changed( av_speed ) ) {
+		if( speed_changed ) {
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
@@ -648,7 +649,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			seek_time_rst = TS_TO_RST_TIME( seek_time_ts, int );
 		}
 	}
-	if( using_atempo && !get_android_sync() && s->parser && s->parser->seekable && s->parser->seekable( s ) &&
+	if( using_atempo && speed_changed && s->audio_time >= 0 && !get_android_sync() &&
+		s->parser && s->parser->seekable && s->parser->seekable( s ) &&
 		seek_time_rst > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
 		// Avoid frame-accurate seek at startup to prevent keyframe-gap jumps.
 		if( seek_time_ts < 1000 ) {

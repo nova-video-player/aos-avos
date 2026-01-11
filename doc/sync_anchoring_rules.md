@@ -81,6 +81,7 @@
 - **Resume**: `heard_audio_ts` is computed from the paused audio clock minus chain delay; `video_sink->put_time(heard_audio_ts)` resets the TS↔WC anchor.
 - **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and the sink is re‑anchored to the new `heard_audio_ts` so playback resumes without a TS discontinuity.
 - **Speed‑change realignment seek**: Uses `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` so the parser seeks to a keyframe, then `_stream_play_n_frames` drops frames until `ts_target`. Audio chunks are dropped until the same `ts_target`.
+- **Broken audio PTS (post‑seek)**: Some files emit non‑monotonic audio PTS after seek (e.g., audio restarts near 0 while video is at 26s). To avoid a video freeze, `stream_audio.c` guards against large backward jumps after seek: first audio far behind video is rebased to `video_time`, and later backward PTS (>1s) are ignored. This is a minimal safety net for malformed files, not the nominal path.
 
 ## Speed Change Cadence
 

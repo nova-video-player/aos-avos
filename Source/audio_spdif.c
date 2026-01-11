@@ -387,6 +387,7 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
 	// Mode 1 (IEC61937 wrapping): Apply IEC-specific rate/channel/bit-depth adjustments
 	// Mode 2 (raw data to Android): Must match AudioTrack configuration for timing sync
 	if (passthrough_on == 1) {
+		int orig_rate = audio->samplesPerSec;
 		// IEC61937 container is always 16-bit, 2-channel stereo (or 8ch for high-bitrate)
 		audio->bitsPerSample = 16;
 		audio->channels = 2;
@@ -408,7 +409,13 @@ DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
 		case WAVE_FORMAT_DTS:
 		case WAVE_FORMAT_AC3:
 		default:
-			// Standard formats use 48kHz stereo IEC container
+			// Standard formats use 48kHz IEC container, but keep 32/44.1kHz streams at
+			// their native rate to avoid timing drift in passthrough mode 1.
+			if (orig_rate == 32000 || orig_rate == 44100) {
+				audio->samplesPerSec = orig_rate;
+			} else {
+				audio->samplesPerSec = 48000;
+			}
 			break;
 		}
 		// Recalculate bytesPerFrame for IEC container

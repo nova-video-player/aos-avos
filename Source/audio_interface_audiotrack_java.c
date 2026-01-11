@@ -636,7 +636,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
             case WAVE_FORMAT_DTS:
                 track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
                 output_channels = 2;
-                rate = 48000;
+                // Keep native 32/44.1kHz for AC3/DTS to avoid timing drift.
+                if (rate != 32000 && rate != 44100) {
+                    rate = 48000;
+                }
                 break;
 			case WAVE_FORMAT_EAC3:
 			case WAVE_FORMAT_E_AC3_JOC:

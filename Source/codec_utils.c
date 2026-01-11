@@ -1152,13 +1152,13 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 	        case AV_IMAGE_BGRA_32:
 	                switch( pixfmt ) {
 	                case PIXFMT_YUV420P:
-	                        convert_libyuv = I420ToARGB;
+	                        convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
 	                        break;
 	                case PIXFMT_YUV422P:
-	                        convert_libyuv = I422ToARGB;
+	                        convert_422P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV444P:
-	                        convert_libyuv = I444ToARGB;
+	                        convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 				break;
 	                case PIXFMT_NV12:
 	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
@@ -1182,13 +1182,13 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 		case AV_IMAGE_RGBX_32:
 	                switch( pixfmt ) {
 	                case PIXFMT_YUV420P:
-	                        convert_libyuv = I420ToABGR;
+	                        convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
 	                        break;
 	                case PIXFMT_YUV422P:
-				convert_libyuv = I422ToABGR;
+				convert_422P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV444P:
-	                        convert_libyuv = I444ToABGR;
+	                        convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_NV12:
 	                        if (!src_data[0] || !src_data[1] || !frame->data[0])

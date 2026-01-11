@@ -154,6 +154,8 @@ typedef struct priv {
 	int grace_until_ms;
 	int drift_dir;
 	int drift_streak;
+	int hold_audio_until_ms;	// android_sync passthrough startup hold
+	int hold_audio_applied_ms;	// ms held during passthrough startup
 } priv_t;
 
 static int _get_time( priv_t *p )
@@ -594,6 +596,10 @@ DBGSI serprintf("MediaCodec resume\n");
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		int64_t render_ts_ns = 0;
 		int passthrough = p->passthrough_cached;
+		if (s && passthrough == 0) {
+			// put_time may be deferred at startup; fetch passthrough directly.
+			passthrough = _is_passthrough(s);
+		}
 		int delay_valid = 1;
 		if( s && s->audio_ctx ) {
 			delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
@@ -700,6 +706,7 @@ render_now:
 			int delay_valid = 1;
 			int delay_ms = 0;
 			int have_audio_time = (s && s->audio_time > 0);
+			int hold_passthrough = 0;
 
 			if (s && s->audio_ctx) {
 				delay_valid = audio_interface_is_delay_valid(s->audio_ctx);
@@ -714,9 +721,49 @@ render_now:
 				delay_ms = 0;
 			}
 
-			if (p->render_offset_ns == -1) {
-				// Always use render_ts: initialize with static or dynamic delay.
-				if (delay_valid && have_audio_time && delay_ms > 0) {
+			if (passthrough == 2 && s && s->audio && s->audio->valid && s->audio_time < 0) {
+				if (p->hold_audio_until_ms == 0) {
+					int hold_ms = delay_ms > 0 ? delay_ms + 200 : 500;
+					p->hold_audio_until_ms = atime() + hold_ms;
+					p->hold_audio_applied_ms = hold_ms;
+					DBGSI serprintf("android_sync: hold video for passthrough start (%d ms)\n", hold_ms);
+				}
+				while (p->locked.run && !has_state_l(p, THREAD_STATE_FLUSHING) &&
+					s->audio_time < 0 && atime() < p->hold_audio_until_ms) {
+					struct timespec ts_wait = ts;
+					timespec_add_ms(&ts_wait, 10);
+					pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
+				}
+				if (s->audio_time >= 0) {
+					p->hold_audio_until_ms = 0;
+				} else {
+					// Timeout reached: keep video blocked until audio becomes available.
+					hold_passthrough = 1;
+				}
+				// Audio time may have become valid while we were waiting.
+				have_audio_time = (s && s->audio_time > 0);
+			}
+
+			if (!hold_passthrough && p->render_offset_ns == -1) {
+				// Passthrough mode 2: align video to audible time (audio_time minus latency).
+				if (passthrough == 2 && have_audio_time) {
+					int delay_for_pt = delay_ms > 0 ? delay_ms : 0;
+					if (p->hold_audio_applied_ms > 0) {
+						// Avoid double-counting startup hold + static latency.
+						delay_for_pt -= p->hold_audio_applied_ms;
+						if (delay_for_pt < 0) {
+							delay_for_pt = 0;
+						}
+						p->hold_audio_applied_ms = 0;
+					}
+					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_for_pt;
+					if (heard_ts < 0) {
+						heard_ts = 0;
+					}
+					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
+					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d passthrough=2 offset=%lld\n",
+						s->audio_time, delay_for_pt, p->render_offset_ns);
+				} else if (delay_valid && have_audio_time && delay_ms > 0) {
 					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_ms;
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d offset=%lld\n",
@@ -726,7 +773,7 @@ render_now:
 					DBGSI serprintf("android_sync: init render_offset from static delay=%d offset=%lld\n",
 						delay_ms, p->render_offset_ns);
 				}
-			} else if (delay_valid && have_audio_time && delay_ms > 0) {
+			} else if (delay_valid && have_audio_time && delay_ms > 0 && passthrough != 2) {
 				// Slew toward dynamic delay once timing becomes valid.
 				int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_ms;
 				p->target_offset_ns = now_ns - heard_ts * 1000000LL;
@@ -750,9 +797,13 @@ render_now:
 				}
 			}
 
-			render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
+			if (hold_passthrough) {
+				do_render = 0;
+			} else {
+				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
 DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d\n",
 				render_ts_ns, now_ns, (render_ts_ns - now_ns) / 1000000LL, f->time);
+			}
 		}
 
 		if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
@@ -1096,6 +1147,8 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->target_offset_ns = 0;
+	p->hold_audio_until_ms = 0;
+	p->hold_audio_applied_ms = 0;
 	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
 	p->grace_until_ms = 0;
 
@@ -1260,6 +1313,8 @@ DBGCV	CLOG();
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->target_offset_ns = 0;
+	p->hold_audio_until_ms = 0;
+	p->hold_audio_applied_ms = 0;
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
 
@@ -1410,11 +1465,16 @@ void sfdec2_android_sync_on_seek( STREAM *s )
 
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
+	int was_holding = (p->hold_audio_until_ms != 0);
 	p->venc_put_time = 0;
 	p->venc_ref_time = 0;
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->target_offset_ns = 0;
+	if (!was_holding) {
+		p->hold_audio_until_ms = 0;
+		p->hold_audio_applied_ms = 0;
+	}
 DBGSI	serprintf("android_sync: seek reset anchors\n");
 	pthread_mutex_unlock( &p->locked.mtx );
 }

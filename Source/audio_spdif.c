@@ -184,6 +184,10 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			int dummy;
 			spdif_put( out, out_size, &dummy );
 			spdif_get( frame );
+			// For AC3, timing should follow the fixed 1536-sample frame duration.
+			if (a->format == WAVE_FORMAT_AC3) {
+				frame->fakeSize = 1536 * a->bytesPerFrame;
+			}
 			DBGCA2 serprintf("Mode 1: IEC wrapped, size=%d, fakeSize=%d\n", frame->size, frame->fakeSize);
 		}
 		return 0;

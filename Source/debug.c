@@ -53,6 +53,9 @@ int Debug[DBG_MAX_ENTRIES] = {
 };
 #endif
 
+// Export compile-time logging mode for diagnostics.
+const int debug_logs_enabled = DEBUG_LOGS;
+
 DECLARE_DEBUG_SWITCH("dbga", 		DBG_AUD);
 DECLARE_DEBUG_SWITCH("dbgap",	 	DBG_AUDIO_PLAYER);
 DECLARE_DEBUG_SWITCH("dbgvp",	 	DBG_VIDEO_PLAYER);

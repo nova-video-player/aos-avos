@@ -28,6 +28,22 @@
 
 #include <stdarg.h>
 
+// Compile-time master switch for all DBG/DBG* logs.
+// Defaults to 1 for DEBUG_MSG builds, 0 otherwise.
+#ifndef DEBUG_LOGS
+#ifdef DEBUG_MSG
+#define DEBUG_LOGS 1
+#else
+#define DEBUG_LOGS 0
+#endif
+#endif
+
+#if DEBUG_LOGS
+#define DBG_IF(x) if (x)
+#else
+#define DBG_IF(x) if (0)
+#endif
+
 enum {
 	DBG_HD = 0,
 	DBG_DSP,

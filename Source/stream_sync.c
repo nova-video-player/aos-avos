@@ -32,15 +32,15 @@ extern int libavos_get_ac3_recoding_enabled(void);
 
 #ifdef CONFIG_STREAM
 
-#define DBGS	if(Debug[DBG_STREAM])
-#define DBGV   	if(Debug[DBG_VID])
-#define DBGVY	if(Debug[DBG_VID]||Debug[DBG_SYNC])
-#define DBGY	if(Debug[DBG_SYNC])
-#define DBGV1  	if(Debug[DBG_VID] == 1)
-#define DBGV2  	if(Debug[DBG_VID] > 1)
-#define DBGV3 	if(Debug[DBG_VID] > 2)
+#define DBGS	DBG_IF(Debug[DBG_STREAM])
+#define DBGV   	DBG_IF(Debug[DBG_VID])
+#define DBGVY	DBG_IF(Debug[DBG_VID]||Debug[DBG_SYNC])
+#define DBGY	DBG_IF(Debug[DBG_SYNC])
+#define DBGV1  	DBG_IF(Debug[DBG_VID] == 1)
+#define DBGV2  	DBG_IF(Debug[DBG_VID] > 1)
+#define DBGV3 	DBG_IF(Debug[DBG_VID] > 2)
 
-#define DBG if(Debug[DBG_SYNC])
+#define DBG DBG_IF(Debug[DBG_SYNC])
 
 extern int stream_max_delay;
 extern int stream_no_sync;

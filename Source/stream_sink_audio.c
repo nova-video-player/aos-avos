@@ -23,8 +23,8 @@
 
 #ifdef CONFIG_STREAM
 
-#define DBGS 	if(Debug[DBG_STREAM])
-#define DBGA2	if(Debug[DBG_AUD] > 1)
+#define DBGS 	DBG_IF(Debug[DBG_STREAM])
+#define DBGA2	DBG_IF(Debug[DBG_AUD] > 1)
 
 static int _open( STREAM *s )
 {

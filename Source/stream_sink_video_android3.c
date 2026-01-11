@@ -36,9 +36,9 @@
 
 #define NSEC_PER_SEC 1000000000L
 
-#define DBGS	if(Debug[DBG_STREAM])
-#define DBGSI   if(Debug[DBG_SINK] )
-#define DBGSI2  if(Debug[DBG_SINK] > 1)
+#define DBGS	DBG_IF(Debug[DBG_STREAM])
+#define DBGSI   DBG_IF(Debug[DBG_SINK])
+#define DBGSI2  DBG_IF(Debug[DBG_SINK] > 1)
 
 #define LOG(fmt, ...) serprintf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
 #define DBGLOG  DBGS LOG

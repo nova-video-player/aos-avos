@@ -36,8 +36,8 @@ extern int libavos_get_ac3_recoding_enabled(void);
 extern int spdif_is_passthrough_on(void);
 #include "jni.h"
 
-#define DBG if(Debug[DBG_AUD])
-#define DBG2 if(Debug [DBG_AUD] > 1)
+#define DBG DBG_IF(Debug[DBG_AUD])
+#define DBG2 DBG_IF(Debug[DBG_AUD] > 1)
 #define ERR  if(1)
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)

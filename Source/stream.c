@@ -39,11 +39,11 @@ int get_android_sync(void);
 #endif
 
 #ifdef CONFIG_STREAM
-#define DBGV if(Debug[DBG_VID])
-#define DBGS if(Debug[DBG_STREAM])
-#define DBGP if(Debug[DBG_PARSER])
+#define DBGV DBG_IF(Debug[DBG_VID])
+#define DBGS DBG_IF(Debug[DBG_STREAM])
+#define DBGP DBG_IF(Debug[DBG_PARSER])
 
-#define DBG if(Debug[DBG_STREAM])
+#define DBG DBG_IF(Debug[DBG_STREAM])
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );

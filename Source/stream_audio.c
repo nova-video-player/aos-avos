@@ -26,12 +26,12 @@
 #include <string.h>
 #include <math.h>
 
-#define DBGS if(Debug[DBG_STREAM])
-#define DBGA if(Debug[DBG_AUD])
-#define DBGV if(Debug[DBG_VID])
+#define DBGS DBG_IF(Debug[DBG_STREAM])
+#define DBGA DBG_IF(Debug[DBG_AUD])
+#define DBGV DBG_IF(Debug[DBG_VID])
 
-#define DBG if(Debug[DBG_STREAM])
-#define DBG2 if(Debug[DBG_STREAM]>1)
+#define DBG DBG_IF(Debug[DBG_STREAM])
+#define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
 #define ERR if( 1 )
 
 #ifdef CONFIG_STREAM

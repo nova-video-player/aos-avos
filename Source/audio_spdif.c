@@ -33,8 +33,8 @@
 #include "androidndk_utils.h"
 #endif
 
-#define DBGCA2 if(Debug[DBG_CA] > 1 )
-#define DBGS   if(Debug[DBG_STREAM])
+#define DBGCA2 DBG_IF(Debug[DBG_CA] > 1)
+#define DBGS   DBG_IF(Debug[DBG_STREAM])
 
 // Forward declaration for AC3 recoding check
 extern int libavos_get_ac3_recoding_enabled(void);

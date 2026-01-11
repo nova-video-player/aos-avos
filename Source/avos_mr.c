@@ -31,8 +31,8 @@
 #include "athread.h"
 #include "stream_config.h"
 
-#define DBG if(Debug[DBG_VIDEO_PLAYER] || Debug[DBG_AUDIO_PLAYER])
-#define DBG2 if((Debug[DBG_VIDEO_PLAYER] > 1) || (Debug[DBG_AUDIO_PLAYER] > 1))
+#define DBG DBG_IF(Debug[DBG_VIDEO_PLAYER] || Debug[DBG_AUDIO_PLAYER])
+#define DBG2 DBG_IF((Debug[DBG_VIDEO_PLAYER] > 1) || (Debug[DBG_AUDIO_PLAYER] > 1))
 
 #define MRLOG(fmt, ...) serprintf("%p|%s: " fmt "\n", mr, __FUNCTION__, ##__VA_ARGS__)
 #define MRLOGV DBG MRLOG

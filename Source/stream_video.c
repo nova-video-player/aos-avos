@@ -52,22 +52,22 @@ int get_android_sync(void);
 
 #ifdef CONFIG_STREAM
  
-#define DBGV   	if(Debug[DBG_VID])
-#define DBGV1  	if(Debug[DBG_VID] == 1)
-#define DBGV2  	if(Debug[DBG_VID] > 1)
-#define DBGV3 	if(Debug[DBG_VID] > 2)
-#define DBGV4 	if(Debug[DBG_VID] > 3)
-#define DBGY	if(Debug[DBG_SYNC])
-#define DBGQ   	if(Debug[DBG_Q] == 1)
-#define DBGQ2	if(Debug[DBG_Q] == 2)
-#define DBGHD 	if(Debug[DBG_HD])
-#define DBGS	if(Debug[DBG_STREAM])
-#define DBGMNG 	if(Debug[DBG_MANGLER])
-#define DBGCV1 	if(Debug[DBG_CV] > 1)
-#define DBGP 	if(Debug[DBG_PARSER])
+#define DBGV   	DBG_IF(Debug[DBG_VID])
+#define DBGV1  	DBG_IF(Debug[DBG_VID] == 1)
+#define DBGV2  	DBG_IF(Debug[DBG_VID] > 1)
+#define DBGV3 	DBG_IF(Debug[DBG_VID] > 2)
+#define DBGV4 	DBG_IF(Debug[DBG_VID] > 3)
+#define DBGY	DBG_IF(Debug[DBG_SYNC])
+#define DBGQ   	DBG_IF(Debug[DBG_Q] == 1)
+#define DBGQ2	DBG_IF(Debug[DBG_Q] == 2)
+#define DBGHD 	DBG_IF(Debug[DBG_HD])
+#define DBGS	DBG_IF(Debug[DBG_STREAM])
+#define DBGMNG 	DBG_IF(Debug[DBG_MANGLER])
+#define DBGCV1 	DBG_IF(Debug[DBG_CV] > 1)
+#define DBGP 	DBG_IF(Debug[DBG_PARSER])
 
-#define DBG if(Debug[DBG_STREAM])
-#define DBG2 if(Debug[DBG_STREAM]>1)
+#define DBG DBG_IF(Debug[DBG_STREAM])
+#define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
 
 int 		stream_zero_fill   = 1;
 

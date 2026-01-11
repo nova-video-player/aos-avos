@@ -14,7 +14,7 @@
 
 - **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor only from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards.
 
-- **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized from static latency at startup, then slewed toward the dynamic delay once AudioTrack timing becomes valid. No local wait/drop pacing is used.
+- **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized at startup. For passthrough=2, timing is treated as unreliable and the sink uses a startup hold plus a residual static latency (no slew) to align with audible time. No local wait/drop pacing is used.
 
 **Unification**: `stream_set_av_speed()` computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. No other layers touch WC anchors.
 
@@ -45,7 +45,7 @@
 
 - **Sink selection**: On Android, the active video sink is `sfdec2` (`codec_sfdec2.c`). The sink is created via `stream_get_default_video_sink()` but the name logged is `sfdec2`.
 - **android_sync=0**: `codec_sfdec2.c` owns TS↔WC anchoring (`venc_put_time`, `venc_ref_time`) and pacing (blit wait/drop). `stream_sync.c` still computes A/V delay and audio master timing, but the sink uses its own WC anchor to schedule frames.
-- **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from the render offset and always passes it to MediaCodec. The offset starts from static latency and slews toward dynamic delay once timing is valid.
+- **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from the render offset and always passes it to MediaCodec. The offset starts from static latency and slews toward dynamic delay once timing is valid, except passthrough=2 which uses a startup hold plus residual static latency and skips slew.
 - **put_time_mode**: When the sink provides `put_time()`, the sync layer uses `heard_audio_ts` for the diff calculation but leaves pacing to the sink.
 
 ## In-Flight Data During Speed Changes
@@ -105,6 +105,7 @@
 **Remedies applied (android_sync=1, MediaCodec):**
 - **Always render_ts**: the sink always calls MediaCodec with `render_ts_ns`, avoiding a pacing mode switch.
 - **Static-to-dynamic slew**: initialize offset with static latency, then slew toward dynamic delay when timing becomes valid.
+- **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is disabled because delay_valid is unreliable.
 
 ## Filters and Time Domains
 

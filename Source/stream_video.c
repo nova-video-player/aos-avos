@@ -244,9 +244,11 @@ static void _video_init( STREAM *s, int time )
 		s->video_dec->seek( s->video_dec, time );
 	}
 	if( s->video_sink && s->video_sink->put_time ) {
-		// For android_sync=1 with audio, defer anchoring until audio_time exists.
-		if( get_android_sync() && s->audio && s->audio->valid && s->audio_time < 0 ) {
-			DBG serprintf("video_init: defer put_time (audio_time=%d)\n", s->audio_time);
+		// android_sync=1: let audio-driven anchoring seed the sink clock.
+		// Avoid an early put_time(0) before audio is known/anchored.
+		if( get_android_sync() && s->audio && (s->audio->valid || (s->buffer && s->buffer->audio)) ) {
+			DBG serprintf("video_init: defer put_time (android_sync audio, valid=%d buffer_audio=%d)\n",
+				s->audio->valid, s->buffer ? s->buffer->audio : -1);
 		} else {
 			s->video_sink->put_time( s->video_sink, time );
 		}
@@ -2820,6 +2822,8 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
+	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
+		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;

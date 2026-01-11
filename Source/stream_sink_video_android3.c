@@ -103,6 +103,9 @@ static inline int align(int x, int y)
 
 static int _get_time( priv_t *p )
 {
+	if (p->venc_ref_time == 0) {
+		DBGSI serprintf("venc_time: ref not set (put_time not called yet)\n");
+	}
 	int diff = atime() - p->venc_ref_time;
 	p->venc_time = p->venc_put_time + diff;
 //serprintf("get %8d + %8d = %8d\n", p->venc_put_time, diff, p->venc_time );	
@@ -232,16 +235,25 @@ static void *venc_thread(void *ctx)
 
 		if (!frame)
 			continue;
+		// Wait for initial put_time when audio is driving anchors.
+		while (p->venc_run && p->venc_ref_time == 0 && s && s->audio && s->audio->valid) {
+			DBGSI serprintf("venc: waiting for anchor (ref_time=0)\n");
+			pthread_cond_wait(&p->venc_cond, &p->venc_mutex);
+		}
 		p->frame_out = frame;
 //		p->frames_state[frame->index] = FRAME_STATE_OUT;
 
 		int venc_time = _get_time(p);
+		DBGSI serprintf("venc: put=%d ref=%d now=%d\n", p->venc_put_time, p->venc_ref_time, venc_time);
 		
 		p->venc_flushing = 0;
 
-		int delay = 4 * 40;	// assume 4 frames at 25fps
+		// Use one-frame pacing offset; fixed 4*40ms over-delays software path.
+		int delay = frame->duration;
 
 		int blit_duration = force_blit ? 0 : frame->blit_time - venc_time - delay;
+		DBGSI serprintf("venc: blit_time=%d delay=%d blit_duration=%d\n",
+			frame->blit_time, delay, blit_duration);
 
 DBGSI serprintf("[%2d]%3d[%2d|%4d](%3d)", frame_q_count( &p->venc_q ), blit_duration, frame->index, frame->decode_time, frame->blit_time - p->out_time );
 		if( s && s->paused ) {
@@ -665,11 +677,13 @@ static int sink_delay(STREAM_SINK_VIDEO *sink)
 static int sink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
-	
+
+	pthread_mutex_lock(&p->venc_mutex);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
-
-DBGSI2 serprintf("[[put %8d]]", time );	
+	DBGSI serprintf("sink_put_time: time=%d ref=%d\n", p->venc_put_time, p->venc_ref_time);
+	pthread_cond_broadcast(&p->venc_cond);
+	pthread_mutex_unlock(&p->venc_mutex);
 	return 0;
 }
 

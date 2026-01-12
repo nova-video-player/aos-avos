@@ -372,6 +372,10 @@ static void _audio_decode( STREAM *s )
 {
 	static int out_of_audio;
 	
+	if( s->paused || stream_audio_paused ) {
+		s->audio_resume_pending = 1;
+	}
+
 	if( s->audio->valid && (!(s->paused || stream_audio_paused) || s->play_n_audio_frames ) ) {
 		if( s->audio_sink && s->audio_preload ) {
 			s->audio_preload = 0;
@@ -1041,6 +1045,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					DBG serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
+					if( s->audio_resume_pending ) {
+						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d)\n",
+							s->audio_time, s->video_time, s->seek_epoch);
+						s->audio_resume_pending = 0;
+					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG serprintf("stream_audio: sink->write returned %d\n", size_written);
 

@@ -4314,6 +4314,10 @@ serprintf("not seekable!\r\n");
 	
 DBGS serprintf("stream_seek_loop time %d  pos %d  \r\n", s->start_time, s->start_pos );
 	_seek_init( s );
+	// Clear stale audio timing before probing post-seek frames; avoids anchoring to pre-seek audio_time.
+	s->audio_time = -1;
+	s->sync_a_time = -1;
+	s->sync_v_time = -1;
 	
 	if ( s->start_time ) {
 DBGS serprintf("loop from time %d \r\n", s->start_time );
@@ -4469,7 +4473,7 @@ serprintf("STUFF_ZERO!\n");
 
 	thread_state_set( &s->parser_tstate,  THREAD_RUNNING );
 
-	// Clear sync markers before probing frames; audio_time is still pre-seek here.
+	// Clear sync markers before probing frames; audio_time is already invalidated above.
 	s->sync_a_time = -1;
 	s->sync_v_time = -1;
 

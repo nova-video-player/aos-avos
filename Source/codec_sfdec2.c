@@ -757,6 +757,10 @@ render_now:
 						p->hold_audio_applied_ms = 0;
 					}
 					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_for_pt;
+					if (s && s->seek_epoch > 0 && heard_ts > f->time) {
+						// Backward seek: avoid anchoring behind the current video frame.
+						heard_ts = f->time;
+					}
 					if (heard_ts < 0) {
 						heard_ts = 0;
 					}
@@ -765,6 +769,10 @@ render_now:
 						s->audio_time, delay_for_pt, p->render_offset_ns);
 				} else if (delay_valid && have_audio_time && delay_ms > 0) {
 					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_ms;
+					if (s && s->seek_epoch > 0 && heard_ts > f->time) {
+						// Backward seek: avoid anchoring behind the current video frame.
+						heard_ts = f->time;
+					}
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d offset=%lld\n",
 						s->audio_time, delay_ms, p->render_offset_ns);
@@ -801,8 +809,13 @@ render_now:
 				do_render = 0;
 			} else {
 				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
+				int64_t delta_ms = (render_ts_ns - now_ns) / 1000000LL;
 DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d\n",
-				render_ts_ns, now_ns, (render_ts_ns - now_ns) / 1000000LL, f->time);
+				render_ts_ns, now_ns, delta_ms, f->time);
+				if (delta_ms <= 0) {
+					DBGSI serprintf("android_sync: render late delta=%lld f_time=%d audio_time=%d delay_ms=%d seek_epoch=%d\n",
+						delta_ms, f->time, s ? s->audio_time : -1, delay_ms, s ? s->seek_epoch : -1);
+				}
 			}
 		}
 
@@ -1437,7 +1450,24 @@ DBGSI		serprintf("android_sync: pause start at %d\n", p->pause_start_ms);
 	}
 
 	if( !p->pause_armed ) {
+DBGSI		serprintf("android_sync: resume shift skipped (pause not armed)\n");
 		p->pause_start_ms = 0;
+		pthread_mutex_unlock( &p->locked.mtx );
+		return;
+	}
+
+DBGSI	serprintf("android_sync: resume check audio_time=%d video_time=%d diff=%d\n",
+		s->audio_time, s->video_time, s->video_time - s->audio_time);
+
+	// If audio_time is stale vs video_time, invalidate audio timing and re-anchor on first post-resume audio.
+	if( s->audio_time >= 0 && s->video_time >= 0 && (s->video_time - s->audio_time) > 500 ) {
+DBGSI		serprintf("android_sync: resume invalidates stale audio_time (a=%d v=%d)\n",
+			s->audio_time, s->video_time);
+		s->audio_time = -1;
+		s->sync_a_time = -1;
+		p->render_offset_ns = -1;
+		p->pause_start_ms = 0;
+		p->pause_armed = 0;
 		pthread_mutex_unlock( &p->locked.mtx );
 		return;
 	}
@@ -1450,6 +1480,9 @@ DBGSI		serprintf("android_sync: pause start at %d\n", p->pause_start_ms);
 DBGSI			serprintf("android_sync: resume shift offset by %dms -> %lld\n",
 				pause_ms, p->render_offset_ns);
 		}
+	} else {
+DBGSI		serprintf("android_sync: resume shift skipped (pause_start=%d offset=%lld)\n",
+			p->pause_start_ms, (long long)p->render_offset_ns);
 	}
 	p->pause_start_ms = 0;
 	p->pause_armed = 0;
@@ -1465,6 +1498,8 @@ void sfdec2_android_sync_on_seek( STREAM *s )
 
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
+DBGSI	serprintf("android_sync: seek check audio_time=%d video_time=%d diff=%d\n",
+		s->audio_time, s->video_time, s->video_time - s->audio_time);
 	int was_holding = (p->hold_audio_until_ms != 0);
 	p->venc_put_time = 0;
 	p->venc_ref_time = 0;
@@ -1474,6 +1509,14 @@ void sfdec2_android_sync_on_seek( STREAM *s )
 	if (!was_holding) {
 		p->hold_audio_until_ms = 0;
 		p->hold_audio_applied_ms = 0;
+	}
+	// If audio_time is stale vs video_time after seek, invalidate and re-anchor on first audio.
+	if( s->audio_time >= 0 && s->video_time >= 0 && (s->video_time - s->audio_time) > 500 ) {
+DBGSI		serprintf("android_sync: seek invalidates stale audio_time (a=%d v=%d)\n",
+			s->audio_time, s->video_time);
+		s->audio_time = -1;
+		s->sync_a_time = -1;
+		p->render_offset_ns = -1;
 	}
 DBGSI	serprintf("android_sync: seek reset anchors\n");
 	pthread_mutex_unlock( &p->locked.mtx );

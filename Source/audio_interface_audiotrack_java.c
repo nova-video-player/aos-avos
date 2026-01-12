@@ -104,6 +104,7 @@ struct audio_ctx {
 };
 
 static int audiotrack_log_underruns = 0;
+static int audiotrack_disable_recovery = 1;
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
@@ -1053,6 +1054,12 @@ static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 
 	// Only recreate AudioTrack if we're in error recovery mode (flag set by audiotrack_write)
 	if (at->in_error_recovery) {
+		if (audiotrack_disable_recovery) {
+DBG			LOG("audiotrack_set_passthrough: recovery disabled, skipping recreate (passthrough=%d)", passthrough);
+			at->in_error_recovery = 0;
+			return 0;
+		}
+
 		// We're in error recovery mode, recreate the track
 		at->in_error_recovery = 0; // Reset the flag
 DBG		LOG("audiotrack_set_passthrough: recreating track for error recovery (passthrough=%d)", passthrough);
@@ -1184,6 +1191,10 @@ DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d
 ERR			LOG("audiotrack_write: write returned 0 (AudioTrack dead/broken) -> recovering track");
 		} else {
 ERR			LOG("audiotrack_write: ERROR_DEAD_OBJECT (-6) -> recovering track");
+		}
+		if (audiotrack_disable_recovery) {
+ERR			LOG("audiotrack_write: recovery disabled, dropping write");
+			return -1;
 		}
 		// Set error recovery flag
 		at->in_error_recovery = 1;
@@ -1703,4 +1714,5 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_PARAM("at_underrun", audiotrack_log_underruns );
+DECLARE_DEBUG_PARAM("at_disable_recovery", audiotrack_disable_recovery );
 #endif

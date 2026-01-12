@@ -587,9 +587,39 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
 	// if we sample post sink, allow us to start 500ms early
 	int max_rst = s->vtime_post_sink ? 500 : 0;
+	if( s->seek_epoch > 0 && s->put_time_mode && !s->seek_converge_done ) {
+		// During post-seek convergence, don't allow early start.
+		max_rst = 0;
+	}
+
+	// Post-seek convergence: allow a short window to align to heard audio,
+	// then re-anchor once and stop gating to avoid stutter.
+	if( s->seek_epoch > 0 && s->put_time_mode && s->audio_time != -1 ) {
+		if( s->seek_converge_epoch != s->seek_epoch ) {
+			s->seek_converge_epoch = s->seek_epoch;
+			s->seek_converge_until_ms = atime() + 500;
+			s->seek_converge_done = 0;
+		}
+		if( !s->seek_converge_done && atime() >= s->seek_converge_until_ms ) {
+			if( s->video_sink && s->video_sink->put_time ) {
+				int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
+					diff, anchor_ts);
+				s->video_sink->put_time( s->video_sink, anchor_ts );
+				s->sink_ref_time = anchor_ts;
+				s->vid_ref_time = s->video_time;
+			}
+			s->seek_converge_done = 1;
+		}
+		if( s->seek_converge_done ) {
+			// After convergence, stop gating to avoid stutter.
+			return 0;
+		}
+	}
 
 	// Wait if video is LATE by more than the threshold.
-	if( diff > RST_TO_TS_DELTA( max_rst, int ) ) {
+	int max_wait = RST_TO_TS_DELTA( max_rst, int );
+	if( diff > max_wait ) {
 DBGY serprintf( "{{V %d}} ", diff );
 		s->sync_audio = 0;
 		return 1; // Wait

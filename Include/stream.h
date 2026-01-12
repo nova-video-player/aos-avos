@@ -720,6 +720,9 @@ typedef struct STREAM {
 	int		seek_target_sync_time;
 	int		seek_frame;
 	int		warmup_video_frames;
+	int		seek_converge_epoch;
+	int		seek_converge_until_ms;
+	int		seek_converge_done;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 
 	ID3_TAG		tag;

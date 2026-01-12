@@ -79,7 +79,7 @@
 
 - **Pause**: WC continues to advance; TS does not. On resume the sink is re‑anchored to `heard_audio_ts`, so the wall‑clock gap is ignored.
 - **Resume**: `heard_audio_ts` is computed from the paused audio clock minus chain delay; `video_sink->put_time(heard_audio_ts)` resets the TS↔WC anchor.
-- **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and the sink is re‑anchored to the new `heard_audio_ts` so playback resumes without a TS discontinuity.
+- **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and a short convergence window is applied (android_sync=0) to align with `heard_audio_ts`, then the sink is re‑anchored once and gating stops to avoid stutter.
 - **Speed‑change realignment seek**: Uses `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` so the parser seeks to a keyframe, then `_stream_play_n_frames` drops frames until `ts_target`. Audio chunks are dropped until the same `ts_target`.
 - **Broken audio PTS (post‑seek)**: Some files emit non‑monotonic audio PTS after seek (e.g., audio restarts near 0 while video is at 26s). To avoid a video freeze, `stream_audio.c` guards against large backward jumps after seek: first audio far behind video is rebased to `video_time`, and later backward PTS (>1s) are ignored. This is a minimal safety net for malformed files, not the nominal path.
 
@@ -100,7 +100,7 @@
 - **High‑latency devices (e.g., Google streamer 4K)**: Stutter appeared as anchor jitter during AudioTrack warm‑up and latency ramps (headpos=0 → delay jumps). This caused backward anchor resets and pacing discontinuities without explicit drops.
 
 **Remedies applied (android_sync=0, sfdec2):**
-- **Grace window (1s)** after startup, seek, speed change, or discontinuity: suppress reanchor resets and frame drops while AudioTrack latency stabilizes.
+- **Convergence window (post‑seek, android_sync=0)**: For ~500 ms after a seek, video gating uses heard‑time (no early‑start bias) to let audio catch up. Once the window expires, the sink is re‑anchored to `heard_audio_ts` and further gating stops, preventing per‑frame stalls.
 - **Monotonic anchor**: prevent backward anchor movement during steady playback; only allow resets on explicit speed change or large discontinuity.
 
 **Remedies applied (android_sync=1, MediaCodec):**

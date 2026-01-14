@@ -600,16 +600,19 @@ DBGSI serprintf("MediaCodec resume\n");
 			// put_time may be deferred at startup; fetch passthrough directly.
 			passthrough = _is_passthrough(s);
 		}
-		int delay_valid = 1;
-		if( s && s->audio_ctx ) {
-			delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+		int have_delay = 1;
+		if (s && s->audio_ctx) {
+			int delay_ms = audio_interface_get_delay(s->audio_ctx);
+			if (delay_ms <= 0) {
+				have_delay = 0;
+			}
 		}
 
 		if( android_sync ) {
 			blit_duration = 0;
 		} else if( sfdec_force_blit ) {
 			blit_duration = 0;
-		} else if( !delay_valid ) {
+		} else if( !have_delay ) {
 			// No reliable audio timing: pace by WC using frame timestamps
 			blit_duration = _compute_blit_wait_ms( p, f );
 		} else {
@@ -642,7 +645,7 @@ DBGCV CLOG("stop thread 2");
 			}
 		// Android sync will happily drop the frames for us
 		} else if ( !android_sync ) {
-			if( !delay_valid ) {
+			if( !have_delay ) {
 DBGSI			serprintf(" timing invalid, skip drop\n");
 				goto render_now;
 			}
@@ -704,7 +707,7 @@ render_now:
 		if( android_sync ) {
 			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 			int delay_valid = 1;
-			int delay_ms = 0;
+			int anchor_delay_ms = 0;
 			int have_audio_time = (s && s->audio_time > 0);
 			int hold_passthrough = 0;
 
@@ -712,18 +715,19 @@ render_now:
 				delay_valid = audio_interface_is_delay_valid(s->audio_ctx);
 			}
 			if (s) {
-				delay_ms = s->smoothed_av_delay;
-				if (delay_ms <= 0 && s->audio_ctx) {
-					delay_ms = audio_interface_get_latency(s->audio_ctx);
+				// Use smoothed delay when available; otherwise use best-delay provider.
+				anchor_delay_ms = s->smoothed_av_delay;
+				if (anchor_delay_ms <= 0 && s->audio_ctx) {
+					anchor_delay_ms = audio_interface_get_delay(s->audio_ctx);
 				}
 			}
-			if (delay_ms < 0) {
-				delay_ms = 0;
+			if (anchor_delay_ms < 0) {
+				anchor_delay_ms = 0;
 			}
 
 			if (passthrough == 2 && s && s->audio && s->audio->valid && s->audio_time < 0) {
 				if (p->hold_audio_until_ms == 0) {
-					int hold_ms = delay_ms > 0 ? delay_ms + 200 : 500;
+					int hold_ms = anchor_delay_ms > 0 ? anchor_delay_ms + 200 : 500;
 					p->hold_audio_until_ms = atime() + hold_ms;
 					p->hold_audio_applied_ms = hold_ms;
 					DBGSI serprintf("android_sync: hold video for passthrough start (%d ms)\n", hold_ms);
@@ -747,7 +751,7 @@ render_now:
 			if (!hold_passthrough && p->render_offset_ns == -1) {
 				// Passthrough mode 2: align video to audible time (audio_time minus latency).
 				if (passthrough == 2 && have_audio_time) {
-					int delay_for_pt = delay_ms > 0 ? delay_ms : 0;
+					int delay_for_pt = anchor_delay_ms > 0 ? anchor_delay_ms : 0;
 					if (p->hold_audio_applied_ms > 0) {
 						// Avoid double-counting startup hold + static latency.
 						delay_for_pt -= p->hold_audio_applied_ms;
@@ -767,23 +771,23 @@ render_now:
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d passthrough=2 offset=%lld\n",
 						s->audio_time, delay_for_pt, p->render_offset_ns);
-				} else if (delay_valid && have_audio_time && delay_ms > 0) {
-					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_ms;
+				} else if (delay_valid && have_audio_time && anchor_delay_ms > 0) {
+					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)anchor_delay_ms;
 					if (s && s->seek_epoch > 0 && heard_ts > f->time) {
 						// Backward seek: avoid anchoring behind the current video frame.
 						heard_ts = f->time;
 					}
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d offset=%lld\n",
-						s->audio_time, delay_ms, p->render_offset_ns);
+						s->audio_time, anchor_delay_ms, p->render_offset_ns);
 				} else {
-					p->render_offset_ns = now_ns + (int64_t)delay_ms * 1000000LL - (int64_t)f->time * 1000000LL;
+					p->render_offset_ns = now_ns + (int64_t)anchor_delay_ms * 1000000LL - (int64_t)f->time * 1000000LL;
 					DBGSI serprintf("android_sync: init render_offset from static delay=%d offset=%lld\n",
-						delay_ms, p->render_offset_ns);
+						anchor_delay_ms, p->render_offset_ns);
 				}
-			} else if (delay_valid && have_audio_time && delay_ms > 0 && passthrough != 2) {
+			} else if (delay_valid && have_audio_time && anchor_delay_ms > 0 && passthrough != 2) {
 				// Slew toward dynamic delay once timing becomes valid.
-				int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_ms;
+				int64_t heard_ts = (int64_t)s->audio_time - (int64_t)anchor_delay_ms;
 				p->target_offset_ns = now_ns - heard_ts * 1000000LL;
 				if (p->target_offset_ns != p->render_offset_ns) {
 					p->slew_active = 1;
@@ -814,7 +818,7 @@ DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d\
 				render_ts_ns, now_ns, delta_ms, f->time);
 				if (delta_ms <= 0) {
 					DBGSI serprintf("android_sync: render late delta=%lld f_time=%d audio_time=%d delay_ms=%d seek_epoch=%d\n",
-						delta_ms, f->time, s ? s->audio_time : -1, delay_ms, s ? s->seek_epoch : -1);
+						delta_ms, f->time, s ? s->audio_time : -1, anchor_delay_ms, s ? s->seek_epoch : -1);
 				}
 			}
 		}

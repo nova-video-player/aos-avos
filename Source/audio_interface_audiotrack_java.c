@@ -100,7 +100,11 @@ struct audio_ctx {
 	int last_good_dynamic_delay_ms;  // last trusted dynamic delay
 	int last_good_dynamic_ms;        // last time we got a trusted dynamic delay
 	int last_good_dynamic_valid;     // last dynamic delay validity
-	int delay_valid;                 // last delay validity (dynamic timing)
+	int delay_valid;                 // dynamic timestamp is stable (fallbacks may still be used)
+	int headpos_zero_streak;         // consecutive headpos==0 samples
+	uint64_t headpos_smooth_frames;  // smoothed playback head position
+	uint64_t headpos_last_frames;    // last raw playback head position
+	int headpos_smooth_valid;        // smoothed headpos validity
 };
 
 static int audiotrack_log_underruns = 0;
@@ -109,6 +113,7 @@ static int audiotrack_disable_recovery = 1;
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
 static int audiotrack_get_latency(audio_ctx_t *at);
+static void audiotrack_reset_timing(audio_ctx_t *at);
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
@@ -1213,8 +1218,12 @@ ERR		LOG("audiotrack_write: ERROR code %d returned from Java write()", ret);
 
 static int audiotrack_get_delay(audio_ctx_t *at)
 {
-	const int timing_query_interval_ms = 1000;
 	const int delay_spike_threshold_ms = 200;
+	const int delay_spike_threshold_stable_ms = 100;
+	const int delay_max_ms = 5000;
+	const int delay_suspect_ms = 2000;
+	const int stable_streak_required = 10;
+	const int max_smooth_drift_ms = 1000;
 
 	if (!at->init) {
 ERR		LOG("track not valid, error");
@@ -1226,6 +1235,7 @@ ERR		LOG("track not valid, error");
 	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
 	if (at->passthrough) {
 DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
+		at->delay_valid = 0;
 		return at->latency;
 	}
 
@@ -1235,34 +1245,38 @@ DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
 	if (!enable_dynamic_audio_delay) {
 		// User disabled dynamic latency, use static latency
 DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
-		at->delay_valid = 1;
+		at->delay_valid = 0;
 		return at->latency;
 	}
 
 	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
 		// Fallback to static latency if AudioTimestamp not available
 DBG2		LOG("Using static latency: %d ms", at->latency);
+		at->delay_valid = 0;
 		return at->latency;
 	}
 
 	if (at->rate <= 0) {
 DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
+		at->delay_valid = 0;
 		return at->latency;
 	}
 
 	int now_ms = atime();
+	int timing_query_interval_ms = at->ts_use_timestamp ? 2000 : 100;
 	if (at->ts_last_query_ms > 0 && now_ms - at->ts_last_query_ms < timing_query_interval_ms) {
+		// Throttle timing queries; reuse cached values while preserving delay_valid state.
 		if (at->ts_cached_valid) {
-			at->delay_valid = 1;
+			at->delay_valid = at->ts_use_timestamp ? 1 : 0;
 			return at->ts_cached_delay_ms;
 		}
 		if (audiotrack_last_good_dynamic(at, now_ms, &at->ts_cached_delay_ms)) {
 			at->ts_cached_valid = 1;
-			at->delay_valid = 1;
+			at->delay_valid = at->ts_use_timestamp ? 1 : 0;
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return at->latency;
 	}
 
 	// IMPORTANT: Get the JNIEnv for the CURRENT thread, not the cached one
@@ -1272,16 +1286,22 @@ DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 	if (!env) {
 		// Can't attach to current thread, fallback to static latency
 DBG2		LOG("Failed to attach to current thread, using static latency: %d ms", at->latency);
+		at->delay_valid = 0;
 		return at->latency;
 	}
 
 	// Check if AudioTrack object is still valid (could be NULL during teardown)
 	if (!at->obj) {
 ERR		LOG("AudioTrack object is NULL, using static latency: %d ms", at->latency);
+		at->delay_valid = 0;
 		return at->latency;
 	}
 
 	int fallback_delay = audiotrack_delay_from_playhead(at, env);
+	if (fallback_delay < 0) {
+		// Playback head is unreliable; use static latency as last resort.
+		fallback_delay = at->latency;
+	}
 
 	// Re-check AudioTrack just before calling into Java to avoid races with teardown
 	jobject track_obj = at->obj;
@@ -1296,7 +1316,7 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return fallback_delay;
 	}
 
 	// Call AudioTrack.getTimestamp(AudioTimestamp)
@@ -1315,7 +1335,7 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return fallback_delay;
 	}
 
 	if (!success) {
@@ -1330,15 +1350,16 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return fallback_delay;
 	}
 
 	// Extract framePosition and nanoTime from AudioTimestamp using cached field IDs
 	int64_t framePosition = (*env)->GetLongField(env, at->audioTimestamp, at->framePositionFieldID);
 	int64_t nanoTime = (*env)->GetLongField(env, at->audioTimestamp, at->nanoTimeFieldID);
 
-	if (framePosition <= 0) {
-DBG2		LOG("Non-positive frame position, timing unavailable");
+	if (framePosition <= 0 || nanoTime <= 0) {
+		// Timestamp not usable; rely on playback-head or static fallback.
+DBG2		LOG("Non-positive timestamp values, timing unavailable");
 		at->ts_last_query_ms = now_ms;
 		if (audiotrack_last_good_dynamic(at, now_ms, &at->ts_cached_delay_ms)) {
 			at->ts_cached_valid = 1;
@@ -1346,7 +1367,7 @@ DBG2		LOG("Non-positive frame position, timing unavailable");
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return fallback_delay;
 	}
 
 	uint64_t frames_presented = (uint64_t)framePosition;
@@ -1379,7 +1400,8 @@ DBG2		LOG("Timestamp reset detected, offset=%llu", (unsigned long long)at->times
 	int delay_ms = (int)((frames_pending * 1000) / at->rate);
 
 	// Guard against unrealistic estimates (e.g., during startup) and fallback to static latency
-	if (delay_ms < 0 || delay_ms > 2000) {
+	if (delay_ms < 0 || delay_ms > delay_max_ms) {
+		// Outlier: drop dynamic delay and fall back.
 DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay_ms, at->latency);
 		at->ts_success_streak = 0;
 		at->ts_use_timestamp = 0;
@@ -1390,12 +1412,16 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return fallback_delay;
 	}
 
-	// Require a few consecutive stable timestamps before trusting them to avoid startup jumps
-	at->ts_success_streak++;
-	if (at->ts_success_streak >= 3)
+	// Require a streak of advancing timestamps before trusting them to avoid startup jumps.
+	if (nanoTime <= at->last_timestamp_ns || frames_presented <= at->last_timestamp_frames) {
+		at->ts_success_streak = 0;
+	} else {
+		at->ts_success_streak++;
+	}
+	if (at->ts_success_streak >= stable_streak_required)
 		at->ts_use_timestamp = 1;
 
 	// Cache the timestamp for debugging/monitoring
@@ -1403,6 +1429,7 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 	at->last_timestamp_frames = frames_presented;
 
 	if (!at->ts_use_timestamp) {
+		// Warmup: require a streak of advancing timestamps before trusting them.
 DBG2		LOG("Dynamic latency warming up (streak %d), using fallback playback-head latency: %d ms", at->ts_success_streak, fallback_delay);
 		at->ts_last_query_ms = now_ms;
 		if (audiotrack_last_good_dynamic(at, now_ms, &at->ts_cached_delay_ms)) {
@@ -1411,18 +1438,38 @@ DBG2		LOG("Dynamic latency warming up (streak %d), using fallback playback-head 
 			return at->ts_cached_delay_ms;
 		}
 		at->delay_valid = 0;
-		return 0;
+		return fallback_delay;
 	}
 
 DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
 		delay_ms, (unsigned long long)frames_written_adjusted, (unsigned long long)frames_presented, (long long)frames_pending);
 
 	at->ts_last_query_ms = now_ms;
-	if (at->ts_cached_valid && delay_ms > at->ts_cached_delay_ms + delay_spike_threshold_ms) {
-DBG2		LOG("Dynamic latency spike %d ms (last %d ms), keeping last good delay",
-			delay_ms, at->ts_cached_delay_ms);
-		at->delay_valid = 1;
-		return at->ts_cached_delay_ms;
+	if (at->ts_cached_valid) {
+		if (delay_ms > delay_suspect_ms) {
+			// Large jump: keep last good delay rather than trusting the spike.
+			at->delay_valid = 1;
+			return at->ts_cached_delay_ms;
+		}
+		int spike_threshold = at->ts_use_timestamp ? delay_spike_threshold_stable_ms
+			: delay_spike_threshold_ms;
+		if (delay_ms > at->ts_cached_delay_ms + spike_threshold) {
+			// Ignore spikes; keep last good delay to avoid jitter.
+			at->delay_valid = 1;
+			return at->ts_cached_delay_ms;
+		}
+		if (abs(delay_ms - at->ts_cached_delay_ms) > max_smooth_drift_ms) {
+			// Drift too large to smooth; jump to the new value.
+			at->ts_cached_delay_ms = delay_ms;
+			at->ts_cached_valid = 1;
+			at->last_good_dynamic_delay_ms = delay_ms;
+			at->last_good_dynamic_ms = now_ms;
+			at->last_good_dynamic_valid = 1;
+			at->delay_valid = 1;
+			return delay_ms;
+		}
+		// Exponential smoothing to reduce jitter in the dynamic delay.
+		delay_ms = (at->ts_cached_delay_ms * 8 + delay_ms * 2) / 10;
 	}
 	at->ts_cached_delay_ms = delay_ms;
 	at->ts_cached_valid = 1;
@@ -1445,19 +1492,9 @@ ERR		LOG("track not valid, error");
 	call_void_method(at, "pause", "()V");
 	call_void_method(at, "flush", "()V");
 
-	// Reset timestamp tracking after flush
+	// Reset timing state after flush
 	at->i_samples_written = 0;
-	at->last_timestamp_ns = 0;
-	at->last_timestamp_frames = 0;
-	at->timestamp_written_offset = 0;
-	at->ts_success_streak = 0;
-	at->ts_use_timestamp = 0;
-	at->ts_last_query_ms = 0;
-	at->ts_cached_delay_ms = 0;
-	at->ts_cached_valid = 0;
-	at->last_good_dynamic_delay_ms = 0;
-	at->last_good_dynamic_ms = 0;
-	at->last_good_dynamic_valid = 0;
+	audiotrack_reset_timing(at);
 }
 
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out)
@@ -1497,10 +1534,28 @@ static int audiotrack_delay_from_playhead(audio_ctx_t *at, JNIEnv *env_local)
 	jint playback_frames = call_int_method_with_env(at, env_local, "getPlaybackHeadPosition", "()I");
 	if (playback_frames <= 0) {
 DBG2		LOG("getPlaybackHeadPosition returned %d, timing unavailable", playback_frames);
-		return -1;
+		at->headpos_zero_streak++;
+		if (at->headpos_smooth_valid) {
+			// Use last smoothed headpos if raw values are stuck at zero.
+			playback_frames = (jint)at->headpos_smooth_frames;
+		} else {
+			return -1;
+		}
+	} else {
+		at->headpos_zero_streak = 0;
 	}
 
-	uint64_t frames_presented = (uint64_t)playback_frames;
+	if (!at->headpos_smooth_valid || (uint64_t)playback_frames < at->headpos_last_frames) {
+		// Reset smoothing on discontinuities or first valid sample.
+		at->headpos_smooth_frames = (uint64_t)playback_frames;
+		at->headpos_smooth_valid = 1;
+	} else {
+		// Smooth headpos to avoid jitter from raw playback head deltas.
+		at->headpos_smooth_frames = (at->headpos_smooth_frames * 7 + (uint64_t)playback_frames * 3) / 10;
+	}
+	at->headpos_last_frames = (uint64_t)playback_frames;
+
+	uint64_t frames_presented = at->headpos_smooth_frames;
 	if (frames_presented < at->last_timestamp_frames && at->i_samples_written > frames_presented) {
 		at->timestamp_written_offset = at->i_samples_written - frames_presented;
 DBG2		LOG("Playback head reset detected, offset=%llu", (unsigned long long)at->timestamp_written_offset);
@@ -1564,6 +1619,29 @@ DBG	LOG();
 static int audiotrack_is_delay_valid(audio_ctx_t *at)
 {
 	return at ? at->delay_valid : 0;
+}
+
+static void audiotrack_reset_timing(audio_ctx_t *at)
+{
+	if (!at) {
+		return;
+	}
+	at->last_timestamp_ns = 0;
+	at->last_timestamp_frames = 0;
+	at->timestamp_written_offset = 0;
+	at->ts_success_streak = 0;
+	at->ts_use_timestamp = 0;
+	at->ts_last_query_ms = 0;
+	at->ts_cached_delay_ms = 0;
+	at->ts_cached_valid = 0;
+	at->last_good_dynamic_delay_ms = 0;
+	at->last_good_dynamic_ms = 0;
+	at->last_good_dynamic_valid = 0;
+	at->delay_valid = 0;
+	at->headpos_zero_streak = 0;
+	at->headpos_smooth_frames = 0;
+	at->headpos_last_frames = 0;
+	at->headpos_smooth_valid = 0;
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
@@ -1675,6 +1753,8 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			audio_interface_set_audio_speed(speed);
 		}
 
+		// AudioTrack timing can jump after speed changes; force a fresh timestamp streak.
+		audiotrack_reset_timing(at);
 		audiotrack_update_latency(at, myEnv);
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");

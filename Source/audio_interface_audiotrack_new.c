@@ -422,5 +422,4 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_new = {
 	.get_session_id = audiotrack_get_session_id,
 	.set_passthrough = audiotrack_set_passthrough,
 	.get_passthrough = audiotrack_get_passthrough,
-	.delay_valid = NULL,
 };

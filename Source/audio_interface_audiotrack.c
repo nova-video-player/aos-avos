@@ -308,5 +308,4 @@ const audio_interface_impl_t audio_interface_impl_audiotrack = {
 	.flush_output = audiotrack_flush_output,
 	.preload = audiotrack_preload,
 	.get_session_id = audiotrack_get_session_id,
-	.delay_valid = NULL,
 };

@@ -562,8 +562,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	audio_interface_set_using_atempo( using_atempo );
 
 	int audio_latency_ms = -1;
-	if( s && s->audio_ctx ) {
-		audio_latency_ms = audio_interface_get_delay( s->audio_ctx );
+	if( s ) {
+		audio_latency_ms = stream_get_anchor_delay_ms( s, 1 );
 	}
 	float previous_speed = audio_interface_get_audio_speed();
 	int speed_changed = is_audio_speed_changed( av_speed );

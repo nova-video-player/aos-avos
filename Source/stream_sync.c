@@ -523,9 +523,15 @@ DBGY			serprintf("sync_video: timing unavailable, free-run video\n");
 		}
 	}
 #else
-	if( s->audio_ctx && !audio_interface_is_delay_valid( s->audio_ctx ) ) {
-DBGY		serprintf("sync_video: timing unavailable, free-run video\n");
-		return 0;
+	{
+		int allow_static = 0;
+		int anchor_valid = 1;
+		// Use the unified anchor delay to decide if timing is available.
+		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
+		if( !anchor_valid ) {
+DBGY			serprintf("sync_video: timing unavailable, free-run video\n");
+			return 0;
+		}
 	}
 #endif
 	

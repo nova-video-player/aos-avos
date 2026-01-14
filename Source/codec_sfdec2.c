@@ -146,6 +146,9 @@ typedef struct priv {
 	int pause_armed;
 	int slew_active;
 	int64_t target_offset_ns;
+	int pending_reanchor;
+	int last_seek_epoch;
+	int last_audio_resume_pending;
 
 	STREAM_DEC_VIDEO *dec;
 	int64_t render_offset_ns;
@@ -402,8 +405,20 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->grace_until_ms = now_ms + 1000;
 		}
 		int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
-		int allow_reanchor = speed_changed;
-		if (in_grace && !speed_changed) {
+		int event_reanchor = speed_changed;
+		if (s) {
+			if (s->seek_epoch != p->last_seek_epoch) {
+				p->last_seek_epoch = s->seek_epoch;
+				event_reanchor = 1;
+			}
+			if (s->audio_resume_pending && !p->last_audio_resume_pending) {
+				event_reanchor = 1;
+			}
+			p->last_audio_resume_pending = s->audio_resume_pending;
+		}
+		// During grace, only allow reanchor on explicit events (seek/resume/speed).
+		int allow_reanchor = event_reanchor;
+		if (in_grace && !event_reanchor) {
 			allow_reanchor = 0;
 		}
 
@@ -412,7 +427,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		// Render offset is initialized in the render thread once audio timing is usable.
 		if (allow_reanchor) {
 			pthread_mutex_lock(&p->locked.mtx);
+			// Event-driven: reset render offset only on seek/resume/speed.
 			p->render_offset_ns = -1;
+			p->pending_reanchor = 1;
 			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d\n",
 				diff, speed_changed);
 			pthread_mutex_unlock(&p->locked.mtx);
@@ -601,8 +618,8 @@ DBGSI serprintf("MediaCodec resume\n");
 			passthrough = _is_passthrough(s);
 		}
 		int have_delay = 1;
-		if (s && s->audio_ctx) {
-			int delay_ms = audio_interface_get_delay(s->audio_ctx);
+		if (s) {
+			int delay_ms = stream_get_anchor_delay_ms(s, 1);
 			if (delay_ms <= 0) {
 				have_delay = 0;
 			}
@@ -658,9 +675,7 @@ DBGSI serprintf(" grace\n");
 			int smoothed_delay = 0;
 			if( s ) {
 				smoothed_delay = s->smoothed_av_delay;
-				if( s->audio_ctx ) {
-					audio_delay = audio_interface_get_delay( s->audio_ctx );
-				}
+				audio_delay = stream_get_anchor_delay_ms( s, 1 );
 			}
 			if( audio_delay < 0 ) {
 				audio_delay = 0;
@@ -706,19 +721,15 @@ DBGSI serprintf(" ok\n");
 render_now:
 		if( android_sync ) {
 			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-			int delay_valid = 1;
 			int anchor_delay_ms = 0;
 			int have_audio_time = (s && s->audio_time > 0);
 			int hold_passthrough = 0;
 
-			if (s && s->audio_ctx) {
-				delay_valid = audio_interface_is_delay_valid(s->audio_ctx);
-			}
 			if (s) {
-				// Use smoothed delay when available; otherwise use best-delay provider.
+				// Use smoothed delay when available; otherwise use the unified anchor delay.
 				anchor_delay_ms = s->smoothed_av_delay;
-				if (anchor_delay_ms <= 0 && s->audio_ctx) {
-					anchor_delay_ms = audio_interface_get_delay(s->audio_ctx);
+				if (anchor_delay_ms <= 0) {
+					anchor_delay_ms = stream_get_anchor_delay_ms(s, 1);
 				}
 			}
 			if (anchor_delay_ms < 0) {
@@ -771,7 +782,7 @@ render_now:
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d passthrough=2 offset=%lld\n",
 						s->audio_time, delay_for_pt, p->render_offset_ns);
-				} else if (delay_valid && have_audio_time && anchor_delay_ms > 0) {
+				} else if (have_audio_time && anchor_delay_ms > 0) {
 					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)anchor_delay_ms;
 					if (s && s->seek_epoch > 0 && heard_ts > f->time) {
 						// Backward seek: avoid anchoring behind the current video frame.
@@ -785,12 +796,17 @@ render_now:
 					DBGSI serprintf("android_sync: init render_offset from static delay=%d offset=%lld\n",
 						anchor_delay_ms, p->render_offset_ns);
 				}
-			} else if (delay_valid && have_audio_time && anchor_delay_ms > 0 && passthrough != 2) {
-				// Slew toward dynamic delay once timing becomes valid.
-				int64_t heard_ts = (int64_t)s->audio_time - (int64_t)anchor_delay_ms;
-				p->target_offset_ns = now_ns - heard_ts * 1000000LL;
-				if (p->target_offset_ns != p->render_offset_ns) {
-					p->slew_active = 1;
+				// Render offset was reset due to an event; clear pending reanchor.
+				p->pending_reanchor = 0;
+			} else if (have_audio_time && anchor_delay_ms > 0 && passthrough != 2) {
+				// Slew toward a new anchor only on explicit events (seek/resume/speed).
+				if (p->pending_reanchor) {
+					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)anchor_delay_ms;
+					p->target_offset_ns = now_ns - heard_ts * 1000000LL;
+					if (p->target_offset_ns != p->render_offset_ns) {
+						p->slew_active = 1;
+					}
+					p->pending_reanchor = 0;
 				}
 			}
 
@@ -1164,6 +1180,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->target_offset_ns = 0;
+	p->pending_reanchor = 0;
+	p->last_seek_epoch = 0;
+	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_applied_ms = 0;
 	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
@@ -1330,6 +1349,9 @@ DBGCV	CLOG();
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->target_offset_ns = 0;
+	p->pending_reanchor = 0;
+	p->last_seek_epoch = 0;
+	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_applied_ms = 0;
 
@@ -1510,6 +1532,9 @@ DBGSI	serprintf("android_sync: seek check audio_time=%d video_time=%d diff=%d\n"
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->target_offset_ns = 0;
+	p->pending_reanchor = 0;
+	p->last_seek_epoch = 0;
+	p->last_audio_resume_pending = 0;
 	if (!was_holding) {
 		p->hold_audio_until_ms = 0;
 		p->hold_audio_applied_ms = 0;

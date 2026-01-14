@@ -110,5 +110,4 @@ const audio_interface_impl_t audio_interface_impl_null = {
 	.get_latency = NULL,
 	.flush_output = null_flush_output,
 	.preload = null_preload,
-	.delay_valid = NULL,
 };

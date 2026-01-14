@@ -430,5 +430,4 @@ const audio_interface_impl_t audio_interface_impl_sdl = {
 	.set_output_volume = sdl_set_output_volume,
 	.set_output_volume_l_r = sdl_set_output_volume_l_r,
 	.get_session_id = sdl_get_session_id,
-	.delay_valid = NULL,
 };

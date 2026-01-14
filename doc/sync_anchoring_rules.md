@@ -8,7 +8,7 @@
 - **Monotonic clock variables (WC)**: `CLOCK_MONOTONIC` timestamps are used for wall‑clock pacing because they never jump due to system time changes. They provide stable elapsed‑time deltas for TS↔WC anchoring.
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
 - **`smoothed_av_delay`**: A low‑pass filtered estimate of audio‑video offset (TS) used as a stable proxy for the audible delay. When it is invalid, fall back to `stream_sync_av_delay()`.
-- **Best delay provider**: Audio delay is chosen by a single provider: use stable `AudioTrack.getTimestamp()` when available; otherwise fall back to playback‑head latency, then static latency. Timestamp validity is gated by a streak of advancing samples and outlier rejection. `delay_valid` only signals "dynamic timestamp is stable", not whether a fallback exists.
+- **Best delay provider**: Audio delay is chosen by a single provider: use stable `AudioTrack.getTimestamp()` when available; otherwise fall back to playback‑head latency, then static latency. Timestamp validity is gated by a streak of advancing samples and outlier rejection; fallback is always available when dynamic timing is unstable.
 - **`put_time_mode`**: Enabled when a sink exposes `put_time()`. In this mode the sync layer keeps audio as the master (via `heard_audio_ts`) but does not disable sync on early frames; the sink owns TS↔WC pacing.
 
 ## Time Domain Anchors (Single per Sink)
@@ -107,7 +107,7 @@
 **Remedies applied (android_sync=1, MediaCodec):**
 - **Always render_ts**: the sink always calls MediaCodec with `render_ts_ns`, avoiding a pacing mode switch.
 - **Static-to-dynamic slew**: initialize offset with static latency, then slew toward dynamic delay when timing becomes valid.
-- **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is disabled because delay_valid is unreliable.
+- **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is event‑driven only (seek/resume/speed).
 
 ## Filters and Time Domains
 

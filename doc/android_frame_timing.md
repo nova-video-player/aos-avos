@@ -9,9 +9,10 @@ Enabling `android_sync` hands video pacing to the Android `MediaCodec` renderer 
 - The sink always calls `sfdec_buf_render` with a non‑zero `render_ts_ns`.
 - `render_ts_ns` is derived from a single render offset: `render_ts_ns = f->time * 1e6 + render_offset_ns`.
 - The render offset is initialized once at startup:
-  - Use dynamic delay if AudioTrack timing is valid.
-  - Otherwise use static latency to provide a stable initial alignment.
-- When dynamic delay becomes valid, the offset is **slewed** toward the new target in small steps to avoid a visible speed jump.
+  - Prefer `smoothed_av_delay` when available.
+  - Otherwise use the unified anchor delay (playback‑head or static latency).
+- The offset is **slewed** toward a new target only on explicit events
+  (seek/resume/speed) to avoid jitter‑driven reanchors.
 
 In short, the sink never blocks or drops; MediaCodec schedules frames using the provided timestamps.
 
@@ -30,9 +31,9 @@ because `render_ts_ns > 0` is always supplied.
 
 ## Operational Notes and Caveats
 
-- The render offset is initialized from static latency when AudioTrack timing is
-  invalid; this provides a stable A/V alignment while dynamic delay ramps up.
-- The offset slews toward the dynamic delay to avoid visible acceleration or
-  stutter when timing becomes valid.
+- The render offset is initialized from a stable fallback when timing is
+  unreliable; this provides a consistent A/V alignment at startup.
+- Subsequent corrections are event‑driven (seek/resume/speed) and applied via
+  slow slew to avoid visible acceleration or stutter.
 - Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
   incorrect snapping after a speed change, causing jitter in scheduled timestamps.

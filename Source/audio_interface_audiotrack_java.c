@@ -1226,11 +1226,24 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 
-	// Use static latency for passthrough mode
-	// Dynamic latency doesn't work because we can't accurately track written vs presented frames
-	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
-	if (at->passthrough) {
-DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
+	// Passthrough mode 2 (raw codec): timestamps/playhead are unreliable; use static latency only.
+	if (at->passthrough == 2) {
+DBG2		LOG("Using static latency for passthrough=2: %d ms", at->latency);
+		return at->latency;
+	}
+	// Passthrough mode 1 (IEC): avoid getTimestamp, but allow playback-head delay if stable.
+	if (at->passthrough == 1) {
+		JNIEnv *env = attach_thread_current_vm();
+		if (!env || !at->obj) {
+DBG2			LOG("Passthrough=1: no AudioTrack env/obj, using static latency: %d ms", at->latency);
+			return at->latency;
+		}
+		int head_delay = audiotrack_delay_from_playhead(at, env);
+		if (head_delay >= 0) {
+DBG2			LOG("Passthrough=1: playback-head delay %d ms", head_delay);
+			return head_delay;
+		}
+DBG2		LOG("Passthrough=1: playback-head unavailable, using static latency: %d ms", at->latency);
 		return at->latency;
 	}
 
@@ -1238,8 +1251,16 @@ DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
 	// This automatically accounts for Bluetooth and other output latencies
 	// Can be disabled via preference if user experiences sync issues
 	if (!enable_dynamic_audio_delay) {
-		// User disabled dynamic latency, use static latency
-DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
+		// User disabled timestamp-based latency; use playback-head if available, else static.
+		JNIEnv *env = attach_thread_current_vm();
+		if (env && at->obj) {
+			int head_delay = audiotrack_delay_from_playhead(at, env);
+			if (head_delay >= 0) {
+DBG2				LOG("Dynamic latency disabled: playback-head delay %d ms", head_delay);
+				return head_delay;
+			}
+		}
+DBG2		LOG("Dynamic latency disabled: using static latency: %d ms", at->latency);
 		return at->latency;
 	}
 

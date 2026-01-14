@@ -107,6 +107,7 @@
 **Remedies applied (android_sync=1, MediaCodec):**
 - **Always render_ts**: the sink always calls MediaCodec with `render_ts_ns`, avoiding a pacing mode switch.
 - **Static-to-dynamic slew**: initialize offset with static latency, then slew toward dynamic delay when timing becomes valid.
+- **Passthrough=1 (IEC)**: use playback‑head delay when available; fall back to static latency if head position is unstable.
 - **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is event‑driven only (seek/resume/speed).
 
 ## Filters and Time Domains

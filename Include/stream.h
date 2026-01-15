@@ -706,6 +706,9 @@ typedef struct STREAM {
 	int 		sync_a_time;
 	int		audio_preload;
 	int		audio_stuff_zero;
+	int		audio_start_pending;
+	int		audio_start_pts;
+	int		audio_start_target_ts;
 		
 	int		play_n_video_frames;
 	int		play_n_video_one;

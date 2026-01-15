@@ -26,6 +26,10 @@
 #include <string.h>
 #include <math.h>
 
+#ifdef CONFIG_ANDROID
+int get_android_sync(void);
+#endif
+
 #define DBGS DBG_IF(Debug[DBG_STREAM])
 #define DBGA DBG_IF(Debug[DBG_AUD])
 #define DBGV DBG_IF(Debug[DBG_VID])
@@ -508,7 +512,20 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 					}
 				} else {
 					if( cdata.time != STREAM_NO_PTS_VALUE ) {
-						_set_audio_time( s, cdata.time );
+						if( !get_android_sync() && s->put_time_mode &&
+							s->audio_time < 0 && !s->audio_start_pending &&
+							s->video_time >= 0 && s->video_time < 1000 ) {
+							// Startup: delay audio_time until the first audible output.
+							// Capture a fixed target based on the first audio PTS so the hold
+							// does not chase a moving audio_time.
+							s->audio_start_pending = 1;
+							s->audio_start_pts = cdata.time;
+							s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
+							DBG serprintf("audio_start_pending: pts=%d video_time=%d\n",
+								s->audio_start_pts, s->video_time);
+						} else if( s->audio_time < 0 ) {
+							_set_audio_time( s, cdata.time );
+						}
 					}
 				}
 
@@ -974,48 +991,24 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 				}
-				// Update audio time based on ACTUAL filtered output (not decoded bytes)
-				// This is critical for atempo filter which changes audio duration
-				if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
-					if( !s->audio->vbr && audio_frame.size > 0 ) {
-						// Calculate time based on actual output size after filtering
-						int bytes_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits) / 8;
-						int channels = audio_frame.channels ? audio_frame.channels : original_channels;
-						int sample_rate = audio_frame.samplesPerSec ? audio_frame.samplesPerSec : original_rate;
-						int prev_audio_time = s->audio_time;
-
-						if( bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
-							// For AC3 recoding, use fakeSize (represents PCM equivalent)
-							int effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
-								audio_frame.fakeSize : audio_frame.size;
-							int output_samples = effective_size / (bytes_per_sample * channels);
-							int output_time_ms = (output_samples * 1000) / sample_rate;
-
-							// Option B: atempo output is already in TS domain (physical playback time)
-							// Don't double-scale by applying RST_TO_TS_DELTA when atempo is active
-							// If filter exists, we're in Option B mode (timeline mapping enabled)
-							if( use_atempo ) {
-								// atempo output duration = physical samples @ 1.0x = TS domain
-								_add_audio_time( s, output_time_ms );
-								DBG serprintf("stream_audio: atempo output, audio_time +%d ms (TS domain, no scaling)\n",
-									output_time_ms);
-							} else {
-								// Normal path: physical samples need RST→TS conversion
-								_add_audio_time( s, RST_TO_TS_DELTA(output_time_ms, int) );
-								DBG serprintf("stream_audio: normal output, audio_time +%d ms (RST→TS scaled)\n",
-									RST_TO_TS_DELTA(output_time_ms, int));
-							}
-							DBG serprintf("stream_audio: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f output_ms=%d bytes=%d bps=%d ch=%d rate=%d\n",
-								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(),
-								output_time_ms, effective_size, bytes_per_sample, channels, sample_rate);
-						} else if( s->audio->bytesPerSec ) {
-							// Fallback: use decoded bytes (original behavior)
-							_add_audio_time( s, RST_TO_TS_DELTA(decoded_bytes * 1000 / s->audio->bytesPerSec, int) );
-							DBG serprintf("stream_audio: audio_time fallback prev=%d now=%d decoded_bytes=%d bytesPerSec=%d using_atempo=%d speed=%.3f\n",
-								prev_audio_time, s->audio_time, decoded_bytes, s->audio->bytesPerSec,
-								use_atempo, audio_interface_get_audio_speed());
-						}
-					}
+				// Prepare per-chunk audio time accounting (updated after write).
+				// We compute the duration once here, but only advance audio_time once
+				// we actually write to the sink, so output holds don't advance the clock.
+				int time_bytes = 0;
+				int time_den = 0;
+				int bytes_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits) / 8;
+				int channels = audio_frame.channels ? audio_frame.channels : original_channels;
+				int sample_rate = audio_frame.samplesPerSec ? audio_frame.samplesPerSec : original_rate;
+				int64_t output_time_ms = -1;
+				if( s->sync_mode != STREAM_SYNC_SAMPLES && !s->audio->vbr && audio_frame.size > 0 &&
+					bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
+					// For AC3 recoding, use fakeSize (PCM-equivalent) to compute timing.
+					int effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
+						audio_frame.fakeSize : audio_frame.size;
+					int output_samples = effective_size / (bytes_per_sample * channels);
+					output_time_ms = (int64_t)output_samples * 1000 / sample_rate;
+					time_bytes = effective_size;
+					time_den = audio_frame.size;
 				}
 
 				// slowly drain the audio data we have, while updating the audio time...
@@ -1023,6 +1016,29 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				while( size > 0 ) {
 					if( _abort( s ) ) {
 						return;
+					}
+					// Startup A/V alignment: if audio is significantly ahead at the very
+					// beginning, delay audio output briefly so video can catch up.
+					if( !get_android_sync() && s->put_time_mode && s->video && s->video->valid &&
+						s->video_time >= 0 && s->video_time < 1000 &&
+						s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
+						if( s->audio_start_target_ts == STREAM_NO_PTS_VALUE ) {
+							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
+							int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+							if( anchor_delay < 0 ) anchor_delay = 0;
+							if( static_latency > anchor_delay ) {
+								anchor_delay = static_latency;
+							}
+							s->audio_start_target_ts = s->audio_start_pts - anchor_delay;
+							if( s->audio_start_target_ts < 0 ) s->audio_start_target_ts = 0;
+						}
+						int diff = s->video_time - s->audio_start_target_ts;
+						if( diff < -150 ) {
+							DBG serprintf("startup_audio_hold: v=%d target=%d diff=%d\n",
+								s->video_time, s->audio_start_target_ts, diff);
+							msec_sleep( 10 );
+							continue;
+						}
 					}
 					audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
 
@@ -1060,6 +1076,44 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
 						size = 0;
 						break;
+					}
+					if( s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
+						int start_time = s->audio_start_pts;
+						if( !get_android_sync() && s->put_time_mode && s->video_time >= 0 ) {
+							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
+							int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+							if( anchor_delay < 0 ) anchor_delay = 0;
+							if( static_latency > anchor_delay ) {
+								anchor_delay = static_latency;
+							}
+							if( anchor_delay > 0 ) {
+								// Align heard audio to current video time at startup.
+								start_time = s->video_time + anchor_delay;
+							}
+						}
+						_set_audio_time( s, start_time );
+						s->audio_start_pending = 0;
+						s->audio_start_pts = STREAM_NO_PTS_VALUE;
+						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
+						DBG serprintf("audio_start_commit: audio_time=%d\n", s->audio_time);
+					}
+					// Update audio time based on actual written output (not decoded bytes).
+					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
+						if( output_time_ms >= 0 && time_den > 0 ) {
+							int64_t chunk_time_ms = (output_time_ms * size_written) / time_den;
+							if( use_atempo ) {
+								_add_audio_time( s, (int)chunk_time_ms );
+							} else {
+								_add_audio_time( s, RST_TO_TS_DELTA((int)chunk_time_ms, int) );
+							}
+						} else if( s->audio->bytesPerSec ) {
+							int chunk_time_ms = (int)((int64_t)size_written * 1000 / s->audio->bytesPerSec);
+							if( use_atempo ) {
+								_add_audio_time( s, chunk_time_ms );
+							} else {
+								_add_audio_time( s, RST_TO_TS_DELTA(chunk_time_ms, int) );
+							}
+						}
 					}
 
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {

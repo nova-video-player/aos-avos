@@ -159,6 +159,9 @@ int stream_sync_init( STREAM *s, int time )
 	s->video_time     = -1;
 	s->audio_time     = -1;
 	s->audio_ref_time = -1;
+	s->audio_start_pending = 0;
+	s->audio_start_pts = STREAM_NO_PTS_VALUE;
+	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
 	s->smoothed_av_delay = -1;
 	s->last_good_delay_ms = 0;
 	s->last_good_delay_valid = 0;

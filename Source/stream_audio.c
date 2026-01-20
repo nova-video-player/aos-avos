@@ -512,6 +512,7 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 					}
 				} else {
 					if( cdata.time != STREAM_NO_PTS_VALUE ) {
+						int pts = cdata.time;
 						if( !get_android_sync() && s->put_time_mode &&
 							s->audio_time < 0 && !s->audio_start_pending &&
 							s->video_time >= 0 && s->video_time < 1000 ) {
@@ -519,12 +520,12 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 							// Capture a fixed target based on the first audio PTS so the hold
 							// does not chase a moving audio_time.
 							s->audio_start_pending = 1;
-							s->audio_start_pts = cdata.time;
+							s->audio_start_pts = pts;
 							s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
 							DBG serprintf("audio_start_pending: pts=%d video_time=%d\n",
 								s->audio_start_pts, s->video_time);
 						} else if( s->audio_time < 0 ) {
-							_set_audio_time( s, cdata.time );
+							_set_audio_time( s, pts );
 						}
 					}
 				}
@@ -1093,7 +1094,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 						_set_audio_time( s, start_time );
 						s->audio_start_pending = 0;
-						s->audio_start_pts = STREAM_NO_PTS_VALUE;
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
 						DBG serprintf("audio_start_commit: audio_time=%d\n", s->audio_time);
 					}

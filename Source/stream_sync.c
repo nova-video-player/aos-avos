@@ -119,12 +119,11 @@ int stream_get_anchor_delay_ms( STREAM *s, int allow_static )
 	return _get_anchor_delay_ms( s, NULL, allow_static );
 }
 
-int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
+static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
 		return fallback_ts;
 	}
-
 #ifdef CONFIG_ANDROID
 #else
 	int allow_static = 0;
@@ -132,8 +131,8 @@ int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 #ifdef CONFIG_ANDROID
 	int allow_static = 1;
 #endif
-	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
-		_get_anchor_delay_ms(s, NULL, allow_static);
+	int current_delay = _get_anchor_delay_ms(s, NULL, allow_static);
+	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay : current_delay;
 DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d anchor_delay=%d av_delay=%d\n",
 		s->audio_time, s->smoothed_av_delay, anchor_delay, s->av_delay);
 
@@ -144,6 +143,11 @@ DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d anchor_delay=%d av_del
 
 DBGY	serprintf("heard_ts_calc: audio_time=%d heard_ts=%d\n", s->audio_time, heard_ts);
 	return heard_ts;
+}
+
+int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
+{
+	return _stream_get_heard_audio_ts_internal( s, fallback_ts );
 }
 
 // ************************************************************
@@ -310,17 +314,14 @@ DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 	// The sync difference is the video timestamp (V_pts) minus the audio clock predicted for when the video frame displays: diff = V_pts - A_clk_pred.
 	// This predicted audio clock is A_clk_pred = (A_pts - A_latency) + V_latency, so the final formula is diff = V_pts - A_pts + A_latency - V_latency.
 	int sync_delay = stream_sync_av_delay( s );
-	int use_heard_time = 0;
-	if( s->put_time_mode ) {
-		// In put_time mode, audio_time is anchored to heard time via stream_get_heard_audio_ts.
-		// Avoid double-counting delay in the diff by using the same heard-time reference.
-		int heard_audio_ts = stream_get_heard_audio_ts( s, audio_time );
-		audio_time = heard_audio_ts;
-		sync_delay = 0;
-		use_heard_time = 1;
-	}
 #ifdef CONFIG_ANDROID
-	if( !use_heard_time && sync_delay <= 0 ) {
+	if( s->put_time_mode && s->smoothed_av_delay > 0 ) {
+		// Keep diff aligned with the smoothed anchor used for put_time.
+		sync_delay = s->smoothed_av_delay;
+	}
+#endif
+#ifdef CONFIG_ANDROID
+	if( sync_delay <= 0 ) {
 		if( s->smoothed_av_delay > 0 ) {
 			sync_delay = s->smoothed_av_delay;
 		} else if( s->audio_ctx ) {
@@ -365,7 +366,6 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	int anchor_valid = 0;
 	int current_av_delay = _get_anchor_delay_ms(s, &anchor_valid, allow_static);
 	int anchor_delay = current_av_delay;
-	static int last_anchor_delay = -1;
 	if( !get_android_sync() && !anchor_valid ) {
 		// No usable timing; disable delay compensation.
 		current_av_delay = 0;
@@ -415,7 +415,6 @@ DBGY			serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d an
 			// Prevent the video path from re-anchoring to a different reference.
 			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time = s->video_time;
-			last_anchor_delay = current_av_delay;
 		}
 	}
 
@@ -589,7 +588,6 @@ DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
 			return 0;
 		}
 	}
-
 	// Wait if video is LATE by more than the threshold.
 	int max_wait = RST_TO_TS_DELTA( max_rst, int );
 	if( diff > max_wait ) {

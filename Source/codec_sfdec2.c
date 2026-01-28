@@ -621,19 +621,17 @@ DBGSI serprintf("MediaCodec resume\n");
 			// put_time may be deferred at startup; fetch passthrough directly.
 			passthrough = _is_passthrough(s);
 		}
-		int have_delay = 1;
-		if (s) {
-			int delay_ms = stream_get_anchor_delay_ms(s, 1);
-			if (delay_ms <= 0) {
-				have_delay = 0;
-			}
+
+		int delay_valid = 1;
+		if( s && s->audio_ctx ) {
+			delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
 		}
 
 		if( android_sync ) {
 			blit_duration = 0;
 		} else if( sfdec_force_blit ) {
 			blit_duration = 0;
-		} else if( !have_delay ) {
+		} else if( !delay_valid ) {
 			// No reliable audio timing: pace by WC using frame timestamps
 			blit_duration = _compute_blit_wait_ms( p, f );
 		} else {
@@ -666,7 +664,7 @@ DBGCV CLOG("stop thread 2");
 			}
 		// Android sync will happily drop the frames for us
 		} else if ( !android_sync ) {
-			if( !have_delay ) {
+			if( !delay_valid ) {
 DBGSI			serprintf(" timing invalid, skip drop\n");
 				goto render_now;
 			}

@@ -343,8 +343,10 @@ DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 		use_heard_time = 1;
 	}
 #ifdef CONFIG_ANDROID
-	if( s->put_time_mode && s->smoothed_av_delay > 0 ) {
-		// Keep diff aligned with the smoothed anchor used for put_time.
+	// In put_time_mode, heard-time is already in the audio-presented domain.
+	// Do not re-add smoothed delay here or we double-count latency.
+	if( !use_heard_time && s->put_time_mode && s->smoothed_av_delay > 0 ) {
+		// Keep diff aligned with the smoothed anchor when not using heard-time.
 		sync_delay = s->smoothed_av_delay;
 	}
 #endif

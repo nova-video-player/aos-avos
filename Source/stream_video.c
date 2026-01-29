@@ -4342,6 +4342,9 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 	_video_init( s, sc.time );
 	
 	stream_audio_flush( s );
+	if( s->audio_sink ) {
+		s->audio_sink->flush( s );
+	}
 
 	if( s->video_dec) {
 		s->video_flush = 1;
@@ -4444,6 +4447,9 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 	_video_init( s, sc.time );
 
 	stream_audio_flush( s );
+	if( s->audio_sink ) {
+		s->audio_sink->flush( s );
+	}
 	if( err ) {
 		stream_sync_init( s, sc.time );
 		// Preserve audio delay fallback across seek re-init (broken timing devices).

@@ -1577,9 +1577,14 @@ ERR		LOG("track not valid, error");
 		return;
 	}
 
-	attach_thread(at);
-	call_void_method(at, "pause", "()V");
-	call_void_method(at, "flush", "()V");
+	// Use thread-local env to avoid cross-thread JNIEnv* usage.
+	JNIEnv *env_local = attach_thread_current_vm();
+	if (!env_local) {
+		ERR LOG("flush_output: failed to attach thread to JVM");
+		return;
+	}
+	call_void_method_with_env(at, env_local, "pause", "()V");
+	call_void_method_with_env(at, env_local, "flush", "()V");
 
 	// Reset timing state after flush
 	at->i_samples_written = 0;

@@ -153,6 +153,17 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	if (!delay_valid) {
 		// Use raw delay (playhead/static) for heard-time only; do not anchor sync.
 		heard_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : 0;
+#ifdef CONFIG_ANDROID
+		// Startup grace: if timing is invalid at the very start, include static latency
+		// in heard-time to avoid large initial A/V offset.
+		if( s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&
+			s->sync_v_time < 500 && s->audio_ctx ) {
+			int static_latency = audio_interface_get_latency( s->audio_ctx );
+			if( static_latency > heard_delay ) {
+				heard_delay = static_latency;
+			}
+		}
+#endif
 	}
 DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d delay_valid=%d anchor_delay=%d heard_delay=%d av_delay=%d ctx=%p\n",
 		s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, heard_delay, s->av_delay, s->audio_ctx);
@@ -562,7 +573,23 @@ int stream_sync_video( STREAM *s, int video_time )
 		int anchor_valid = 1;
 		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
 		if( !anchor_valid ) {
-DBGY			serprintf("sync_video: timing unavailable, free-run video\n");
+			int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1;
+			// Startup grace: if audio has started but timing is invalid, allow a brief
+			// static-latency anchor to avoid large A/V offset at start.
+			if( s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&
+				s->sync_v_time < 500 && delay_valid == 0 ) {
+				int static_latency = s->audio_ctx ? audio_interface_get_latency(s->audio_ctx) : 0;
+				if( static_latency > 0 ) {
+					// We only need anchor_valid to allow sync_video gating; anchor delay itself
+					// is still computed via stream_get_heard_audio_ts().
+					anchor_valid = 1;
+				}
+			}
+		}
+		if( !anchor_valid ) {
+DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d)\n",
+				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
+				s->put_time_mode, s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1);
 			return 0;
 		}
 	}
@@ -573,7 +600,9 @@ DBGY			serprintf("sync_video: timing unavailable, free-run video\n");
 		// Use the unified anchor delay to decide if timing is available.
 		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
 		if( !anchor_valid ) {
-DBGY			serprintf("sync_video: timing unavailable, free-run video\n");
+DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d)\n",
+				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
+				s->put_time_mode);
 			return 0;
 		}
 	}

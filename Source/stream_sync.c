@@ -147,8 +147,23 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 #endif
 
 	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
+	int suppress_static_heard_delay = 0;
 	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
 		_get_anchor_delay_ms(s, NULL, allow_static);
+#ifdef CONFIG_ANDROID
+	// Late-audio start guard for static delay: avoid subtracting static latency
+	// when audio starts significantly after video at the very beginning.
+	if( delay_valid && s->put_time_mode && s->audio_ctx &&
+		s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
+		int audio_lead = s->audio_time - s->sync_v_time;
+		int static_latency = audio_interface_get_latency( s->audio_ctx );
+		if( static_latency > 0 && s->smoothed_av_delay == static_latency && audio_lead > 150 ) {
+			delay_valid = 0;
+			anchor_delay = 0;
+			suppress_static_heard_delay = 1;
+		}
+	}
+#endif
 	int heard_delay = anchor_delay;
 	if (!delay_valid) {
 		// Use raw delay (playhead/static) for heard-time only; do not anchor sync.
@@ -162,6 +177,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			if( static_latency > heard_delay ) {
 				heard_delay = static_latency;
 			}
+		}
+		if( suppress_static_heard_delay ) {
+			// Dynamic delay is disabled and audio starts late: avoid applying static latency
+			// to heard-time during startup to prevent large A/V offset.
+			heard_delay = 0;
 		}
 #endif
 	}
@@ -572,8 +592,20 @@ int stream_sync_video( STREAM *s, int video_time )
 		int allow_static = 1;
 		int anchor_valid = 1;
 		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
+		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1;
+
+		// Late-audio start guard when dynamic delay is disabled:
+		// static latency is always "valid" in that mode and can over-shift heard time.
+		// If audio starts significantly after video, suppress anchor validity briefly.
+		if( anchor_valid && delay_valid == 1 && s->put_time_mode &&
+			s->audio_time > 0 && s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
+			int audio_lead = s->audio_time - s->sync_v_time;
+			if( audio_lead > 150 ) {
+				anchor_valid = 0;
+			}
+		}
+
 		if( !anchor_valid ) {
-			int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1;
 			// Startup grace: if audio has started but timing is invalid, allow a brief
 			// static-latency anchor to avoid large A/V offset at start.
 			if( s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&
@@ -589,7 +621,7 @@ int stream_sync_video( STREAM *s, int video_time )
 		if( !anchor_valid ) {
 DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d)\n",
 				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
-				s->put_time_mode, s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1);
+				s->put_time_mode, delay_valid);
 			return 0;
 		}
 	}

@@ -149,13 +149,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
 		_get_anchor_delay_ms(s, NULL, allow_static);
+	int heard_delay = anchor_delay;
 	if (!delay_valid) {
-		anchor_delay = 0;
+		// Use raw delay (playhead/static) for heard-time only; do not anchor sync.
+		heard_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : 0;
 	}
-DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d delay_valid=%d anchor_delay=%d av_delay=%d\n",
-		s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, s->av_delay);
+DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d delay_valid=%d anchor_delay=%d heard_delay=%d av_delay=%d ctx=%p\n",
+		s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, heard_delay, s->av_delay, s->audio_ctx);
 
-	int heard_ts = s->audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+	int heard_ts = s->audio_time - heard_delay - RST_TO_TS_DELTA( s->av_delay, int );
 	if( heard_ts < 0 ) {
 		heard_ts = 0;
 	}

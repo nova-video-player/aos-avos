@@ -18,6 +18,8 @@
 #include "stream.h"
 #include "stream_sync.h"
 #include "audio_spdif.h"
+#include "audio_interface.h"
+#include "atime.h"
 #include "debug.h"
 #include "atime.h"
 #include "util.h"

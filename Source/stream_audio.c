@@ -380,6 +380,8 @@ static void _audio_decode( STREAM *s )
 	
 	if( s->paused || stream_audio_paused ) {
 		s->audio_resume_pending = 1;
+		s->audio_resume_valid_pending = 0;
+		s->video_resume_frame_primed = 0;
 	}
 
 	if( s->audio->valid && (!(s->paused || stream_audio_paused) || s->play_n_audio_frames ) ) {
@@ -1065,8 +1067,24 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					DBG serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
 					if( s->audio_resume_pending ) {
-						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d)\n",
-							s->audio_time, s->video_time, s->seek_epoch);
+						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
+							s->audio_time, s->video_time, s->seek_epoch, atime());
+						// Sabrina (Chromecast 4K) often reports invalid AudioTrack delay at resume.
+						// Rebase once here using static latency to avoid a large AV offset while
+						// we wait for a stable timestamp.
+						if( !get_android_sync() && s->audio_ctx && s->video_time >= 0 && s->audio_time >= 0 &&
+							!audio_interface_is_delay_valid( s->audio_ctx ) ) {
+							int static_latency = audio_interface_get_latency( s->audio_ctx );
+							int old_audio_time = s->audio_time;
+							int new_audio_time = s->video_time;
+							if( static_latency > 0 ) {
+								new_audio_time += static_latency;
+							}
+							_set_audio_time( s, new_audio_time );
+							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d latency=%d)\n",
+								old_audio_time, s->audio_time, s->video_time, static_latency);
+						}
+						s->audio_resume_valid_pending = 1;
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
@@ -1116,6 +1134,25 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								_add_audio_time( s, RST_TO_TS_DELTA(chunk_time_ms, int) );
 							}
 						}
+					}
+					// If delay becomes valid after resume, rebase once using measured delay.
+					// On Sabrina, the first "valid" timestamp can be unstable; wait for a small
+					// success streak before snapping to avoid visible jitter.
+					if( s->audio_resume_valid_pending && s->audio_ctx &&
+						s->video_time >= 0 && s->audio_time >= 0 &&
+						audio_interface_is_delay_valid( s->audio_ctx ) &&
+						audio_interface_get_delay_valid_streak( s->audio_ctx ) >= 3 ) {
+						int delay = audio_interface_get_delay( s->audio_ctx );
+						int old_audio_time = s->audio_time;
+						int new_audio_time = s->video_time;
+						if( delay > 0 ) {
+							new_audio_time += delay;
+						}
+						_set_audio_time( s, new_audio_time );
+						s->audio_resume_valid_pending = 0;
+						DBG serprintf("resume_rebase_delay_valid: audio_time %d -> %d (video=%d delay=%d streak=%d)\n",
+							old_audio_time, s->audio_time, s->video_time, delay,
+							audio_interface_get_delay_valid_streak( s->audio_ctx ));
 					}
 
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {

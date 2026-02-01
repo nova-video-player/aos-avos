@@ -728,6 +728,8 @@ typedef struct STREAM {
 	int		seek_converge_done;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
+	int		audio_resume_valid_pending;
+	int		video_resume_frame_primed;
 
 	ID3_TAG		tag;
 	int		tag_new;

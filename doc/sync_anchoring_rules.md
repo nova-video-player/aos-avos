@@ -9,6 +9,7 @@
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
 - **`smoothed_av_delay`**: A low‑pass filtered estimate of audio‑video offset (TS) used as a stable proxy for the audible delay. When it is invalid, fall back to `stream_sync_av_delay()`.
 - **Best delay provider**: Audio delay is chosen by a single provider: use stable `AudioTrack.getTimestamp()` when available; otherwise fall back to playback‑head latency, then static latency. Timestamp validity is gated by a streak of advancing samples and outlier rejection; fallback is always available when dynamic timing is unstable.
+- **Delay validity streak (AudioTrack)**: We require a short run of consecutive advancing samples before marking delay as valid. This avoids anchoring on transient/zero playhead values seen on Sabrina/Kirkwood right after resume or seek. Once the streak is met, we allow a one‑time rebase to measured delay.
 - **`put_time_mode`**: Enabled when a sink exposes `put_time()`. In this mode the sync layer keeps audio as the master (via `heard_audio_ts`) but does not disable sync on early frames; the sink owns TS↔WC pacing.
 
 ## Time Domain Anchors (Single per Sink)
@@ -79,7 +80,13 @@
 ## Pause/Resume and Seek
 
 - **Pause**: WC continues to advance; TS does not. On resume the sink is re‑anchored to `heard_audio_ts`, so the wall‑clock gap is ignored.
-- **Resume**: `heard_audio_ts` is computed from the paused audio clock minus chain delay; `video_sink->put_time(heard_audio_ts)` resets the TS↔WC anchor.
+- **Resume (android_sync=0)**:
+  - First audio output after resume triggers a **static‑latency rebase** if AudioTrack timing is invalid. This is used on devices like **Sabrina (Chromecast 4K)** where `getTimestamp()` can be invalid for hundreds of ms after resume.
+  - When AudioTrack delay later becomes valid (streak threshold), a **second rebase** aligns to the measured delay. This can cause a visible jump but yields accurate alignment.
+- **Resume (android_sync=1)**:
+  - The sink continues to render via `render_ts_ns`; no local wait/drop pacing is applied.
+  - While AudioTrack delay is invalid, video can free‑run against its current anchor (timing unavailable). This can show a small initial A/V offset.
+  - When delay becomes valid (streak threshold), a one‑time **delay‑valid rebase** aligns audio_time to `video_time + measured_delay`. This is why A/V appears to converge quickly after start on some devices.
 - **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and a short convergence window is applied (android_sync=0) to align with `heard_audio_ts`, then the sink is re‑anchored once and gating stops to avoid stutter.
 - **Speed‑change realignment seek**: Uses `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` so the parser seeks to a keyframe, then `_stream_play_n_frames` drops frames until `ts_target`. Audio chunks are dropped until the same `ts_target`.
 - **Broken audio PTS (post‑seek)**: Some files emit non‑monotonic audio PTS after seek (e.g., audio restarts near 0 while video is at 26s). To avoid a video freeze, `stream_audio.c` guards against large backward jumps after seek: first audio far behind video is rebased to `video_time`, and later backward PTS (>1s) are ignored. This is a minimal safety net for malformed files, not the nominal path.
@@ -103,12 +110,14 @@
 **Remedies applied (android_sync=0, sfdec2):**
 - **Convergence window (post‑seek, android_sync=0)**: For ~500 ms after a seek, video gating uses heard‑time (no early‑start bias) to let audio catch up. Once the window expires, the sink is re‑anchored to `heard_audio_ts` and further gating stops, preventing per‑frame stalls.
 - **Monotonic anchor**: prevent backward anchor movement during steady playback; only allow resets on explicit speed change or large discontinuity.
+- **Resume rebasing**: On devices with unstable AudioTrack timing after resume (e.g., **Sabrina/Chromecast 4K**), the first audio output rebases to static latency, then a later rebase to measured delay corrects the remaining offset.
 
 **Remedies applied (android_sync=1, MediaCodec):**
 - **Always render_ts**: the sink always calls MediaCodec with `render_ts_ns`, avoiding a pacing mode switch.
 - **Static-to-dynamic slew**: initialize offset with static latency, then slew toward dynamic delay when timing becomes valid.
 - **Passthrough=1 (IEC)**: use playback‑head delay when available; fall back to static latency if head position is unstable.
 - **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is event‑driven only (seek/resume/speed).
+  - **Note on Kirkwood (Google streamer 4K)**: long invalid‑delay windows after resume can delay the slew, so the initial offset is static until delay validity is established.
 
 ## Filters and Time Domains
 

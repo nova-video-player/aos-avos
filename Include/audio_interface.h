@@ -59,6 +59,9 @@ typedef int (*audio_interface_impl_set_passthrough)(audio_ctx_t *ctx, int pass);
 typedef int (*audio_interface_impl_get_passthrough)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_change_audio_speed)(audio_ctx_t *ctx, float speed);
 typedef int (*audio_interface_impl_delay_valid)(audio_ctx_t *ctx);
+// For platforms (e.g., Sabrina) where timestamps become valid only after warmup,
+// expose a stability streak so callers can avoid rebasing on the first valid sample.
+typedef int (*audio_interface_impl_delay_valid_streak)(audio_ctx_t *ctx);
 
 
 typedef struct audio_interface_impl {
@@ -87,6 +90,7 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_set_passthrough set_passthrough;
 	audio_interface_impl_change_audio_speed change_audio_speed;
 	audio_interface_impl_delay_valid delay_valid;
+	audio_interface_impl_delay_valid_streak delay_valid_streak;
 } audio_interface_impl_t;
 
 int audio_interface_init(void);
@@ -103,6 +107,8 @@ int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, 
 int audio_interface_get_delay(audio_ctx_t *ctx);
 int audio_interface_get_latency(audio_ctx_t *ctx);
 int audio_interface_is_delay_valid(audio_ctx_t *ctx);
+// Returns the number of consecutive valid-delay samples (0 if unsupported).
+int audio_interface_get_delay_valid_streak(audio_ctx_t *ctx);
 void audio_interface_flush_output(audio_ctx_t *ctx);
 int audio_interface_preload(audio_ctx_t *ctx);
 int audio_interface_mute(audio_ctx_t *ctx, BOOL fade);

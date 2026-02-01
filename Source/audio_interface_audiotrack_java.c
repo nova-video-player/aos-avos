@@ -108,6 +108,9 @@ struct audio_ctx {
 	int last_playhead_delay_ms;      // last playhead-derived delay
 	char last_delay_src[32];         // last delay source tag
 	int delay_valid;                 // dynamic timestamp is stable (fallbacks may still be used)
+	// Sabrina sometimes never yields stable AudioTrack timestamps; allow
+	// playhead-derived delay to become "valid" after a small stability streak.
+	int playhead_valid_streak;       // consecutive non-zero, advancing playhead samples
 	uint64_t headpos_smooth_frames;  // smoothed playback head position
 	uint64_t headpos_last_frames;    // last raw playback head position
 	int headpos_smooth_valid;        // smoothed headpos validity
@@ -1315,6 +1318,16 @@ DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 		}
 		// No cached timing; reuse last fallback delay for heard-time only.
 		if (at->last_fallback_delay_ms > 0 && (now_ms - at->last_fallback_ms) < 5000) {
+			if (at->playhead_valid_streak >= 5) {
+				at->ts_cached_delay_ms = at->last_fallback_delay_ms;
+				at->ts_cached_valid = 1;
+				at->last_good_dynamic_delay_ms = at->last_fallback_delay_ms;
+				at->last_good_dynamic_ms = now_ms;
+				at->last_good_dynamic_valid = 1;
+				at->delay_valid = 1;
+				DBG2 LOG("playhead(stable_throttle) t=%d", atime());
+				AUD_RETURN("playhead(stable_throttle)", at->last_fallback_delay_ms);
+			}
 			at->delay_valid = 0;
 			AUD_RETURN("fallback(throttle)", at->last_fallback_delay_ms);
 		}
@@ -1410,6 +1423,18 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 		at->ts_success_streak = 0;
 		at->ts_use_timestamp = 0;
 		at->ts_last_query_ms = now_ms;
+		// If timestamps never stabilize (e.g., Sabrina), promote stable playhead fallback.
+		if (fallback_delay > 0 && at->playhead_valid_streak >= 5) {
+			at->ts_cached_delay_ms = fallback_delay;
+			at->ts_cached_valid = 1;
+			at->last_good_dynamic_delay_ms = fallback_delay;
+			at->last_good_dynamic_ms = now_ms;
+			at->last_good_dynamic_valid = 1;
+			at->delay_valid = 1;
+			src = "playhead(stable)";
+			ret = fallback_delay;
+			goto done;
+		}
 		// If we already had a valid dynamic delay, keep it instead of static.
 		if (at->last_good_dynamic_valid && at->last_good_dynamic_delay_ms > 0) {
 			src = "last_good(getTimestamp_false)";
@@ -1433,11 +1458,26 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 	// Extract framePosition and nanoTime from AudioTimestamp using cached field IDs
 	int64_t framePosition = (*env)->GetLongField(env, at->audioTimestamp, at->framePositionFieldID);
 	int64_t nanoTime = (*env)->GetLongField(env, at->audioTimestamp, at->nanoTimeFieldID);
+DBG2	LOG("getTimestamp success=%d framePosition=%lld nanoTime=%lld rate=%d ts_use=%d streak=%d",
+		(int)success, (long long)framePosition, (long long)nanoTime, at->rate,
+		at->ts_use_timestamp, at->ts_success_streak);
 
 	if (framePosition <= 0 || nanoTime <= 0) {
 		// Timestamp not usable; rely on playback-head or static fallback.
-DBG2		LOG("Non-positive timestamp values, timing unavailable");
+DBG2		LOG("Non-positive timestamp values, timing unavailable (framePosition=%lld nanoTime=%lld)",
+			(long long)framePosition, (long long)nanoTime);
 		at->ts_last_query_ms = now_ms;
+		if (fallback_delay > 0 && at->playhead_valid_streak >= 5) {
+			at->ts_cached_delay_ms = fallback_delay;
+			at->ts_cached_valid = 1;
+			at->last_good_dynamic_delay_ms = fallback_delay;
+			at->last_good_dynamic_ms = now_ms;
+			at->last_good_dynamic_valid = 1;
+			at->delay_valid = 1;
+			src = "playhead(stable)";
+			ret = fallback_delay;
+			goto done;
+		}
 		// Keep last-good dynamic delay if available.
 		if (at->last_good_dynamic_valid && at->last_good_dynamic_delay_ms > 0) {
 			at->delay_valid = 1;
@@ -1677,6 +1717,12 @@ static int audiotrack_is_delay_valid(audio_ctx_t *at)
 	return at ? at->delay_valid : 0;
 }
 
+static int audiotrack_get_delay_valid_streak(audio_ctx_t *at)
+{
+	// Sabrina can report late/unstable timestamps; expose streak to gate rebases.
+	return at ? at->ts_success_streak : 0;
+}
+
 
 // Compute latency using playback head position as a safe fallback when getTimestamp is
 // unavailable or unstable. Do not reuse stale headpos; a zero value means timing is unavailable.
@@ -1692,12 +1738,23 @@ static int audiotrack_delay_from_playhead(audio_ctx_t *at, JNIEnv *env_local)
 	jint playback_frames = call_int_method_with_env(at, env_local, "getPlaybackHeadPosition", "()I");
 	if (playback_frames <= 0) {
 DBG2		LOG("getPlaybackHeadPosition returned %d, timing unavailable", playback_frames);
+		at->playhead_valid_streak = 0;
 		at->last_playhead_delay_ms = -1;
 
 		return -1;
 	}
 
 	uint64_t frames_presented = (uint64_t)playback_frames;
+	if (frames_presented > at->headpos_last_frames) {
+		at->playhead_valid_streak++;
+	} else {
+		at->playhead_valid_streak = 0;
+	}
+	at->headpos_last_frames = frames_presented;
+DBG2	LOG("playhead_streak: presented=%llu last=%llu streak=%d",
+		(unsigned long long)frames_presented,
+		(unsigned long long)at->headpos_last_frames,
+		at->playhead_valid_streak);
 	if (frames_presented < at->last_timestamp_frames && at->i_samples_written > frames_presented) {
 		at->timestamp_written_offset = at->i_samples_written - frames_presented;
 DBG2		LOG("Playback head reset detected, offset=%llu", (unsigned long long)at->timestamp_written_offset);
@@ -1780,6 +1837,7 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->last_good_dynamic_ms = 0;
 	at->last_good_dynamic_valid = 0;
 	at->delay_valid = 0;
+	at->playhead_valid_streak = 0;
 	at->headpos_smooth_frames = 0;
 	at->headpos_last_frames = 0;
 	at->headpos_smooth_valid = 0;
@@ -1934,6 +1992,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.get_passthrough = audiotrack_get_passthrough,
 	.change_audio_speed = audiotrack_change_audio_speed,
 	.delay_valid = audiotrack_is_delay_valid,
+	.delay_valid_streak = audiotrack_get_delay_valid_streak,
 };
 
 #ifdef DEBUG_MSG

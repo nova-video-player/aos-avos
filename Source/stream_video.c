@@ -2824,6 +2824,20 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	int real_time_calc = _real_time( s, time ); // should be ts
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
 		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
+	if( get_android_sync() && s->audio_resume_pending && s->audio_ctx &&
+		!audio_interface_is_delay_valid( s->audio_ctx ) && s->audio_time < 0 ) {
+		// On Sabrina, AudioTrack timing is invalid right after resume; avoid
+		// running video ahead before first audio output establishes timing.
+		if( !s->video_resume_frame_primed ) {
+			s->video_resume_frame_primed = 1;
+			DBG serprintf("video_hold_on_resume: allow first frame_time=%d video_time=%d\n",
+				time, s->video_time);
+		} else {
+			DBG serprintf("video_hold_on_resume: skip frame_time=%d video_time=%d (delay invalid)\n",
+				time, s->video_time);
+			return;
+		}
+	}
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;

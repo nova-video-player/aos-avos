@@ -169,6 +169,16 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		// Use raw delay (playhead/static) for heard-time only; do not anchor sync.
 		heard_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : 0;
 #ifdef CONFIG_ANDROID
+		// When atempo is active, include filter delay in heard-time even if timing is invalid.
+		// Otherwise speed changes can anchor without accounting for the atempo pipeline latency.
+		if( audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() ) {
+			int chain_delay = stream_sync_av_delay( s );
+			if( chain_delay > heard_delay ) {
+				heard_delay = chain_delay;
+			}
+		}
+#endif
+#ifdef CONFIG_ANDROID
 		// Startup grace: if timing is invalid at the very start, include static latency
 		// in heard-time to avoid large initial A/V offset.
 		if( s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&

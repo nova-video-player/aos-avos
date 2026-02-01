@@ -18,7 +18,7 @@
 
 - **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized at startup. For passthrough=2, timing is treated as unreliable and the sink uses a startup hold plus a residual static latency (no slew) to align with audible time. No local wait/drop pacing is used.
 
-**Unification**: `stream_set_av_speed()` normally computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. For **android_sync=1** when delay is invalid, it falls back to `current_time_ts` for the mapping anchor and **defers** re‑anchoring the sink to avoid visible catch‑up bursts.
+**Unification**: `stream_set_av_speed()` normally computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. When delay is invalid, speed‑change anchoring uses **last‑good delay** (adjusted by atempo delta) if available. If no last‑good delay and **android_sync=1**, it falls back to `current_time_ts` and **defers** sink re‑anchoring to avoid visible catch‑up bursts.
 
 ## Heard-Audio Anchor Definition
 
@@ -42,8 +42,9 @@
 3) Apply mapping: `timeline_map_apply(anchor_rst, heard_audio_ts, new_speed)`.
 4) Anchor the sink: `video_sink->put_time(heard_audio_ts)` so the TS↔WC anchor matches what is heard.
 5) Sinks keep pacing off their own WC reference (`venc_ref_time` or `start_monotonic`) using the new TS anchor.
-6) **android_sync=1 + invalid delay**: mapping falls back to `current_time_ts` (not `heard_audio_ts`) and the sink re‑anchor is deferred to avoid catch‑up bursts.
-7) **android_sync=0 + atempo**: optionally issue a frame‑accurate realignment seek (see below) to pull video/audio back to the audible TS without flushing.
+6) **invalid delay (android_sync=0/1)**: prefer last‑good delay for speed‑change anchoring (adjusted by atempo delta). This avoids anchoring on a stale/zero heard_ts when timing is unstable.
+7) **android_sync=1 + no last‑good delay**: mapping falls back to `current_time_ts` (not `heard_audio_ts`) and the sink re‑anchor is deferred to avoid catch‑up bursts.
+8) **android_sync=0 + atempo**: optionally issue a frame‑accurate realignment seek (see below) to pull video/audio back to the audible TS without flushing.
 
 ## Android Path (sfdec2)
 

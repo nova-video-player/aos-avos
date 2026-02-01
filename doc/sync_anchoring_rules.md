@@ -4,7 +4,7 @@
 
 - **`venc_put_time` (TS)**: The last TS value passed into the video sink as the anchor point.
 - **`venc_ref_time` (WC)**: The monotonic clock sample taken when `venc_put_time` was set. Together, the sink estimates current TS as `venc_put_time + (now_wc - venc_ref_time)` (android_sync=0).
-- **`heard_audio_ts` (TS)**: The audio time that is actually audible at the speakers. Formula: `heard_audio_ts = audio_time - chain_delay_ts - RST_TO_TS_DELTA(av_delay)`, where `chain_delay_ts` is `smoothed_av_delay` if valid, otherwise `stream_sync_av_delay()`.
+- **`heard_audio_ts` (TS)**: The audio time that is actually audible at the speakers. Formula: `heard_audio_ts = audio_time - chain_delay_ts - RST_TO_TS_DELTA(av_delay)`, where `chain_delay_ts` is `smoothed_av_delay` if valid, otherwise a fallback delay. When timing is invalid and atempo is active, the fallback includes the atempo chain delay so speed changes remain latency‑aware.
 - **Monotonic clock variables (WC)**: `CLOCK_MONOTONIC` timestamps are used for wall‑clock pacing because they never jump due to system time changes. They provide stable elapsed‑time deltas for TS↔WC anchoring.
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
 - **`smoothed_av_delay`**: A low‑pass filtered estimate of audio‑video offset (TS) used as a stable proxy for the audible delay. When it is invalid, fall back to `stream_sync_av_delay()`.
@@ -14,17 +14,18 @@
 
 ## Time Domain Anchors (Single per Sink)
 
-- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor only from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards.
+- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards. If delay becomes invalid during steady playback, last‑good delay is held for anchoring so latency compensation does not drop to zero.
 
 - **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized at startup. For passthrough=2, timing is treated as unreliable and the sink uses a startup hold plus a residual static latency (no slew) to align with audible time. No local wait/drop pacing is used.
 
-**Unification**: `stream_set_av_speed()` computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. No other layers touch WC anchors.
+**Unification**: `stream_set_av_speed()` normally computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. For **android_sync=1** when delay is invalid, it falls back to `current_time_ts` for the mapping anchor and **defers** re‑anchoring the sink to avoid visible catch‑up bursts.
 
 ## Heard-Audio Anchor Definition
 
 - `heard_audio_ts = audio_time - stream_sync_av_delay() - RST_TO_TS_DELTA(av_delay)`
-- Use `s->smoothed_av_delay` when valid; otherwise fall back to `_get_anchor_delay_ms()` which prefers last‑good delay and (on Android) static latency if dynamic timing is invalid.
-- Clamp to zero; never allow negative anchors.
+- When timing is **valid**, `heard_audio_ts` uses `s->smoothed_av_delay` (or `_get_anchor_delay_ms()` if no smoothing is available).
+- When timing is **invalid**, heard‑time falls back to the raw AudioTrack delay (playhead/static), and if atempo is active it uses the atempo chain delay so speed changes remain latency‑aware.
+- Negative anchors are generally avoided, but **android_sync=1** may allow a negative internal anchor at startup to keep MediaCodec timing consistent until audio is ready.
 - `heard_audio_ts` is an audio‑side anchor (audible time). Video TS is aligned to it via delay compensation in `stream_sync_av_delay()`.
 - `heard_audio_ts` is computed centrally via `stream_get_heard_audio_ts()` and should not be re‑implemented elsewhere.
 
@@ -41,7 +42,8 @@
 3) Apply mapping: `timeline_map_apply(anchor_rst, heard_audio_ts, new_speed)`.
 4) Anchor the sink: `video_sink->put_time(heard_audio_ts)` so the TS↔WC anchor matches what is heard.
 5) Sinks keep pacing off their own WC reference (`venc_ref_time` or `start_monotonic`) using the new TS anchor.
-6) **android_sync=0 + atempo**: optionally issue a frame‑accurate realignment seek (see below) to pull video/audio back to the audible TS without flushing.
+6) **android_sync=1 + invalid delay**: mapping falls back to `current_time_ts` (not `heard_audio_ts`) and the sink re‑anchor is deferred to avoid catch‑up bursts.
+7) **android_sync=0 + atempo**: optionally issue a frame‑accurate realignment seek (see below) to pull video/audio back to the audible TS without flushing.
 
 ## Android Path (sfdec2)
 
@@ -61,7 +63,7 @@
 
 - **RST↔TS continuity**: `timeline_map_apply()` changes only the slope (speed) while pinning the current `heard_audio_ts`, so TS does not jump.
 - **TS↔WC continuity**: The sink anchor is reset with `video_sink->put_time(heard_audio_ts)` so WC pacing advances smoothly from the same TS reference.
-- **android_sync=1 stability**: Repeated anchors with the same TS must not update `venc_ref_time`; otherwise the WC mapping jumps forward and MediaCodec will wait, causing stop/go stutter.
+- **android_sync=1 stability**: Repeated anchors with the same TS must not update `venc_ref_time`; otherwise the WC mapping jumps forward and MediaCodec will wait, causing stop/go stutter. At startup, a negative anchor may be used internally to preserve continuity.
 
 ## atempo Speed Change Behavior
 
@@ -101,6 +103,7 @@
 - The biggest stability risk is **noisy delay reporting** (e.g., `stream_sync_av_delay()` returning 0 or jumping). That makes `heard_audio_ts` jump and can force unnecessary reanchors.
 - This is why `smoothed_av_delay` is preferred when valid: it damps jitter in the audio chain delay and keeps the audible anchor stable.
 - `smoothed_av_delay` is computed in `stream_sync_audio()` using low‑pass filtering: either a LWMA (`stream_calc_lwma`) or an exponential smoother `smoothed = (prev * delay_fb + current * (1000 - delay_fb)) / 1000`.
+- **android_sync=0**: if delay validity drops during steady playback, last‑good delay is held for anchoring to avoid losing latency compensation.
 
 ## 1.0x Stutter Observations and Remedies
 

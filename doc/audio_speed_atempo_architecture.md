@@ -147,6 +147,8 @@ if (using_atempo) {
 
     // ENABLE timeline mapping with atempo speed
     // Anchor on heard_audio_ts for continuity with what is actually heard.
+    // android_sync=1 + invalid delay: fall back to current_time_ts for mapping
+    // and defer sink re-anchoring to avoid visible catch-up bursts.
     timeline_map_apply((double)stream_current_time_rst,
                       (double)anchor_ts,
                       clamped_speed);
@@ -154,7 +156,7 @@ if (using_atempo) {
 ```
 
 **Key:** Timeline mapping is enabled, NOT disabled. This creates the TS domain that matches physical playback time.
-**Current behavior:** On android_sync=0, a frame‑accurate seek may be triggered after applying the new mapping to realign both audio/video to the audible target TS (see Seeking and Speed Changes).
+**Current behavior:** On android_sync=0, a frame‑accurate seek may be triggered after applying the new mapping to realign both audio/video to the audible target TS (see Seeking and Speed Changes). On android_sync=1 with invalid delay, the mapping anchor falls back to `current_time_ts` and sink re‑anchoring is deferred.
 
 ### 2. Parser Timestamp Scaling (`stream_parser_ffmpeg.c`)
 
@@ -395,9 +397,11 @@ Timeline mapping anchors are re-established after seek completes.
                      heard_audio_ts,
                      new_speed);
    ```
-3. Update atempo filter speed (runtime update; rebuild only on failure)
-4. No pipeline flush required
-5. Continuity maintained via anchors
+3. **android_sync=1 + invalid delay**: mapping anchor falls back to `current_time_ts`,
+   and sink re‑anchoring is deferred to avoid fast catch‑up bursts.
+4. Update atempo filter speed (runtime update; rebuild only on failure)
+5. No pipeline flush required
+6. Continuity maintained via anchors
 6. **android_sync=0 + atempo realignment:** optionally call
    `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` to
    seek to the nearest keyframe and drop frames until `ts_target`. Audio

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a unique video synchronization mechanism in the sink. In the AudioTrack PlaybackParams path, speed changes are applied seamlessly by retargeting the timeline mapping without a self-seek. (The atempo path may optionally use a frame-accurate seek; see the atempo architecture doc.)
+This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a sink-side synchronization mechanism. In the AudioTrack PlaybackParams path, speed changes are applied seamlessly by retargeting the timeline mapping without a self-seek. (The atempo path may optionally use a frame-accurate seek; see the atempo architecture doc.)
 
 ## Time Domains
 
@@ -127,11 +127,8 @@ This correctly estimates the current `ts` by adding the elapsed `wc` duration to
 
 When the `android_sync` flag is enabled, the synchronization strategy changes completely, bypassing the sink's internal wait/drop logic and delegating frame pacing directly to the Android `MediaCodec` framework.
 
-1.  **Delegation:** The `videosink_thread` applies a `-200ms` bias to `blit_duration`. This is likely intended to ensure the result is always negative, thus bypassing the `blit_duration > 0` wait condition. The thread then calls `sfdec_buf_render` and passes the responsibility of scheduling the frame to the `sfdec` library.
+1.  **Delegation:** The `videosink_thread` bypasses local wait/drop pacing and delegates scheduling to `sfdec`/`MediaCodec`.
 
-2.  **`sfdec` Timestamp Calculation:** The logic within `sfdec_ndkmediacodec.cpp` calculates a target presentation `WallTime` to be passed to the Android API `AMediaCodec_releaseOutputBufferAtTime()`. The core formula is:
-    `TargetWallTime_ns = (FrameMediaTime_ns - FirstFrameMediaTime_ns) + StartWallTime_ns`
+2.  **`sfdec` Timestamp Calculation:** The `sfdec` layer computes `render_ts_ns` for `AMediaCodec_releaseOutputBufferAtTime()`. The render time is derived from the current TS anchor and a wall‑clock reference so MediaCodec can pace frames in wall clock while respecting the TS timeline (including audio speed).
 
-3.  **The Flaw:** This calculation is fundamentally flawed because it **does not account for playback speed `S`**. It assumes a 1-to-1 relationship between the passage of `MediaTime` and `WallTime`. At any speed other than 1.0, the calculated `TargetWallTime` will be incorrect, leading to stuttering or incorrect pacing.
-
-4.  **Irrelevant `blit_time`:** In this mode, the entire `blit_duration` calculation in `videosink_thread` becomes irrelevant. It is calculated, biased, and then ignored, as the `sfdec` layer performs its own, separate (and incorrect) scheduling calculation. The `-200ms` bias only serves to ensure this delegation path is taken.
+3.  **Irrelevant `blit_time`:** In this mode, the sink’s `blit_duration` pacing is intentionally bypassed; the MediaCodec render timestamps are the authoritative schedule.

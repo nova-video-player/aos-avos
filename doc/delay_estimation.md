@@ -8,8 +8,10 @@ AudioTrack delay is estimated from three sources:
 - Playback head position (getPlaybackHeadPosition).
 - Static latency (AudioTrack.getLatency).
 
-The goal is to track real output latency and avoid reinjecting static
-latency once a valid dynamic delay has been observed.
+The goal is to track real output latency, avoid reinjecting static
+latency once a valid dynamic delay has been observed, and keep anchors
+stable when timing is noisy (especially on Android devices with unreliable
+AudioTrack timestamps).
 
 Equations
 ---------
@@ -40,6 +42,8 @@ State Machine Summary
    - last_good_dynamic_delay_ms is set and reused when timestamps are
      invalid or during throttle windows.
    - Static latency is no longer injected once last_good is present.
+   - Validity is gated by a short streak of advancing samples to avoid
+     false positives after resume/seek (Sabrina/Kirkwood).
 
 3) Throttle window
    - Use cached delay if valid.
@@ -62,6 +66,54 @@ Notes
 - The diff metrics are control signals, not a direct lipsync meter.
 - In put_time mode, sync uses heard_ts for anchoring and smoothed_av_delay
   for diff alignment (no heard_ts substitution in the diff path).
+- When timing is invalid and atempo is active, heard_ts uses the atempo
+  chain delay to keep speed-change anchoring latency-aware.
+- For android_sync=0, if timing becomes invalid during steady playback,
+  last-good delay is held for anchoring to avoid dropping latency
+  compensation. For android_sync=1, stale delay is not used for anchoring
+  to avoid visible catch-up bursts.
+
+Full State Machine (Delay + Anchoring)
+--------------------------------------
+Definitions:
+- `delay_valid`: AudioTrack timing is trusted (timestamp/playhead passes validity checks).
+- `last_good_delay`: most recent trusted dynamic delay (cached).
+- `static_latency`: AudioTrack.getLatency().
+- `anchor_delay`: delay used for anchoring (put_time / render_ts alignment).
+- `heard_delay`: delay used for heard_ts only (audible-time estimate).
+
+Rules:
+1) Choose delay candidate (raw):
+   - If `delay_valid`, use dynamic delay (timestamp or playhead).
+   - Else if `last_good_delay` exists, use it as a candidate.
+   - Else if `static_latency` > 0, use static.
+
+2) Anchor delay selection:
+   - android_sync=0:
+     - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
+     - If `delay_valid` becomes false during steady playback and last_good exists,
+       hold `last_good_delay` as anchor_delay (prevents latency drop).
+     - If no usable delay exists, anchor_delay = 0.
+   - android_sync=1:
+     - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
+     - If `delay_valid` is false, do NOT anchor on last_good/static (avoid catch-up bursts).
+
+3) Heard delay selection (heard_ts):
+   - If `delay_valid`, heard_delay = anchor_delay (smoothed/dynamic).
+   - If `delay_valid` is false, heard_delay = raw delay from AudioTrack
+     (playhead/static). If atempo is active, include atempo chain delay so
+     speed changes remain latency-aware.
+
+4) Mapping on speed change:
+   - Default: anchor at `heard_audio_ts`.
+   - android_sync=1 + invalid delay: map using `current_time_ts` instead and
+     defer sink re-anchoring (avoid fast catch-up).
+
+5) Resume:
+   - android_sync=0: if delay invalid on first audio after resume, rebase to
+     static latency; when delay becomes valid (streak), rebase to measured delay.
+   - android_sync=1: free-run while delay invalid; when delay becomes valid
+     (streak), a one-time rebase aligns to measured delay.
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
   - Passthrough mode 2 (raw): playhead/timestamp are unreliable; static only.

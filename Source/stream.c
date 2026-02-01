@@ -613,17 +613,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			delay_valid, delay_streak, s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ) );
 	}
 
-	if( speed_changed ) {
-		s->audio_speed_log_pending = 1;
-		int diff_ts = (s->video_time >= 0 ? s->video_time : current_time_ts) - anchor_ts;
-		DBG serprintf( "stream:stream_set_av_speed speed_change_dbg v=%d a=%d heard_ts=%d diff_ts=%d cur_ts=%d use_cur=%d\n",
-			s->video_time, s->audio_time, anchor_ts, diff_ts, current_time_ts, use_current_ts_for_speed );
-	}
 	DBG serprintf( "stream:stream_set_av_speed anchor_ts=%d speed_anchor_ts=%d, anchor_rst=%d (audio_latency_ms=%d video_active=%d)\n",
 		anchor_ts, speed_anchor_ts, stream_current_time_rst, audio_latency_ms, video_active );
-	DBG serprintf( "stream:stream_set_av_speed anchor_dbg v=%d a=%d heard_ts=%d delay=%d speed=%.3f using_atempo=%d\n",
-		s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ),
-		av_speed, audio_interface_is_using_atempo() );
 
 	float applied_speed = av_speed;
 	if( using_atempo ) {

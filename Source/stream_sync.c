@@ -112,6 +112,14 @@ static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
 	if (!delay_valid) {
 		if (s->last_good_delay_valid) {
 			delay = s->last_good_delay_ms;
+			if( !get_android_sync() ) {
+				// android_sync=0: keep last-good delay as a usable anchor when timing drops invalid
+				// during steady playback. This avoids sudden loss of latency compensation.
+				anchor_valid = 1;
+			}
+			// TODO: consider enabling last-good anchoring for android_sync=1 to keep latency
+			// consistent when timing goes invalid, but this risks regressions from anchoring on
+			// stale delay (visible catch-up bursts on some devices).
 		} else if (allow_static && s->audio_ctx) {
 			int static_latency = audio_interface_get_latency(s->audio_ctx);
 			if (static_latency > 0) {

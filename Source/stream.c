@@ -573,7 +573,17 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		current_time_ts = 0;
 	}
 	int anchor_ts = stream_get_heard_audio_ts( s, current_time_ts );
-	int stream_current_time_rst = TS_TO_RST_TIME( anchor_ts, int );
+	int use_current_ts_for_speed = 0;
+	if( get_android_sync() && s->audio_ctx ) {
+		// android_sync=1: if delay is invalid, heard_ts can lag far behind stream time.
+		// Using it for timeline_map_apply bakes in large skew during speed changes.
+		// Fall back to the current stream time (pre-42fbc4d behavior) until delay is valid.
+		if( !audio_interface_is_delay_valid( s->audio_ctx ) ) {
+			use_current_ts_for_speed = 1;
+		}
+	}
+	int speed_anchor_ts = use_current_ts_for_speed ? current_time_ts : anchor_ts;
+	int stream_current_time_rst = TS_TO_RST_TIME( speed_anchor_ts, int );
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
 	}
@@ -596,8 +606,24 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	s->video_speed_num = target_num;
 	s->video_speed_den = target_den;
 
-	DBG serprintf( "stream:stream_set_av_speed anchor_ts=%d, anchor_rst=%d (audio_latency_ms=%d video_active=%d)\n",
-		anchor_ts, stream_current_time_rst, audio_latency_ms, video_active );
+	if( speed_changed ) {
+		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
+		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
+		DBG serprintf( "stream:stream_set_av_speed delay_valid=%d streak=%d v=%d a=%d heard_ts=%d av_delay=%d\n",
+			delay_valid, delay_streak, s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ) );
+	}
+
+	if( speed_changed ) {
+		s->audio_speed_log_pending = 1;
+		int diff_ts = (s->video_time >= 0 ? s->video_time : current_time_ts) - anchor_ts;
+		DBG serprintf( "stream:stream_set_av_speed speed_change_dbg v=%d a=%d heard_ts=%d diff_ts=%d cur_ts=%d use_cur=%d\n",
+			s->video_time, s->audio_time, anchor_ts, diff_ts, current_time_ts, use_current_ts_for_speed );
+	}
+	DBG serprintf( "stream:stream_set_av_speed anchor_ts=%d speed_anchor_ts=%d, anchor_rst=%d (audio_latency_ms=%d video_active=%d)\n",
+		anchor_ts, speed_anchor_ts, stream_current_time_rst, audio_latency_ms, video_active );
+	DBG serprintf( "stream:stream_set_av_speed anchor_dbg v=%d a=%d heard_ts=%d delay=%d speed=%.3f using_atempo=%d\n",
+		s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ),
+		av_speed, audio_interface_is_using_atempo() );
 
 	float applied_speed = av_speed;
 	if( using_atempo ) {
@@ -610,16 +636,16 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		audio_interface_set_audio_speed( clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed apply atempo speed=%.3f (audio_time=%d video_time=%d)\n",
 			clamped_speed, s->audio_time, s->video_time );
-		timeline_map_apply( (double)stream_current_time_rst, (double)anchor_ts, clamped_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
-				   stream_current_time_rst, anchor_ts, clamped_speed );
+				   stream_current_time_rst, speed_anchor_ts, clamped_speed );
 		applied_speed = clamped_speed;
 	} else {
 		if( speed_changed ) {
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
-					   stream_current_time_rst, anchor_ts, applied_speed, rc );
+					   stream_current_time_rst, speed_anchor_ts, applied_speed, rc );
 			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
 				serprintf( "stream:stream_set_av_speed requested=%.3f applied=%.3f (rc=%d)\n",
 					   av_speed, applied_speed, rc );
@@ -628,7 +654,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			applied_speed = previous_speed;
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
-		timeline_map_apply( (double)stream_current_time_rst, (double)anchor_ts, applied_speed );
+		timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, applied_speed );
 	}
 
 	int seek_time_ts = anchor_ts;
@@ -654,7 +680,18 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			// For android_sync=1, always seed the anchor when audio_time exists.
 			// stream_sync_audio will override to audio_time if heard_ts is invalid.
 			if( s->audio_time != -1 ) {
-				_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+				int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
+				if( delay_valid ) {
+					_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+				} else {
+					// android_sync=1: if timing is invalid, defer re-anchoring on speed change.
+					// Anchoring to a stale/invalid heard_ts can push the sink far behind the
+					// current video time, causing a visible "fast catch-up" burst. Wait for a
+					// valid delay before snapping the anchor.
+					int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
+					DBG serprintf("stream:stream_set_av_speed defer anchor (delay invalid, streak=%d v=%d a=%d heard_ts=%d)\n",
+						delay_streak, s->video_time, s->audio_time, anchor_ts);
+				}
 			} else {
 				DBG serprintf( "stream:stream_set_av_speed defer anchor (audio_time=%d)\n", s->audio_time );
 			}

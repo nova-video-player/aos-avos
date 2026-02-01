@@ -87,6 +87,7 @@ int stream_sync_restart( STREAM *s )
 	s->delay_valid   = 0;
 	s->last_good_delay_ms = 0;
 	s->last_good_delay_valid = 0;
+	s->last_good_atempo_delay_ms = 0;
 	s->drop          = 0;
 	s->drop_P        = 0;
 	s->drop_B        = 0;
@@ -239,6 +240,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->smoothed_av_delay = -1;
 	s->last_good_delay_ms = 0;
 	s->last_good_delay_valid = 0;
+	s->last_good_atempo_delay_ms = 0;
 	s->warmup_video_frames = 0;
 
 	if( s->video->valid ) {
@@ -428,6 +430,18 @@ DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d
 //	stream_sync_audio
 //
 // ************************************************************
+static int _stream_get_atempo_delay( STREAM *s )
+{
+	int use_atempo = (s && s->audio_filter_atempo != NULL);
+	if( !use_atempo || !audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo() ) {
+		return 0;
+	}
+	if( s->audio_filter_atempo->delay ) {
+		return s->audio_filter_atempo->delay( s->audio_filter_atempo );
+	}
+	return 0;
+}
+
 int stream_sync_audio( STREAM *s, int audio_time )
 {
 	// Defensive check: validate stream pointer to prevent JNI abort crashes
@@ -464,15 +478,32 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		anchor_delay = 0;
 	}
 	if( delay_valid ) {
-		s->last_good_delay_ms = current_av_delay;
-		s->last_good_delay_valid = 1;
-		if( s->smoothed_av_delay == -1 ) {
-			s->smoothed_av_delay = current_av_delay;
-		} else {
-			if (stream_use_xbmc_smoothing) {
-				s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
+		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
+		int allow_update = 1;
+#ifdef CONFIG_ANDROID
+		// android_sync=1: require a short valid streak before accepting a new last_good delay.
+		// This avoids capturing transient fallback values (startup_hold) as "good" and
+		// biasing speed-change anchoring.
+		if( get_android_sync() && delay_streak < 3 ) {
+			allow_update = 0;
+			DBG serprintf( "stream_sync_audio: skip last_good update (delay_streak=%d current=%d)\n",
+				delay_streak, current_av_delay );
+		}
+#endif
+		if( allow_update ) {
+			s->last_good_delay_ms = current_av_delay;
+			s->last_good_delay_valid = 1;
+			s->last_good_atempo_delay_ms = _stream_get_atempo_delay( s );
+			DBG serprintf( "stream_sync_audio: last_good_delay=%d last_good_atempo=%d speed=%.3f\n",
+				s->last_good_delay_ms, s->last_good_atempo_delay_ms, audio_interface_get_audio_speed() );
+			if( s->smoothed_av_delay == -1 ) {
+				s->smoothed_av_delay = current_av_delay;
 			} else {
-				s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+				if (stream_use_xbmc_smoothing) {
+					s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
+				} else {
+					s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+				}
 			}
 		}
 	}

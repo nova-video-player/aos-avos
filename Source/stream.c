@@ -546,6 +546,46 @@ static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_
 		audio_time_ts, audio_time_ts );
 }
 
+static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int heard_ts,
+	int speed_changed, int using_atempo, int *used_current_ts, int *used_last_good )
+{
+	int use_current = 0;
+	int use_last_good = 0;
+	int anchor_ts = heard_ts;
+
+	if( s && s->audio_ctx ) {
+		int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+		if( !delay_valid && speed_changed && s->last_good_delay_valid && s->audio_time >= 0 ) {
+			int effective_delay = s->last_good_delay_ms;
+			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
+				int current_atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+				effective_delay += current_atempo_delay - s->last_good_atempo_delay_ms;
+				if( effective_delay < 0 ) {
+					effective_delay = 0;
+				}
+			}
+			anchor_ts = s->audio_time - effective_delay;
+			if( anchor_ts < 0 ) {
+				anchor_ts = 0;
+			}
+			use_last_good = 1;
+		} else if( get_android_sync() && !delay_valid ) {
+			// android_sync=1: if delay is invalid, heard_ts can lag far behind stream time.
+			// Using it for timeline_map_apply bakes in large skew during speed changes.
+			// Fall back to the current stream time until delay is valid.
+			use_current = 1;
+		}
+	}
+
+	if( used_current_ts ) {
+		*used_current_ts = use_current;
+	}
+	if( used_last_good ) {
+		*used_last_good = use_last_good;
+	}
+	return use_current ? current_time_ts : anchor_ts;
+}
+
 int stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
@@ -574,15 +614,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 	int anchor_ts = stream_get_heard_audio_ts( s, current_time_ts );
 	int use_current_ts_for_speed = 0;
-	if( get_android_sync() && s->audio_ctx ) {
-		// android_sync=1: if delay is invalid, heard_ts can lag far behind stream time.
-		// Using it for timeline_map_apply bakes in large skew during speed changes.
-		// Fall back to the current stream time (pre-42fbc4d behavior) until delay is valid.
-		if( !audio_interface_is_delay_valid( s->audio_ctx ) ) {
-			use_current_ts_for_speed = 1;
-		}
-	}
-	int speed_anchor_ts = use_current_ts_for_speed ? current_time_ts : anchor_ts;
+	int use_last_good_for_speed = 0;
+	int speed_anchor_ts = _stream_get_speed_anchor_ts( s, current_time_ts, anchor_ts,
+		speed_changed, using_atempo, &use_current_ts_for_speed, &use_last_good_for_speed );
 	int stream_current_time_rst = TS_TO_RST_TIME( speed_anchor_ts, int );
 	if( stream_current_time_rst < 0 ) {
 		stream_current_time_rst = 0;
@@ -609,8 +643,23 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( speed_changed ) {
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
+		int atempo_delay = 0;
+		if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
+			atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+		}
 		DBG serprintf( "stream:stream_set_av_speed delay_valid=%d streak=%d v=%d a=%d heard_ts=%d av_delay=%d\n",
 			delay_valid, delay_streak, s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ) );
+		DBG serprintf( "stream:stream_set_av_speed speed_change prev=%.3f target=%.3f using_atempo=%d atempo_delay=%d use_current_ts=%d cur_ts=%d anchor_ts=%d speed_anchor_ts=%d\n",
+			previous_speed, av_speed, using_atempo, atempo_delay, use_current_ts_for_speed,
+			current_time_ts, anchor_ts, speed_anchor_ts );
+		if( use_last_good_for_speed ) {
+			int current_atempo_delay = 0;
+			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
+				current_atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+			}
+			DBG serprintf( "stream:stream_set_av_speed speed_change using last_good_delay=%d last_good_atempo=%d cur_atempo=%d (audio_time=%d anchor_ts=%d)\n",
+				s->last_good_delay_ms, s->last_good_atempo_delay_ms, current_atempo_delay, s->audio_time, anchor_ts );
+		}
 	}
 
 	DBG serprintf( "stream:stream_set_av_speed anchor_ts=%d speed_anchor_ts=%d, anchor_rst=%d (audio_latency_ms=%d video_active=%d)\n",

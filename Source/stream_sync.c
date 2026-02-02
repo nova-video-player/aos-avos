@@ -727,6 +727,25 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		if( !s->seek_converge_done && atime() >= s->seek_converge_until_ms ) {
 			if( s->video_sink && s->video_sink->put_time ) {
 				int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+#ifdef CONFIG_ANDROID
+				if( get_android_sync() && s->audio_ctx ) {
+					int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+					if( !delay_valid && s->last_good_delay_valid ) {
+						int effective_delay = s->last_good_delay_ms;
+						int atempo_delay = _stream_get_atempo_delay( s );
+						effective_delay += atempo_delay - s->last_good_atempo_delay_ms;
+						if( effective_delay < 0 ) {
+							effective_delay = 0;
+						}
+						anchor_ts = s->audio_time - effective_delay - RST_TO_TS_DELTA( s->av_delay, int );
+						if( anchor_ts < 0 ) {
+							anchor_ts = 0;
+						}
+DBGY					serprintf("post-seek converge anchor: last_good=%d atempo=%d eff=%d audio=%d anchor=%d\n",
+							s->last_good_delay_ms, atempo_delay, effective_delay, s->audio_time, anchor_ts);
+					}
+				}
+#endif
 DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
 					diff, anchor_ts);
 				s->video_sink->put_time( s->video_sink, anchor_ts );

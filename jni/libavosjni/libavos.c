@@ -366,6 +366,28 @@ Java_com_archos_medialib_LibAvos_nativeSetMaxPcmChannels(JNIEnv *env, jobject th
 }
 
 void
+Java_com_archos_medialib_LibAvos_nativeSetPcmChannelMasks(JNIEnv *env, jobject thiz, jintArray masks)
+{
+    jint *elems = NULL;
+    jsize len = 0;
+
+    if (masks) {
+        len = (*env)->GetArrayLength(env, masks);
+        if (len > 0) {
+            elems = (*env)->GetIntArrayElements(env, masks, NULL);
+        }
+    }
+
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_pcm_channel_masks((const int *)elems, (int)len);
+    pthread_mutex_unlock(&libavos.mtx);
+
+    if (masks && elems) {
+        (*env)->ReleaseIntArrayElements(env, masks, elems, JNI_ABORT);
+    }
+}
+
+void
 Java_com_archos_medialib_LibAvos_nativeSetAudioSpeed(JNIEnv *env, jobject thiz, jfloat audio_speed)
 {
     pthread_mutex_lock(&libavos.mtx);

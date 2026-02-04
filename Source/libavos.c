@@ -15,6 +15,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "global.h"
 #include "log.h"
@@ -53,6 +54,8 @@ void set_android_sync(int enable);
 static pthread_t mainloop_thread;
 
 static long hdmi_audio_codecs_flag = 0;
+static int *pcm_channel_masks = NULL;
+static int pcm_channel_masks_count = 0;
 
 //#define DUMP_OMX
 
@@ -189,6 +192,40 @@ void libavos_set_max_pcm_channels(int max_channels)
 int libavos_get_max_pcm_channels(void)
 {
 	return pcm_output_max_channels;
+}
+
+void libavos_set_pcm_channel_masks(const int *masks, int count)
+{
+	if (pcm_channel_masks) {
+		free(pcm_channel_masks);
+		pcm_channel_masks = NULL;
+		pcm_channel_masks_count = 0;
+	}
+	if (!masks || count <= 0) {
+		return;
+	}
+	pcm_channel_masks = (int *)malloc(sizeof(int) * count);
+	if (!pcm_channel_masks) {
+		serprintf("libavos_set_pcm_channel_masks: OOM for %d masks\n", count);
+		return;
+	}
+	memcpy(pcm_channel_masks, masks, sizeof(int) * count);
+	pcm_channel_masks_count = count;
+	serprintf("libavos_set_pcm_channel_masks: %d\n", pcm_channel_masks_count);
+}
+
+int libavos_pcm_channel_mask_supported(int mask)
+{
+	int i;
+	if (!pcm_channel_masks || pcm_channel_masks_count <= 0) {
+		return -1;
+	}
+	for (i = 0; i < pcm_channel_masks_count; i++) {
+		if (pcm_channel_masks[i] == mask) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 void libavos_set_audio_speed(float speed)

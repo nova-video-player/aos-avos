@@ -1158,7 +1158,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time
 						if( s->audio->samplesPerSec ) {
-							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / s->audio->bytesPerFrame;
+							int bpf = s->audio->bytesPerFrame;
+#ifdef CONFIG_SPDIF
+							if( passthrough_active && audio_frame.fakeSize > 0 ) {
+								AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );
+								if( spdif_props && spdif_props->bytesPerFrame > 0 ) {
+									bpf = spdif_props->bytesPerFrame;
+								}
+							}
+#endif
+							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / bpf;
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
 							int prev_audio_time = s->audio_time;
 

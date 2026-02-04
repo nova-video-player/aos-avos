@@ -1270,6 +1270,10 @@ ERR		LOG("track not valid, error");
 	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
 	if (at->passthrough) {
 DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
+		// Treat static passthrough delay as stable/valid for sync gating.
+		if (at->ts_success_streak < stable_streak_required) {
+			at->ts_success_streak = stable_streak_required;
+		}
 		at->delay_valid = 1;
 		AUD_RETURN("static(passthrough)", at->latency);
 	}
@@ -1281,6 +1285,10 @@ DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
 
 		// User disabled dynamic latency, use static latency
 DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
+		// Treat static delay as stable/valid for sync gating.
+		if (at->ts_success_streak < stable_streak_required) {
+			at->ts_success_streak = stable_streak_required;
+		}
 		at->delay_valid = 1;
 		AUD_RETURN("static(disabled)", at->latency);
 	}

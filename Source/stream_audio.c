@@ -1162,9 +1162,19 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 #ifdef CONFIG_SPDIF
 							if( passthrough_active && audio_frame.fakeSize > 0 ) {
 								AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );
+								// CRITICAL: When using fakeSize, we MUST use sink bytesPerFrame (not source)
+								// fakeSize was calculated in spdif_decode using sink properties (2ch 16bit = 4 bytes)
+								// Source bytesPerFrame may differ (e.g., 6ch = 12 bytes), causing 3x sync drift
 								if( spdif_props && spdif_props->bytesPerFrame > 0 ) {
 									bpf = spdif_props->bytesPerFrame;
+								} else {
+									// Fallback: use 2ch 16bit (4 bytes) which is standard for passthrough
+									bpf = 4;
+									DBG serprintf("stream_audio EAC3_SYNC: WARNING! spdif_props->bytesPerFrame=%d, using fallback=4\n",
+										spdif_props ? spdif_props->bytesPerFrame : 0);
 								}
+								DBG serprintf("stream_audio EAC3_SYNC: passthrough_active=%d fakeSize=%d size_written=%d bpf=%d source_bpf=%d format=%04X\n",
+									passthrough_active, audio_frame.fakeSize, size_written, bpf, s->audio->bytesPerFrame, s->audio->format);
 							}
 #endif
 							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / bpf;

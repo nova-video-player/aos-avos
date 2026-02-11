@@ -51,7 +51,7 @@ extern int stream_pdrop_threshold;
 
 static volatile int	stream_dbg_delay = 0;
 
-static int stream_use_xbmc_smoothing = 0;
+static int stream_use_xbmc_smoothing = 1;
 
 static int stream_calc_lwma(int current, int *history, int *count)
 {

@@ -499,10 +499,15 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			if( s->smoothed_av_delay == -1 ) {
 				s->smoothed_av_delay = current_av_delay;
 			} else {
-				if (stream_use_xbmc_smoothing) {
-					s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
-				} else {
-					s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+				// Check if passthrough mode is active (constant latency, no smoothing needed)
+				int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+				if( !passthrough ) {
+					// Normal mode: smooth dynamic delays
+					if (stream_use_xbmc_smoothing) {
+						s->smoothed_av_delay = stream_calc_lwma(current_av_delay, s->av_delay_history, &s->av_delay_history_count);
+					} else {
+						s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + current_av_delay * (1000 - s->delay_fb)) / 1000;
+					}
 				}
 			}
 		}

@@ -756,8 +756,12 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 		av_dict_set(&ff_p->fmt_opts, "probesize", "10000000", 0);
 	}
 
+	// Set user agent for HTTP streams to improve compatibility with CDN/debrid services
+	av_dict_set(&ff_p->fmt_opts, "user_agent", "Mozilla/5.0 (Linux; Android) Nova/1.0", 0);
+DBGP serprintf("FFMPEG: opening url [%s]\r\n", s->src.url);
+
 	if( avformat_open_input(&ff_p->fmt, s->src.url, NULL, &ff_p->fmt_opts ) != 0) {
-serprintf("FFMPEG: cannot open file\r\n");
+serprintf("FFMPEG: cannot open file [%s]\r\n", s->src.url);
 		goto ErrorExit4;
 	}
 
@@ -1753,9 +1757,12 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 	AVDictionary *fmt_opts = NULL;
 	av_dict_set(&fmt_opts, "probesize", "500000", 0);      // 500KB instead of 5MB default
 	av_dict_set(&fmt_opts, "analyzeduration", "1000000", 0);  // 1 second max
+	// Set user agent for HTTP streams to improve compatibility with CDN/debrid services
+	av_dict_set(&fmt_opts, "user_agent", "Mozilla/5.0 (Linux; Android) Nova/1.0", 0);
 
+	serprintf("FFMPEG: metadata opening url [%s]\r\n", full_path);
 	if( avformat_open_input(&priv->fmt, full_path, NULL, &fmt_opts ) != 0) {
-serprintf("FFMPEG: cannot open file\r\n");
+serprintf("FFMPEG: cannot open file [%s]\r\n", full_path);
 		av_dict_free(&fmt_opts);
 		err = 1;
 		goto ErrorExit;

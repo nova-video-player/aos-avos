@@ -208,8 +208,14 @@ DBGY	serprintf("heard_ts_delay: audio_time=%d smoothed=%d delay_valid=%d anchor_
 		s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, heard_delay, s->av_delay, s->audio_ctx);
 
 	int heard_ts = s->audio_time - heard_delay - RST_TO_TS_DELTA( s->av_delay, int );
+	// For passthrough mode, allow negative heard_ts at startup (like android_sync=1 does).
+	// This preserves the full delay offset so video doesn't advance before audio catches up.
+	// Non-passthrough modes clamp to 0 to avoid negative timeline issues with dynamic delays.
 	if( heard_ts < 0 ) {
-		heard_ts = 0;
+		int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+		if( !passthrough_mode ) {
+			heard_ts = 0;
+		}
 	}
 
 DBGY	serprintf("heard_ts_calc: audio_time=%d heard_ts=%d\n", s->audio_time, heard_ts);
@@ -512,7 +518,10 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			}
 		}
 	}
-	if( !get_android_sync() && anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
+	// Check if passthrough mode is active - static delay is immediately valid
+	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	
+	if( !get_android_sync() && anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 && !passthrough_mode ) {
 		int anchor_ts_raw = audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
 		if( anchor_ts_raw < 0 ) {
 DBGY			serprintf("anchor_wait: audio_time=%d delay=%d av_delay=%d\n",
@@ -623,7 +632,10 @@ int stream_sync_video( STREAM *s, int video_time )
 	}
 #endif
 
-	if( !s->sync_video || s->speed != STREAM_SPEED_NORMAL || s->play_n_video_frames || stream_no_sync ) {
+	// For passthrough mode, don't bypass sync even during play_n_video_frames.
+	// The large static latency means we need to block video until audio buffer fills.
+	int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough(s)) ? 1 : 0;
+	if( !s->sync_video || s->speed != STREAM_SPEED_NORMAL || (s->play_n_video_frames && !passthrough_mode) || stream_no_sync ) {
 		return 0;
 	}
 	// let data without timestamp pass!
@@ -645,18 +657,24 @@ int stream_sync_video( STREAM *s, int video_time )
 	{
 		int allow_static = 1;
 		int anchor_valid = 1;
+		int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough(s)) ? 1 : 0;
 		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1;
 
 		// Late-audio start guard when dynamic delay is disabled:
 		// static latency is always "valid" in that mode and can over-shift heard time.
 		// If audio starts significantly after video, suppress anchor validity briefly.
-		if( anchor_valid && delay_valid == 1 && s->put_time_mode &&
+		if( !passthrough_mode && anchor_valid && delay_valid == 1 && s->put_time_mode &&
 			s->audio_time > 0 && s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
 			int audio_lead = s->audio_time - s->sync_v_time;
 			if( audio_lead > 150 ) {
 				anchor_valid = 0;
 			}
+		}
+
+		// For passthrough with static latency, prefer anchoring even if timing is "invalid".
+		if( passthrough_mode && delay_valid == 1 ) {
+			anchor_valid = 1;
 		}
 
 		if( !anchor_valid ) {
@@ -673,6 +691,10 @@ int stream_sync_video( STREAM *s, int video_time )
 			}
 		}
 		if( !anchor_valid ) {
+			// Passthrough: don't free-run video when timing is unavailable; block instead.
+			if( passthrough_mode && s->put_time_mode ) {
+				return 1;
+			}
 DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d)\n",
 				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
 				s->put_time_mode, delay_valid);
@@ -704,7 +726,15 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	if( s->sync_v_time == -1 || audio_time_for_diff == -1 )
 		return 1;
 	if( s->put_time_mode && audio_time_for_diff <= 0 ) {
-		// Startup/resume warm-up: allow a few frames before audible time exists.
+		// For passthrough mode, don't allow ANY video frames until audio reaches audible time.
+		// The large static latency means audio won't be heard until buffer fills completely.
+		int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+		if( passthrough_mode ) {
+			DBG serprintf("stream_sync_video: blocking video at vtime=%d (heard_ts=%d <= 0, passthrough=%d)\n",
+				s->sync_v_time, audio_time_for_diff, passthrough_mode);
+			return 1;  // Block video completely until audio catches up
+		}
+		// Non-passthrough: Startup/resume warm-up: allow a few frames before audible time exists.
 		if( s->warmup_video_frames < 5 ) {
 			s->warmup_video_frames++;
 			return 0;

@@ -4518,6 +4518,12 @@ serprintf("STUFF_ZERO!\n");
 	if( s->video->valid ) {
 DBGV serprintf("play one frame\n");
 		s->play_n_video_one = 1;
+		// Passthrough + put_time: initialize sync before any frame output so we don't
+		// display video ahead of audible audio during the initial probe.
+		if( s->video_sink && s->video_sink->put_time &&
+		    s->audio_sink && s->audio_sink->get_passthrough( s ) ) {
+			stream_sync_init( s, sc.time );
+		}
 		if( !s->seek_skip_initial_play ) {
 			_stream_play_n_frames( s, 10, sc.time, old_time );
 		}

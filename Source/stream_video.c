@@ -414,9 +414,9 @@ DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recodin
 			}
 		}
 
-		// If the device doesn't support the 6.1 channel mask, downshift to 5.1.
-		// In practice, some Android devices report 6.1 support but still output silence.
-		// We cannot rely solely on channel masks for 6.1 PCM.
+		// If the device doesn't support 6.1 channel output (or we want to force downmix),
+		// request a 6-channel (5.1) output for 7-channel (6.1) content.
+		// libswresample will handle the proper channel mapping.
 		if( s->audio->channels == 7 ) {
 #ifdef CONFIG_ANDROID
 			int mask_61 = AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;

@@ -34,6 +34,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libswresample/swresample.h>
 
 #define DBGS 	if(Debug[DBG_STREAM])
 
@@ -89,6 +90,11 @@ typedef struct PRIV {
 	const AVCodec 	*acodec;
 	AVCodecParserContext *aparser;
 	AVChannelLayout last_channel_layout;
+	SwrContext      *swr_ctx;
+	AVChannelLayout  swr_in_layout;
+	AVChannelLayout  swr_out_layout;
+	enum AVSampleFormat swr_in_fmt;
+	int             swr_in_rate;
 	AVFrame         *aframe;
 	SHORT		*asamples;
 	SHORT		*bsamples;
@@ -413,18 +419,6 @@ serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
 
-	// If a 6.1 downmix was requested but the decoded layout doesn't expose
-	// a back-center channel via AV_CH_BACK_CENTER, we still proceed with the
-	// downmix. FFmpeg may not expose BC for AAC with PCE, but the fallback in
-	// convert() will drop the last channel. This is a pragmatic workaround until
-	// libswresample is integrated for proper channel remapping.
-	if (p->request_channels == 6 && p->actx->ch_layout.nb_channels == 7) {
-		int bc_idx = av_channel_layout_index_from_channel(&p->actx->ch_layout, AV_CH_BACK_CENTER);
-		if (bc_idx < 0) {
-DBG			serprintf("codec_ffmpeg_audio: no back-center in 7ch layout, will use fallback in convert()\n");
-		}
-	}
-
 	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
 	p->actx->extradata      = NULL;
 	p->actx->extradata_size = 0;
@@ -501,6 +495,12 @@ ErrorExit:
 		av_parser_close( p->aparser );
 	p->aparser = NULL;
 
+	if( p->swr_ctx ) {
+		swr_free( &p->swr_ctx );
+	}
+	av_channel_layout_uninit( &p->swr_in_layout );
+	av_channel_layout_uninit( &p->swr_out_layout );
+
 	return 1;
 }
 
@@ -520,6 +520,12 @@ serprintf("ffad not open!\r\n");
 	}
 	if( p->aparser )
 		av_parser_close( p->aparser );
+
+	if( p->swr_ctx ) {
+		swr_free( &p->swr_ctx );
+	}
+	av_channel_layout_uninit( &p->swr_in_layout );
+	av_channel_layout_uninit( &p->swr_out_layout );
 
 	av_free(p->aframe);
 
@@ -694,20 +700,61 @@ static int convert( PRIV *p, AVFrame *frame, UCHAR **out_data, int *out_channels
 		int shift = (bits == 32) ? 16 : (bits == 24 ) ? 8 : 0;
 		uint8_t *dest = (uint8_t*) p->bsamples;
 
-		// Special-case 6.1 -> 5.1 downmix: drop back-center if present.
-		// If back-center is not detected (e.g., AAC with PCE), fall back to
-		// dropping the last channel as a pragmatic workaround.
-		// TODO: Use libswresample for proper 6.1->5.1 downmix when available.
-		int downmix_drop_index = -1;
+		// Use libswresample for proper 6.1 -> 5.1 downmix when requested.
 		if (p->request_channels == 6 && p->actx->ch_layout.nb_channels == 7) {
-			int idx = av_channel_layout_index_from_channel(&p->actx->ch_layout, AV_CH_BACK_CENTER);
-			if (idx >= 0) {
-				downmix_drop_index = idx;
-			} else {
-				// Fallback: FFmpeg may not expose BC for AAC with PCE, but we still
-				// want 6ch output. Drop the last channel as a pragmatic workaround.
-				downmix_drop_index = p->actx->ch_layout.nb_channels - 1;
-				serprintf("codec_ffmpeg_audio: BC not in layout, dropping last channel (idx=%d) as fallback\n", downmix_drop_index);
+			int need_init = 0;
+			if (!p->swr_ctx) {
+				need_init = 1;
+			} else if (p->swr_in_rate != p->actx->sample_rate ||
+			           p->swr_in_fmt != p->actx->sample_fmt ||
+			           av_channel_layout_compare(&p->swr_in_layout, &p->actx->ch_layout) != 0) {
+				swr_free(&p->swr_ctx);
+				av_channel_layout_uninit(&p->swr_in_layout);
+				av_channel_layout_uninit(&p->swr_out_layout);
+				need_init = 1;
+			}
+
+			if (need_init) {
+				av_channel_layout_uninit(&p->swr_in_layout);
+				av_channel_layout_uninit(&p->swr_out_layout);
+				av_channel_layout_copy(&p->swr_in_layout, &p->actx->ch_layout);
+				av_channel_layout_from_mask(&p->swr_out_layout, AV_CH_LAYOUT_5POINT1);
+				p->swr_in_fmt = p->actx->sample_fmt;
+				p->swr_in_rate = p->actx->sample_rate;
+				if (swr_alloc_set_opts2(&p->swr_ctx,
+						&p->swr_out_layout, AV_SAMPLE_FMT_S16, p->actx->sample_rate,
+						&p->swr_in_layout, p->actx->sample_fmt, p->actx->sample_rate,
+						0, NULL) < 0) {
+DBGS					serprintf("codec_ffmpeg_audio: swr_alloc_set_opts2 failed\n");
+					p->swr_ctx = NULL;
+				} else if (swr_init(p->swr_ctx) < 0) {
+DBGS					serprintf("codec_ffmpeg_audio: swr_init failed\n");
+					swr_free(&p->swr_ctx);
+				} else {
+					static int swr_logged = 0;
+					if (!swr_logged) {
+DBGS						serprintf("codec_ffmpeg_audio: using libswresample for 6.1->5.1 downmix\n");
+						swr_logged = 1;
+					}
+				}
+			}
+
+			if (p->swr_ctx) {
+				int out_buf_bytes = av_samples_get_buffer_size(NULL, 6, frame->nb_samples,
+					AV_SAMPLE_FMT_S16, 1);
+				if (out_buf_bytes > 0 && out_buf_bytes <= (2 * MAX_AUDIO_FRAME_SIZE)) {
+					int out_samples = swr_convert(p->swr_ctx, &dest, frame->nb_samples,
+						(const uint8_t**)frame->extended_data, frame->nb_samples);
+					if (out_samples > 0) {
+						out_size = out_samples * 2 * 6;
+						*out_channels = 6;
+						*out_bits = 16;
+						*out_data = (UCHAR*)p->bsamples;
+						return out_size;
+					}
+				} else {
+DBGS					serprintf("codec_ffmpeg_audio: swr output buffer too large (%d)\n", out_buf_bytes);
+				}
 			}
 		}
 
@@ -745,36 +792,6 @@ serprintf("planar %d / %d\n", p->actx->ch_layout.nb_channels, p->request_channel
 				}
 			}
 			*out_channels = p->request_channels;
-		} else if( downmix_drop_index >= 0 ) {
-			// Downmix 7-channel to 6-channel by dropping back-center
-			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
-				int i, j;
-				for (i = 0; i < frame->nb_samples; ++i) {
-					for (j = 0; j < p->actx->ch_layout.nb_channels; ++j) {
-						if (j == downmix_drop_index) {
-							continue;
-						}
-						uint8_t *src = frame->data[j] + i * bytes_per_samples;
-						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
-						memcpy(dest, &res, 2);
-						dest += 2;
-					}
-				}
-			} else {
-				int i, j;
-				uint8_t *src = frame->data[0];
-				for (i = 0; i < frame->nb_samples; i++) {
-					for( j = 0; j < p->actx->ch_layout.nb_channels; j++) {
-						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
-						if (j != downmix_drop_index) {
-							memcpy(dest, &res, 2);
-							dest += 2;
-						}
-						src += bytes_per_samples;
-					}
-				}
-			}
-			*out_channels = 6;
 		} else {
 			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
 				int i, j;

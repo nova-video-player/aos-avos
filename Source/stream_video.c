@@ -415,17 +415,22 @@ DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recodin
 		}
 
 		// If the device doesn't support the 6.1 channel mask, downshift to 5.1.
+		// In practice, some Android devices report 6.1 support but still output silence.
+		// We cannot rely solely on channel masks for 6.1 PCM.
 		if( s->audio->channels == 7 ) {
 #ifdef CONFIG_ANDROID
 			int mask_61 = AUDIO_CHANNEL_OUT_5POINT1 | AUDIO_CHANNEL_OUT_BACK_CENTER;
 			int supported = libavos_pcm_channel_mask_supported(mask_61);
-			if( supported == 0 || supported == -1 ) {
+			int should_downmix_61 = (supported == 0 || supported == -1);
+#else
+			int should_downmix_61 = 0;
+#endif
+			if( should_downmix_61 ) {
 				if( desired == 0 || desired >= 7 ) {
 					desired = 6;
-DBGS				serprintf("stream_open_audio_dec: 6.1 mask unsupported, fallback to 5.1\n");
+DBGS				serprintf("stream_open_audio_dec: 6.1 PCM is unreliable, fallback to 5.1\n");
 				}
 			}
-#endif
 		}
 
 		// Apply downmix request only when it reduces channel count

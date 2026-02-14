@@ -162,6 +162,17 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 	memcpy( sink, s->audio, sizeof( AUDIO_PROPERTIES ) );
 	stream_audio_init_sink_defaults( sink );
 
+	// If a downmix was requested, reflect it in sink properties so AudioTrack
+	// is created with the correct channel count.
+	if( s->audio->request_channels > 0 &&
+	    s->audio->request_channels < sink->channels ) {
+		sink->channels = s->audio->request_channels;
+		if( sink->bitsPerSample ) {
+			sink->bytesPerFrame = sink->channels * sink->bitsPerSample / 8;
+			sink->bytesPerSec = sink->samplesPerSec * sink->bytesPerFrame;
+		}
+	}
+
 #ifdef CONFIG_SPDIF
 	// When passthrough is disabled and AC3 recoding is disabled,
 	// audio will be decoded to PCM regardless of source format.
@@ -653,7 +664,8 @@ serprintf(" ae! ");
 			if( !audio_frame.error ) {
 				// Store original format and properties before filtering
 				original_format = sink_props ? sink_props->format : s->audio->format;
-				original_channels = s->audio->channels;
+				original_channels = (s->audio->request_channels > 0) ?
+					s->audio->request_channels : s->audio->channels;
 				original_rate = s->audio->samplesPerSec;
 				original_bits = s->audio->bitsPerSample;
 

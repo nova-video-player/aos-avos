@@ -413,6 +413,18 @@ serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
 
+	// If a 6.1 downmix was requested but the decoded layout doesn't expose
+	// a back-center channel via AV_CH_BACK_CENTER, we still proceed with the
+	// downmix. FFmpeg may not expose BC for AAC with PCE, but the fallback in
+	// convert() will drop the last channel. This is a pragmatic workaround until
+	// libswresample is integrated for proper channel remapping.
+	if (p->request_channels == 6 && p->actx->ch_layout.nb_channels == 7) {
+		int bc_idx = av_channel_layout_index_from_channel(&p->actx->ch_layout, AV_CH_BACK_CENTER);
+		if (bc_idx < 0) {
+DBG			serprintf("codec_ffmpeg_audio: no back-center in 7ch layout, will use fallback in convert()\n");
+		}
+	}
+
 	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
 	p->actx->extradata      = NULL;
 	p->actx->extradata_size = 0;
@@ -455,6 +467,10 @@ serprintf("downmix to stereo S16\r\n");
 		audio->bitsPerSample = 16;
 	} else {
 		audio->channels = p->actx->ch_layout.nb_channels;
+		// If a specific channel count was requested (e.g., 6.1 -> 5.1), use it.
+		if (p->request_channels > 0 && p->request_channels != p->actx->ch_layout.nb_channels) {
+			audio->channels = p->request_channels;
+		}
 		audio->bitsPerSample = 16; //av_get_bytes_per_sample(p->actx->sample_fmt) * 4;
 	}
 	update_audio_channel_mask( audio, &p->actx->ch_layout );
@@ -678,6 +694,23 @@ static int convert( PRIV *p, AVFrame *frame, UCHAR **out_data, int *out_channels
 		int shift = (bits == 32) ? 16 : (bits == 24 ) ? 8 : 0;
 		uint8_t *dest = (uint8_t*) p->bsamples;
 
+		// Special-case 6.1 -> 5.1 downmix: drop back-center if present.
+		// If back-center is not detected (e.g., AAC with PCE), fall back to
+		// dropping the last channel as a pragmatic workaround.
+		// TODO: Use libswresample for proper 6.1->5.1 downmix when available.
+		int downmix_drop_index = -1;
+		if (p->request_channels == 6 && p->actx->ch_layout.nb_channels == 7) {
+			int idx = av_channel_layout_index_from_channel(&p->actx->ch_layout, AV_CH_BACK_CENTER);
+			if (idx >= 0) {
+				downmix_drop_index = idx;
+			} else {
+				// Fallback: FFmpeg may not expose BC for AAC with PCE, but we still
+				// want 6ch output. Drop the last channel as a pragmatic workaround.
+				downmix_drop_index = p->actx->ch_layout.nb_channels - 1;
+				serprintf("codec_ffmpeg_audio: BC not in layout, dropping last channel (idx=%d) as fallback\n", downmix_drop_index);
+			}
+		}
+
 		if( p->actx->ch_layout.nb_channels < p->request_channels ) {
 serprintf("upmix %d -> %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
 			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
@@ -712,6 +745,36 @@ serprintf("planar %d / %d\n", p->actx->ch_layout.nb_channels, p->request_channel
 				}
 			}
 			*out_channels = p->request_channels;
+		} else if( downmix_drop_index >= 0 ) {
+			// Downmix 7-channel to 6-channel by dropping back-center
+			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
+				int i, j;
+				for (i = 0; i < frame->nb_samples; ++i) {
+					for (j = 0; j < p->actx->ch_layout.nb_channels; ++j) {
+						if (j == downmix_drop_index) {
+							continue;
+						}
+						uint8_t *src = frame->data[j] + i * bytes_per_samples;
+						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
+						memcpy(dest, &res, 2);
+						dest += 2;
+					}
+				}
+			} else {
+				int i, j;
+				uint8_t *src = frame->data[0];
+				for (i = 0; i < frame->nb_samples; i++) {
+					for( j = 0; j < p->actx->ch_layout.nb_channels; j++) {
+						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
+						if (j != downmix_drop_index) {
+							memcpy(dest, &res, 2);
+							dest += 2;
+						}
+						src += bytes_per_samples;
+					}
+				}
+			}
+			*out_channels = 6;
 		} else {
 			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
 				int i, j;

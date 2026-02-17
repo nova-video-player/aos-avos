@@ -357,6 +357,7 @@ void avos_mp_sendevent(avos_mp_t *mp, int what, int arg1, int arg2)
 
 static int avos_mp_open_common(avos_mp_t *mp)
 {
+	MPLOG("type=%d etype=%d", mp->type, mp->etype);
 	if (mp->type == TYPE_VID) {
 		avos_mp_video_t *video = avos_mp_video_create();
 		mp->media = video;
@@ -365,7 +366,17 @@ static int avos_mp_open_common(avos_mp_t *mp)
 		avos_mp_audio_t *audio = avos_mp_audio_create();
 		mp->media = audio;
 		return avos_mp_audio_open(mp, audio, &mp->src, mp->etype);
+	} else if ((mp->type == TYPE_NONE || mp->type == TYPE_UNKNOWN) && 
+	           (!strncmp(mp->src.url, "http://", 7) || !strncmp(mp->src.url, "https://", 8))) {
+		// For HTTP URLs with unknown type, default to video/MKV and let FFmpeg probe
+		MPLOG("HTTP URL with unknown type, defaulting to VIDEO/MKV for FFmpeg probing");
+		mp->type = TYPE_VID;
+		mp->etype = ETYPE_MKV;  // Use MKV as default container for FFmpeg to probe
+		avos_mp_video_t *video = avos_mp_video_create();
+		mp->media = video;
+		return avos_mp_video_open(mp, video, &mp->src, mp->etype, mp->surface_handle, mp->starttime);
 	}
+	MPLOG("error: unsupported type=%d", mp->type);
 	return AVOS_ERR;
 }
 
@@ -594,8 +605,15 @@ static int avos_mp_setdatasource(avos_mp_t *mp, const char *path, const char **k
 	stream_url_cpy_url_name(&mp->src, path, extra_name);
 	get_url_type(&mp->src, &mp->type, &mp->etype);
 	MPLOGV("file type: %d|%s  %d|%s", mp->type, mp->type == TYPE_VID ? "VIDEO" : mp->type == TYPE_AUD ? "AUDIO" : "UNKNOWN", mp->etype, av_get_etype_name( mp->etype) );
-	if (mp->type == TYPE_NONE || mp->type == TYPE_UNKNOWN)
-		avos_mp_sendevent(mp, MEDIA_ERROR, MEDIA_ERROR_VE_FILE_ERROR, 0);
+	if (mp->type == TYPE_NONE || mp->type == TYPE_UNKNOWN) {
+		// Allow HTTP/HTTPS URLs without file extensions to proceed.
+		// FFmpeg will probe the stream format when it opens.
+		if (!strncmp(mp->src.url, "http://", 7) || !strncmp(mp->src.url, "https://", 8)) {
+			MPLOG("Unknown file type for HTTP URL, allowing FFmpeg to probe: %s", mp->src.url);
+		} else {
+			avos_mp_sendevent(mp, MEDIA_ERROR, MEDIA_ERROR_VE_FILE_ERROR, 0);
+		}
+	}
 	return AVOS_ERR_OK;
 }
 

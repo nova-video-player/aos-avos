@@ -1190,19 +1190,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 #endif
 							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / bpf;
-							// Use actual source sample rate for sync when passthrough is inactive.
-							// TrueHD passthrough forces 192kHz container rate, but actual content is 48k/96k.
-							// When decoding to PCM, use sourceSamples to avoid sync drift (audio ahead of video).
-							// Prefer decoded frame rate if available (most reliable), else fallback to sourceSamples.
-							int sync_rate = s->audio->samplesPerSec;
-							if (!passthrough_active) {
-								if (audio_frame.samplesPerSec > 0) {
-									sync_rate = audio_frame.samplesPerSec;
-								} else if (s->audio->sourceSamples > 0) {
-									sync_rate = s->audio->sourceSamples;
-								}
-							}
-							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)sync_rate;
+							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
 							int prev_audio_time = s->audio_time;
 
 							// Check if atempo filter is active - output samples are already in TS domain (physical time)
@@ -1221,8 +1209,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
 									s->audio_ref_time, delta);
 							}
-							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d sync_rate=%d configured_rate=%d\n",
-								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta, sync_rate, s->audio->samplesPerSec);
+							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d\n",
+								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta);
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}

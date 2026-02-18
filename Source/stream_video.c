@@ -1354,6 +1354,10 @@ ErrorExit:
 void stream_audio_samplerate_changed( STREAM *s )
 {
 serprintf("stream_audio_samplerate_changed!\r\n");
+	// Reset sample counter to prevent sync drift from samples accumulated at old rate
+	s->audio_ref_time = -1;
+	s->audio_samples  = 0;
+
 	// stop audio sink
 	if( s->audio_sink) {
 		s->audio_sink->flush( s );

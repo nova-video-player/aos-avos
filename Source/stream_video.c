@@ -886,6 +886,16 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 		}
 		s->audio_filter = NULL;
 	}
+	// Close and delete atempo filter
+	if( s->audio_filter_atempo ) {
+		if( s->audio_filter_atempo->close ) {
+			s->audio_filter_atempo->close( s->audio_filter_atempo );
+		}
+		if( s->audio_filter_atempo->delete ) {
+			s->audio_filter_atempo->delete( s->audio_filter_atempo );
+		}
+		s->audio_filter_atempo = NULL;
+	}
 }
 
 // *****************************************************************************

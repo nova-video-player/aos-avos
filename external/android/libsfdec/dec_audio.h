@@ -24,19 +24,20 @@
 extern "C" {
 #endif
 
+struct dec_audio;
 
-sfdec_t*	dec_audio_new( sfdec_codec_t codec,int64_t duration_us, int input_size, int samplesPerSec, int channels, int bitrate,
+struct dec_audio*	dec_audio_new( sfdec_codec_t codec,int64_t duration_us, int input_size, int samplesPerSec, int channels, int bitrate,
 	void *extradata, size_t extradata_size, int64_t codec_delay, int64_t seek_preroll);
 
-void		dec_audio_delete(sfdec_t *sfdec);
-int		dec_audio_start(sfdec_t *);
-int		dec_audio_stop(sfdec_t *);
-ssize_t		dec_audio_send_input(sfdec_t *sfdec, void *data, size_t size, int64_t time_us, int is_sync_frame, int wait);
-int		dec_audio_flush(sfdec_t *sfdec);
-int		dec_audio_stop_input(sfdec_t *sfdec);
-int		dec_audio_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
-int		dec_audio_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render);
-int		dec_audio_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf);
+void		dec_audio_delete(struct dec_audio *dec);
+int		dec_audio_start(struct dec_audio *);
+int		dec_audio_stop(struct dec_audio *);
+ssize_t		dec_audio_send_input(struct dec_audio *dec, void *data, size_t size, int64_t time_us, int is_sync_frame, int wait);
+int		dec_audio_flush(struct dec_audio *dec);
+int		dec_audio_stop_input(struct dec_audio *dec);
+int		dec_audio_read(struct dec_audio *dec, int64_t seek, sfdec_read_out_t *read_out);
+int		dec_audio_buf_render(struct dec_audio *dec, sfbuf_t *sfbuf, int render);
+int		dec_audio_buf_release(struct dec_audio *dec, sfbuf_t *sfbuf);
 
 #if __cplusplus
 }

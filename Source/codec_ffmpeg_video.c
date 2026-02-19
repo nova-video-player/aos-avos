@@ -654,9 +654,10 @@ DBGCV2 serprintf("[");
 				avos_frame->priv = (void*)av_frame_clone(vframe);
 			} else {
 				avos_frame->dec = NULL;
+				avos_frame->color_space = vframe->colorspace;
 				if( p->mt_ctx ) {
 					codec_convert_mt( p->mt_ctx, map_pixfmt( vctx->pix_fmt ), vframe->data, vframe->linesize, vctx->width, vctx->height, avos_frame );
-				} else {	
+				} else {
 					codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), vframe->data, vframe->linesize, vctx->width, vctx->height, avos_frame);
 				}
 			}
@@ -713,6 +714,7 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	AVFrame	*avframe = (AVFrame*)src->priv;
 DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );
 	if( dst ) {
+		dst->color_space = avframe->colorspace;
 		if( p->mt_ctx ) {
 			codec_convert_mt( p->mt_ctx, map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
 		} else {

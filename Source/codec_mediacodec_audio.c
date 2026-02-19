@@ -44,7 +44,7 @@
 int acodecs_is_supported( int format, int is_video, int is_sw_allowed );
 
 typedef struct PRIV {
-	sfdec_t *dec_audio;
+	struct dec_audio *dec_audio;
 	AVCodecParserContext *aparser;
 	struct AVCodecContext avctx;
 } PRIV;

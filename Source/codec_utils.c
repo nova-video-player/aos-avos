@@ -70,52 +70,80 @@ DECLARE_DEBUG_COMMAND_VOID("deintp", toggle_deinterlace_perf_report);
  * @return a RGB8888 pixels int array. Where each int is a pixels ARGB. 
  */
 
-static int convertYUVtoBGRA32( int y, int u, int v )
+// YUV->RGB conversion coefficients per color space
+// BT.601 (SD): AVCOL_SPC_SMPTE170M(6), AVCOL_SPC_BT470BG(5), or default
+// BT.709 (HD): AVCOL_SPC_BT709(1)
+// BT.2020 (UHD): AVCOL_SPC_BT2020_NCL(9), AVCOL_SPC_BT2020_CL(10)
+struct yuv_coeffs {
+	double rv;	// v coefficient for r
+	double gu;	// u coefficient for g
+	double gv;	// v coefficient for g
+	double bu;	// u coefficient for b
+};
+
+static const struct yuv_coeffs coeffs_bt601  = { 1.13983, 0.39465, 0.58060, 2.03211 };
+static const struct yuv_coeffs coeffs_bt709  = { 1.5748,  0.1873,  0.4681,  1.8556  };
+static const struct yuv_coeffs coeffs_bt2020 = { 1.4746,  0.1646,  0.5714,  1.8814  };
+
+static const struct yuv_coeffs *get_yuv_coeffs(int src_color_space)
+{
+	switch (src_color_space) {
+	case 1: /* AVCOL_SPC_BT709 */
+		return &coeffs_bt709;
+	case 9:  /* AVCOL_SPC_BT2020_NCL */
+	case 10: /* AVCOL_SPC_BT2020_CL */
+		return &coeffs_bt2020;
+	default: /* BT.601 for SD and unknown */
+		return &coeffs_bt601;
+	}
+}
+
+static int convertYUVtoBGRA32( const struct yuv_coeffs *c, int y, int u, int v )
 {
 	int r, g, b;
 
-	r = y + ( int )   1.13983 *v;
-	g = y - ( int ) ( 0.39465 * u + 0.58060 * v );
-	b = y + ( int )   2.03211 *u;
+	r = y + ( int ) ( c->rv * v );
+	g = y - ( int ) ( c->gu * u + c->gv * v );
+	b = y + ( int ) ( c->bu * u );
 	r = r > 255 ? 255 : r < 0 ? 0 : r;
 	g = g > 255 ? 255 : g < 0 ? 0 : g;
 	b = b > 255 ? 255 : b < 0 ? 0 : b;
 	return ( 0xff << 24 ) | ( r << 16 ) | ( g << 8 ) | b;
 }
 
-static int convertYUVtoRGBX32( int y, int u, int v )
+static int convertYUVtoRGBX32( const struct yuv_coeffs *c, int y, int u, int v )
 {
 	int r, g, b;
 
-	r = y + ( int )   1.13983 *v;
-	g = y - ( int ) ( 0.39465 * u + 0.58060 * v );
-	b = y + ( int )   2.03211 *u;
+	r = y + ( int ) ( c->rv * v );
+	g = y - ( int ) ( c->gu * u + c->gv * v );
+	b = y + ( int ) ( c->bu * u );
 	r = r > 255 ? 255 : r < 0 ? 0 : r;
 	g = g > 255 ? 255 : g < 0 ? 0 : g;
 	b = b > 255 ? 255 : b < 0 ? 0 : b;
 	return ( b << 16 ) | ( g << 8 ) | r;
 }
 
-static int convertYUV10btoBGRA32( int y, int u, int v )
+static int convertYUV10btoBGRA32( const struct yuv_coeffs *c, int y, int u, int v )
 {
 	int r, g, b;
 
-	r = (y + ( int )   1.13983 *v) / 4;
-	g = (y - ( int ) ( 0.39465 * u + 0.58060 * v )) / 4;
-	b = (y + ( int )   2.03211 *u) / 4;
+	r = (y + ( int ) ( c->rv * v )) / 4;
+	g = (y - ( int ) ( c->gu * u + c->gv * v )) / 4;
+	b = (y + ( int ) ( c->bu * u )) / 4;
 	r = r > 255 ? 255 : r < 0 ? 0 : r;
 	g = g > 255 ? 255 : g < 0 ? 0 : g;
 	b = b > 255 ? 255 : b < 0 ? 0 : b;
 	return ( 0xff << 24 ) | ( r << 16 ) | ( g << 8 ) | b;
 }
 
-static int convertYUV10btoRGBX32( int y, int u, int v )
+static int convertYUV10btoRGBX32( const struct yuv_coeffs *c, int y, int u, int v )
 {
 	int r, g, b;
 
-	r = (y + ( int )   1.13983 *v) / 4;
-	g = (y - ( int ) ( 0.39465 * u + 0.58060 * v )) / 4;
-	b = (y + ( int )   2.03211 *u) / 4;
+	r = (y + ( int ) ( c->rv * v )) / 4;
+	g = (y - ( int ) ( c->gu * u + c->gv * v )) / 4;
+	b = (y + ( int ) ( c->bu * u )) / 4;
 	r = r > 255 ? 255 : r < 0 ? 0 : r;
 	g = g > 255 ? 255 : g < 0 ? 0 : g;
 	b = b > 255 ? 255 : b < 0 ? 0 : b;
@@ -123,10 +151,10 @@ static int convertYUV10btoRGBX32( int y, int u, int v )
 }
 
 __attribute__((unused))
-static void convert_420P_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize, int deinterlace )
+static void convert_420P_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize, int deinterlace )
 {
 	if( !src_data[0] || !src_data[1] || !src_data[2] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) )
-		return;	  
+		return;
 
 	int perf_time = 0;
 
@@ -166,7 +194,7 @@ static void convert_420P_to_RGB( int colorspace, unsigned char *src_data[], int 
 #endif
 	}
 #ifdef CONFIG_NEON
-	if( use_neon ) {
+	if( use_neon && coeffs == &coeffs_bt601 ) {
 		void (*convert)(uint32_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, int, int) = colorspace == AV_IMAGE_BGRA_32 ? neon_yuv420_to_BGRA32 : neon_yuv420_to_RGBX32;
 		int y;
 		for (y = start; y < start + height; y += 2) {
@@ -183,7 +211,7 @@ static void convert_420P_to_RGB( int colorspace, unsigned char *src_data[], int 
 	} else
 #endif
 	{
-		int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUVtoBGRA32 : convertYUVtoRGBX32;
+		int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 		int y;
 		for( y = start ; y < start + height; y += 2 ) {
 			int x;
@@ -194,8 +222,13 @@ static void convert_420P_to_RGB( int colorspace, unsigned char *src_data[], int 
 				unsigned char *U  = inBufferU + y / 2  * inStrideU + x / 2;
 				unsigned char *V  = inBufferV + y / 2  * inStrideV + x / 2;
 				UINT32 *dst = (UINT32*)data + y  * linesize + x;
-				dst[0]        = convert(*Y1 - 16, *U - 128, *V - 128);
-				dst[linesize] = convert(*Y2 - 16, *U - 128, *V - 128);
+				if (is_bgra) {
+					dst[0]        = convertYUVtoBGRA32(coeffs, *Y1 - 16, *U - 128, *V - 128);
+					dst[linesize] = convertYUVtoBGRA32(coeffs, *Y2 - 16, *U - 128, *V - 128);
+				} else {
+					dst[0]        = convertYUVtoRGBX32(coeffs, *Y1 - 16, *U - 128, *V - 128);
+					dst[linesize] = convertYUVtoRGBX32(coeffs, *Y2 - 16, *U - 128, *V - 128);
+				}
 			}
 		}
 	}
@@ -206,14 +239,14 @@ static void convert_420P_to_RGB( int colorspace, unsigned char *src_data[], int 
 	}
 }
 
-static void convert_420P10b_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
+static void convert_420P10b_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
 {
 	if( !src_data[0] || !src_data[1] || !src_data[2] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) )
 		return;
 
 	int y = 0;
 #ifdef CONFIG_NEON
-	if( use_neon ) {
+	if( use_neon && coeffs == &coeffs_bt601 ) {
 		void (*convert)(uint32_t *, uint16_t *, uint16_t *, uint16_t *, uint16_t *, int, int) = colorspace == AV_IMAGE_BGRA_32 ? neon_yuv42010b_to_BGRA32 : neon_yuv42010b_to_RGBX32;
 		for (y = start; y < start+height; y += 2) {
 			int x;
@@ -230,7 +263,7 @@ static void convert_420P10b_to_RGB( int colorspace, unsigned char *src_data[], i
 	} else
 #endif
 	{
-		int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUV10btoBGRA32 : convertYUV10btoRGBX32;
+		int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 
 		for( y=start ; y < start+height; y += 2 ) {
 			int x;
@@ -242,21 +275,26 @@ static void convert_420P10b_to_RGB( int colorspace, unsigned char *src_data[], i
 				UINT16 *V  = (UINT16*)src_data[2] + y / 2  * src_linesize[2]/2 + x / 2;
 				UINT32 *dst = (UINT32*)data + y  * linesize + x;
 
-				dst[0]        = convert(*Y1 - 64, *U - 512, *V - 512);
-				dst[linesize] = convert(*Y2 - 64, *U - 512, *V - 512);
+				if (is_bgra) {
+					dst[0]        = convertYUV10btoBGRA32(coeffs, *Y1 - 64, *U - 512, *V - 512);
+					dst[linesize] = convertYUV10btoBGRA32(coeffs, *Y2 - 64, *U - 512, *V - 512);
+				} else {
+					dst[0]        = convertYUV10btoRGBX32(coeffs, *Y1 - 64, *U - 512, *V - 512);
+					dst[linesize] = convertYUV10btoRGBX32(coeffs, *Y2 - 64, *U - 512, *V - 512);
+				}
 			}
 		}
 	}
 }
 
 __attribute__((unused))
-static void convert_422P_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
+static void convert_422P_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
 {
 	if( !src_data[0] || !src_data[1] || !src_data[2] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) )
 		return;
 
 #ifdef CONFIG_NEON
-	if( use_neon ) {
+	if( use_neon && coeffs == &coeffs_bt601 ) {
 		void (*convert)(uint32_t *, uint8_t *, uint8_t *, uint8_t *, int) = colorspace == AV_IMAGE_BGRA_32 ? neon_yuv422_to_BGRA32 : neon_yuv422_to_RGBX32;
 		int y;
 		for (y = start; y < start + height; y ++) {
@@ -273,7 +311,7 @@ static void convert_422P_to_RGB( int colorspace, unsigned char *src_data[], int 
 	} else
 #endif
 	{
-		int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUVtoBGRA32 : convertYUVtoRGBX32;
+		int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 		int y;
 		for( y = start; y < start + height; y ++ ) {
 			int x;
@@ -284,13 +322,16 @@ static void convert_422P_to_RGB( int colorspace, unsigned char *src_data[], int 
 				unsigned char  *V = src_data[2] + y * src_linesize[2] + x;
 				UINT32 *dst = (UINT32*)data + y * linesize + x;
 
-				dst[0] = convert(*Y - 16, *U - 128, *V - 128);
+				if (is_bgra)
+					dst[0] = convertYUVtoBGRA32(coeffs, *Y - 16, *U - 128, *V - 128);
+				else
+					dst[0] = convertYUVtoRGBX32(coeffs, *Y - 16, *U - 128, *V - 128);
 			}
 		}
 	}
 }
 
-static void convert_444P_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
+static void convert_444P_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
 {
 	if( !src_data[0] || !src_data[1] || !src_data[2] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) )
 		return;
@@ -303,7 +344,7 @@ static void convert_444P_to_RGB( int colorspace, unsigned char *src_data[], int 
 */
 #endif
 	{
-		int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUVtoBGRA32 : convertYUVtoRGBX32;
+		int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 		int y;
 		for( y = start; y < start + height; y ++ ) {
 			int x;
@@ -314,20 +355,23 @@ static void convert_444P_to_RGB( int colorspace, unsigned char *src_data[], int 
 				unsigned char  *V = src_data[2] + y * src_linesize[2] + x;
 				UINT32 *dst = (UINT32*)data + y * linesize + x;
 
-				dst[0] = convert(*Y - 16, *U - 128, *V - 128);
+				if (is_bgra)
+					dst[0] = convertYUVtoBGRA32(coeffs, *Y - 16, *U - 128, *V - 128);
+				else
+					dst[0] = convertYUVtoRGBX32(coeffs, *Y - 16, *U - 128, *V - 128);
 			}
 		}
 	}
 }
 
-static void convert_NV12_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
+static void convert_NV12_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
 {
 	if( !src_data[0] || !src_data[1] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) ) {
 		return;
 	}
 
 #ifdef CONFIG_NEON
-	if( use_neon ) {
+	if( use_neon && coeffs == &coeffs_bt601 ) {
 		void (*convert)(uint32_t *, uint8_t *, uint8_t *, uint8_t *, int, int) = colorspace == AV_IMAGE_BGRA_32 ? neon_nv12_to_BGRA32 : neon_nv12_to_RGBX32;
 		int y;
 		for (y = start; y < start + height; y += 2) {
@@ -344,7 +388,7 @@ static void convert_NV12_to_RGB( int colorspace, unsigned char *src_data[], int 
 	} else
 #endif
 	{
-		int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUVtoBGRA32 : convertYUVtoRGBX32;
+		int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 		int y;
 		for( y = start; y < start + height; y += 2 ) {
 			int x;
@@ -358,16 +402,26 @@ static void convert_NV12_to_RGB( int colorspace, unsigned char *src_data[], int 
 				unsigned char U = *UV++;
 				unsigned char V = *UV++;
 
-				dst[0] =        convert(*Y1 - 16, U - 128, V - 128);
-				dst[linesize] = convert(*Y2 - 16, U - 128, V - 128);
+				if (is_bgra) {
+					dst[0] =        convertYUVtoBGRA32(coeffs, *Y1 - 16, U - 128, V - 128);
+					dst[linesize] = convertYUVtoBGRA32(coeffs, *Y2 - 16, U - 128, V - 128);
+				} else {
+					dst[0] =        convertYUVtoRGBX32(coeffs, *Y1 - 16, U - 128, V - 128);
+					dst[linesize] = convertYUVtoRGBX32(coeffs, *Y2 - 16, U - 128, V - 128);
+				}
 
 				Y1++;
 				Y2++;
 				dst++;
 
-				dst[0] =        convert(*Y1 - 16, U - 128, V - 128);
-				dst[linesize] = convert(*Y2 - 16, U - 128, V - 128);
-			
+				if (is_bgra) {
+					dst[0] =        convertYUVtoBGRA32(coeffs, *Y1 - 16, U - 128, V - 128);
+					dst[linesize] = convertYUVtoBGRA32(coeffs, *Y2 - 16, U - 128, V - 128);
+				} else {
+					dst[0] =        convertYUVtoRGBX32(coeffs, *Y1 - 16, U - 128, V - 128);
+					dst[linesize] = convertYUVtoRGBX32(coeffs, *Y2 - 16, U - 128, V - 128);
+				}
+
 				Y1++;
 				Y2++;
 				dst++;
@@ -376,7 +430,7 @@ static void convert_NV12_to_RGB( int colorspace, unsigned char *src_data[], int 
 	}
 }
 
-static void convert_P010_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
+static void convert_P010_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, unsigned char *data, int linesize )
 {
 	if( !src_data[0] || !src_data[1] || (colorspace != AV_IMAGE_BGRA_32 && colorspace != AV_IMAGE_RGBX_32) ) {
 		return;
@@ -388,7 +442,7 @@ static void convert_P010_to_RGB( int colorspace, unsigned char *src_data[], int 
 	}
 #endif
 
-	int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUV10btoBGRA32 : convertYUV10btoRGBX32;
+	int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 	int y;
 	for( y = start; y < start + height; y += 2 ) {
 		int x;
@@ -405,15 +459,25 @@ static void convert_P010_to_RGB( int colorspace, unsigned char *src_data[], int 
 			UINT16 y1 = *Y1++ >> 6;
 			UINT16 y2 = *Y2++ >> 6;
 
-			dst[0] =        convert(y1 - 64, U - 512, V - 512);
-			dst[linesize] = convert(y2 - 64, U - 512, V - 512);
+			if (is_bgra) {
+				dst[0] =        convertYUV10btoBGRA32(coeffs, y1 - 64, U - 512, V - 512);
+				dst[linesize] = convertYUV10btoBGRA32(coeffs, y2 - 64, U - 512, V - 512);
+			} else {
+				dst[0] =        convertYUV10btoRGBX32(coeffs, y1 - 64, U - 512, V - 512);
+				dst[linesize] = convertYUV10btoRGBX32(coeffs, y2 - 64, U - 512, V - 512);
+			}
 
 			UINT16 y1b = *Y1++ >> 6;
 			UINT16 y2b = *Y2++ >> 6;
 
 			dst++;
-			dst[0] =        convert(y1b - 64, U - 512, V - 512);
-			dst[linesize] = convert(y2b - 64, U - 512, V - 512);
+			if (is_bgra) {
+				dst[0] =        convertYUV10btoBGRA32(coeffs, y1b - 64, U - 512, V - 512);
+				dst[linesize] = convertYUV10btoBGRA32(coeffs, y2b - 64, U - 512, V - 512);
+			} else {
+				dst[0] =        convertYUV10btoRGBX32(coeffs, y1b - 64, U - 512, V - 512);
+				dst[linesize] = convertYUV10btoRGBX32(coeffs, y2b - 64, U - 512, V - 512);
+			}
 
 			dst++;
 		}
@@ -930,7 +994,7 @@ static void convert_QCOM_NV12_TILED_to_NV12( unsigned char *src_data[], int src_
 #undef TILE_GROUP_SIZE
 }
 
-static void convert_QCOM_NV12_TILED_to_RGB( int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, int total_height, unsigned char *data, int linesize )
+static void convert_QCOM_NV12_TILED_to_RGB( const struct yuv_coeffs *coeffs, int colorspace, unsigned char *src_data[], int src_linesize[], int width, int height, int start, int total_height, unsigned char *data, int linesize )
 {
 #define TILE_WIDTH 64
 #define TILE_HEIGHT 32
@@ -955,7 +1019,7 @@ static void convert_QCOM_NV12_TILED_to_RGB( int colorspace, unsigned char *src_d
 		luma_size = (((luma_size - 1) / TILE_GROUP_SIZE) + 1) * TILE_GROUP_SIZE;
 
 #ifdef CONFIG_NEON
-	if( use_neon ) {
+	if( use_neon && coeffs == &coeffs_bt601 ) {
 		void (*convert)(uint32_t *, uint8_t *, uint8_t *, uint8_t *, int, int) = colorspace == AV_IMAGE_BGRA_32 ? neon_nv12_to_BGRA32 : neon_nv12_to_RGBX32;
 
 		for(y = tile_h_luma_start; y < tile_h_luma_end; y++) {
@@ -1005,7 +1069,7 @@ static void convert_QCOM_NV12_TILED_to_RGB( int colorspace, unsigned char *src_d
 	} else
 #endif
 	{
-		int (*convert)(int, int, int) = colorspace == AV_IMAGE_BGRA_32 ? convertYUVtoBGRA32 : convertYUVtoRGBX32;
+		int is_bgra = (colorspace == AV_IMAGE_BGRA_32);
 		for(y = tile_h_luma_start; y < tile_h_luma_end; y++) {
 			size_t row_width = width;
 			for(x = 0; x < tile_w; x++) {
@@ -1045,15 +1109,25 @@ static void convert_QCOM_NV12_TILED_to_RGB( int colorspace, unsigned char *src_d
 						unsigned char U = *UV++;
 						unsigned char V = *UV++;
 
-						dst[0] =        convert(*Y1 - 16, U - 128, V - 128);
-						dst[linesize] = convert(*Y2 - 16, U - 128, V - 128);
+						if (is_bgra) {
+							dst[0] =        convertYUVtoBGRA32(coeffs, *Y1 - 16, U - 128, V - 128);
+							dst[linesize] = convertYUVtoBGRA32(coeffs, *Y2 - 16, U - 128, V - 128);
+						} else {
+							dst[0] =        convertYUVtoRGBX32(coeffs, *Y1 - 16, U - 128, V - 128);
+							dst[linesize] = convertYUVtoRGBX32(coeffs, *Y2 - 16, U - 128, V - 128);
+						}
 
 						Y1++;
 						Y2++;
 						dst++;
 
-						dst[0] =        convert(*Y1 - 16, U - 128, V - 128);
-						dst[linesize] = convert(*Y2 - 16, U - 128, V - 128);
+						if (is_bgra) {
+							dst[0] =        convertYUVtoBGRA32(coeffs, *Y1 - 16, U - 128, V - 128);
+							dst[linesize] = convertYUVtoBGRA32(coeffs, *Y2 - 16, U - 128, V - 128);
+						} else {
+							dst[0] =        convertYUVtoRGBX32(coeffs, *Y1 - 16, U - 128, V - 128);
+							dst[linesize] = convertYUVtoRGBX32(coeffs, *Y2 - 16, U - 128, V - 128);
+						}
 
 						Y1++;
 						Y2++;
@@ -1096,6 +1170,8 @@ int color_conversion_supported(int colorspace, int pixfmt)
 
 static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[], int width, int height, int start, int total_height, VIDEO_FRAME *frame)
 {
+	// Resolve YUV->RGB coefficients from the frame's color space
+	const struct yuv_coeffs *coeffs = get_yuv_coeffs(frame->color_space);
 
 #ifndef CONFIG_NEON
 	//Deactivate deinterlacing on non Neon SoC
@@ -1152,60 +1228,68 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 	        case AV_IMAGE_BGRA_32:
 	                switch( pixfmt ) {
 	                case PIXFMT_YUV420P:
-	                        convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
+	                        convert_420P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
 	                        break;
 	                case PIXFMT_YUV422P:
-	                        convert_422P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        convert_422P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV444P:
-	                        convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        convert_444P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 				break;
 	                case PIXFMT_NV12:
-	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
-	                                return;
-	                        NV12ToARGB( src_data[0] + start * src_linesize[0], src_linesize[0],
-	                                    src_data[1] + (start / 2) * src_linesize[1], src_linesize[1],
-	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
-	                                    width, height );
+	                        if (coeffs == &coeffs_bt601) {
+	                                if (!src_data[0] || !src_data[1] || !frame->data[0])
+	                                        return;
+	                                NV12ToARGB( src_data[0] + start * src_linesize[0], src_linesize[0],
+	                                            src_data[1] + (start / 2) * src_linesize[1], src_linesize[1],
+	                                            frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                            width, height );
+	                        } else {
+	                                convert_NV12_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        }
 	                        break;
 	                case PIXFMT_QCOM_NV12_TILED:
-	                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
+	                        convert_QCOM_NV12_TILED_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV420P10LE:
-	                        convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] );
+	                        convert_420P10b_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] );
 	                        break;
 	                case PIXFMT_P010:
-	                        convert_P010_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        convert_P010_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                }
 			break;
 		case AV_IMAGE_RGBX_32:
 	                switch( pixfmt ) {
 	                case PIXFMT_YUV420P:
-	                        convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
+	                        convert_420P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
 	                        break;
 	                case PIXFMT_YUV422P:
-				convert_422P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+				convert_422P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV444P:
-	                        convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        convert_444P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_NV12:
-	                        if (!src_data[0] || !src_data[1] || !frame->data[0])
-	                                return;
-	                        NV12ToABGR( src_data[0] + start * src_linesize[0], src_linesize[0],
-	                                    src_data[1] + (start / 2) * src_linesize[1], src_linesize[1],
-	                                    frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
-	                                    width, height );
+	                        if (coeffs == &coeffs_bt601) {
+	                                if (!src_data[0] || !src_data[1] || !frame->data[0])
+	                                        return;
+	                                NV12ToABGR( src_data[0] + start * src_linesize[0], src_linesize[0],
+	                                            src_data[1] + (start / 2) * src_linesize[1], src_linesize[1],
+	                                            frame->data[0] + start * frame->linestep[0] * 4, frame->linestep[0] * 4,
+	                                            width, height );
+	                        } else {
+	                                convert_NV12_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        }
 	                        break;
 	                case PIXFMT_QCOM_NV12_TILED:
-	                        convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
+	                        convert_QCOM_NV12_TILED_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
 	                        break;
 	                case PIXFMT_YUV420P10LE:
-	                        convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] );
+	                        convert_420P10b_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0] );
 	                        break;
 	                case PIXFMT_P010:
-	                        convert_P010_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+	                        convert_P010_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 	                        break;
 	                }
 			break;
@@ -1275,25 +1359,25 @@ static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[],
 	case AV_IMAGE_RGBX_32:
 			switch( pixfmt ) {
 			case PIXFMT_YUV420P:
-				convert_420P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
+				convert_420P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0], frame->deinterlace);
 			break;
 		case PIXFMT_YUV422P:
-			convert_422P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+			convert_422P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 			break;
 		case PIXFMT_YUV444P:
-			convert_444P_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+			convert_444P_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 			break;
 		case PIXFMT_NV12:
-			convert_NV12_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+			convert_NV12_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 			break;
 			case PIXFMT_QCOM_NV12_TILED:
-				convert_QCOM_NV12_TILED_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
+				convert_QCOM_NV12_TILED_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, total_height, frame->data[0], frame->linestep[0]);
 				break;
 			case PIXFMT_YUV420P10LE:
-				convert_420P10b_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+				convert_420P10b_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 				break;
 			case PIXFMT_P010:
-				convert_P010_to_RGB( frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
+				convert_P010_to_RGB( coeffs, frame->colorspace, src_data, src_linesize, width, height, start, frame->data[0], frame->linestep[0]);
 				break;
 			}
 			break;

@@ -31,7 +31,6 @@ typedef enum sfdec_type {
 	SFDEC_TYPE_UNKNOWN,
 	SFDEC_TYPE_OMXCODEC,
 	SFDEC_TYPE_MEDIACODEC,
-	DEC_TYPE_MEDIACODEC_AUDIO
 } sfdec_type_t;
 
 typedef enum sfdec_codec_type {
@@ -89,7 +88,8 @@ sfdec_t*	sfdec_new(sfdec_type_t type,
 		    int64_t duration_us, int input_size,
 		    void *surface_handle,
 		    void *extradata, size_t extradata_size,
-		    int *pts_reorder, const char* codec_name, int video_frame_rate_den, int video_frame_rate_num);
+		    int *pts_reorder, const char* codec_name, int video_frame_rate_den, int video_frame_rate_num,
+		    int color_primaries, int color_trc, int color_space, int color_range);
 
 void		sfdec_delete(sfdec_t *sfdec);
 int		sfdec_start(sfdec_t *);

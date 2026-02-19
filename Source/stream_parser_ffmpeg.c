@@ -430,8 +430,12 @@ serprintf("FF: parse H264 SPS\n");
 				video->aspect_n    = codecpar->sample_aspect_ratio.num;
 				video->aspect_d	   = codecpar->sample_aspect_ratio.den;
 				video->bytesPerSec = codecpar->bit_rate / 8;
-				
-				
+
+				video->color_primaries = codecpar->color_primaries;
+				video->color_trc       = codecpar->color_trc;
+				video->color_space     = codecpar->color_space;
+				video->color_range     = codecpar->color_range;
+
 				switch( video->format ) {
 				case VIDEO_FORMAT_MPEG:
 					video->reorder_pts   = 0;

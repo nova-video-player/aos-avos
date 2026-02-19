@@ -27,7 +27,7 @@
 #include "sfdec_common.h"
 
 typedef struct dec_audio_mediacodec sfdec_priv_t;
-#include "sfdec_priv.h"
+#include "dec_audio_priv.h"
 
 #define DBG if (0)
 
@@ -89,13 +89,10 @@ static int init_renderer(sfdec_priv_t *sfdec)
 }
 
 static sfdec_priv_t *dec_audio_init(sfdec_codec_t codec,
-            sfdec_flags_t flags,
-            int *width, int *height, int rotation,
             int64_t duration_us, int input_size,
-            void *surface_handle,
             void *extradata, size_t extradata_size,
-            int *pts_reorder, int samplesPerSec, int channels, int bitrate,
-            int64_t codec_delay, int64_t seek_preroll, const char *codec_name, int _video_frame_rate_den, int _video_frame_rate_num)
+            int samplesPerSec, int channels,
+            int64_t codec_delay, int64_t seek_preroll)
 {
     media_status_t err;
     const char *mime_type;
@@ -125,7 +122,6 @@ static sfdec_priv_t *dec_audio_init(sfdec_codec_t codec,
         AMediaFormat_setInt32(sfdec->mFormat, "max-input-size", input_size);
     AMediaFormat_setInt32(sfdec->mFormat, "sample-rate", samplesPerSec);
     AMediaFormat_setInt32(sfdec->mFormat, "channel-count", channels);
-    //AMediaFormat_setInt32(sfdec->mFormat, "bitrate", bitrate);
 
    if ( extradata ) {
     AMediaFormat_setBuffer(sfdec->mFormat, "csd-0", extradata, extradata_size);
@@ -332,7 +328,7 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
     return err == AMEDIA_OK ? 0 : -1;
 }
 
-sfdec_itf_t dec_audio_mediacodec = {
+dec_audio_itf_t dec_audio_mediacodec = {
     "MediaCodec",
     dec_audio_init,
     dec_audio_destroy,

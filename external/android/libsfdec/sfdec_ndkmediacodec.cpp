@@ -120,14 +120,58 @@ static int init_renderer(sfdec_priv_t *sfdec)
 
 static int err_count;
 
+// Map FFmpeg AVCOL_TRC_* to Android COLOR_TRANSFER_*
+static int map_color_transfer(int color_trc)
+{
+    switch (color_trc) {
+    case 1:  /* AVCOL_TRC_BT709 */        return 3; /* COLOR_TRANSFER_SDR_VIDEO */
+    case 6:  /* AVCOL_TRC_SMPTE170M */    return 3; /* COLOR_TRANSFER_SDR_VIDEO */
+    case 7:  /* AVCOL_TRC_SMPTE240M */    return 3; /* COLOR_TRANSFER_SDR_VIDEO */
+    case 13: /* AVCOL_TRC_IEC61966_2_1 */ return 3; /* COLOR_TRANSFER_SDR_VIDEO (sRGB ~ BT.709) */
+    case 16: /* AVCOL_TRC_SMPTE2084 */    return 6; /* COLOR_TRANSFER_ST2084 (PQ/HDR10) */
+    case 18: /* AVCOL_TRC_ARIB_STD_B67 */ return 7; /* COLOR_TRANSFER_HLG */
+    default: return 0;
+    }
+}
+
+// Map FFmpeg AVCOL_PRI_* to Android COLOR_STANDARD_*
+static int map_color_standard(int color_primaries, int color_space)
+{
+    // Use primaries as primary signal, fall back to matrix
+    if (color_primaries == 9 /* AVCOL_PRI_BT2020 */ ||
+        color_space == 9 /* AVCOL_SPC_BT2020_NCL */ ||
+        color_space == 10 /* AVCOL_SPC_BT2020_CL */)
+        return 6; /* COLOR_STANDARD_BT2020 */
+    if (color_primaries == 1 /* AVCOL_PRI_BT709 */ ||
+        color_space == 1 /* AVCOL_SPC_BT709 */)
+        return 1; /* COLOR_STANDARD_BT709 */
+    if (color_primaries == 6 /* AVCOL_PRI_SMPTE170M */ ||
+        color_primaries == 5 /* AVCOL_PRI_BT470BG */ ||
+        color_space == 6 /* AVCOL_SPC_SMPTE170M */ ||
+        color_space == 5 /* AVCOL_SPC_BT470BG */)
+        return 4; /* COLOR_STANDARD_BT601_NTSC / BT601_PAL */
+    return 0;
+}
+
+// Map FFmpeg AVCOL_RANGE_* to Android COLOR_RANGE_*
+static int map_color_range(int color_range)
+{
+    switch (color_range) {
+    case 2: /* AVCOL_RANGE_JPEG */ return 1; /* COLOR_RANGE_FULL */
+    case 1: /* AVCOL_RANGE_MPEG */ return 2; /* COLOR_RANGE_LIMITED */
+    default: return 0;
+    }
+}
+
 static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             sfdec_flags_t flags,
             int *width, int *height, int rotation,
             int64_t duration_us, int input_size,
             void *surface_handle,
             void *extradata, size_t extradata_size,
-            int *pts_reorder, int sampleSize, int channels, int bitrate,
-            int64_t codec_delay, int64_t seek_preroll, const char* codec_name, int video_frame_rate_den, int video_frame_rate_num)
+            int *pts_reorder,
+            int color_primaries, int color_trc, int color_space, int color_range,
+            const char* codec_name, int video_frame_rate_den, int video_frame_rate_num)
 {
     media_status_t err;
     const char *mime_type;
@@ -197,6 +241,25 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
 
     // Priority hint (0 = realtime priority)
     AMediaFormat_setInt32(sfdec->mFormat, "priority", 0);
+
+    // Set color metadata for HDR/color space signaling
+    {
+        int android_transfer = map_color_transfer(color_trc);
+        int android_standard = map_color_standard(color_primaries, color_space);
+        int android_range = map_color_range(color_range);
+        if (android_transfer) {
+            AMediaFormat_setInt32(sfdec->mFormat, "color-transfer", android_transfer);
+            LOG("color-transfer: %d (from trc %d)", android_transfer, color_trc);
+        }
+        if (android_standard) {
+            AMediaFormat_setInt32(sfdec->mFormat, "color-standard", android_standard);
+            LOG("color-standard: %d (from pri %d spc %d)", android_standard, color_primaries, color_space);
+        }
+        if (android_range) {
+            AMediaFormat_setInt32(sfdec->mFormat, "color-range", android_range);
+            LOG("color-range: %d (from range %d)", android_range, color_range);
+        }
+    }
 
     err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, sfdec->mNativeWindow, NULL, 0);
     CHECK_STATUS(err);

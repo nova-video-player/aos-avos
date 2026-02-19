@@ -472,14 +472,23 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             int64_t duration_us, int input_size,
             void *surface_handle,
             void *extradata, size_t extradata_size,
-            int *pts_reorder, int sampleSize, int channels, int bitrate,
-            int64_t codec_delay, int64_t seek_preroll, int _frame_rate_den, int _frame_rate_num)
+            int *pts_reorder,
+            int color_primaries, int color_trc, int color_space, int color_range,
+            const char* codec_name, int _frame_rate_den, int _frame_rate_num)
 {
     status_t err;
     sp<MetaData> meta;
     uint32_t omxFlags = 0;
     const char *mime_type;
     sfdec_priv_t *sfdec;
+
+    (void)color_primaries;
+    (void)color_trc;
+    (void)color_space;
+    (void)color_range;
+    (void)codec_name;
+    (void)_frame_rate_den;
+    (void)_frame_rate_num;
 
     if (dlhelper_oc_init())
         return NULL;

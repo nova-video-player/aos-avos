@@ -359,6 +359,7 @@ DBGCV2 serprintf("[   -   ]");
 
 		avos_frame->width           = vctx->width;
 		avos_frame->height          = vctx->height;
+		avos_frame->color_space     = vframe->colorspace;
 	if( dec->video->reorder_pts ) {
 		if (vframe->opaque != NULL)
 			avos_frame->time = (int64_t)(intptr_t)vframe->opaque;

@@ -19,7 +19,7 @@
 #include <dlfcn.h>
 
 typedef struct sfdec_priv_t sfdec_priv_t;
-#include "sfdec_priv.h"
+#include "dec_audio_priv.h"
 #include "dec_audio.h"
 
 #undef LOG
@@ -28,78 +28,77 @@ typedef struct sfdec_priv_t sfdec_priv_t;
     fflush(stdout); \
 } while (0)
 
-sfdec_t* dec_audio_new(	sfdec_codec_t codec,int64_t duration_us, int input_size,int samplesPerSec, int channels, int bitrate, void *extradata, size_t extradata_size, int64_t codec_delay, int64_t seek_preroll)
+struct dec_audio* dec_audio_new(	sfdec_codec_t codec,int64_t duration_us, int input_size,int samplesPerSec, int channels, int bitrate, void *extradata, size_t extradata_size, int64_t codec_delay, int64_t seek_preroll)
 {
-	sfdec_t *dec_audio;
+	struct dec_audio *dec;
 	void *itf = NULL;
 
 	dlerror();
 	itf = dlsym(RTLD_DEFAULT, "dec_audio_mediacodec");
-		
+
 	if (!itf) {
 		LOG("dec_audio_new failed: dlsym error: %s\n", dlerror());
 		return NULL;
 	}
-	dec_audio = calloc(1, sizeof(sfdec_t));
-	if (!dec_audio)
+	dec = calloc(1, sizeof(struct dec_audio));
+	if (!dec)
 		return NULL;
 
-	dec_audio->itf = (const sfdec_itf_t *) itf;
-	dec_audio->priv = dec_audio->itf->init(codec, 0,
-		    0,0,0,
-		    duration_us,input_size,
-		    NULL, extradata, extradata_size,
-		    0, samplesPerSec, channels, bitrate,
-		    codec_delay, seek_preroll, NULL, 0, 0);
-	if (!dec_audio->priv) {
-		free(dec_audio);
+	dec->itf = (const dec_audio_itf_t *) itf;
+	(void)bitrate;
+	dec->priv = dec->itf->init(codec, duration_us, input_size,
+		    extradata, extradata_size,
+		    samplesPerSec, channels,
+		    codec_delay, seek_preroll);
+	if (!dec->priv) {
+		free(dec);
 		return NULL;
 	}
-	return dec_audio;
+	return dec;
 }
 
-void dec_audio_delete(sfdec_t *dec_audio)
+void dec_audio_delete(struct dec_audio *dec)
 {
-	dec_audio->itf->destroy(dec_audio->priv);
-	free(dec_audio);
+	dec->itf->destroy(dec->priv);
+	free(dec);
 }
 
-int dec_audio_start(sfdec_t *dec_audio)
+int dec_audio_start(struct dec_audio *dec)
 {
-	return dec_audio->itf->start(dec_audio->priv);
+	return dec->itf->start(dec->priv);
 }
 
-int dec_audio_stop(sfdec_t *dec_audio)
+int dec_audio_stop(struct dec_audio *dec)
 {
-	return dec_audio->itf->stop(dec_audio->priv);
+	return dec->itf->stop(dec->priv);
 }
 
-ssize_t dec_audio_send_input(sfdec_t *dec_audio, void *data, size_t size, int64_t time_us, int is_sync_frame, int wait)
+ssize_t dec_audio_send_input(struct dec_audio *dec, void *data, size_t size, int64_t time_us, int is_sync_frame, int wait)
 {
-	return dec_audio->itf->send_input(dec_audio->priv, data, size, time_us, is_sync_frame, wait);
+	return dec->itf->send_input(dec->priv, data, size, time_us, is_sync_frame, wait);
 }
 
-int dec_audio_flush(sfdec_t *dec_audio)
+int dec_audio_flush(struct dec_audio *dec)
 {
-	return dec_audio->itf->flush(dec_audio->priv);
+	return dec->itf->flush(dec->priv);
 }
 
-int dec_audio_stop_input(sfdec_t *dec_audio)
+int dec_audio_stop_input(struct dec_audio *dec)
 {
-	return dec_audio->itf->stop_input(dec_audio->priv);
+	return dec->itf->stop_input(dec->priv);
 }
 
-int dec_audio_read(sfdec_t *dec_audio, int64_t seek, sfdec_read_out_t *read_out)
+int dec_audio_read(struct dec_audio *dec, int64_t seek, sfdec_read_out_t *read_out)
 {
-	return dec_audio->itf->read(dec_audio->priv, seek, read_out);
+	return dec->itf->read(dec->priv, seek, read_out);
 }
 
-int dec_audio_buf_render(sfdec_t *dec_audio, sfbuf_t *sfbuf, int render)
+int dec_audio_buf_render(struct dec_audio *dec, sfbuf_t *sfbuf, int render)
 {
-	return dec_audio->itf->buf_render(dec_audio->priv, sfbuf, render, 1, 0);
+	return dec->itf->buf_render(dec->priv, sfbuf, render, 1, 0);
 }
 
-int dec_audio_buf_release(sfdec_t *dec_audio, sfbuf_t *sfbuf)
+int dec_audio_buf_release(struct dec_audio *dec, sfbuf_t *sfbuf)
 {
-	return dec_audio->itf->buf_release(dec_audio->priv, sfbuf);
+	return dec->itf->buf_release(dec->priv, sfbuf);
 }

@@ -658,6 +658,12 @@ typedef struct _video_props {
     // for dolby vision
     int dv_profile;
 
+    // for color metadata (values from FFmpeg AVCOL_* enums)
+    int color_primaries;    // AVCOL_PRI_* (e.g. BT709=1, BT2020=9)
+    int color_trc;          // AVCOL_TRC_* (e.g. BT709=1, SMPTE2084/PQ=16, HLG=18)
+    int color_space;        // AVCOL_SPC_* (e.g. BT709=1, BT2020_NCL=9)
+    int color_range;        // AVCOL_RANGE_* (MPEG=1/limited, JPEG=2/full)
+
     int frame_rate_den;
     int frame_rate_num;
 } VIDEO_PROPERTIES;
@@ -823,6 +829,8 @@ typedef struct vfr_str {
 	int 		ofs_y;  
 
 	int 		decode_time;
+
+	int		color_space;	// AVCOL_SPC_* for SW YUV->RGB conversion
 
 	void		(*destroy)(struct vfr_str *f);
 

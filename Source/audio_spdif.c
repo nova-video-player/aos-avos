@@ -139,6 +139,25 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 	if (!size)
 		return 0;
 
+	// AC3 recoding can intentionally run without parser (encoder already emits full syncframes).
+	// In passthrough mode 2, the sink expects raw codec frames (ENCODING_AC3/E_AC3/DTS),
+	// not IEC61937-wrapped bursts. Bypass mux wrapping when parser is absent.
+	// Guard on AC3 format since fakeSize assumes 1536 samples/frame (AC3-specific).
+	// Note: if future recoding paths emit non-AC3 compressed frames in mode 2 with
+	// !aparser, this branch must be extended with codec-specific timing instead of
+	// falling back to IEC wrapping.
+	if (passthrough_on == 2 && !aparser && libavos_get_ac3_recoding_enabled() && a->format == WAVE_FORMAT_AC3) {
+		frame->data = data;
+		frame->size = size;
+		frame->error = 0;
+		frame->format = a->format;
+		frame->fakeSize = 1536 * a->bytesPerFrame;
+		*decoded = size;
+		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d\n",
+		                 frame->format, frame->size, frame->fakeSize);
+		return 0;
+	}
+
 DBGCA2 serprintf("spdif_encapsulate %5d", size );
 	if( aparser ) {
 		unsigned char *out = NULL;

@@ -32,7 +32,9 @@ This document describes the passthrough detection and routing logic across Java 
 
 - `hdmiAudioEncodingFlag`: derived from HDMI device encodings
 - `spdifAudioEncodingFlag`: derived from SPDIF device encodings
-- `isIecEncapsulationCapable`: true if **HDMI or SPDIF** advertises `ENCODING_IEC61937`
+- `isIecEncapsulationCapable`: route-aware IEC capability:
+  - if HDMI/ARC/eARC is present: derived from HDMI flags only
+  - else: derived from SPDIF flags (with SPDIF missing-encodings fallback)
 - `isDirectPcmMultichannelCapable`: probed via `AudioManager.getDirectPlaybackSupport()` or `isDirectPlaybackSupported()`
 
 **Fallback for SPDIF (Sony/Bravia case)**
@@ -42,7 +44,7 @@ If SPDIF device is present but `AudioDeviceInfo.getEncodings()` is empty:
 - **If “Force audio passthrough” is enabled**: advertise **all codecs** (same as HDMI bitmask) so passthrough can be forced.
 - **If “Force audio passthrough” is disabled**: do not inject codec flags.
 
-IEC capability is still forced to `true` when SPDIF is present and encodings are missing so that mode 1 can be selected, but codec flags are only broadened when force passthrough is explicitly enabled.
+IEC capability is only forced to `true` for SPDIF-missing-encodings when **no HDMI route is active**. This avoids leaking SPDIF fallback into HDMI ARC/eARC routing.
 
 **Observed TV behavior**
 
@@ -65,7 +67,12 @@ From `PlayerActivity.onStart()`:
 - `LibAvos.setMaxPcmChannels(getEffectiveMaxPcmChannels())`
 - `LibAvos.setPcmChannelMasks(getHdmiChannelMasks())`
 - `LibAvos.setPassthrough(force_audio_passthrough_multiple)`
-- `LibAvos.setHdmiSupportedAudioCodecs(flags)`
+- `LibAvos.setHdmiSupportedAudioCodecs(getNativeAudioCodecsFlag())`
+
+`getNativeAudioCodecsFlag()`:
+
+- if HDMI/ARC/eARC is present: send **HDMI-only** flags
+- otherwise: send SPDIF flags
 
 `force_audio_passthrough_multiple` mapping:
 
@@ -90,7 +97,7 @@ From `PlayerActivity.onStart()`:
 Native determines IEC support by inspecting codec flags set by Java:
 
 - `get_hdmi_supports_iec()` checks flag `ENCODING_IEC61937`
-- This includes **SPDIF** once Java sets `spdifAudioEncodingFlag`
+- With current Java routing, native receives route-scoped flags (HDMI-only when HDMI is active), so SPDIF fallback cannot force IEC on ARC/eARC sessions.
 
 ### AudioTrack configuration
 
@@ -110,6 +117,11 @@ Native determines IEC support by inspecting codec flags set by Java:
 - If IEC supported: use mode 1
 - If IEC unsupported: switch to mode 2
 
+`audio_spdif.c` mode-2 handling for recoding:
+
+- In mode 2 with parser output: send raw codec frames (`ENCODING_AC3` path) and keep timing via `fakeSize`
+- In mode 2 with **no parser** (AC3 recoding path): bypass IEC wrapping and send raw AC3 syncframes directly (`PT_MODE2_NOPARSER` path)
+
 ## State Diagram
 
 ```
@@ -121,21 +133,21 @@ Native determines IEC support by inspecting codec flags set by Java:
                                v
                     +----------------------+
                     | Compute Capabilities |
-                    | HDMI + SPDIF flags   |
+                    | HDMI / SPDIF flags   |
                     +----------+-----------+
                                |
                                v
                     +----------------------+
-                    |  IEC Capable?        |
-                    | (HDMI|SPDIF IEC)     |
+                    |  Active route?       |
+                    | HDMI present ?       |
                     +----+-----------+-----+
                          |           |
                  Yes     |           |   No
                          |           |
                          v           v
-                +----------------+  +------------------------+
-                | Mode 1 allowed |  | Mode 1 disabled         |
-                | IEC passthrough|  | Use Mode 2 or PCM       |
+                +-----------------------+  +-------------------+
+                | IEC from HDMI flags   |  | IEC from SPDIF    |
+                | (no SPDIF fallback)   |  | (+fallback if none)|
                 +------+---------+  +-----------+------------+
                        |                        |
                        v                        v
@@ -147,7 +159,7 @@ Native determines IEC support by inspecting codec flags set by Java:
 
 ## Edge Cases
 
-- **SPDIF reported without encodings**: fallback enables IEC so mode 1 can work.
+- **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
 

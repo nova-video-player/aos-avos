@@ -21,7 +21,7 @@ ANDROID_DIR := $(EXTERNAL_DIR)/android
 LDFLAGS = -Wl,-z,max-page-size=16384
 include $(ANDROID_DIR)/include/ndkbuild.mk
 
-LIBAV_DIR := $(AVOS_DIR)/../ffmpeg-android-builder
+LIBAV_DIR := $(AVOS_DIR)/../prebuilt/ffmpeg
 ifeq ($(LIBAV_CONFIG),)
 	LIBAV_CONFIG := base
 endif

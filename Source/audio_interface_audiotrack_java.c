@@ -71,6 +71,7 @@ struct audio_ctx {
 	int channel_count;
 	uint32_t latency;
 	int passthrough;
+	int applied_passthrough;
 	JNIEnv * env;
 	int willDetach;
 	jobject obj;
@@ -384,6 +385,7 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->startup_hold_active = 1;
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
+	at->applied_passthrough = -1;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -545,7 +547,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int prev_rate = at->rate;
 	int prev_channels = at->channel_count;
 	int prev_format = at->format;
-	int prev_passthrough = at->passthrough;
+	int prev_applied_passthrough = at->applied_passthrough;
 	size_t prev_frame_size = at->frame_size;
 
 	float as = get_effective_audio_speed();
@@ -555,17 +557,22 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	// For AC3 recoding, force format to WAVE_FORMAT_AC3 regardless of input format
 	// This ensures AudioTrack is created with AC3 format (2000) instead of original format (e.g., EAC3 18247)
 	int ac3_recoding_enabled = libavos_get_ac3_recoding_enabled();
+	int requested_passthrough = at->passthrough;
 	if(ac3_recoding_enabled) {
 		format = WAVE_FORMAT_AC3;
 		// Respect the current passthrough mode selected in native (may be 1 or 2)
-		int pt_mode = spdif_is_passthrough_on();
-		if (pt_mode != 1 && pt_mode != 2) {
-			pt_mode = 1;  // default to IEC if unset
+		requested_passthrough = spdif_is_passthrough_on();
+		if (requested_passthrough != 1 && requested_passthrough != 2) {
+			requested_passthrough = 1;  // default to IEC if unset
 		}
-		at->passthrough = pt_mode;
+		// If IEC is unavailable on the current route, force codec-specific passthrough.
+		if (requested_passthrough == 1 && !get_hdmi_supports_iec()) {
+			requested_passthrough = 2;
+		}
 		channels = 2;  // IEC/codec-specific container is stereo for compressed payload
-		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d", pt_mode, channels );
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d", requested_passthrough, channels );
 	}
+	at->passthrough = requested_passthrough;
 
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
 
@@ -695,7 +702,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		prev_rate == rate &&
 		prev_channels == output_channels &&
 		prev_format == format &&
-		prev_passthrough == at->passthrough &&
+		prev_applied_passthrough == at->passthrough &&
 		prev_frame_size == frame_size) {
 		same_config = 1;
 	}
@@ -763,6 +770,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 		at->obj = NULL;
 		at->init = 0;
+		at->applied_passthrough = -1;
 		reinit = 1;
 	}
 
@@ -1030,6 +1038,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	audiotrack_update_latency(at, at->env);
 
 	at->init = 1;
+	at->applied_passthrough = at->passthrough;
 	// Initialize timestamp tracking for dynamic latency calculation
 	at->i_samples_written = 0;
 	at->last_timestamp_ns = 0;
@@ -1042,9 +1051,6 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
-	// Store previous passthrough mode to detect mode changes
-	int old_passthrough = at->passthrough;
-
 	at->passthrough = passthrough;
 
 	// DO NOT call audiotrack_set_output_params here during format changes!

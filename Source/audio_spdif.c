@@ -153,8 +153,8 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		frame->format = a->format;
 		frame->fakeSize = 1536 * a->bytesPerFrame;
 		*decoded = size;
-		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d\n",
-		                 frame->format, frame->size, frame->fakeSize);
+		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d, bpf=%d, rate=%d, recode=1\n",
+		                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
 		return 0;
 	}
 
@@ -195,9 +195,8 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			// time = fakeSize / bytesPerSec = (1536 * bytesPerFrame) / (samplesPerSec * bytesPerFrame)
 			//      = 1536 / samplesPerSec is correct for any sample rate.
 			frame->fakeSize = 1536 * a->bytesPerFrame;
-
-			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d\n",
-			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame);
+			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d, rate=%d, parser=1\n",
+			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
 		} else {
 			// Mode 1: Manual IEC61937 wrapping via FFmpeg SPDIF muxer
 			int dummy;
@@ -209,7 +208,8 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			    a->format == WAVE_FORMAT_E_AC3_JOC) {
 				frame->fakeSize = 1536 * a->bytesPerFrame;
 			}
-			DBGCA2 serprintf("Mode 1: IEC wrapped, size=%d, fakeSize=%d\n", frame->size, frame->fakeSize);
+			DBGCA2 serprintf("Mode 1: IEC wrapped, size=%d, fakeSize=%d format=%04X bpf=%d rate=%d\n",
+				frame->size, frame->fakeSize, a->format, a->bytesPerFrame, a->samplesPerSec);
 		}
 		return 0;
 	}
@@ -403,11 +403,12 @@ DBGS serprintf("audio format is %d, %d channels, %dkHz, %d bits, %d B/s, %d B/f\
 
 	int codecid = audio->format;
 
-	if ( !aparser )
-	        aparser = av_parser_init(wave2libav_codecid(codecid));
-        if ( !aparser ) {
-DBGS            serprintf("cannot open parser for %04X\r\n", codecid );
-        }
+	if (!aparser && !libavos_get_ac3_recoding_enabled()) {
+		aparser = av_parser_init(wave2libav_codecid(codecid));
+		if (!aparser) {
+DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
+		}
+	}
 
 	// Mode 1 (IEC61937 wrapping): Apply IEC-specific rate/channel/bit-depth adjustments
 	// Mode 2 (raw data to Android): Must match AudioTrack configuration for timing sync

@@ -601,6 +601,12 @@ DBGS serprintf("~");
 serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				s->audio->sourceSamples = s->audio->samplesPerSec;
 				s->audio->samplesPerSec = audio_frame.samplesPerSec;
+				if( s->audio->channels && s->audio->bitsPerSample ) {
+					s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
+				}
+				if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
+					s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
+				}
 				stream_audio_samplerate_changed( s );		
 			}
 		
@@ -832,6 +838,9 @@ serprintf(" ae! ");
 						}
 						if( s->audio->channels && s->audio->bitsPerSample ) {
 							s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
+						}
+						if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
+							s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
 						}
 					}
 					// For AC3 recoding: s->audio keeps the original source format/channels/bits
@@ -1190,7 +1199,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 #endif
 							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / bpf;
-							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
+							// Use actual source sample rate for sync when passthrough is inactive.
+							// TrueHD passthrough forces 192kHz container rate, but actual content is 48k/96k.
+							// When decoding to PCM, use decoded frame rate if available (most reliable),
+							// else fallback to the currently configured rate.
+							int sync_rate = s->audio->samplesPerSec;
+							if (!passthrough_active && audio_frame.samplesPerSec > 0) {
+								sync_rate = audio_frame.samplesPerSec;
+							}
+							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)sync_rate;
 							int prev_audio_time = s->audio_time;
 
 							// Check if atempo filter is active - output samples are already in TS domain (physical time)
@@ -1209,8 +1226,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
 									s->audio_ref_time, delta);
 							}
-							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d\n",
-								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta);
+							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d sync_rate=%d configured_rate=%d\n",
+								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta, sync_rate, s->audio->samplesPerSec);
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}

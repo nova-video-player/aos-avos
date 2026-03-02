@@ -358,8 +358,17 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			frame->width = MAX(1920, right); // safer but breaks AR
 			frame->height = MAX(1080, bottom); // safer but breaks AR
 		} else if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX) {
-			frame->width = MAX(720, right); // safer but breaks AR
-			frame->height = MAX(576, bottom); // safer but breaks AR
+			int base_width = 720;
+			int base_height = 576;
+			STREAM *stream = (STREAM *)self->base.ctx;
+			if (stream && stream->video) {
+				if (stream->video->width > 0)
+					base_width = stream->video->width;
+				if (stream->video->height > 0)
+					base_height = stream->video->height;
+			}
+			frame->width = MAX(base_width, right);
+			frame->height = MAX(base_height, bottom);
 		}
 		frame->colorspace = AV_IMAGE_BGRA_32;  // Set the colorspace to BGRA
 		DBGS serprintf("codec_ffsub: decoded sub width=%d, height=%d, size=%d, window=%d,%d,%d,%d\n", frame->width, frame->height, frame->size, frame->window.x, frame->window.y, frame->window.width, frame->window.height);

@@ -363,19 +363,19 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 							uint32_t before = palette[c];
 							uint32_t alpha = palette[c] & 0xFF000000;
 
-						if (alpha == 0 || counts[c] == 0)
-							continue;
+							if (alpha == 0 || counts[c] == 0)
+								continue;
 
 							if (c == dominant_index) {
 								palette[c] = alpha;
 								DBGS serprintf("codec_ffsub: dvd gfx palette[%d] 0x%08X -> 0x%08X (dominant index -> black)\n",
 										c, before, palette[c]);
-						} else {
-							palette[c] = alpha | 0x00FFFFFF;
-							DBGS serprintf("codec_ffsub: dvd gfx palette[%d] 0x%08X -> 0x%08X (non-dominant visible index -> white)\n",
-									c, before, palette[c]);
+							} else {
+								palette[c] = alpha | 0x00FFFFFF;
+								DBGS serprintf("codec_ffsub: dvd gfx palette[%d] 0x%08X -> 0x%08X (non-dominant visible index -> white)\n",
+										c, before, palette[c]);
+							}
 						}
-					}
 				}
 			}
 			// Set up destination data pointers and line sizes

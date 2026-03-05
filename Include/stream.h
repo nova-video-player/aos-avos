@@ -474,6 +474,7 @@ typedef struct STREAM {
 	int 		audio_time;
 	int 		audio_ref_time;
 	int 		audio_samples;
+	int64_t		audio_time_remainder_us;
 	UINT64		audio_pos;
 	
 	int 		video_time;

@@ -254,6 +254,7 @@ void stream_audio_flush( STREAM *s )
 {
 	s->audio_buffer_size = 0;
 	s->audio_end = 0;
+	s->audio_time_remainder_us = 0;
 	
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
@@ -604,6 +605,10 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				if( s->audio->channels && s->audio->bitsPerSample ) {
 					s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
 				}
+				if( s->audio->bytesPerFrame == 0 ) {
+					int floor_channels = s->audio->channels ? s->audio->channels : 2;
+					s->audio->bytesPerFrame = floor_channels * 2; // assume 16-bit PCM
+				}
 				if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
 					s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
 				}
@@ -839,6 +844,10 @@ serprintf(" ae! ");
 						if( s->audio->channels && s->audio->bitsPerSample ) {
 							s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
 						}
+						if( s->audio->bytesPerFrame == 0 ) {
+							int floor_channels = s->audio->channels ? s->audio->channels : 2;
+							s->audio->bytesPerFrame = floor_channels * 2; // assume 16-bit PCM
+						}
 						if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
 							s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
 						}
@@ -1020,25 +1029,23 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// Prepare per-chunk audio time accounting (updated after write).
 				// We compute the duration once here, but only advance audio_time once
 				// we actually write to the sink, so output holds don't advance the clock.
-				int time_bytes = 0;
-				int time_den = 0;
-				int bytes_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits) / 8;
+				int bits_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits);
+				if (bits_per_sample == 0) bits_per_sample = 16;
+				int bytes_per_sample = bits_per_sample / 8;
 				int channels = audio_frame.channels ? audio_frame.channels : original_channels;
+				if (channels == 0) channels = 2;
 				int sample_rate = audio_frame.samplesPerSec ? audio_frame.samplesPerSec : original_rate;
-				int64_t output_time_ms = -1;
-				if( s->sync_mode != STREAM_SYNC_SAMPLES && !s->audio->vbr && audio_frame.size > 0 &&
-					bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
-					// For AC3 recoding, use fakeSize (PCM-equivalent) to compute timing.
-					int effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
-						audio_frame.fakeSize : audio_frame.size;
-					int output_samples = effective_size / (bytes_per_sample * channels);
-					output_time_ms = (int64_t)output_samples * 1000 / sample_rate;
-					time_bytes = effective_size;
-					time_den = audio_frame.size;
-				}
+				if (sample_rate == 0) sample_rate = 48000;
+
+				// For A/V sync scaling, we need to know the duration of the data we just decoded.
+				// For AC3 recoding, use fakeSize (PCM-equivalent) to compute timing.
+				int64_t effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
+					audio_frame.fakeSize : audio_frame.size;
+				int64_t bytes_per_sec = (int64_t)sample_rate * channels * bytes_per_sample;
 
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
+				int total_size = audio_frame.size;
 				while( size > 0 ) {
 					if( _abort( s ) ) {
 						return;
@@ -1140,19 +1147,35 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					// Update audio time based on actual written output (not decoded bytes).
 					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
-						if( output_time_ms >= 0 && time_den > 0 ) {
-							int64_t chunk_time_ms = (output_time_ms * size_written) / time_den;
-							if( use_atempo ) {
-								_add_audio_time( s, (int)chunk_time_ms );
-							} else {
-								_add_audio_time( s, RST_TO_TS_DELTA((int)chunk_time_ms, int) );
-							}
-						} else if( s->audio->bytesPerSec ) {
-							int chunk_time_ms = (int)((int64_t)size_written * 1000 / s->audio->bytesPerSec);
-							if( use_atempo ) {
-								_add_audio_time( s, chunk_time_ms );
-							} else {
-								_add_audio_time( s, RST_TO_TS_DELTA(chunk_time_ms, int) );
+						int64_t chunk_time_us = 0;
+						// Byte-ratio timing is valid for PCM-like fixed-rate outputs.
+						// Keep VBR and incomplete-metadata paths on conservative fallback timing.
+						int use_rational_timing = (!s->audio->vbr &&
+							audio_frame.size > 0 &&
+							bytes_per_sample > 0 &&
+							channels > 0 &&
+							sample_rate > 0 &&
+							bytes_per_sec > 0 &&
+							total_size > 0);
+
+						if( use_rational_timing ) {
+							chunk_time_us = ((int64_t)size_written * effective_size * 1000000) /
+								((int64_t)total_size * bytes_per_sec);
+						} else if( s->audio->bytesPerSec > 0 ) {
+							chunk_time_us = ((int64_t)size_written * 1000000) / s->audio->bytesPerSec;
+						}
+
+						if( chunk_time_us > 0 ) {
+							s->audio_time_remainder_us += chunk_time_us;
+							int add_ms = (int)(s->audio_time_remainder_us / 1000);
+							s->audio_time_remainder_us %= 1000;
+
+							if( add_ms > 0 ) {
+								if( use_atempo ) {
+									_add_audio_time( s, add_ms );
+								} else {
+									_add_audio_time( s, RST_TO_TS_DELTA(add_ms, int) );
+								}
 							}
 						}
 					}

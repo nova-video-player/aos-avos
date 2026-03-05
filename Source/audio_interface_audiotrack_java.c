@@ -1346,8 +1346,7 @@ DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 			AUD_RETURN("fallback(throttle)", at->last_fallback_delay_ms);
 		}
 		at->delay_valid = 0;
-		AUD_RET0("throttle_none");
-		AUD_RETURN("throttle_none", 0);
+		AUD_RETURN("throttle_none", (at->startup_hold_active && at->latency > 0) ? at->latency : 0);
 	}
 
 	// IMPORTANT: Get the JNIEnv for the CURRENT thread, not the cached one
@@ -1465,7 +1464,8 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 		// No trusted delay; return fallback for heard-time only.
 		at->delay_valid = 0;
 		src = "fallback(ts_false)";
-		ret = (fallback_delay > 0) ? fallback_delay : 0;
+		ret = (at->startup_hold_active && startup_fallback > 0) ? startup_fallback :
+		      (fallback_delay > 0) ? fallback_delay : 0;
 		goto done;
 	}
 
@@ -1509,7 +1509,8 @@ DBG2		LOG("Non-positive timestamp values, timing unavailable (framePosition=%lld
 		// No trusted delay; return fallback for heard-time only.
 		at->delay_valid = 0;
 		src = "fallback(bad_ts)";
-		ret = (fallback_delay > 0) ? fallback_delay : 0;
+		ret = (at->startup_hold_active && startup_fallback > 0) ? startup_fallback :
+		      (fallback_delay > 0) ? fallback_delay : 0;
 		goto done;
 	}
 
@@ -1735,6 +1736,11 @@ static int audiotrack_get_delay_valid_streak(audio_ctx_t *at)
 {
 	// Sabrina can report late/unstable timestamps; expose streak to gate rebases.
 	return at ? at->ts_success_streak : 0;
+}
+
+static int audiotrack_is_startup_hold_active(audio_ctx_t *at)
+{
+	return at ? at->startup_hold_active : 0;
 }
 
 
@@ -2007,6 +2013,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.change_audio_speed = audiotrack_change_audio_speed,
 	.delay_valid = audiotrack_is_delay_valid,
 	.delay_valid_streak = audiotrack_get_delay_valid_streak,
+	.is_startup_hold_active = audiotrack_is_startup_hold_active,
 };
 
 #ifdef DEBUG_MSG

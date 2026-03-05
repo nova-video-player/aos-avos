@@ -125,6 +125,7 @@ static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
 			int static_latency = audio_interface_get_latency(s->audio_ctx);
 			if (static_latency > 0) {
 				delay = static_latency;
+				anchor_valid = 1;
 			}
 		}
 	}
@@ -157,8 +158,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 	int suppress_static_heard_delay = 0;
-	int anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
-		_get_anchor_delay_ms(s, NULL, allow_static);
+	int anchor_delay;
+	
+	// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
+	if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
+		anchor_delay = _get_anchor_delay_ms(s, NULL, allow_static);
+	} else {
+		anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
+			_get_anchor_delay_ms(s, NULL, allow_static);
+	}
 #ifdef CONFIG_ANDROID
 	// Late-audio start guard for static delay: avoid subtracting static latency
 	// when audio starts significantly after video at the very beginning.

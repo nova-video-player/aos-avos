@@ -226,6 +226,14 @@ int audio_interface_get_delay_valid_streak(audio_ctx_t *ctx)
 	return impl->delay_valid_streak(ctx);
 }
 
+int audio_interface_is_startup_hold_active(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->is_startup_hold_active) {
+		return 0;
+	}
+	return impl->is_startup_hold_active(ctx);
+}
+
 void audio_interface_flush_output(audio_ctx_t *ctx) 
 {
 	impl->flush_output(ctx);

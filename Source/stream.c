@@ -44,6 +44,7 @@ int get_android_sync(void);
 #define DBGP DBG_IF(Debug[DBG_PARSER])
 
 #define DBG DBG_IF(Debug[DBG_STREAM])
+#define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
@@ -600,6 +601,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		using_atempo = 0;
 	}
 	audio_interface_set_using_atempo( using_atempo );
+	DBG2 serprintf("stream:stream_set_av_speed gate req=%.3f speed_enabled=%d filter=%p using_atempo_pref=%d effective_using_atempo=%d current_speed=%.3f\n",
+		av_speed, audio_interface_is_audio_speed_enabled(), s->audio_filter_atempo,
+		audio_interface_is_using_atempo(), using_atempo, audio_interface_get_audio_speed());
 
 	int audio_latency_ms = -1;
 	if( s ) {

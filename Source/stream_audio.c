@@ -38,6 +38,7 @@ int get_android_sync(void);
 
 #define DBG DBG_IF(Debug[DBG_STREAM])
 #define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
+#define DBG3 DBG_IF(Debug[DBG_STREAM] > 2)
 #define ERR if( 1 )
 
 #ifdef CONFIG_STREAM
@@ -52,6 +53,9 @@ static int stream_audio_chunk = 4096;
 static int ac3_sink_configured = 0;  // Track if sink is configured for AC3 passthrough
 static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when AC3 recoding starts
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations
+static int startup_anchor_log_count = 0;  // Cap startup anchor diagnostics per playback
+static int startup_write_log_count = 0;   // Cap first-write diagnostics per playback
+static int atempo_gate_log_count = 0;     // Cap atempo runtime gating diagnostics per playback
 extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
@@ -680,8 +684,8 @@ serprintf(" ae! ");
 				original_rate = s->audio->samplesPerSec;
 				original_bits = s->audio->bitsPerSample;
 
-				DBG serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d active=%d recoding=%d\n",
-					audio_frame.format, audio_frame.size, passthrough, passthrough_active, ac3_recoding);
+					DBG3 serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d active=%d recoding=%d\n",
+						audio_frame.format, audio_frame.size, passthrough, passthrough_active, ac3_recoding);
 
 				// For AC3 recoding, always run filters on ALL decoded formats
 				// This provides consistent audio boost/night mode for all sources
@@ -694,14 +698,23 @@ serprintf(" ae! ");
 				// 2. User selected atempo (not AudioTrack PlaybackParams)
 				// 3. NOT in passthrough mode 1 or 2 (compressed audio to receiver)
 				use_atempo = (s->audio_filter_atempo != NULL);
-				if (!audio_interface_is_audio_speed_enabled()) {
+				int audio_speed_enabled = audio_interface_is_audio_speed_enabled();
+				int using_atempo_pref = audio_interface_is_using_atempo();
+				if (!audio_speed_enabled) {
 					use_atempo = 0;  // Audio speed feature disabled
 				}
-				if (!audio_interface_is_using_atempo()) {
+				if (!using_atempo_pref) {
 					use_atempo = 0;  // User chose AudioTrack-based speed
 				}
 				if (passthrough == 1 || passthrough == 2) {
 					use_atempo = 0;  // Passthrough mode active
+				}
+				if (atempo_gate_log_count < 10) {
+					DBG2 serprintf("stream_audio: atempo_gate[%d] filter=%p speed_enabled=%d using_atempo_pref=%d passthrough=%d frame_size=%d use=%d speed=%.3f\n",
+						atempo_gate_log_count, s->audio_filter_atempo, audio_speed_enabled,
+						using_atempo_pref, passthrough, audio_frame.size, use_atempo,
+						audio_interface_get_audio_speed());
+					atempo_gate_log_count++;
 				}
 
 				if (use_atempo && audio_frame.size > 0) {
@@ -767,8 +780,8 @@ serprintf(" ae! ");
 				// 4. JNI filter always runs
 				s->audio_filter_jni->filter( s->audio_filter_jni, &audio_frame );
 
-				DBG serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
-					audio_frame.format, audio_frame.size);
+					DBG3 serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
+						audio_frame.format, audio_frame.size);
 
 				// Check if filter changed the audio format or layout (e.g., PCM -> AC3 recoding)
 				int expected_format = sink_props ? sink_props->format : original_format;
@@ -1064,6 +1077,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 							s->audio_start_target_ts = s->audio_start_pts - anchor_delay;
 							if( s->audio_start_target_ts < 0 ) s->audio_start_target_ts = 0;
+							if (startup_anchor_log_count < 5) {
+								DBG2 serprintf("startup_anchor_target[%d]: pts=%d video=%d anchor=%d static=%d target=%d put_time=%d sync_mode=%d\n",
+									startup_anchor_log_count, s->audio_start_pts, s->video_time,
+									anchor_delay, static_latency, s->audio_start_target_ts,
+									s->put_time_mode, s->sync_mode);
+								startup_anchor_log_count++;
+							}
 						}
 						int diff = s->video_time - s->audio_start_target_ts;
 						if( diff < -150 ) {
@@ -1076,7 +1096,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
 
 					// no error, output PCM
-					DBG serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
+					DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
 					int can_write_retries = 0;
 					while( !s->audio_sink->can_write( s, audio_frame.size ) ) {
 						can_write_retries++;
@@ -1092,7 +1112,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( _abort( s ) ) {
 						return;
 					}
-					DBG serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
+					DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
 					if( s->audio_resume_pending ) {
 						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
@@ -1116,7 +1136,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
-					DBG serprintf("stream_audio: sink->write returned %d\n", size_written);
+					DBG3 serprintf("stream_audio: sink->write returned %d\n", size_written);
+					if (startup_write_log_count < 5) {
+						DBG2 serprintf("startup_write[%d]: before_time=%d video=%d fmt=%04X req=%d wrote=%d effective_size=%lld bytes_per_sec=%lld ref=%d start_pending=%d resume_pending=%d\n",
+							startup_write_log_count, s->audio_time, s->video_time, audio_frame.format,
+							audio_frame.size, size_written, (long long)effective_size, (long long)bytes_per_sec,
+							s->audio_ref_time, s->audio_start_pending, s->audio_resume_pending);
+						startup_write_log_count++;
+					}
 
 					if( _abort( s ) ) {
 						return;
@@ -1139,11 +1166,19 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								// Align heard audio to current video time at startup.
 								start_time = s->video_time + anchor_delay;
 							}
+							if (startup_anchor_log_count < 5) {
+								DBG2 serprintf("startup_anchor_commit[%d]: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d sync_mode=%d\n",
+									startup_anchor_log_count, s->audio_start_pts, s->video_time,
+									anchor_delay, static_latency, start_time,
+									s->put_time_mode, s->sync_mode);
+								startup_anchor_log_count++;
+							}
 						}
 						_set_audio_time( s, start_time );
 						s->audio_start_pending = 0;
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
-						DBG serprintf("audio_start_commit: audio_time=%d\n", s->audio_time);
+						DBG serprintf("audio_start_commit: audio_time=%d ref=%d samples=%d\n",
+							s->audio_time, s->audio_ref_time, s->audio_samples);
 					}
 					// Update audio time based on actual written output (not decoded bytes).
 					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
@@ -1291,6 +1326,9 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 
 	// Reset AC3 sink configuration flag for new playback session
 	ac3_sink_configured = 0;
+	startup_anchor_log_count = 0;
+	startup_write_log_count = 0;
+	atempo_gate_log_count = 0;
 	// Initialize with current format to prevent redundant reconfiguration on first audio thread loop iteration.
 	// The sink was already configured by start() before the audio thread began, so we use the current format
 	// to avoid a redundant set_passthrough call that would recreate the AudioTrack unnecessarily.

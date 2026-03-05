@@ -93,6 +93,7 @@ struct ctx {
 
 	int last_delay_ms;                  // Last reported delay (ms)
 	int last_speed_change_ms;           // Timestamp of last speed change (ms)
+	int delay_log_count;                // throttle noisy delay diagnostics
 };
 
 static int atempo_update_speed(struct ctx *ctx, float speed)
@@ -347,6 +348,7 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	ctx->channels = audio->channels;
 	ctx->sample_rate = audio->samplesPerSec;
 	ctx->current_speed = 1.0f;
+	ctx->delay_log_count = 0;
 
 	// Determine sample format
 	ctx->format = get_sample_format_from_bits(audio->bitsPerSample);
@@ -431,9 +433,10 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 				serprintf("atempo: failed to rebuild filter graph\n");
 				return -1;
 			}
-			ctx->last_speed_change_ms = 0;
-			ctx->last_delay_ms = -1;
-		} else {
+				ctx->last_speed_change_ms = 0;
+				ctx->last_delay_ms = -1;
+				ctx->delay_log_count = 0;
+			} else {
 			DBGA serprintf("atempo: speed changed %.3f -> %.3f (fifo=%d)\n",
 				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
 			if (atempo_update_speed(ctx, speed) < 0) {
@@ -442,9 +445,10 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 					return -1;
 				}
 			}
-			ctx->last_speed_change_ms = atime();
+				ctx->last_speed_change_ms = atime();
+				ctx->delay_log_count = 0;
+			}
 		}
-	}
 
 	int ret;
 	int bytes_per_sample = av_get_bytes_per_sample(ctx->format) * ctx->channels;
@@ -633,11 +637,19 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 		}
 	}
 
-	DBG serprintf("atempo: delay=%d ms (fifo_ms=%d, atempo_ms=%d, speed=%.2f)\n",
-		delay_ms,
-		fifo_ms,
-		atempo_internal_ms,
-		ctx->current_speed);
+	{
+		int emit_delay_log = 0;
+		if (Debug[DBG_AUD] > 2) {
+			emit_delay_log = 1;
+		} else if (Debug[DBG_AUD] > 1 && (ctx->delay_log_count % 100) == 0) {
+			emit_delay_log = 1;
+		}
+		if (emit_delay_log) {
+			serprintf("atempo: delay=%d ms (fifo_ms=%d, atempo_ms=%d, speed=%.2f)\n",
+				delay_ms, fifo_ms, atempo_internal_ms, ctx->current_speed);
+		}
+		ctx->delay_log_count++;
+	}
 
 	ctx->last_delay_ms = delay_ms;
 	return delay_ms;

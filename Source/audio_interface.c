@@ -194,12 +194,7 @@ int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, 
 
 int audio_interface_get_delay(audio_ctx_t *ctx)
 {
-	int delay = impl->get_delay(ctx);
-	if (Debug[DBG_AUD]) {
-		serprintf("aud_get_delay: impl=%s ctx=%p delay=%d\n",
-			impl && impl->name ? impl->name : "?", ctx, delay);
-	}
-	return delay;
+	return impl->get_delay(ctx);
 }
 
 int audio_interface_get_latency(audio_ctx_t *ctx)

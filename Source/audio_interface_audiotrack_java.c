@@ -38,6 +38,7 @@ extern int spdif_is_passthrough_on(void);
 
 #define DBG DBG_IF(Debug[DBG_AUD])
 #define DBG2 DBG_IF(Debug[DBG_AUD] > 1)
+#define DBG3 DBG_IF(Debug[DBG_AUD] > 2)
 #define ERR  if(1)
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
@@ -116,6 +117,13 @@ struct audio_ctx {
 	uint64_t headpos_last_frames;    // last raw playback head position
 	int headpos_smooth_valid;        // smoothed headpos validity
 	int startup_hold_active;         // clamp to static latency during initial timing warmup
+	int startup_latency_log_count;   // cap initial latency diagnostics
+	int startup_delay_log_count;     // cap initial get_delay diagnostics
+	int delay_diag_count;            // throttling counter for aud_at_delay summary
+	int delay_diag_last_ret;         // last reported return value
+	int delay_diag_last_valid;       // last reported delay_valid
+	int delay_diag_last_fallback;    // last reported fallback value
+	int delay_diag_last_ts_use;      // last reported ts_use_timestamp
 };
 
 static int audiotrack_log_underruns = 0;
@@ -386,6 +394,13 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
 	at->applied_passthrough = -1;
+	at->startup_latency_log_count = 0;
+	at->startup_delay_log_count = 0;
+	at->delay_diag_count = 0;
+	at->delay_diag_last_ret = -1;
+	at->delay_diag_last_valid = -1;
+	at->delay_diag_last_fallback = -1;
+	at->delay_diag_last_ts_use = -1;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -520,6 +535,12 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	}
 
 	DBG LOG("audiotrack_update_latency latency: %d ms (track=%d, system=%d, app=%d)", calculated_latency, track_latency, system_latency, app_latency);
+	if (at->startup_latency_log_count < 5) {
+		DBG2 LOG("startup_latency[%d]: format=%04X rate=%d ch=%d frame_size=%zu buf=%zu track=%u system=%u app=%u final=%u",
+			at->startup_latency_log_count, at->format, at->rate, at->channel_count,
+			at->frame_size, at->buf_size, track_latency, system_latency, app_latency, calculated_latency);
+		at->startup_latency_log_count++;
+	}
 
 	at->latency = calculated_latency;
 }
@@ -1020,6 +1041,17 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			msec_sleep(100); // give AudioFlinger more time to recover before re-entering
 		}
 
+		// Diagnostic: compare requested compressed config vs actual AudioTrack config.
+		// Some HALs may silently force PCM/stereo while passthrough remains enabled.
+		{
+			int actual_format = call_int_method(at, "getAudioFormat", "()I");
+			int actual_chmask = call_int_method(at, "getChannelConfiguration", "()I");
+			int actual_rate = call_int_method(at, "getSampleRate", "()I");
+			DBG2 LOG("audiotrack_set_output_params: actual AudioTrack format=%d chmask=0x%x rate=%d (requested format=%d chmask=0x%x passthrough=%d channels=%d)",
+				actual_format, actual_chmask, actual_rate,
+				track_format, track_chanmask, at->passthrough, channels);
+		}
+
 		//frame_size reported can be false for compressed formats
 		at->frame_count = at->buf_size / at->frame_size; // number of frames in the buffer
 		DBG LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
@@ -1255,14 +1287,6 @@ static int audiotrack_get_delay(audio_ctx_t *at)
 		ret = (value); \
 		goto done; \
 	} while (0)
-#define AUD_RET0(tag) \
-	do { \
-		if (Debug[DBG_AUD]) { \
-			serprintf("aud_at_delay: src=%s ret=0 latency=%d ts_use=%d streak=%d\n", \
-				tag, at ? at->latency : -1, at ? at->ts_use_timestamp : -1, \
-				at ? at->ts_success_streak : -1); \
-		} \
-	} while (0)
 
 	if (!at->init) {
 ERR		LOG("track not valid, error");
@@ -1275,7 +1299,7 @@ ERR		LOG("track not valid, error");
 	// Dynamic latency doesn't work because we can't accurately track written vs presented frames
 	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
 	if (at->passthrough) {
-DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
+DBG3		LOG("Using static latency for passthrough: %d ms", at->latency);
 		// Treat static passthrough delay as stable/valid for sync gating.
 		if (at->ts_success_streak < stable_streak_required) {
 			at->ts_success_streak = stable_streak_required;
@@ -1290,7 +1314,7 @@ DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
 	if (!enable_dynamic_audio_delay) {
 
 		// User disabled dynamic latency, use static latency
-DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
+DBG3		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
 		// Treat static delay as stable/valid for sync gating.
 		if (at->ts_success_streak < stable_streak_required) {
 			at->ts_success_streak = stable_streak_required;
@@ -1301,14 +1325,14 @@ DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d
 
 	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
 		// Fallback to static latency if AudioTimestamp not available
-DBG2		LOG("Using static latency: %d ms", at->latency);
+DBG3		LOG("Using static latency: %d ms", at->latency);
 		at->delay_valid = 1;
 
 		AUD_RETURN("static(no_timestamp)", at->latency);
 	}
 
 	if (at->rate <= 0) {
-DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
+DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 		at->delay_valid = 1;
 
 		AUD_RETURN("static(bad_rate)", at->latency);
@@ -1402,8 +1426,6 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 			goto done;
 		}
 		at->delay_valid = 0;
-		AUD_RET0("track_null");
-
 		AUD_RETURN("track_null", 0);
 	}
 
@@ -1425,8 +1447,6 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 			goto done;
 		}
 		at->delay_valid = 0;
-		AUD_RET0("exception");
-
 		AUD_RETURN("exception", 0);
 	}
 
@@ -1561,8 +1581,6 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 			goto done;
 		}
 		at->delay_valid = 0;
-		AUD_RET0("outlier");
-
 		AUD_RETURN("outlier", 0);
 	}
 
@@ -1663,19 +1681,46 @@ DBG2	LOG("delay: latency=%d startup=%d fallback=%d returned=%d", at->latency, at
 	src = "dynamic";
 	ret = delay_ms;
 done:
-DBG2	LOG("get_delay: src=%s ret=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d",
+DBG3	LOG("get_delay: src=%s ret=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d",
 		src, ret, at->latency, fallback_delay, delay_ms, at->ts_use_timestamp,
 		at->ts_success_streak);
 	at->last_delay_ret = ret;
 	at->last_delay_fallback_ms = fallback_delay;
 	at->last_delay_ms = delay_ms;
 	snprintf(at->last_delay_src, sizeof(at->last_delay_src), "%s", src ? src : "unknown");
-	if (Debug[DBG_AUD]) {
+	if (Debug[DBG_AUD] > 2) {
 		serprintf("aud_at_delay: src=%s ret=%d delay_valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d\n",
 			src, ret, at->delay_valid, at->latency, fallback_delay, delay_ms,
 			at->ts_use_timestamp, at->ts_success_streak);
+	} else if (Debug[DBG_AUD] > 1 && at) {
+		int emit = 0;
+		if ((at->delay_diag_count % 100) == 0) {
+			emit = 1;
+		}
+		if (at->delay_diag_last_valid != at->delay_valid ||
+		    at->delay_diag_last_ret != ret ||
+		    at->delay_diag_last_fallback != fallback_delay ||
+		    at->delay_diag_last_ts_use != at->ts_use_timestamp) {
+			emit = 1;
+		}
+		if (emit) {
+			serprintf("aud_at_delay: src=%s ret=%d delay_valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d\n",
+				src, ret, at->delay_valid, at->latency, fallback_delay, delay_ms,
+				at->ts_use_timestamp, at->ts_success_streak);
+		}
+		at->delay_diag_count++;
+		at->delay_diag_last_valid = at->delay_valid;
+		at->delay_diag_last_ret = ret;
+		at->delay_diag_last_fallback = fallback_delay;
+		at->delay_diag_last_ts_use = at->ts_use_timestamp;
 	}
-#undef AUD_RET0
+	if (at && at->startup_delay_log_count < 5) {
+		DBG2 LOG("startup_delay[%d]: src=%s ret=%d valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d hold=%d",
+			at->startup_delay_log_count, src ? src : "unknown", ret, at->delay_valid,
+			at->latency, fallback_delay, delay_ms, at->ts_use_timestamp,
+			at->ts_success_streak, at->startup_hold_active);
+		at->startup_delay_log_count++;
+	}
 #undef AUD_RETURN
 	return ret;
 }

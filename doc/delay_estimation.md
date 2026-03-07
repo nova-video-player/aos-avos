@@ -18,13 +18,13 @@ Equations
 All times are in milliseconds (TS domain) unless noted.
 
 Core A/V diff (control):
-  diff = (video_time - audio_time) + sync_delay + av_delay
+  diff = (video_time - audio_time) + sync_delay
 
 Audio pipeline delay (ms):
   sync_delay = codec_delay + filter_delay + sink_delay - video_delay
 
 Heard time (estimated):
-  heard_ts = audio_time - sync_delay - av_delay
+  heard_ts = audio_time - sync_delay
 
 Notes:
 - playhead_ms is the output position derived from getPlaybackHeadPosition and is used only
@@ -66,6 +66,9 @@ Notes
 - The diff metrics are control signals, not a direct lipsync meter.
 - In put_time mode, sync uses heard_ts for anchoring and smoothed_av_delay
   for diff alignment (no heard_ts substitution in the diff path).
+- Manual A/V delay is a presentation-side offset, not part of the core
+  delay-estimation equations. On `android_sync=1` it is applied in
+  `codec_sfdec2.c` when building `render_ts_ns` for MediaCodec.
 - When timing is invalid and atempo is active, heard_ts uses the atempo
   chain delay to keep speed-change anchoring latency-aware.
 - For android_sync=0, if timing becomes invalid during steady playback,

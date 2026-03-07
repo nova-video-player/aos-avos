@@ -156,6 +156,7 @@ typedef struct priv {
 	float last_av_speed;
 	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
 	int grace_until_ms;
+	int last_user_av_delay;
 	int drift_dir;
 	int drift_streak;
 	int hold_audio_until_ms;	// android_sync passthrough startup hold
@@ -289,8 +290,10 @@ static int videosink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void
 {
 	sink->ctx = ctx;
 	priv_t *p = (priv_t *) sink->priv;
+	STREAM *s = (STREAM *)ctx;
 	p->last_av_speed = 1.0f;
 	p->grace_until_ms = 0;
+	p->last_user_av_delay = s ? s->av_delay : 0;
 
 	pthread_mutex_lock(&p->locked.mtx);
 	int i;
@@ -626,6 +629,16 @@ DBGSI serprintf("MediaCodec resume\n");
 		if( s && s->audio_ctx ) {
 			delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
 		}
+		if( !android_sync && s ) {
+			int current_av_delay = s->av_delay;
+			if( p->last_user_av_delay != current_av_delay ) {
+				int delta = current_av_delay - p->last_user_av_delay;
+				DBGSI serprintf("av_delay_change: %d -> %d (delta=%d) frame=%d blit=%d\n",
+					p->last_user_av_delay, current_av_delay, delta,
+					f ? f->time : -1, f ? f->blit_time : -1);
+				p->last_user_av_delay = current_av_delay;
+			}
+		}
 
 		if( android_sync ) {
 			blit_duration = 0;
@@ -639,7 +652,7 @@ DBGSI serprintf("MediaCodec resume\n");
 			blit_duration = _compute_blit_wait_ms( p, f );
 		}
 
-DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d", blit_duration, f->index, f->time, f->duration, f->blit_time);
+DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d", blit_duration, f->index, f->time, f->duration, f->blit_time, s ? s->av_delay : 0);
 		if( s && s->paused ) {
 DBGSI serprintf(" paused\n");
 		} else if (blit_duration > 0) {
@@ -847,10 +860,16 @@ render_now:
 			if (hold_passthrough) {
 				do_render = 0;
 			} else {
-				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns;
+				int av_delay_ts = 0;
+				int64_t av_delay_ns = 0;
+				if( s ) {
+					av_delay_ts = RST_TO_TS_DELTA( s->av_delay, int );
+					av_delay_ns = (int64_t)av_delay_ts * 1000000LL;
+				}
+				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns + av_delay_ns;
 				int64_t delta_ms = (render_ts_ns - now_ns) / 1000000LL;
-DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d\n",
-				render_ts_ns, now_ns, delta_ms, f->time);
+DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d av_delay=%d av_delay_ts=%d\n",
+				render_ts_ns, now_ns, delta_ms, f->time, s ? s->av_delay : 0, av_delay_ts);
 				if (delta_ms <= 0) {
 					DBGSI serprintf("android_sync: render late delta=%lld f_time=%d audio_time=%d delay_ms=%d seek_epoch=%d\n",
 						delta_ms, f->time, s ? s->audio_time : -1, anchor_delay_ms, s ? s->seek_epoch : -1);
@@ -1205,8 +1224,10 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_applied_ms = 0;
-	p->passthrough_cached = _is_passthrough((STREAM *)dec->ctx);
+	STREAM *sctx = (STREAM *)dec->ctx;
+	p->passthrough_cached = _is_passthrough(sctx);
 	p->grace_until_ms = 0;
+	p->last_user_av_delay = sctx ? sctx->av_delay : 0;
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;

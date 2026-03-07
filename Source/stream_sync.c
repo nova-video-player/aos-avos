@@ -502,7 +502,10 @@ DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 	}
 #endif
 	int using_atempo = (s->audio_filter_atempo != NULL);
-	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( s->av_delay + stream_dbg_delay, int );
+	// User AV delay is applied in renderer/sink scheduling paths.
+	// Keep diff in physical timeline to avoid double-applying offset.
+	int user_av_delay = stream_dbg_delay;
+	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( user_av_delay, int );
 DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
 		video_time, audio_time, sync_delay, s->av_delay, stream_dbg_delay, diff,
 		audio_interface_get_audio_speed(), using_atempo);
@@ -524,6 +527,14 @@ static int _stream_get_atempo_delay( STREAM *s )
 		return s->audio_filter_atempo->delay( s->audio_filter_atempo );
 	}
 	return 0;
+}
+
+static int _apply_user_av_delay_ts( STREAM *s, int ts )
+{
+	(void)s;
+	// Keep put_time anchors in physical timeline.
+	// User AV delay is applied at presentation scheduling stage.
+	return ts;
 }
 
 int stream_sync_audio( STREAM *s, int audio_time )
@@ -618,7 +629,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 #ifdef CONFIG_ANDROID
 			// android_sync=1: allow negative heard_ts for internal anchoring at startup.
 			if( get_android_sync() && anchor_delay > 0 ) {
-				int raw_anchor_ts = audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+				int raw_anchor_ts = audio_time - anchor_delay;
 				if( raw_anchor_ts < 0 ) {
 					anchor_ts = raw_anchor_ts;
 				}
@@ -628,6 +639,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d\n",
 					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts);
 			}
+			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
 			s->video_sink->put_time( s->video_sink, anchor_ts );
 			// Audio-driven anchor is authoritative in put_time mode.
@@ -868,6 +880,7 @@ DBGY					serprintf("post-seek converge anchor: last_good=%d atempo=%d eff=%d aud
 #endif
 DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
 					diff, anchor_ts);
+				anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 				s->video_sink->put_time( s->video_sink, anchor_ts );
 				s->sink_ref_time = anchor_ts;
 				s->vid_ref_time = s->video_time;

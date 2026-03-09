@@ -526,6 +526,10 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 		return 1;
 		
 	s->av_delay = av_delay;
+	s->manual_audio_delay_target_ms = (av_delay < 0) ? -av_delay : 0;
+	if( av_delay >= 0 ) {
+		s->manual_audio_delay_applied_ms = 0;
+	}
 	
 	return 0;
 }
@@ -543,8 +547,8 @@ static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_
 		return;
 
 	s->video_sink->put_time( s->video_sink, audio_time_ts );
-	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d\n",
-		audio_time_ts, audio_time_ts );
+	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d av_delay=%d\n",
+		audio_time_ts, audio_time_ts, stream_sync_av_delay( s ) );
 }
 
 static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int heard_ts,

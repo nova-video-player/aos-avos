@@ -2898,11 +2898,19 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	frame->aspect_n = s->video->aspect_n,
 	frame->aspect_d = s->video->aspect_d;
 	frame->duration = RST_TO_TS_DELTA(s->video->msPerFrame, int);
-				
+	int dec_q_before = frame_q_count( &s->decode_q );
+	int sink_count_before = s->video_sink_count;
+
 	pthread_mutex_lock( &s->video_sink_mutex );
 	s->sink_delay = frame->blit_time - s->video_sink->put( s->video_sink, frame ); 	
 	s->video_sink_count ++;
 	pthread_mutex_unlock( &s->video_sink_mutex );
+	int dec_q_after = frame_q_count( &s->decode_q );
+	int sink_count_after = s->video_sink_count;
+	DBG2 serprintf("_put_frame_q_dbg: frame=%d blit=%d real=%d dec_q=%d->%d sink_count=%d->%d sink_delay=%d put_time_mode=%d av_delay=%d\n",
+		frame->time, frame->blit_time, real_time_calc,
+		dec_q_before, dec_q_after, sink_count_before, sink_count_after,
+		s->sink_delay, s->put_time_mode, s->av_delay);
 DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 	if( s->play_n_video_one ) {
 		s->play_n_video_frames = 0;

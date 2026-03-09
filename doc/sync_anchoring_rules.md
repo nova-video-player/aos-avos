@@ -14,7 +14,7 @@
 
 ## Time Domain Anchors (Single per Sink)
 
-- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor from `heard_audio_ts` (audio_time - chain delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards. If delay becomes invalid during steady playback, last‑good delay is held for anchoring so latency compensation does not drop to zero.
+- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor from `heard_audio_ts` (audio_time - chain delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards. If delay becomes invalid during steady playback, last‑good delay is held for anchoring so latency compensation does not drop to zero. Manual A/V delay does not shift `put_time` anchors. The sync diff includes `s->av_delay`; for negative delay requests, extra audio hold is applied in `stream_audio.c` (non-passthrough).
 
 - **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized at startup. Manual A/V delay is applied at final presentation scheduling (`render_ts_ns = frame_ts + render_offset + av_delay_ts`). For passthrough=2, timing is treated as unreliable and the sink uses a startup hold plus a residual static latency (no slew) to align with audible time. No local wait/drop pacing is used.
 
@@ -51,7 +51,9 @@
 - **Sink selection**: On Android, the active video sink is `sfdec2` (`codec_sfdec2.c`). The sink is created via `stream_get_default_video_sink()` but the name logged is `sfdec2`.
 - **android_sync=0**: `codec_sfdec2.c` owns TS↔WC anchoring (`venc_put_time`, `venc_ref_time`) and pacing (blit wait/drop). `stream_sync.c` still computes A/V delay and audio master timing, but the sink uses its own WC anchor to schedule frames.
 - **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from the render offset and always passes it to MediaCodec. The offset starts from static latency and slews toward dynamic delay once timing is valid, except passthrough=2 which uses a startup hold plus residual static latency and skips slew.
-- **Manual A/V delay policy**: keep anchors/diff in physical time; apply user delay at presentation scheduling. For `android_sync=1`, this is the `render_ts_ns` path in `codec_sfdec2.c`.
+- **Manual A/V delay policy**: keep anchors/diff in physical time; apply user delay at presentation scheduling. In `codec_sfdec2.c`, this is:
+  - `android_sync=1`: `render_ts_ns`.
+  - `android_sync=0`: anchors remain physical in the sink. The sync diff includes `s->av_delay`; negative delay is realized by audio-side hold in `stream_audio.c` (non-passthrough).
 - **put_time_mode**: When the sink provides `put_time()`, the sync layer uses `heard_audio_ts` for the diff calculation but leaves pacing to the sink.
 
 ## In-Flight Data During Speed Changes

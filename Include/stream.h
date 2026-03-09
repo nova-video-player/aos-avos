@@ -470,6 +470,8 @@ typedef struct STREAM {
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
 	int		put_time_mode;		// video sink uses put_time pacing
+	int		manual_audio_delay_target_ms;   // extra audio hold for android_sync=0, negative av_delay
+	int		manual_audio_delay_applied_ms;  // currently applied extra audio hold
 
 	int 		audio_time;
 	int 		audio_ref_time;

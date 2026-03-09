@@ -268,7 +268,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, heard_delay, s->av_delay, s->audio_ctx);
 	}
 
-	int heard_ts = s->audio_time - heard_delay - RST_TO_TS_DELTA( s->av_delay, int );
+	// Keep heard-time in physical timeline. Manual user AV delay is applied
+	// only at final presentation scheduling in sink/renderer paths.
+	int heard_ts = s->audio_time - heard_delay;
 	// For passthrough mode, allow negative heard_ts at startup (like android_sync=1 does).
 	// This preserves the full delay offset so video doesn't advance before audio catches up.
 	// Non-passthrough modes clamp to 0 to avoid negative timeline issues with dynamic delays.
@@ -502,9 +504,8 @@ DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 	}
 #endif
 	int using_atempo = (s->audio_filter_atempo != NULL);
-	// User AV delay is applied in renderer/sink scheduling paths.
-	// Keep diff in physical timeline to avoid double-applying offset.
-	int user_av_delay = stream_dbg_delay;
+	// User AV delay is part of A/V relationship and must be visible to sync gating.
+	int user_av_delay = s->av_delay + stream_dbg_delay;
 	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( user_av_delay, int );
 DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d diff=%d speed=%.3f using_atempo=%d\n",
 		video_time, audio_time, sync_delay, s->av_delay, stream_dbg_delay, diff,
@@ -532,8 +533,9 @@ static int _stream_get_atempo_delay( STREAM *s )
 static int _apply_user_av_delay_ts( STREAM *s, int ts )
 {
 	(void)s;
-	// Keep put_time anchors in physical timeline.
-	// User AV delay is applied at presentation scheduling stage.
+	// Keep put_time anchors in the physical timeline.
+	// Manual user AV delay is handled by sync diff and, for android_sync=0
+	// negative offsets, by audio-side hold.
 	return ts;
 }
 
@@ -612,7 +614,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	
 	if( !get_android_sync() && anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 && !passthrough_mode ) {
-		int anchor_ts_raw = audio_time - anchor_delay - RST_TO_TS_DELTA( s->av_delay, int );
+		int anchor_ts_raw = audio_time - anchor_delay;
 		if( anchor_ts_raw < 0 ) {
 			if (diag_log) {
 				DBGY2 serprintf("anchor_wait: audio_time=%d delay=%d av_delay=%d\n",
@@ -869,7 +871,7 @@ DBGY serprintf("{SSV %d}} ", video_time );
 						if( effective_delay < 0 ) {
 							effective_delay = 0;
 						}
-						anchor_ts = s->audio_time - effective_delay - RST_TO_TS_DELTA( s->av_delay, int );
+						anchor_ts = s->audio_time - effective_delay;
 						if( anchor_ts < 0 ) {
 							anchor_ts = 0;
 						}

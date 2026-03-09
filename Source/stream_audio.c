@@ -398,6 +398,7 @@ static void _audio_decode( STREAM *s )
 		s->audio_resume_pending = 1;
 		s->audio_resume_valid_pending = 0;
 		s->video_resume_frame_primed = 0;
+		s->manual_audio_delay_applied_ms = 0;
 	}
 
 	if( s->audio->valid && (!(s->paused || stream_audio_paused) || s->play_n_audio_frames ) ) {
@@ -407,6 +408,7 @@ static void _audio_decode( STREAM *s )
 			int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 			if( s->audio_sink->syncable( s ) && !passthrough ) {
 				s->audio_sink->flush( s );
+				s->manual_audio_delay_applied_ms = 0;
 				s->audio_sink->preload( s );
 				/* AudioTrack.pause()+flush leaves the track paused; resume playback so subsequent writes succeed. */
 				s->audio_sink->start( s );
@@ -1094,6 +1096,31 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 					audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
+
+					// android_sync=0 cannot sustain large negative AV offsets by video pacing alone.
+					// Apply user negative AV delay as additional audio hold (silence insertion).
+					if( !get_android_sync() && s->put_time_mode && s->audio_sink ) {
+						int passthrough = s->audio_sink->get_passthrough ? s->audio_sink->get_passthrough( s ) : 0;
+						int target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
+						s->manual_audio_delay_target_ms = target_ms;
+						if( !passthrough ) {
+							if( s->manual_audio_delay_applied_ms < target_ms ) {
+								int add_ms = target_ms - s->manual_audio_delay_applied_ms;
+								DBG serprintf("manual_audio_delay_hold: av_delay=%d target=%d applied=%d add=%d\n",
+									s->av_delay, target_ms, s->manual_audio_delay_applied_ms, add_ms);
+								_wait( s, add_ms );
+								s->manual_audio_delay_applied_ms = target_ms;
+							} else if( s->manual_audio_delay_applied_ms > target_ms ) {
+								// We cannot pull already queued audio back in time; shrink target
+								// so future holds follow the latest user setting.
+								DBG serprintf("manual_audio_delay_reduce: av_delay=%d target=%d applied=%d\n",
+									s->av_delay, target_ms, s->manual_audio_delay_applied_ms);
+								s->manual_audio_delay_applied_ms = target_ms;
+							}
+						} else {
+							s->manual_audio_delay_applied_ms = 0;
+						}
+					}
 
 					// no error, output PCM
 					DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);

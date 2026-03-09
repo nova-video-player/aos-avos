@@ -218,6 +218,9 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f)
 		asap = 1;
 	}
 
+	target_ns = timestamp_ns - p->sched_start_off_ns + p->sched_start_mono_ns;
+	delta = target_ns - now_ns;
+
 	if( !asap && delta < 0 ) {
 		p->sched_late++;
 		if( p->sched_late >= 3 ) {
@@ -476,11 +479,11 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
-	int allow_reanchor = speed_changed;
-	if( in_grace ) {
+	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
+	int allow_reanchor = speed_changed || discontinuity || no_sched_anchor;
+	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor ) {
 		allow_reanchor = 0;
 	}
-
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 	if (allow_reanchor) {
@@ -491,7 +494,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->sched_last_off_ns   = p->sched_start_off_ns;
 			p->sched_last_mono_ns  = p->sched_start_mono_ns;
 			p->sched_late          = 0;
-			DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d)\n", time, diff, speed_changed);
+			DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d)\n",
+				time, diff, speed_changed, discontinuity, no_sched_anchor);
 		} else {
 			p->render_offset_ns = -1;
 			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d\n",
@@ -612,7 +616,7 @@ DBGSI serprintf("MediaCodec resume\n");
 			goto endloop;
 		}
 
- 		int do_render = 1;
+		int do_render = 1;
  		int venc_time = _get_time(p);
  		int blit_duration;
 
@@ -637,6 +641,9 @@ DBGSI serprintf("MediaCodec resume\n");
 					p->last_user_av_delay, current_av_delay, delta,
 					f ? f->time : -1, f ? f->blit_time : -1);
 				p->last_user_av_delay = current_av_delay;
+				// Keep physical schedule anchor stable; apply only presentation offset shift.
+				// Use grace to prevent transient drop logic from fighting the user change.
+				p->grace_until_ms = atime() + 1000;
 			}
 		}
 
@@ -652,7 +659,8 @@ DBGSI serprintf("MediaCodec resume\n");
 			blit_duration = _compute_blit_wait_ms( p, f );
 		}
 
-DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d", blit_duration, f->index, f->time, f->duration, f->blit_time, s ? s->av_delay : 0);
+DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d",
+	blit_duration, f->index, f->time, f->duration, f->blit_time, s ? s->av_delay : 0);
 		if( s && s->paused ) {
 DBGSI serprintf(" paused\n");
 		} else if (blit_duration > 0) {

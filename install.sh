@@ -6,7 +6,7 @@ set -e  # Exit on unhandled errors
 SCRIPT_DIR="$(pwd)"
 
 # Trap Ctrl-C to display log file before exiting
-trap 'echo ""; echo "🛑 Interrupted. Log file: avos-$LOG_NUM.log"; exit 130' SIGINT
+trap 'echo ""; echo "🛑 Interrupted. Log file: avos-$(printf "%02d" $LOG_NUM).log"; exit 130' SIGINT
 
 # Infer PROJECT_DIR from current script location
 # This script is in native/avos/, so Video/ is two levels up
@@ -37,7 +37,7 @@ fi
 
 # Build APK
 echo "🔨 Building APK with gradlew aND..."
-if ! ./gradlew aND > "$BUILD_LOG" 2>&1; then
+if ! ./gradlew aND --offline > "$BUILD_LOG" 2>&1; then
     echo "❌ ERROR: Gradle build failed."
     echo "📄 Build log: $PROJECT_DIR/$BUILD_LOG"
     echo ""

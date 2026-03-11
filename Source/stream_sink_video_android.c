@@ -186,7 +186,7 @@ serprintf(" DROP(%3d)\n", blit_duration);
 		} else {
 DBGSI serprintf(" ok\n");
 		}
-		if( do_fake == 1 ) {
+		if( do_fake == 1 || !p->venc_run ) {
 			frame_q_put(&p->get_q, frame);
 			p->frames_state[frame->index] = FRAME_STATE_DEQUEUED;
 		} else {

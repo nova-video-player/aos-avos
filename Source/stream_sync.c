@@ -683,8 +683,16 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
 		audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
 	}
-	if( s->sync_v_time == -1 || audio_time_for_diff == -1 )
+	if( s->sync_v_time == -1 || audio_time_for_diff == -1 ) {
+#ifdef CONFIG_ANDROID
+		// android_sync=1 bypasses video-side gating, so blocking audio when
+		// sync_v_time is not established can deadlock resume/startup.
+		if( get_android_sync() && s->sync_v_time == -1 ) {
+			return 0;
+		}
+#endif
 		return 1;
+	}
 	
 	// if audio is in the future, delay it (but only if significantly ahead)
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );

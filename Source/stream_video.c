@@ -2859,7 +2859,7 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 //
 // ************************************************************
 
-static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
+static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
@@ -2875,7 +2875,7 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 		} else {
 			DBG serprintf("video_hold_on_resume: skip frame_time=%d video_time=%d (delay invalid)\n",
 				time, s->video_time);
-			return;
+			return 0;
 		}
 	}
 	if( s->video_sink->put_time ) {
@@ -2916,6 +2916,7 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 		s->play_n_video_frames = 0;
 		s->play_n_video_one    = 0;
 	}
+	return 1;
 }
 
 // ************************************************************
@@ -3023,8 +3024,9 @@ DBGY serprintf("[ %8d] ", frame->time );
 				s->drop_count = 0;
 			}
 
-			_put_frame_in_sink( s, frame, frame->time );
-			
+			if( !_put_frame_in_sink( s, frame, frame->time ) ) {
+				goto Discard;
+			}
 			if( qframe ) {
 				// we gave this frame to the sink!
 				*qframe = NULL;

@@ -21,7 +21,7 @@
 
 typedef int  (*ABORT_HANDLER)    ( void *ctx );
 
-typedef void (*STREAM_GET_PART_NAME) ( char *part_name, const char *full_path, int part_num );
+typedef int (*STREAM_GET_PART_NAME) ( char *part_name, const char *full_path, int part_num );
 
 typedef struct stream_part {
 	UINT32	pad_size;		// padded size of this section

@@ -878,7 +878,7 @@ STREAM_SINK_AUDIO *stream_get_audio_sink( STREAM *s );
 
 int 	stream_get_index( STREAM *s, int *time, void **data, int *size );
 
-void	stream_get_part_name( char *part_name, const char *full_path, int part_num );
+int	stream_get_part_name( char *part_name, const char *full_path, int part_num );
 int	stream_is_part_name ( const char *full_path, const char *ext );
 void	stream_set_cpu_priority( STREAM *s, int cpu_prio );
 

@@ -357,20 +357,23 @@ DBGS serprintf("codec_thread joined\r\n");
 //	stream_get_part_name
 //
 // ***********************************************************
-void stream_get_part_name( char *part_name, const char *full_path, int part_num )
+int stream_get_part_name( char *part_name, const char *full_path, int part_num )
 {
-	if( part_name ) {
-		int ret;
-		if( part_num > 0 ) {
-			ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s.%d", full_path ? full_path : "", part_num + 1 );
-		} else {
-			ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s", full_path ? full_path : "" );
-		}
-		if (ret < 0 || ret > STREAM_MAX_PATH_LEN) {
-			part_name[STREAM_MAX_PATH_LEN] = '\0';
-		}
-DBGS serprintf("stream_get_part_name( %d ) = %s\r\n", part_num, part_name );
+	int ret;
+	if( !part_name ) {
+		return 1;
 	}
+	if( part_num > 0 ) {
+		ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s.%d", full_path ? full_path : "", part_num + 1 );
+	} else {
+		ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s", full_path ? full_path : "" );
+	}
+	if (ret < 0 || ret > STREAM_MAX_PATH_LEN) {
+		part_name[0] = '\0';
+		return 1;
+	}
+DBGS serprintf("stream_get_part_name( %d ) = %s\r\n", part_num, part_name );
+	return 0;
 }
 
 // *****************************************************************************
@@ -384,7 +387,10 @@ int stream_check_parts( const char *full_path )
 	
 	for( num = 1; num < STREAM_MAX_PARTS; num ++ ) {
 		char file[STREAM_MAX_PATH_LEN + 1];
-		stream_get_part_name( file, full_path, num );
+		if( stream_get_part_name( file, full_path, num ) ) {
+DBGP serprintf("part name overflow for %d\r\n", num );
+			break;
+		}
 
 		STAT st;
 		if( !file_stat( file, &st ) ) {
@@ -407,7 +413,10 @@ int stream_parse_parts( STREAM *s )
 	int i;
 	for( i = 0; i < s->num_parts; i ++ ) {
 		char file[STREAM_MAX_PATH_LEN + 1];
-		stream_get_part_name( file, s->src.url, i );
+		if( stream_get_part_name( file, s->src.url, i ) ) {
+			stream_set_error( s, VE_FILE_ERROR );
+			return 1;
+		}
 
 		STAT st;
 		file_stat( file, &st );
@@ -1544,8 +1553,11 @@ static void _stream_get_part_name( int argc, char *argv[] )
 	int num    = atoi(argv[2]);
 	char	res[STREAM_MAX_PATH_LEN + 1];
 	
-	stream_get_part_name( res, path, num );
+	if( stream_get_part_name( res, path, num ) ) {
+serprintf("stream_get_part_name( %s, %d ): overflow\r\n", path, num ); 
+	} else {
 serprintf("stream_get_part_name( %s, %d ): %s\r\n", path, num, res ); 
+	}
 }
 
 static void _perform_stream_abort( void )

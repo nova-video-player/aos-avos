@@ -484,6 +484,8 @@ static void _mark( UCHAR *data, int width, int height, int linestep )
 static int map_pixfmt( int pix_fmt )
 {
 	switch( pix_fmt ) {
+	case AV_PIX_FMT_NV12:
+		return PIXFMT_NV12;
 	case AV_PIX_FMT_YUYV422:
 	case AV_PIX_FMT_YUVJ422P:
 		return PIXFMT_YUV422P;

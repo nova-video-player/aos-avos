@@ -1168,8 +1168,54 @@ int color_conversion_supported(int colorspace, int pixfmt)
 	return 0;
 }
 
+static int has_valid_source_layout(int pixfmt, unsigned char *src_data[], int src_linesize[])
+{
+	if (!src_data || !src_linesize || !src_data[0] || src_linesize[0] <= 0)
+		return 0;
+
+	switch (pixfmt) {
+	case PIXFMT_YUV420P:
+	case PIXFMT_YUV422P:
+	case PIXFMT_YUV420P10LE:
+	case PIXFMT_YUV444P:
+		return src_data[1] && src_data[2] && src_linesize[1] > 0 && src_linesize[2] > 0;
+	case PIXFMT_NV12:
+	case PIXFMT_QCOM_NV12_TILED:
+	case PIXFMT_P010:
+		return src_data[1] && src_linesize[1] > 0;
+	default:
+		return 0;
+	}
+}
+
+static int has_valid_destination_layout(const VIDEO_FRAME *frame)
+{
+	if (!frame || !frame->data[0] || frame->linestep[0] <= 0)
+		return 0;
+
+	switch (frame->colorspace) {
+	case AV_IMAGE_YV12:
+		return frame->data[1] && frame->data[2] && frame->linestep[1] > 0 && frame->linestep[2] > 0;
+	case AV_IMAGE_NV12:
+		return frame->data[1] && frame->linestep[1] > 0;
+	case AV_IMAGE_YUV_422:
+	case AV_IMAGE_BGRA_32:
+	case AV_IMAGE_RGBX_32:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[], int width, int height, int start, int total_height, VIDEO_FRAME *frame)
 {
+	if (width <= 0 || height <= 0 || start < 0 || total_height <= 0 || start + height > total_height)
+		return;
+	if (!has_valid_source_layout(pixfmt, src_data, src_linesize))
+		return;
+	if (!has_valid_destination_layout(frame))
+		return;
+
 	// Resolve YUV->RGB coefficients from the frame's color space
 	const struct yuv_coeffs *coeffs = get_yuv_coeffs(frame->color_space);
 

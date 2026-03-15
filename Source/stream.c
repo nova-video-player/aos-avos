@@ -360,10 +360,14 @@ DBGS serprintf("codec_thread joined\r\n");
 void stream_get_part_name( char *part_name, const char *full_path, int part_num )
 {
 	if( part_name ) {
+		int ret;
 		if( part_num > 0 ) {
-			sprintf( part_name, "%s.%d", full_path, part_num + 1 );
+			ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s.%d", full_path ? full_path : "", part_num + 1 );
 		} else {
-			sprintf( part_name, "%s", full_path );
+			ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s", full_path ? full_path : "" );
+		}
+		if (ret < 0 || ret > STREAM_MAX_PATH_LEN) {
+			part_name[STREAM_MAX_PATH_LEN] = '\0';
 		}
 DBGS serprintf("stream_get_part_name( %d ) = %s\r\n", part_num, part_name );
 	}

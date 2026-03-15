@@ -198,6 +198,34 @@ static INT64 _snap_timestamp_ns(priv_t *p, int frame_time)
 	return timestamp_us * 1000LL;
 }
 
+// For android_sync=1 reanchor windows, prefer the audio-thread put_time anchor
+// when it is fresh to avoid cross-thread heard-time skew.
+static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int *used_put_time, int *put_age_ms)
+{
+	const int k_put_time_fresh_ms = 100;
+	int use_put = 0;
+	int age_ms = 0;
+	int64_t heard_ts = 0;
+
+	if (p && s && s->audio_time > 0 && p->venc_put_time > 0 && p->venc_ref_time > 0) {
+		age_ms = atime() - p->venc_ref_time;
+		if (age_ms >= 0 && age_ms <= k_put_time_fresh_ms) {
+			heard_ts = p->venc_put_time;
+			use_put = 1;
+		}
+	}
+	if (!use_put) {
+		heard_ts = s ? (int64_t)stream_get_heard_audio_ts(s, s->audio_time) : 0;
+	}
+	if (used_put_time) {
+		*used_put_time = use_put;
+	}
+	if (put_age_ms) {
+		*put_age_ms = age_ms;
+	}
+	return heard_ts;
+}
+
 // Reproduce MediaCodec's releaseOutputBufferAtTime() pacing logic when we can't
 // use android_sync, so reordered frames still map to the correct WC deadline.
 static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f)
@@ -809,7 +837,9 @@ render_now:
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d passthrough=2 offset=%lld\n",
 						s->audio_time, delay_for_pt, p->render_offset_ns);
 				} else if (have_audio_time && anchor_delay_ms > 0) {
-					int64_t heard_ts = (int64_t)stream_get_heard_audio_ts(s, s->audio_time);
+					int used_put_time = 0;
+					int put_age_ms = 0;
+					int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
 					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
 						// Backward seek: avoid anchoring behind the current video frame.
 						// Only clamp after video_time is established; allow startup to align to audio.
@@ -817,8 +847,10 @@ render_now:
 					}
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					p->render_offset_from_audio = 1;
-					DBGSI2 serprintf("android_sync anchor_diag(init): a_time=%d heard_ts=%lld raw_delay=%d smooth_delay=%d off=%lld\n",
+					DBGSI2 serprintf("android_sync anchor_diag(init): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
 						s ? s->audio_time : -1, (long long)heard_ts,
+						used_put_time ? "put_time" : "recompute",
+						p ? p->venc_put_time : -1, put_age_ms,
 						s ? stream_get_anchor_delay_ms(s, 1) : -1,
 						s ? s->smoothed_av_delay : -1, (long long)p->render_offset_ns);
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d heard_ts=%lld offset=%lld\n",
@@ -833,15 +865,19 @@ render_now:
 				p->pending_reanchor = 0;
 			} else if (have_audio_time && p->render_offset_from_audio == 0 && anchor_delay_ms > 0) {
 				// Audio time became valid after a static init: re-anchor once to heard audio.
-				int64_t heard_ts = (int64_t)stream_get_heard_audio_ts(s, s->audio_time);
+				int used_put_time = 0;
+				int put_age_ms = 0;
+				int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
 				if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
 					// Same clamp rule as initial anchor; skip clamp during startup.
 					heard_ts = f->time;
 				}
 				p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 				p->render_offset_from_audio = 1;
-				DBGSI2 serprintf("android_sync anchor_diag(reanchor): a_time=%d heard_ts=%lld raw_delay=%d smooth_delay=%d off=%lld\n",
+				DBGSI2 serprintf("android_sync anchor_diag(reanchor): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
 					s ? s->audio_time : -1, (long long)heard_ts,
+					used_put_time ? "put_time" : "recompute",
+					p ? p->venc_put_time : -1, put_age_ms,
 					s ? stream_get_anchor_delay_ms(s, 1) : -1,
 					s ? s->smoothed_av_delay : -1, (long long)p->render_offset_ns);
 				DBGSI serprintf("android_sync: reanchor from audio_time=%d heard_ts=%lld offset=%lld\n",
@@ -849,14 +885,18 @@ render_now:
 			} else if (have_audio_time && anchor_delay_ms > 0 && passthrough != 2) {
 				// Slew toward a new anchor only on explicit events (seek/resume/speed).
 				if (p->pending_reanchor) {
-					int64_t heard_ts = (int64_t)stream_get_heard_audio_ts(s, s->audio_time);
+					int used_put_time = 0;
+					int put_age_ms = 0;
+					int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
 					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
 						// Keep reanchor target consistent with init/reanchor clamp policy.
 						heard_ts = f->time;
 					}
 					p->target_offset_ns = now_ns - heard_ts * 1000000LL;
-					DBGSI2 serprintf("android_sync anchor_diag(slew_target): a_time=%d heard_ts=%lld raw_delay=%d smooth_delay=%d off=%lld target=%lld\n",
+					DBGSI2 serprintf("android_sync anchor_diag(slew_target): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld target=%lld\n",
 						s ? s->audio_time : -1, (long long)heard_ts,
+						used_put_time ? "put_time" : "recompute",
+						p ? p->venc_put_time : -1, put_age_ms,
 						s ? stream_get_anchor_delay_ms(s, 1) : -1,
 						s ? s->smoothed_av_delay : -1,
 						(long long)p->render_offset_ns, (long long)p->target_offset_ns);

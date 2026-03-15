@@ -1,5 +1,5 @@
 diff --git a/Include/debug.h b/Include/debug.h
-index 72d32b8..c442ea6 100644
+index 72d32b8..86a9c13 100644
 --- a/Include/debug.h
 +++ b/Include/debug.h
 @@ -31,11 +31,7 @@
@@ -26,11 +26,6 @@ index 72d32b8..c442ea6 100644
  
  #if defined( SIM ) && defined ( DEBUG_MSG ) && !( UCLIBC )
  void Trace( void ); // dumps the callstack
-@@ -215,4 +207,3 @@ static inline void Dump32( unsigned long *buf , int size) {}
- #endif
- 
- #endif // _DEBUG_H_
--
 diff --git a/Source/debug.c b/Source/debug.c
 index 48f3f70..08eb639 100644
 --- a/Source/debug.c
@@ -73,3 +68,83 @@ index 48f3f70..08eb639 100644
 +	[DBG_FB] = 1,
 +};
  #endif
+diff --git a/debug.diff b/debug.diff
+index b494aae..e69de29 100644
+--- a/debug.diff
++++ b/debug.diff
+@@ -1,75 +0,0 @@
+-diff --git a/Include/debug.h b/Include/debug.h
+-index 72d32b8..c442ea6 100644
+---- a/Include/debug.h
+-+++ b/Include/debug.h
+-@@ -31,11 +31,7 @@
+- // Compile-time master switch for all DBG/DBG* logs.
+- // Defaults to 1 for DEBUG_MSG builds, 0 otherwise.
+- #ifndef DEBUG_LOGS
+--#ifdef DEBUG_MSG
+- #define DEBUG_LOGS 1
+--#else
+--#define DEBUG_LOGS 0
+--#endif
+- #endif
+- 
+- #if DEBUG_LOGS
+-@@ -99,11 +95,7 @@ enum {
+- 	DBG_MAX_ENTRIES	// must alway be last !
+- };
+- 
+--#ifdef CONFIG_RELEASE
+--extern const int Debug[DBG_MAX_ENTRIES];
+--#else
+- extern int Debug[DBG_MAX_ENTRIES];
+--#endif
+- 
+- #if defined( SIM ) && defined ( DEBUG_MSG ) && !( UCLIBC )
+- void Trace( void ); // dumps the callstack
+-@@ -215,4 +207,3 @@ static inline void Dump32( unsigned long *buf , int size) {}
+- #endif
+- 
+- #endif // _DEBUG_H_
+--
+-diff --git a/Source/debug.c b/Source/debug.c
+-index 48f3f70..08eb639 100644
+---- a/Source/debug.c
+-+++ b/Source/debug.c
+-@@ -44,11 +44,13 @@
+- // debug flags for a non release version
+- #ifndef CONFIG_RELEASE
+- int Debug[DBG_MAX_ENTRIES] = { 
+--	[DBG_VIDEO_PLAYER] = 0,
+--	[DBG_AUDIO_PLAYER] = 0,
+--	[DBG_PARSER] = 0,
+--	[DBG_STREAM] = 0,
+--	[DBG_SINK] = 0,
+-+	[DBG_VIDEO_PLAYER] = 2,
+-+	[DBG_AUDIO_PLAYER] = 2,
+-+	[DBG_PARSER] = 1,
+-+	[DBG_STREAM] = 2,
+-+	[DBG_SYNC] = 1,
+-+	[DBG_SINK] = 2,
+-+	[DBG_AUD] = 2,
+- 	[DBG_FB] = 1,
+- };
+- #endif
+-@@ -484,7 +486,16 @@ DECLARE_DEBUG_COMMAND_VOID( "ping", 	_ping );
+- 
+- #endif
+- 
+--// fake debug flags for a release version
+-+// Allow runtime debug flags even in release builds when explicitly set.
+- #ifdef CONFIG_RELEASE
+--const int Debug[DBG_MAX_ENTRIES];
+-+int Debug[DBG_MAX_ENTRIES] = {
+-+	[DBG_VIDEO_PLAYER] = 2,
+-+	[DBG_AUDIO_PLAYER] = 2,
+-+	[DBG_PARSER] = 1,
+-+	[DBG_STREAM] = 2,
+-+	[DBG_SYNC] = 1,
+-+	[DBG_SINK] = 2,
+-+	[DBG_AUD] = 2,
+-+	[DBG_FB] = 1,
+-+};
+- #endif

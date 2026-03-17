@@ -4761,6 +4761,15 @@ serprintf("PNF: not open!\r\n");
 //serprintf("-");	
 		stream_yield();
 	}
+	if( s->play_n_video_frames ) {
+		// Seek decode did not converge in time. Clear one-shot seek state so
+		// playback can continue instead of staying stuck in seek-drop mode.
+		DBG serprintf("SEEK_PNF_TIMEOUT: target_ts=%d old_ts=%d video_time=%d audio_time=%d left=%d\n",
+			time, old_time, s->video_time, s->audio_time, s->play_n_video_frames);
+		s->play_n_video_frames = 0;
+		s->play_n_video_time = -1;
+		s->play_n_old_time = 0;
+	}
 
 	_stream_wait_for_idle( s, 1000 );
 }

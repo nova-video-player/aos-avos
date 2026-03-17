@@ -7,12 +7,20 @@ Enabling `android_sync` hands video pacing to the Android `MediaCodec` renderer 
 ## How the Sink Delegates Pacing (`Source/codec_sfdec2.c`)
 
 - The sink always calls `sfdec_buf_render` with a non‑zero `render_ts_ns`.
-- `render_ts_ns` is derived from a single render offset: `render_ts_ns = f->time * 1e6 + render_offset_ns`.
+- `render_ts_ns` is derived from a single render offset plus user delay:
+  `render_ts_ns = f->time * 1e6 + render_offset_ns + effective_av_delay_ns`.
 - The render offset is initialized once at startup:
   - Prefer `smoothed_av_delay` when available.
   - Otherwise use the unified anchor delay (playback‑head or static latency).
+- For `android_sync=1` reanchor windows, the sink prefers a **fresh** audio-thread
+  `put_time` anchor (`venc_put_time`) and falls back to recomputed
+  `stream_get_heard_audio_ts()` only when `put_time` is stale. This avoids
+  cross-thread heard-time skew at seek/resume boundaries.
 - The offset is **slewed** toward a new target only on explicit events
   (seek/resume/speed) to avoid jitter‑driven reanchors.
+- Manual A/V delay (`s->av_delay`) is also slewed in the render path through
+  `effective_av_delay` (bounded per-frame step) so large UI jumps do not create
+  a burst of ASAP renders ("fast video" transient).
 
 In short, the sink never blocks or drops; MediaCodec schedules frames using the provided timestamps.
 

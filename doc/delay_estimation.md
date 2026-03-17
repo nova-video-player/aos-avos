@@ -69,7 +69,9 @@ Notes
 - Manual A/V delay is a user offset, not part of the core delay-estimation
   equations.
   - `android_sync=1`: applied at final presentation scheduling in
-    `codec_sfdec2.c` when building `render_ts_ns` for MediaCodec.
+    `codec_sfdec2.c` when building `render_ts_ns` for MediaCodec. The user
+    target delay is slewed through an effective delay state (bounded per-frame
+    step) to avoid fast-render bursts on large UI changes.
   - `android_sync=0`: keep sink anchors physical (`put_time` unchanged).
     The sync diff includes `s->av_delay`; negative delay (video earlier)
     is implemented as audio-side hold (silence insertion) in
@@ -105,6 +107,8 @@ Rules:
    - android_sync=1:
      - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
      - If `delay_valid` is false, do NOT anchor on last_good/static (avoid catch-up bursts).
+     - In sfdec2 reanchor windows, prefer fresh sink `put_time` (`venc_put_time`)
+       as authoritative heard anchor; fallback to recomputed heard-time when stale.
 
 3) Heard delay selection (heard_ts):
    - If `delay_valid`, heard_delay = anchor_delay (smoothed/dynamic).

@@ -1155,9 +1155,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				int sample_rate = audio_frame.samplesPerSec ? audio_frame.samplesPerSec : original_rate;
 				if (sample_rate == 0) sample_rate = 48000;
 
-				// For A/V sync scaling, we need to know the duration of the data we just decoded.
-				// For AC3 recoding, use fakeSize (PCM-equivalent) to compute timing.
-				int64_t effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
+				// For A/V sync scaling, we need the PCM-equivalent duration of written data.
+				// In passthrough, compressed payload size does not represent played duration
+				// (notably EAC3 mode 2 system encapsulation), so prefer fakeSize when available.
+				int64_t effective_size = ((audio_frame.fakeSize > 0) &&
+					(ac3_recoding || passthrough_active)) ?
 					audio_frame.fakeSize : audio_frame.size;
 				int64_t bytes_per_sec = (int64_t)sample_rate * channels * bytes_per_sample;
 

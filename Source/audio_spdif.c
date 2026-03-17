@@ -89,6 +89,25 @@ static AVCodecContext avctx;
 
 static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
+static int _spdif_frame_samples(const AUDIO_PROPERTIES *a)
+{
+	// Prefer parser-derived frame sample count when available.
+	// EAC3 can vary (256/512/768/1536 samples), so fixed 1536 causes drift.
+	if (avctx.frame_size > 0) {
+		return avctx.frame_size;
+	}
+
+	// Conservative fallback for legacy behavior when parser metadata is missing.
+	if (a && (a->format == WAVE_FORMAT_AC3 ||
+	          a->format == WAVE_FORMAT_EAC3 ||
+	          a->format == WAVE_FORMAT_E_AC3_JOC ||
+	          a->format == WAVE_FORMAT_DTS)) {
+		return 1536;
+	}
+
+	return 0;
+}
+
 static int spdif_put( UCHAR *data, int size, int *decoded )
 {
 	if ( !data || size < 10 )
@@ -151,7 +170,10 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		frame->size = size;
 		frame->error = 0;
 		frame->format = a->format;
-		frame->fakeSize = 1536 * a->bytesPerFrame;
+		{
+			int samples = _spdif_frame_samples(a);
+			frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : size;
+		}
 		*decoded = size;
 		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d, bpf=%d, rate=%d, recode=1\n",
 		                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
@@ -186,15 +208,12 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			frame->error = 0;
 			frame->format = a->format;  // Preserve codec ID (AC3/EAC3/DTS) for downstream logic
 
-			// fakeSize represents the "PCM-equivalent" data size for timing calculations.
-			// AC3/EAC3/DTS core frames always contain 1536 samples regardless of sample rate:
-			//   - 48kHz: 1536 samples = 32ms
-			//   - 44.1kHz: 1536 samples = 34.8ms
-			//   - 32kHz: 1536 samples = 48ms
-			// Since we preserve samplesPerSec from demuxer in spdif_open, the timing formula
-			// time = fakeSize / bytesPerSec = (1536 * bytesPerFrame) / (samplesPerSec * bytesPerFrame)
-			//      = 1536 / samplesPerSec is correct for any sample rate.
-			frame->fakeSize = 1536 * a->bytesPerFrame;
+			// fakeSize carries PCM-equivalent duration for timing.
+			// Use parser frame_size when available (required for variable-size EAC3 frames).
+			{
+				int samples = _spdif_frame_samples(a);
+				frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : out_size;
+			}
 			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d, rate=%d, parser=1\n",
 			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
 		} else {
@@ -202,11 +221,11 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			int dummy;
 			spdif_put( out, out_size, &dummy );
 			spdif_get( frame );
-			// For AC3/EAC3, timing should follow the fixed 1536-sample frame duration.
-			if (a->format == WAVE_FORMAT_AC3 ||
-			    a->format == WAVE_FORMAT_EAC3 ||
-			    a->format == WAVE_FORMAT_E_AC3_JOC) {
-				frame->fakeSize = 1536 * a->bytesPerFrame;
+			{
+				int samples = _spdif_frame_samples(a);
+				if (samples > 0) {
+					frame->fakeSize = samples * a->bytesPerFrame;
+				}
 			}
 			DBGCA2 serprintf("Mode 1: IEC wrapped, size=%d, fakeSize=%d format=%04X bpf=%d rate=%d\n",
 				frame->size, frame->fakeSize, a->format, a->bytesPerFrame, a->samplesPerSec);

@@ -1159,7 +1159,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d latency=%d)\n",
 								old_audio_time, s->audio_time, s->video_time, static_latency);
 						}
-						s->audio_resume_valid_pending = 1;
+						// Do not arm delay-valid rebase for passthrough/system-encapsulation:
+						// AudioTrack delay validity does not represent true encoded pipeline latency.
+						s->audio_resume_valid_pending = passthrough_active ? 0 : 1;
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
@@ -1245,6 +1247,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// On Sabrina, the first "valid" timestamp can be unstable; wait for a small
 					// success streak before snapping to avoid visible jitter.
 					if( s->audio_resume_valid_pending && s->audio_ctx &&
+						!passthrough_active &&
 						s->video_time >= 0 && s->audio_time >= 0 &&
 						audio_interface_is_delay_valid( s->audio_ctx ) &&
 						audio_interface_get_delay_valid_streak( s->audio_ctx ) >= 3 ) {

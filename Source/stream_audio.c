@@ -72,6 +72,7 @@ static int stream_audio_format_supports_passthrough(int format)
 	case WAVE_FORMAT_DTS:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS_HD_MA:
+	case WAVE_FORMAT_TRUEHD:
 		return 1;
 	default:
 		return 0;

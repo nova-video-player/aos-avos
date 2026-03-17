@@ -157,6 +157,7 @@ typedef struct priv {
 	int passthrough_cached;		// cached passthrough state to avoid repeated sink queries
 	int grace_until_ms;
 	int last_user_av_delay;
+	int effective_av_delay_ms;
 	int drift_dir;
 	int drift_streak;
 	int hold_audio_until_ms;	// android_sync passthrough startup hold
@@ -661,17 +662,23 @@ DBGSI serprintf("MediaCodec resume\n");
 		if( s && s->audio_ctx ) {
 			delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
 		}
-		if( !android_sync && s ) {
+		if( s ) {
 			int current_av_delay = s->av_delay;
 			if( p->last_user_av_delay != current_av_delay ) {
 				int delta = current_av_delay - p->last_user_av_delay;
-				DBGSI serprintf("av_delay_change: %d -> %d (delta=%d) frame=%d blit=%d\n",
-					p->last_user_av_delay, current_av_delay, delta,
-					f ? f->time : -1, f ? f->blit_time : -1);
+				if( android_sync ) {
+					DBGSI serprintf("android_sync: av_delay_change target %d -> %d (delta=%d) effective=%d frame=%d\n",
+						p->last_user_av_delay, current_av_delay, delta,
+						p->effective_av_delay_ms, f ? f->time : -1);
+				} else {
+					DBGSI serprintf("av_delay_change: %d -> %d (delta=%d) frame=%d blit=%d\n",
+						p->last_user_av_delay, current_av_delay, delta,
+						f ? f->time : -1, f ? f->blit_time : -1);
+					// Keep physical schedule anchor stable; apply only presentation offset shift.
+					// Use grace to prevent transient drop logic from fighting the user change.
+					p->grace_until_ms = atime() + 1000;
+				}
 				p->last_user_av_delay = current_av_delay;
-				// Keep physical schedule anchor stable; apply only presentation offset shift.
-				// Use grace to prevent transient drop logic from fighting the user change.
-				p->grace_until_ms = atime() + 1000;
 			}
 		}
 
@@ -928,13 +935,28 @@ render_now:
 				int av_delay_ts = 0;
 				int64_t av_delay_ns = 0;
 				if( s ) {
-					av_delay_ts = RST_TO_TS_DELTA( s->av_delay, int );
+					int target_av_delay = s->av_delay;
+					int effective_av_delay = p->effective_av_delay_ms;
+					const int av_delay_slew_step_ms = 40;
+					if( effective_av_delay < target_av_delay ) {
+						int step = target_av_delay - effective_av_delay;
+						if( step > av_delay_slew_step_ms )
+							step = av_delay_slew_step_ms;
+						effective_av_delay += step;
+					} else if( effective_av_delay > target_av_delay ) {
+						int step = effective_av_delay - target_av_delay;
+						if( step > av_delay_slew_step_ms )
+							step = av_delay_slew_step_ms;
+						effective_av_delay -= step;
+					}
+					p->effective_av_delay_ms = effective_av_delay;
+					av_delay_ts = RST_TO_TS_DELTA( effective_av_delay, int );
 					av_delay_ns = (int64_t)av_delay_ts * 1000000LL;
 				}
 				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns + av_delay_ns;
 				int64_t delta_ms = (render_ts_ns - now_ns) / 1000000LL;
-DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d av_delay=%d av_delay_ts=%d\n",
-				render_ts_ns, now_ns, delta_ms, f->time, s ? s->av_delay : 0, av_delay_ts);
+DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d av_delay=%d av_eff=%d av_delay_ts=%d\n",
+				render_ts_ns, now_ns, delta_ms, f->time, s ? s->av_delay : 0, p->effective_av_delay_ms, av_delay_ts);
 				if (delta_ms <= 0) {
 					DBGSI serprintf("android_sync: render late delta=%lld f_time=%d audio_time=%d delay_ms=%d seek_epoch=%d\n",
 						delta_ms, f->time, s ? s->audio_time : -1, anchor_delay_ms, s ? s->seek_epoch : -1);
@@ -1293,6 +1315,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->passthrough_cached = _is_passthrough(sctx);
 	p->grace_until_ms = 0;
 	p->last_user_av_delay = sctx ? sctx->av_delay : 0;
+	p->effective_av_delay_ms = sctx ? sctx->av_delay : 0;
 
 	video->colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;
@@ -1647,6 +1670,8 @@ DBGSI	serprintf("android_sync: seek state offset=%lld pending=%d seek_epoch=%d\n
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
 	p->last_audio_resume_pending = 0;
+	p->effective_av_delay_ms = s->av_delay;
+	p->last_user_av_delay = s->av_delay;
 	if (!was_holding) {
 		p->hold_audio_until_ms = 0;
 		p->hold_audio_applied_ms = 0;

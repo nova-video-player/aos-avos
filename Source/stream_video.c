@@ -795,6 +795,14 @@ DBGS serprintf("stream_open_video_dec: %s/%d/%d done!\r\n", s->video_dec->name, 
 
 		return 0;
 next:
+		// Close the video sink first to join its threads and ensure no
+		// render/convert callbacks reference decoder-owned data
+		if (s->video_sink) {
+			if (s->video_sink->is_open) {
+				s->video_sink->close(s->video_sink);
+			}
+			s->put_time_mode = 0;
+		}
 		if (s->video_dec) {
 			if (s->video_dec->is_open) {
 				// call cleanup if needed
@@ -805,12 +813,6 @@ serprintf("error, could not cleanup video dec!\n");
 			}
 			s->video_dec->destroy( s->video_dec );
 			s->video_dec = NULL;
-		}
-		if (s->video_sink) {
-			if (s->video_sink->is_open) {
-				s->video_sink->close(s->video_sink);
-			}
-			s->put_time_mode = 0;
 		}
 	} 
 ErrorExit:
@@ -905,6 +907,12 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 // *****************************************************************************
 static void stream_close_video_dec( STREAM *s )
 {
+	// Close the video sink first to join its threads (venc_thread, copy_thread)
+	// and ensure no render/convert callbacks are in progress that reference
+	// decoder-owned data (AVFrame pointers in frame->priv)
+	if( s->video_sink && s->video_sink->is_open ) {
+		s->video_sink->close( s->video_sink );
+	}
 	if( s->video_dec) {
 DBGS serprintf("stream_close_video_dec\r\n");
 		// call cleanup if needed
@@ -914,9 +922,6 @@ serprintf("error, could not cleanup video dec!\n");
 		s->video_dec->close( s->video_dec );
 		s->video_dec->destroy( s->video_dec );
 		s->video_dec = NULL;
-	}
-	if( s->video_sink && s->video_sink->is_open ) {
-		s->video_sink->close( s->video_sink );
 	}
 
 	_free_video_buffers( s );

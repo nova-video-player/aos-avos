@@ -711,7 +711,14 @@ DBGCV2 serprintf("[   -   ]");
 
 static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, VIDEO_FRAME *src )
 {
+	if( !dec || !src )
+		return 1;
 	PRIV *p = (PRIV*)dec->priv;
+	if( !p || !p->vctx || !src->priv ) {
+		// decoder already cleaned up, skip render
+		src->dec = NULL;
+		return 1;
+	}
 	AVCodecContext *vctx = p->vctx;
 	AVFrame	*avframe = (AVFrame*)src->priv;
 DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );

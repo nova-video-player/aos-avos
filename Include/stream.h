@@ -472,6 +472,14 @@ typedef struct STREAM {
 	int		put_time_mode;		// video sink uses put_time pacing
 	int		manual_audio_delay_target_ms;   // extra audio hold for android_sync=0, negative av_delay
 	int		manual_audio_delay_applied_ms;  // currently applied extra audio hold
+	// PCM accumulation buffer to coalesce tiny decoder output chunks.
+	unsigned char	*pcm_accum_data;
+	int		pcm_accum_size;
+	int		pcm_accum_capacity;
+	int		pcm_accum_format;
+	int		pcm_accum_channels;
+	int		pcm_accum_bits;
+	int		pcm_accum_rate;
 
 	int 		audio_time;
 	int 		audio_ref_time;

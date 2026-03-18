@@ -828,7 +828,6 @@ render_now:
 						if (delay_for_pt < 0) {
 							delay_for_pt = 0;
 						}
-						p->hold_audio_applied_ms = 0;
 					}
 					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_for_pt;
 					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {

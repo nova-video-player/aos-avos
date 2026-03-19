@@ -51,6 +51,8 @@
 - **Sink selection**: On Android, the active video sink is `sfdec2` (`codec_sfdec2.c`). The sink is created via `stream_get_default_video_sink()` but the name logged is `sfdec2`.
 - **android_sync=0**: `codec_sfdec2.c` owns TS↔WC anchoring (`venc_put_time`, `venc_ref_time`) and pacing (blit wait/drop). `stream_sync.c` still computes A/V delay and audio master timing, but the sink uses its own WC anchor to schedule frames.
 - **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from the render offset and always passes it to MediaCodec. The offset starts from static latency and slews toward dynamic delay once timing is valid, except passthrough=2 which uses a startup hold plus residual static latency and skips slew. For reanchor windows, fresh `put_time` is preferred over recomputed heard-time to keep cross-thread anchor math consistent.
+  - **passthrough=2 post-seek re-init rule**: if `put_time` immediately resets `render_offset_ns` after the first init pass, startup hold compensation must remain active for the next init pass. This avoids snapping to full static latency before the post-flush audio pipeline has actually refilled.
+  - **passthrough=2 timing source**: audio TS progression uses compressed-frame `fakeSize` as PCM-equivalent duration. `fakeSize` is derived from parser `frame_size` when available, with a conservative 1536-sample fallback. This avoids E-AC3 cadence drift on streams that do not use fixed 1536-sample frames.
 - **Manual A/V delay policy**: keep anchors/diff in physical time; apply user delay at presentation scheduling. In `codec_sfdec2.c`, this is:
   - `android_sync=1`: `render_ts_ns`, using a slewed `effective_av_delay` toward the UI target.
   - `android_sync=0`: anchors remain physical in the sink. The sync diff includes `s->av_delay`; negative delay is realized by audio-side hold in `stream_audio.c` (non-passthrough).
@@ -124,6 +126,7 @@
 - **Static-to-dynamic slew**: initialize offset with static latency, then slew toward dynamic delay when timing becomes valid.
 - **Passthrough=1 (IEC)**: use playback‑head delay when available; fall back to static latency if head position is unstable.
 - **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is event‑driven only (seek/resume/speed).
+  - Keep startup hold compensation across an immediate post-seek offset reset; clear it on normal lifecycle resets (seek/flush/close), not during the first init pass.
   - **Note on Kirkwood (Google streamer 4K)**: long invalid‑delay windows after resume can delay the slew, so the initial offset is static until delay validity is established.
 
 ## Filters and Time Domains

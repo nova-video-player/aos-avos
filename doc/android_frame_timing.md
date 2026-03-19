@@ -43,5 +43,9 @@ because `render_ts_ns > 0` is always supplied.
   unreliable; this provides a consistent A/V alignment at startup.
 - Subsequent corrections are event‑driven (seek/resume/speed) and applied via
   slow slew to avoid visible acceleration or stutter.
+- For `passthrough=2` seek/resume windows, startup hold compensation is kept
+  across an immediate `put_time`-triggered `render_offset_ns` reset. This
+  prevents a second init pass from snapping to full static latency while the
+  post-flush audio path is still warming up.
 - Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
   incorrect snapping after a speed change, causing jitter in scheduled timestamps.

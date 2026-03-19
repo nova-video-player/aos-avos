@@ -162,6 +162,9 @@ Native determines IEC support by inspecting codec flags set by Java:
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
+- **Mode 2 A/V timing**: timing is based on compressed-frame duration via `fakeSize`
+  (PCM-equivalent bytes), not raw payload size. For E-AC3/DD+, parser `frame_size`
+  is preferred when available; fixed 1536-sample fallback is used otherwise.
 
 ## Debug Tips
 

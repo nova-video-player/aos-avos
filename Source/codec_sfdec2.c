@@ -161,6 +161,7 @@ typedef struct priv {
 	int drift_dir;
 	int drift_streak;
 	int hold_audio_until_ms;	// android_sync passthrough startup hold
+	int hold_audio_start_ms;	// wall clock when passthrough startup hold started
 	int hold_audio_applied_ms;	// ms held during passthrough startup
 } priv_t;
 
@@ -795,21 +796,33 @@ render_now:
 				anchor_delay_ms = 0;
 			}
 
-			if (passthrough == 2 && s && s->audio && s->audio->valid && s->audio_time < 0) {
+			if (passthrough == 2 && s && s->audio && s->audio->valid &&
+			    (s->audio_time < 0 || p->hold_audio_until_ms != 0)) {
 				if (p->hold_audio_until_ms == 0) {
 					int hold_ms = anchor_delay_ms > 0 ? anchor_delay_ms + 200 : 500;
-					p->hold_audio_until_ms = atime() + hold_ms;
-					p->hold_audio_applied_ms = hold_ms;
+					int hold_start_ms = atime();
+					p->hold_audio_start_ms = hold_start_ms;
+					p->hold_audio_until_ms = hold_start_ms + hold_ms;
+					p->hold_audio_applied_ms = 0;
 					DBGSI serprintf("android_sync: hold video for passthrough start (%d ms)\n", hold_ms);
 				}
 				while (p->locked.run && !has_state_l(p, THREAD_STATE_FLUSHING) &&
-					s->audio_time < 0 && atime() < p->hold_audio_until_ms) {
+				       s->audio_time < 0 && atime() < p->hold_audio_until_ms) {
 					struct timespec ts_wait = ts;
 					timespec_add_ms(&ts_wait, 10);
 					pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
 				}
 				if (s->audio_time >= 0) {
+					int hold_end_ms = atime();
+					if (p->hold_audio_start_ms > 0 && hold_end_ms > p->hold_audio_start_ms) {
+						p->hold_audio_applied_ms = hold_end_ms - p->hold_audio_start_ms;
+					} else {
+						p->hold_audio_applied_ms = 0;
+					}
 					p->hold_audio_until_ms = 0;
+					p->hold_audio_start_ms = 0;
+					DBGSI serprintf("android_sync: passthrough hold done applied=%d ms\n",
+						p->hold_audio_applied_ms);
 				} else {
 					// Timeout reached: keep video blocked until audio becomes available.
 					hold_passthrough = 1;
@@ -821,6 +834,7 @@ render_now:
 			if (!hold_passthrough && p->render_offset_ns == -1) {
 				// Passthrough mode 2: align video to audible time (audio_time minus latency).
 				if (passthrough == 2 && have_audio_time) {
+					const int max_forward_lead_ms = 500;
 					int delay_for_pt = anchor_delay_ms > 0 ? anchor_delay_ms : 0;
 					if (p->hold_audio_applied_ms > 0) {
 						// Avoid double-counting startup hold + static latency.
@@ -834,6 +848,14 @@ render_now:
 						// Backward seek: avoid anchoring behind the current video frame.
 						// Only clamp after video_time is established; allow startup to align to audio.
 						heard_ts = f->time;
+					}
+					if (s && s->seek_epoch > 0 && heard_ts >= 0) {
+						int64_t forward_lead = (int64_t)f->time - heard_ts;
+						if (forward_lead > max_forward_lead_ms) {
+							DBGSI serprintf("android_sync: clamp passthrough forward lead %lld -> %d ms (f=%d heard=%lld)\n",
+								(long long)forward_lead, max_forward_lead_ms, f->time, (long long)heard_ts);
+							heard_ts = (int64_t)f->time - max_forward_lead_ms;
+						}
 					}
 					if (heard_ts < 0) {
 						heard_ts = 0;
@@ -1309,6 +1331,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->last_seek_epoch = 0;
 	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
+	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
 	STREAM *sctx = (STREAM *)dec->ctx;
 	p->passthrough_cached = _is_passthrough(sctx);
@@ -1481,6 +1504,7 @@ DBGCV	CLOG();
 	p->last_seek_epoch = 0;
 	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
+	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
@@ -1673,6 +1697,7 @@ DBGSI	serprintf("android_sync: seek state offset=%lld pending=%d seek_epoch=%d\n
 	p->last_user_av_delay = s->av_delay;
 	if (!was_holding) {
 		p->hold_audio_until_ms = 0;
+		p->hold_audio_start_ms = 0;
 		p->hold_audio_applied_ms = 0;
 	}
 	// If audio_time is stale vs video_time after seek, invalidate and re-anchor on first audio.

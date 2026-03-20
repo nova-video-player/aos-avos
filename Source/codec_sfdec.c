@@ -612,8 +612,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 
 	int hw_type = device_get_hw_type();
 	if (video->format == VIDEO_FORMAT_H264 && video->sps.valid && video->profile >= H264_PROFILE_HIGH10) {
-		CLOG("sf can't do Hi10P, abort");
-		return 1;
+		// Do not hard-block Hi10 here: some devices can still decode via MediaCodec.
+		// If decoder instantiation/start fails, stream_open_video_dec will fall back.
+		CLOG("Hi10P input detected (profile=%d): try sfdec and fallback on runtime failure", video->profile);
 	}
 
 	dec->ctx = ctx;

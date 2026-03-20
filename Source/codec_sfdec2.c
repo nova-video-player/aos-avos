@@ -1144,11 +1144,20 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	size_t extradata_size = 0;
 	int pts_reorder = 0;
 	int input_size = -1;
+	CLOG("open: format=%d %dx%d subfmt=%d profile=%d level=%d rotation=%d",
+		video ? video->format : -1,
+		video ? video->width : -1,
+		video ? video->height : -1,
+		video ? video->subfmt : -1,
+		video ? video->profile : -1,
+		video ? video->level : -1,
+		video ? video->rotation : -1);
 
 	int hw_type = device_get_hw_type();
 	if (video->format == VIDEO_FORMAT_H264 && video->sps.valid && video->profile >= H264_PROFILE_HIGH10) {
-		CLOG("sf can't do Hi10P, abort");
-		return 1;
+		// Do not hard-block Hi10 here: some devices can still decode via MediaCodec.
+		// If decoder instantiation/start fails, stream_open_video_dec will fall back.
+		CLOG("Hi10P input detected (profile=%d): try sfdec2 and fallback on runtime failure", video->profile);
 	}
 
 	dec->ctx = ctx;
@@ -1239,8 +1248,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			sfdec_codec = SFDEC_VIDEO_WMV;
 			break;
 		default:
+			CLOG("open reject: unsupported format=%d subfmt=%d profile=%d", video->format, video->subfmt, video->profile);
 			return 1;
-	}
+		}
 
 	// force AVCDecoder usage, better perf than rk OMX decoder
 	if ((hw_type == HW_TYPE_RK30 ||
@@ -1281,7 +1291,8 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	apply_rotation(p, video->rotation, width, height, &width, &height);
 
 	if (!p->sfdec) {
-		CLOG("sfdec_new failed");
+		CLOG("sfdec_new failed codec=%d flags=0x%x decoder_name=%s w=%d h=%d",
+			sfdec_codec, flags, decoder_name ? decoder_name : "(default)", width, height);
 		goto err;
 	}
 
@@ -1295,7 +1306,8 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	}
 
 	if (sfdec_start(p->sfdec) != 0) {
-		CLOG("sfdec_start failed");
+		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",
+			sfdec_codec, flags, decoder_name ? decoder_name : "(default)");
 		goto err;
 	}
 
@@ -1358,6 +1370,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 
 	return 0;
 err:
+	CLOG("open failed: format=%d %dx%d subfmt=%d profile=%d", video->format, video->width, video->height, video->subfmt, video->profile);
 	if (p->sfdec) {
 		sfdec_delete(p->sfdec);
 		p->sfdec = NULL;

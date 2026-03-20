@@ -324,15 +324,34 @@ STREAM_DEC_VIDEO *stream_get_new_dec_video( VIDEO_PROPERTIES *video, STREAM_VIDE
 {
 DBGS serprintf("stream_get_new_dec_video( %d [%s], %d, %d x %d  cpu %d  forced %d name %s)\r\n", video->format, video_get_format_name(video), video->subfmt, video->width, video->height, cpu, forced , dec_name);
 	STREAM_REG_DEC_VIDEO *v = _get_dec_video( video, cpu, dec_name );
-	if( v && (forced
+	if( !v ) {
+		serprintf("stream_get_new_dec_video: no candidate format=%d[%s] subfmt=%d %dx%d cpu=%d forced=%d name=%s\n",
+			video->format, video_get_format_name(video), video->subfmt,
+			video->width, video->height, cpu, forced, dec_name ? dec_name : "(any)");
+	}
+	int allow_decode = 0;
 #ifdef CONFIG_ANDROID
-	          || (android_can_hw_run_dec(cpu) && (
-	           ( (cpu!=LIBAV) && ((acodecs_is_supported(video->format, 1, 0) || (device_config_has_pluginlib() && !acodecs_is_supported(video->format, 1, 1) ) ) ) )
-		  || ( cpu==LIBAV)))
+	int can_hw = android_can_hw_run_dec(cpu);
+	int codec_supported = 1;
+	int pluginlib_fallback = 0;
+	if( cpu != LIBAV ) {
+		codec_supported = acodecs_is_supported(video->format, 1, 0);
+		pluginlib_fallback = device_config_has_pluginlib() && !acodecs_is_supported(video->format, 1, 1);
+	}
+	allow_decode = forced || (can_hw && (
+		((cpu != LIBAV) && (codec_supported || pluginlib_fallback)) ||
+		(cpu == LIBAV)
+	));
+	if( v && !allow_decode ) {
+		serprintf("stream_get_new_dec_video: reject name=%s cpu=%d forced=%d can_hw=%d codec_supported=%d pluginlib_fallback=%d format=%d[%s] %dx%d\n",
+			v->name ? v->name : "(null)", cpu, forced, can_hw, codec_supported,
+			pluginlib_fallback, video->format, video_get_format_name(video),
+			video->width, video->height);
+	}
 #else
-		  || 1
+	allow_decode = 1;
 #endif
-	         )
+	if( v && allow_decode
 	) {
 		if( mangler )
 			*mangler = (STREAM_VIDEO_MANGLER*)v->mangler;

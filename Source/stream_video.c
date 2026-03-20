@@ -689,23 +689,38 @@ DBGS serprintf("stream_open_video_dec\r\n");
 		forced = 1;
 	}
 	while( prio ) {
+		int try_prio = prio;
 		// reset previous error states
 		s->video_error           = VE_NO_ERROR;
 		s->video_error_qualifier = VEQ_NONE;
 		s->video_error_desc[0]   = '\0';
+		serprintf("stream_open_video_dec: try format=%d[%s] %dx%d subfmt=%d profile=%d prio=%d forced=%d\n",
+			s->video ? s->video->format : -1,
+			s->video ? video_get_format_name(s->video) : "(null)",
+			s->video ? s->video->width : -1,
+			s->video ? s->video->height : -1,
+			s->video ? s->video->subfmt : -1,
+			s->video ? s->video->profile : -1,
+			try_prio, forced);
 		// try to get a video decoder
 		s->video_dec = stream_get_new_dec_video( s->video, &s->video_mangler, prio, forced, stream_force_codec );
 		prio = stream_force_prio ? 0 : prio - 1;
 		
 		if( !s->video_dec) {
+			serprintf("stream_open_video_dec: no decoder candidate at prio=%d, fallback to next\n", try_prio);
 			goto next;
 		}
 		// try to open the decoder
 		if( s->video_dec->open( s->video_dec, s->video, s, &s->video->flush_frames, &s->video->delay_frames ) ) {
 			// no dec
-serprintf("error opening video_dec[%s]!\n", s->video_dec->name);
+serprintf("error opening video_dec[%s] cpu=%d at prio=%d (video_error=%d qual=%d desc=%s), fallback\n",
+				s->video_dec->name, s->video_dec->cpu, try_prio,
+				s->video_error, s->video_error_qualifier,
+				s->video_error_desc[0] ? s->video_error_desc : "(none)");
 			goto next;
 		}
+		serprintf("stream_open_video_dec: selected video_dec[%s] cpu=%d at prio=%d\n",
+			s->video_dec->name, s->video_dec->cpu, try_prio);
 
 		memset( &s->video_rc, 0, sizeof( s->video_rc ) );
 		if( s->video_dec->get_rc ) {			
@@ -4040,6 +4055,7 @@ static int _handle_video_codec_error( STREAM *s )
 serprintf("no lower prio possible!\n" ); 
 		return 1;
 	}	
+	serprintf("_handle_video_codec_error: downgrade decoder priority %d -> %d\n", cpu + 1, cpu);
 	stream_set_cpu_priority( s, cpu );
 
 	if( stream_open_video_dec( s, NULL ) ) {

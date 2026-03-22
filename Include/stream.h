@@ -741,7 +741,7 @@ typedef struct STREAM {
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;
-	int		video_resume_frame_primed;
+	int		video_hold_for_delay;
 
 	ID3_TAG		tag;
 	int		tag_new;

@@ -596,6 +596,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->passthrough = requested_passthrough;
 
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
+	DBG LOG( "audiotrack_set_output_params: enter req_rate=%d req_channels=%d req_bits=%d req_format=%04X passthrough=%d using_atempo=%d speed=%.3f init=%d prev_rate=%d prev_channels=%d prev_format=%04X prev_passthrough=%d prev_frame_size=%zu",
+		rate, channels, bits, format, at->passthrough, using_atempo, as, at->init,
+		prev_rate, prev_channels, prev_format, prev_applied_passthrough, prev_frame_size );
 
 	attach_thread( at );
 
@@ -733,6 +736,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->channel_count = output_channels;
 	at->frame_size = frame_size;
 	channels = output_channels;
+	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
+		rate, output_channels, frame_size, track_format, track_chanmask, same_config, at->passthrough);
 
 	if (same_config) {
 		DBG LOG("audiotrack_set_output_params: reusing existing track (rate=%d ch=%d fmt=%d passthrough=%d speed=%.3f using_atempo=%d)",
@@ -767,12 +772,15 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 						(*at->env)->ExceptionDescribe(at->env);
 						(*at->env)->ExceptionClear(at->env);
 					} else {
-						DBG LOG("audiotrack_set_output_params: PlaybackParams updated on existing track");
+						DBG LOG("audiotrack_set_output_params: PlaybackParams updated on existing track speed=%.3f rate=%d channels=%d frame_size=%zu",
+							as, rate, output_channels, frame_size);
 						return 0;
 					}
 				}
 			}
 		} else {
+			DBG LOG("audiotrack_set_output_params: same_config reuse without speed update using_atempo=%d speed_enabled=%d passthrough=%d api=%d speed=%.3f obj=%p",
+				using_atempo, is_audio_speed_enabled, at->passthrough, device_get_android_api(), as, at->obj);
 			return 0;
 		}
 		// Fall through to recreate if PlaybackParams update failed.
@@ -800,6 +808,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int channelConfig = track_chanmask << 2;
 	int audioFormat = track_format;
 	mode = 1; /*MODE_STREAM*/
+	DBG LOG("audiotrack_set_output_params: creating new track reinit=%d speed=%.3f using_atempo=%d passthrough=%d sampleRate=%d channels=%d audioFormat=%d channelConfig=0x%x",
+		reinit, as, using_atempo, at->passthrough, sampleRateInHz, channels, audioFormat, channelConfig);
 
 	// When using atempo filter, AudioTrack always plays at 1.0x, so no need for larger buffers
 	DBG LOG( "audiotrack_set_output_params: track_format=%d, track_chanmask=0x%x, channelConfig=0x%x (format=%d, passthrough=%d, channels=%d)",
@@ -1276,6 +1286,7 @@ static int audiotrack_get_delay(audio_ctx_t *at)
 	const int delay_max_ms = 5000;
 	const int delay_suspect_ms = 2000;
 	const int stable_streak_required = 10;
+	const int playhead_streak_required = 3; // playhead advances in large chunks on some devices
 	const int max_smooth_drift_ms = 1000;
 	const char *src = "unknown";
 	int ret = -1;
@@ -1343,7 +1354,7 @@ DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 	if (at->ts_last_query_ms > 0 && now_ms - at->ts_last_query_ms < timing_query_interval_ms) {
 		// Throttle timing queries; reuse cached values during the stable window.
 		if (at->ts_cached_valid) {
-			at->delay_valid = at->ts_use_timestamp ? 1 : 0;
+			at->delay_valid = (at->ts_use_timestamp || at->last_good_dynamic_valid) ? 1 : 0;
 			AUD_RETURN("cached(throttle)", at->ts_cached_delay_ms);
 		}
 		if (audiotrack_last_good_dynamic(at, now_ms, &at->ts_cached_delay_ms)) {
@@ -1351,12 +1362,12 @@ DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 				AUD_RETURN("static(last_good_zero)", at->latency);
 			}
 			at->ts_cached_valid = 1;
-			at->delay_valid = at->ts_use_timestamp ? 1 : 0;
+			at->delay_valid = (at->ts_use_timestamp || at->last_good_dynamic_valid) ? 1 : 0;
 			AUD_RETURN("last_good(throttle)", at->ts_cached_delay_ms);
 		}
 		// No cached timing; reuse last fallback delay for heard-time only.
 		if (at->last_fallback_delay_ms > 0 && (now_ms - at->last_fallback_ms) < 5000) {
-			if (at->playhead_valid_streak >= 5) {
+			if (at->playhead_valid_streak >= playhead_streak_required) {
 				at->ts_cached_delay_ms = at->last_fallback_delay_ms;
 				at->ts_cached_valid = 1;
 				at->last_good_dynamic_delay_ms = at->last_fallback_delay_ms;
@@ -1457,7 +1468,7 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 		at->ts_use_timestamp = 0;
 		at->ts_last_query_ms = now_ms;
 		// If timestamps never stabilize (e.g., Sabrina), promote stable playhead fallback.
-		if (fallback_delay > 0 && at->playhead_valid_streak >= 5) {
+		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required) {
 			at->ts_cached_delay_ms = fallback_delay;
 			at->ts_cached_valid = 1;
 			at->last_good_dynamic_delay_ms = fallback_delay;
@@ -1501,7 +1512,7 @@ DBG2	LOG("getTimestamp success=%d framePosition=%lld nanoTime=%lld rate=%d ts_us
 DBG2		LOG("Non-positive timestamp values, timing unavailable (framePosition=%lld nanoTime=%lld)",
 			(long long)framePosition, (long long)nanoTime);
 		at->ts_last_query_ms = now_ms;
-		if (fallback_delay > 0 && at->playhead_valid_streak >= 5) {
+		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required) {
 			at->ts_cached_delay_ms = fallback_delay;
 			at->ts_cached_valid = 1;
 			at->last_good_dynamic_delay_ms = fallback_delay;
@@ -1923,6 +1934,9 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 
 	if(audio_interface_is_audio_speed_enabled() && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed path using_atempo=%d passthrough=%d api=%d rate=%d channels=%d format=%04X frame_size=%d buf_size=%d obj=%p current_speed=%.3f",
+			using_atempo, at->passthrough, device_get_android_api(), at->rate, at->channel_count,
+			at->format, at->frame_size, at->buf_size, at->obj, audio_interface_get_audio_speed());
 
 		JNIEnv *myEnv = attach_thread_current_vm();
 		if (*myEnv == NULL) return 0;
@@ -2024,7 +2038,9 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		audiotrack_reset_timing(at);
 		audiotrack_update_latency(at, myEnv);
 	} else {
-		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed skipped speed=%f speed_enabled=%d using_atempo=%d passthrough=%d api=%d init=%d obj=%p",
+			speed, audio_interface_is_audio_speed_enabled(), using_atempo, at ? at->passthrough : -1,
+			device_get_android_api(), at ? at->init : 0, at ? at->obj : NULL);
 	}
 	return 0;
 }

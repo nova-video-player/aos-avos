@@ -429,7 +429,7 @@ static void _audio_decode( STREAM *s )
 	if( s->paused || stream_audio_paused ) {
 		s->audio_resume_pending = 1;
 		s->audio_resume_valid_pending = 0;
-		s->video_resume_frame_primed = 0;
+		s->video_hold_for_delay = 1;
 		s->manual_audio_delay_applied_ms = 0;
 		s->pcm_accum_size = 0;
 	}

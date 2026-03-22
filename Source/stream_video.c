@@ -391,6 +391,9 @@ serprintf("error creating audio_dec!\r\n");
 	int ac3_recoding = libavos_get_ac3_recoding_enabled();
 DBGS serprintf("stream_open_audio_dec: downmix=%d max_channels=%d ac3_recoding=%d\r\n",
 			stream_audio_downmix, s->audio_max_channels, ac3_recoding);
+	DBG serprintf("stream_open_audio_dec: input channels=%d rate=%d bits=%d passthrough=%d downmix_pref=%d max_pcm=%d ac3_recoding=%d\n",
+		s->audio->channels, s->audio->samplesPerSec, s->audio->bitsPerSample,
+		spdif_is_passthrough_on(), stream_audio_downmix, s->audio_max_channels, ac3_recoding);
 	if( stream_audio_downmix && !ac3_recoding ) {
 		s->audio->request_channels = s->audio_max_channels;
 DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r\n", s->audio->request_channels);
@@ -440,11 +443,16 @@ DBGS serprintf("stream_open_audio_dec: request_channels=%d (src=%d, cap=%d)\r\n"
 	desired, s->audio->channels, pcm_cap);
 		}
 	}
+	DBG serprintf("stream_open_audio_dec: final request_channels=%d (src=%d passthrough=%d downmix_pref=%d ac3_recoding=%d)\n",
+		s->audio->request_channels, s->audio->channels, passthrough_mode, stream_audio_downmix, ac3_recoding);
 	if( s->audio_dec->open( s->audio ) ) {
 serprintf("error opening audio_dec!\r\n");
 		s->audio_dec = NULL;		
 		return 1;
 	}
+	DBG serprintf("stream_open_audio_dec: decoder opened channels=%d request_channels=%d bytesPerFrame=%d\n",
+		s->audio->channels, s->audio->request_channels,
+		s->audio->channels * s->audio->bitsPerSample / 8);
 		s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
 
 		memset( &s->audio_rc, 0, sizeof( s->audio_rc ) );
@@ -2884,20 +2892,6 @@ static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	int real_time_calc = _real_time( s, time ); // should be ts
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
 		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
-	if( get_android_sync() && s->audio_resume_pending && s->audio_ctx &&
-		!audio_interface_is_delay_valid( s->audio_ctx ) && s->audio_time < 0 ) {
-		// On Sabrina, AudioTrack timing is invalid right after resume; avoid
-		// running video ahead before first audio output establishes timing.
-		if( !s->video_resume_frame_primed ) {
-			s->video_resume_frame_primed = 1;
-			DBG serprintf("video_hold_on_resume: allow first frame_time=%d video_time=%d\n",
-				time, s->video_time);
-		} else {
-			DBG serprintf("video_hold_on_resume: skip frame_time=%d video_time=%d (delay invalid)\n",
-				time, s->video_time);
-			return 0;
-		}
-	}
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;
@@ -2977,6 +2971,31 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
 		goto Discard;
 	}
+	// Block video output until audio delay estimation is valid to prevent
+	// render_offset from being anchored against an incorrect heard_ts.
+	// Blocking here creates backpressure: disp_q stops draining, so the
+	// decoder cannot advance the video timeline during the wait.
+	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx ) {
+		int hold_wait_ms = 0;
+		while( !_engine_abort( s ) &&
+		       !audio_interface_is_delay_valid( s->audio_ctx ) &&
+		       hold_wait_ms < 2000 ) {
+			if( (hold_wait_ms % 200) == 0 ) {
+				DBG serprintf("video_hold_for_delay: waiting frame_time=%d (%d ms)\n",
+					frame->time, hold_wait_ms);
+			}
+			msec_sleep( 10 );
+			hold_wait_ms += 10;
+		}
+		s->video_hold_for_delay = 0;
+		if( hold_wait_ms >= 2000 ) {
+			serprintf("video_hold_for_delay: timeout after %d ms\n", hold_wait_ms);
+		} else {
+			DBG serprintf("video_hold_for_delay: delay valid after %d ms, frame_time=%d\n",
+				hold_wait_ms, frame->time);
+		}
+	}
+
 	int sync_wait_ms = 0;
 	const int sync_wait_timeout_ms = 5000; // Avoid indefinite freeze if audio never starts
 

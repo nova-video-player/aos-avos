@@ -73,8 +73,10 @@
 struct ctx {
 	AVFilterGraph *filter_graph;
 	AVFilterContext *abuffer_ctx;
-    AVFilterContext *atempo_ctx;
-    AVFilterContext *abuffersink_ctx;
+	AVFilterContext *aformat_in_ctx;
+	AVFilterContext *atempo_ctx;
+	AVFilterContext *aformat_out_ctx;
+	AVFilterContext *abuffersink_ctx;
 	AVFrame *in_frame;
 	AVFrame *out_frame;
 	AVAudioFifo *fifo;                  // FIFO for output buffering
@@ -127,10 +129,12 @@ static void ctx_free(struct ctx *ctx)
 		return;
 	}
 
-    if (ctx->filter_graph) {
-        avfilter_graph_free(&ctx->filter_graph);
-    }
-    ctx->atempo_ctx = NULL;
+	if (ctx->filter_graph) {
+		avfilter_graph_free(&ctx->filter_graph);
+	}
+	ctx->aformat_in_ctx = NULL;
+	ctx->atempo_ctx = NULL;
+	ctx->aformat_out_ctx = NULL;
 	if (ctx->in_frame) {
 		av_frame_free(&ctx->in_frame);
 	}
@@ -207,7 +211,9 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
     if (ctx->filter_graph) {
         avfilter_graph_free(&ctx->filter_graph);
         ctx->abuffer_ctx = NULL;
+        ctx->aformat_in_ctx = NULL;
         ctx->abuffersink_ctx = NULL;
+        ctx->aformat_out_ctx = NULL;
     }
     ctx->atempo_ctx = NULL;
 
@@ -255,36 +261,94 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 		return -1;
 	}
 
-    const AVFilter *atempo_filter = avfilter_get_by_name("atempo");
-    if (!atempo_filter) {
-        serprintf("atempo: atempo filter not found\n");
-        avfilter_graph_free(&ctx->filter_graph);
-        return -1;
-    }
+	const AVFilter *aformat_filter = avfilter_get_by_name("aformat");
+	if (!aformat_filter) {
+		serprintf("atempo: aformat filter not found\n");
+		avfilter_graph_free(&ctx->filter_graph);
+		return -1;
+	}
 
-    ctx->atempo_ctx = avfilter_graph_alloc_filter(ctx->filter_graph, atempo_filter, "atempo0");
-    if (!ctx->atempo_ctx) {
-        serprintf("atempo: failed to allocate atempo filter\n");
-        avfilter_graph_free(&ctx->filter_graph);
-        return -1;
-    }
+	ctx->aformat_in_ctx = avfilter_graph_alloc_filter(ctx->filter_graph, aformat_filter, "afmt_in");
+	if (!ctx->aformat_in_ctx) {
+		serprintf("atempo: failed to allocate input aformat filter\n");
+		avfilter_graph_free(&ctx->filter_graph);
+		return -1;
+	}
 
-    snprintf(args, sizeof(args), "tempo=%f", speed);
-    ret = avfilter_init_str(ctx->atempo_ctx, args);
-    if (ret < 0) {
-        serprintf("atempo: failed to init atempo with tempo=%f: %s\n", speed, av_err2str(ret));
-        avfilter_graph_free(&ctx->filter_graph);
-        ctx->atempo_ctx = NULL;
-        return -1;
-    }
+	snprintf(args, sizeof(args), "sample_fmts=flt:sample_rates=%d:channel_layouts=%s",
+		ctx->sample_rate, ctx->channel_layout);
+	ret = avfilter_init_str(ctx->aformat_in_ctx, args);
+	if (ret < 0) {
+		serprintf("atempo: failed to init input aformat: %s\n", av_err2str(ret));
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->aformat_in_ctx = NULL;
+		return -1;
+	}
 
-    ret = avfilter_link(ctx->abuffer_ctx, 0, ctx->atempo_ctx, 0);
-    if (ret < 0) {
-        serprintf("atempo: failed to link abuffer -> atempo: %s\n", av_err2str(ret));
-        avfilter_graph_free(&ctx->filter_graph);
-        ctx->atempo_ctx = NULL;
-        return -1;
-    }
+	const AVFilter *atempo_filter = avfilter_get_by_name("atempo");
+	if (!atempo_filter) {
+		serprintf("atempo: atempo filter not found\n");
+		avfilter_graph_free(&ctx->filter_graph);
+		return -1;
+	}
+
+	ctx->atempo_ctx = avfilter_graph_alloc_filter(ctx->filter_graph, atempo_filter, "atempo0");
+	if (!ctx->atempo_ctx) {
+		serprintf("atempo: failed to allocate atempo filter\n");
+		avfilter_graph_free(&ctx->filter_graph);
+		return -1;
+	}
+
+	snprintf(args, sizeof(args), "tempo=%f", speed);
+	ret = avfilter_init_str(ctx->atempo_ctx, args);
+	if (ret < 0) {
+		serprintf("atempo: failed to init atempo with tempo=%f: %s\n", speed, av_err2str(ret));
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->aformat_in_ctx = NULL;
+		ctx->atempo_ctx = NULL;
+		return -1;
+	}
+
+	ctx->aformat_out_ctx = avfilter_graph_alloc_filter(ctx->filter_graph, aformat_filter, "afmt_out");
+	if (!ctx->aformat_out_ctx) {
+		serprintf("atempo: failed to allocate output aformat filter\n");
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->aformat_in_ctx = NULL;
+		ctx->atempo_ctx = NULL;
+		return -1;
+	}
+
+	snprintf(args, sizeof(args), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
+		av_get_sample_fmt_name(ctx->format), ctx->sample_rate, ctx->channel_layout);
+	ret = avfilter_init_str(ctx->aformat_out_ctx, args);
+	if (ret < 0) {
+		serprintf("atempo: failed to init output aformat: %s\n", av_err2str(ret));
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->aformat_in_ctx = NULL;
+		ctx->atempo_ctx = NULL;
+		ctx->aformat_out_ctx = NULL;
+		return -1;
+	}
+
+	ret = avfilter_link(ctx->abuffer_ctx, 0, ctx->aformat_in_ctx, 0);
+	if (ret < 0) {
+		serprintf("atempo: failed to link abuffer -> aformat_in: %s\n", av_err2str(ret));
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->aformat_in_ctx = NULL;
+		ctx->atempo_ctx = NULL;
+		ctx->aformat_out_ctx = NULL;
+		return -1;
+	}
+
+	ret = avfilter_link(ctx->aformat_in_ctx, 0, ctx->atempo_ctx, 0);
+	if (ret < 0) {
+		serprintf("atempo: failed to link aformat_in -> atempo: %s\n", av_err2str(ret));
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->aformat_in_ctx = NULL;
+		ctx->atempo_ctx = NULL;
+		ctx->aformat_out_ctx = NULL;
+		return -1;
+	}
 
  	// Create abuffersink
 	const AVFilter *abuffersink = avfilter_get_by_name("abuffersink");
@@ -308,9 +372,16 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 		return -1;
 	}
 
-	ret = avfilter_link(ctx->atempo_ctx, 0, ctx->abuffersink_ctx, 0);
+	ret = avfilter_link(ctx->atempo_ctx, 0, ctx->aformat_out_ctx, 0);
 	if (ret < 0) {
-		serprintf("atempo: failed to link atempo -> abuffersink: %s\n", av_err2str(ret));
+		serprintf("atempo: failed to link atempo -> aformat_out: %s\n", av_err2str(ret));
+		avfilter_graph_free(&ctx->filter_graph);
+		return -1;
+	}
+
+	ret = avfilter_link(ctx->aformat_out_ctx, 0, ctx->abuffersink_ctx, 0);
+	if (ret < 0) {
+		serprintf("atempo: failed to link aformat_out -> abuffersink: %s\n", av_err2str(ret));
 		avfilter_graph_free(&ctx->filter_graph);
 		return -1;
 	}
@@ -326,7 +397,8 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 	ctx->current_speed = speed;
 	ctx->filter_initialized = 1;
 
-	DBGA serprintf("atempo: filter graph configured for speed %.3f\n", speed);
+	DBGA serprintf("atempo: filter graph configured for speed %.3f (internal=flt output=%s)\n",
+		speed, av_get_sample_fmt_name(ctx->format));
 
 	return 0;
 }

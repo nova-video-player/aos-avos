@@ -50,7 +50,7 @@ void stream_audio_samplerate_changed( STREAM *s );
 
 static int zero_time = 200;
 static int stream_audio_chunk = 4096;
-static int stream_audio_pcm_accum_ms = 20;
+static int stream_audio_pcm_accum_ms = 40;
 static int ac3_sink_configured = 0;  // Track if sink is configured for AC3 passthrough
 static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when AC3 recoding starts
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations

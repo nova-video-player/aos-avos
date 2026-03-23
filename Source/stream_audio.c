@@ -774,9 +774,18 @@ serprintf(" ae! ");
 				using_pcm_accum = 1;
 			}
 		} else if( s->pcm_accum_size > 0 ) {
-			DBG serprintf("stream_audio: pcm_accum dropped pending=%d (format=%04X passthrough_active=%d ac3_recoding=%d)\n",
+			// Non-eligible frame arrived while PCM was accumulated.
+			// Flush the pending PCM through the normal filter/sink path
+			// instead of dropping it, which would cause silent playback.
+			DBG serprintf("stream_audio: pcm_accum flush pending=%d (next format=%04X passthrough_active=%d ac3_recoding=%d)\n",
 				s->pcm_accum_size, audio_frame.format, passthrough_active, ac3_recoding);
-			s->pcm_accum_size = 0;
+			audio_frame.data = s->pcm_accum_data;
+			audio_frame.size = s->pcm_accum_size;
+			audio_frame.format = s->pcm_accum_format;
+			audio_frame.channels = s->pcm_accum_channels;
+			audio_frame.bits = s->pcm_accum_bits;
+			audio_frame.samplesPerSec = s->pcm_accum_rate;
+			using_pcm_accum = 1;
 		}
 
 		if( s->audio_sink ) {

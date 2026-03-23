@@ -75,6 +75,8 @@ struct audio_ctx {
 	int applied_passthrough;
 	JNIEnv * env;
 	int willDetach;
+	pthread_t attach_thread_id;
+	int attach_thread_id_valid;
 	jobject obj;
 	jbyteArray jbuffer;
 	size_t buf_size;
@@ -411,8 +413,11 @@ static audio_ctx_t *audiotrack_open(int mode)
 			ERR LOG("ERROR: Attach to JVM failed");
 			return 0;
 		}
-		else
+		else {
 			at->willDetach = 1;
+			at->attach_thread_id = pthread_self();
+			at->attach_thread_id_valid = 1;
+		}
 	}
 
 	at->audiotrackClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOTRACK_CLASS_NAME));
@@ -470,10 +475,27 @@ static audio_ctx_t *audiotrack_open(int mode)
 
 static int audiotrack_close(audio_ctx_t **pat)
 {
+	if (!pat || !*pat) return 0;
 	audio_ctx_t *at = *pat;
 
 	if (at->init) {
-		attach_thread(at);
+		// Attach close thread to JVM if not already attached.
+		// Track whether we attached it so we can detach afterwards.
+		int close_thread_attached = 0;
+		JNIEnv *env = NULL;
+		if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
+			if ((*myVm)->AttachCurrentThread(myVm, &env, NULL) == 0) {
+				close_thread_attached = 1;
+			} else {
+				ERR LOG("audiotrack_close: AttachCurrentThread failed, skipping JNI cleanup");
+				at->init = 0;
+				free(at);
+				*pat = NULL;
+				return -1;
+			}
+		}
+		at->env = env;
+
 		int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
 		if (underrun_count > 0)
 			ERR LOG("Underrun count: %d", underrun_count);
@@ -496,12 +518,23 @@ static int audiotrack_close(audio_ctx_t **pat)
 			(*at->env)->DeleteGlobalRef(at->env, at->audioTimestampClass);
 			at->audioTimestampClass = NULL;
 		}
-		//if (at->willDetach)
-		//	(*myVm)->DetachCurrentThread(myVm);
+
+		// Detach the owner thread (from audiotrack_open) if close runs on it
+		if (at->willDetach && at->attach_thread_id_valid &&
+		    pthread_equal(pthread_self(), at->attach_thread_id)) {
+			// Close is on the same thread that opened — detach it.
+			// This also covers the close_thread_attached case since it's the same thread.
+			(*myVm)->DetachCurrentThread(myVm);
+			close_thread_attached = 0; // already detached
+		} else if (close_thread_attached) {
+			// Close is on a different thread that we temporarily attached — detach it
+			(*myVm)->DetachCurrentThread(myVm);
+		}
+
 		at->init = 0;
 	}
 	free(at);
-	pat = NULL;
+	*pat = NULL;
 	return 0;
 }
 

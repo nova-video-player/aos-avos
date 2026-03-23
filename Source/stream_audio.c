@@ -713,9 +713,16 @@ serprintf(" ae! ");
 	int use_atempo = 0;
 	int using_pcm_accum = 0;
 
-		// Pre-filter PCM accumulation (non-passthrough only):
-		// coalesce tiny decoder output so atempo/filter/sink path runs on larger batches.
-		int pcm_eligible = (!passthrough_active &&
+		// Pre-filter PCM accumulation: only when atempo is active.
+		// Coalesces tiny decoder output so atempo WSOLA runs on larger batches.
+		// Without atempo, frames pass straight through to avoid unnecessary
+		// latency and the risk of dropping accumulated PCM on empty frames.
+		int atempo_will_run = (s->audio_filter_atempo != NULL &&
+			audio_interface_is_audio_speed_enabled() &&
+			audio_interface_is_using_atempo() &&
+			passthrough != 1 && passthrough != 2);
+		int pcm_eligible = (atempo_will_run &&
+			!passthrough_active &&
 			!ac3_recoding &&
 			!audio_frame.error &&
 			audio_frame.size > 0 &&

@@ -98,6 +98,8 @@ struct ctx {
 	int delay_log_count;                // throttle noisy delay diagnostics
 };
 
+static int _flush(STREAM_FILTER_AUDIO *f);
+
 static int atempo_update_speed(struct ctx *ctx, float speed)
 {
 	if (!ctx || !ctx->filter_graph || !ctx->atempo_ctx) {
@@ -472,6 +474,22 @@ error:
 static int _close(STREAM_FILTER_AUDIO *f)
 {
 	DBGA serprintf("atempo: close\n");
+	struct ctx *ctx = f->priv;
+	if (ctx) {
+		if (ctx->filter_graph) {
+			_flush(f);
+			avfilter_graph_free(&ctx->filter_graph);
+			ctx->abuffer_ctx = NULL;
+			ctx->aformat_in_ctx = NULL;
+			ctx->atempo_ctx = NULL;
+			ctx->aformat_out_ctx = NULL;
+			ctx->abuffersink_ctx = NULL;
+		}
+		if (ctx->fifo) {
+			av_audio_fifo_reset(ctx->fifo);
+		}
+		ctx->filter_initialized = 0;
+	}
 	return 0;
 }
 

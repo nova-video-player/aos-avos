@@ -2978,6 +2978,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx ) {
 		int hold_wait_ms = 0;
 		while( !_engine_abort( s ) &&
+		       s->audio_ctx &&
 		       !audio_interface_is_delay_valid( s->audio_ctx ) &&
 		       hold_wait_ms < 2000 ) {
 			if( (hold_wait_ms % 200) == 0 ) {

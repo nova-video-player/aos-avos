@@ -385,6 +385,11 @@ int stream_sync_av_delay( STREAM *s )
 	if (!audio_speed_enabled || !using_atempo_pref) {
 		use_atempo = 0;
 	}
+	// Keep delay accounting aligned with the actual runtime filter path:
+	// passthrough and AC3 recoding do not run atempo on samples.
+	if (passthrough || ac3_recoding) {
+		use_atempo = 0;
+	}
 	if( use_atempo && s->audio_filter_atempo->delay ) {
 		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
 		filter_delay += atempo_delay;
@@ -521,7 +526,18 @@ DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d
 static int _stream_get_atempo_delay( STREAM *s )
 {
 	int use_atempo = (s && s->audio_filter_atempo != NULL);
+	int ac3_recoding = 0;
+	int passthrough = 0;
+#ifdef CONFIG_AUDIO_AC3
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
+#endif
+	if( s && s->audio_sink ) {
+		passthrough = s->audio_sink->get_passthrough( s );
+	}
 	if( !use_atempo || !audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo() ) {
+		return 0;
+	}
+	if( passthrough || ac3_recoding ) {
 		return 0;
 	}
 	if( s->audio_filter_atempo->delay ) {

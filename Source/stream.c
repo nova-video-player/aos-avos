@@ -37,6 +37,7 @@
 #ifdef CONFIG_ANDROID
 int get_android_sync(void);
 #endif
+extern int libavos_get_ac3_recoding_enabled(void);
 
 #ifdef CONFIG_STREAM
 #define DBGV DBG_IF(Debug[DBG_VID])
@@ -614,7 +615,18 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	int using_atempo = (s->audio_filter_atempo != NULL);
+	int ac3_recoding = 0;
+	int passthrough = 0;
+#ifdef CONFIG_AUDIO_AC3
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
+#endif
+	if( s && s->audio_sink ) {
+		passthrough = s->audio_sink->get_passthrough( s );
+	}
 	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
+		using_atempo = 0;
+	}
+	if( passthrough || ac3_recoding ) {
 		using_atempo = 0;
 	}
 	audio_interface_set_using_atempo( using_atempo );

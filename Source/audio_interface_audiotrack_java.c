@@ -126,6 +126,9 @@ struct audio_ctx {
 	int delay_diag_last_valid;       // last reported delay_valid
 	int delay_diag_last_fallback;    // last reported fallback value
 	int delay_diag_last_ts_use;      // last reported ts_use_timestamp
+	uint64_t can_write_last_playback_frames; // last playhead seen by passthrough can_write gate
+	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
+	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 };
 
 static int audiotrack_log_underruns = 0;
@@ -1126,7 +1129,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
+	int old_passthrough = at->passthrough;
 	at->passthrough = passthrough;
+	DBG LOG("audiotrack_set_passthrough: old=%d new=%d init=%d format=%04X rate=%d ch=%d frame_size=%zu applied=%d error_recovery=%d",
+		old_passthrough, passthrough, at->init, at->format, at->rate,
+		at->channel_count, at->frame_size, at->applied_passthrough, at->in_error_recovery);
 
 	// DO NOT call audiotrack_set_output_params here during format changes!
 	//
@@ -1240,15 +1247,93 @@ ERR		LOG("track not valid, error");
 
 static int audiotrack_can_write(audio_ctx_t *at, int len)
 {
-	// This function always returns true, which means it never blocks
-	// For AC3 recoding troubleshooting, log when it's called
-	DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (always returns true)",
-		at->format, at->passthrough, len);
+	const int passthrough_stall_fallback_ms = 250;
 
-	// TODO: Consider implementing actual buffer checking using AudioTrack.getPlaybackHeadPosition()
-	// and AudioTrack.getBufferSizeInFrames() to prevent buffer overflows
+	if (!at->init) {
+		ERR LOG("audiotrack_can_write: track not valid, error");
+		return 0;
+	}
 
-	return 1;
+	if (len <= 0) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d -> true",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	// Keep PCM behavior unchanged for now. The passthrough case is the one where
+	// partial writes are structurally unsafe because compressed bursts must be
+	// accepted atomically.
+	if (!at->passthrough) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (pcm fast-path=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	if (at->passthrough_can_write_blind) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (blind fallback=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	if (at->frame_size == 0 || at->frame_count <= 0) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (invalid frame geometry, fallback=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	JNIEnv *env_local = attach_thread_current_vm();
+	if (!env_local) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (no env, fallback=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	jint playback_frames = call_int_method_with_env(at, env_local, "getPlaybackHeadPosition", "()I");
+	if (playback_frames < 0) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (playhead unavailable=%d, fallback=true)",
+			at->format, at->passthrough, len, playback_frames);
+		return 1;
+	}
+
+	uint64_t frames_presented = (uint64_t)playback_frames;
+	uint64_t frames_written_adjusted = 0;
+	if (at->i_samples_written > at->timestamp_written_offset) {
+		frames_written_adjusted = at->i_samples_written - at->timestamp_written_offset;
+	}
+
+	int64_t frames_pending = (int64_t)frames_written_adjusted - (int64_t)frames_presented;
+	if (frames_pending < 0) {
+		frames_pending = 0;
+	}
+
+	int64_t frames_requested = ((int64_t)len + (int64_t)at->frame_size - 1) / (int64_t)at->frame_size;
+	int64_t frames_available = (int64_t)at->frame_count - frames_pending;
+	int can_write = (frames_available >= frames_requested);
+	int now_ms = atime();
+
+	if (frames_presented != at->can_write_last_playback_frames) {
+		at->can_write_last_playback_frames = frames_presented;
+		at->can_write_stall_start_ms = 0;
+	} else if (!can_write) {
+		if (!at->can_write_stall_start_ms) {
+			at->can_write_stall_start_ms = now_ms;
+		} else if (now_ms - at->can_write_stall_start_ms >= passthrough_stall_fallback_ms) {
+			at->passthrough_can_write_blind = 1;
+			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled (pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
+				at->format, at->passthrough, len,
+				(long long)frames_pending, (long long)frames_available, (long long)frames_requested);
+			return 1;
+		}
+	} else {
+		at->can_write_stall_start_ms = 0;
+	}
+
+	DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d pending=%lld available=%lld requested=%lld frame_count=%d frame_size=%zu -> %d",
+		at->format, at->passthrough, len,
+		(long long)frames_pending, (long long)frames_available, (long long)frames_requested,
+		at->frame_count, at->frame_size, can_write);
+
+	return can_write;
 }
 
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
@@ -1953,6 +2038,9 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->startup_hold_active = 1;
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
+	at->can_write_last_playback_frames = 0;
+	at->can_write_stall_start_ms = 0;
+	at->passthrough_can_write_blind = 0;
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)

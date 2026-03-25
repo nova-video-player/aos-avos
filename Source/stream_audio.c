@@ -1216,7 +1216,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							continue;
 						}
 					}
-					audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
+					// Do not split compressed passthrough bursts. IEC61937 / raw codec frames
+					// must reach AudioTrack atomically; chunking them into generic PCM-sized
+					// writes can break HAL parsing and lead to dead/broken passthrough tracks.
+					if( passthrough_active || ac3_recoding ) {
+						audio_frame.size = size;
+					} else {
+						audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
+					}
 
 					// android_sync=0 cannot sustain large negative AV offsets by video pacing alone.
 					// Apply user negative AV delay as additional audio hold (silence insertion).
@@ -1302,6 +1309,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
 						size = 0;
 						break;
+					}
+					if( (passthrough_active || ac3_recoding) && size_written < audio_frame.size ) {
+						DBG serprintf("stream_audio: passthrough short write %d/%d fmt=%04X pt=%d recode=%d, dropping burst remainder\n",
+							size_written, audio_frame.size, audio_frame.format, passthrough_active, ac3_recoding);
+						size = 0;
 					}
 					if( s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
 						int start_time = s->audio_start_pts;
@@ -1505,6 +1517,10 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 
 		AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
 		if( sink && sink->format != audio_format_configured ) {
+			DBG serprintf("stream_audio thread: sink format changed old=%04X new=%04X src_fmt=%04X ac3=%d configured=%d pending=%d pt=%d\n",
+				audio_format_configured, sink->format, s->audio ? s->audio->format : 0,
+				libavos_get_ac3_recoding_enabled(), ac3_sink_configured,
+				ac3_reconfigure_pending, s->audio_sink ? s->audio_sink->get_passthrough(s) : -1);
 			if( s->pcm_accum_size > 0 ) {
 				DBG serprintf("stream_audio: pcm_accum reset on sink format change (%04X->%04X, pending=%d)\n",
 					audio_format_configured, sink->format, s->pcm_accum_size);

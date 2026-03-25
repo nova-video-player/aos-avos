@@ -430,6 +430,7 @@ static void _audio_decode( STREAM *s )
 		s->audio_resume_pending = 1;
 		s->audio_resume_valid_pending = 0;
 		s->video_hold_for_delay = 1;
+		s->video_hold_for_resume_audio = 1;
 		s->manual_audio_delay_applied_ms = 0;
 		s->pcm_accum_size = 0;
 	}
@@ -1309,6 +1310,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
 						size = 0;
 						break;
+					}
+					if( s->video_hold_for_resume_audio ) {
+						DBG serprintf("stream_audio: first resumed audio write committed (%d bytes, pt=%d recode=%d)\n",
+							size_written, passthrough_active, ac3_recoding);
+						s->video_hold_for_resume_audio = 0;
 					}
 					if( (passthrough_active || ac3_recoding) && size_written < audio_frame.size ) {
 						DBG serprintf("stream_audio: passthrough short write %d/%d fmt=%04X pt=%d recode=%d, dropping burst remainder\n",

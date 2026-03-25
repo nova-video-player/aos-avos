@@ -742,6 +742,7 @@ typedef struct STREAM {
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;
 	int		video_hold_for_delay;
+	int		video_hold_for_resume_audio;
 
 	ID3_TAG		tag;
 	int		tag_new;

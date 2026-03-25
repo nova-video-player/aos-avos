@@ -2977,23 +2977,30 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	// decoder cannot advance the video timeline during the wait.
 	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx ) {
 		int hold_wait_ms = 0;
+		int passthrough_active = (s->audio_sink && s->audio_sink->get_passthrough) ?
+			s->audio_sink->get_passthrough( s ) : 0;
+		int ac3_recoding = libavos_get_ac3_recoding_enabled();
+		int wait_for_resume_audio = ((passthrough_active > 0) || ac3_recoding) && s->video_hold_for_resume_audio;
 		while( !_engine_abort( s ) &&
 		       s->audio_ctx &&
-		       !audio_interface_is_delay_valid( s->audio_ctx ) &&
+		       ((wait_for_resume_audio && s->video_hold_for_resume_audio) ||
+		        (!wait_for_resume_audio && !audio_interface_is_delay_valid( s->audio_ctx ))) &&
 		       hold_wait_ms < 2000 ) {
 			if( (hold_wait_ms % 200) == 0 ) {
-				DBG serprintf("video_hold_for_delay: waiting frame_time=%d (%d ms)\n",
-					frame->time, hold_wait_ms);
+				DBG serprintf("video_hold_for_delay: waiting frame_time=%d (%d ms, pt=%d recode=%d wait_resume_audio=%d delay_valid=%d)\n",
+					frame->time, hold_wait_ms, passthrough_active, ac3_recoding,
+					wait_for_resume_audio, audio_interface_is_delay_valid( s->audio_ctx ));
 			}
 			msec_sleep( 10 );
 			hold_wait_ms += 10;
 		}
 		s->video_hold_for_delay = 0;
+		s->video_hold_for_resume_audio = 0;
 		if( hold_wait_ms >= 2000 ) {
 			serprintf("video_hold_for_delay: timeout after %d ms\n", hold_wait_ms);
 		} else {
-			DBG serprintf("video_hold_for_delay: delay valid after %d ms, frame_time=%d\n",
-				hold_wait_ms, frame->time);
+			DBG serprintf("video_hold_for_delay: released after %d ms, frame_time=%d pt=%d recode=%d wait_resume_audio=%d\n",
+				hold_wait_ms, frame->time, passthrough_active, ac3_recoding, wait_for_resume_audio);
 		}
 	}
 

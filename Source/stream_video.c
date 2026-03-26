@@ -2975,7 +2975,11 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	// render_offset from being anchored against an incorrect heard_ts.
 	// Blocking here creates backpressure: disp_q stops draining, so the
 	// decoder cannot advance the video timeline during the wait.
-	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx ) {
+	// Skip the hold during seek preview: play_n_video_frames > 0 means we are in
+	// _stream_play_n_frames() showing scrub thumbnails.  Audio is idle during seek
+	// so delay_valid can never become 1 and the hold just burns the 2-second timeout.
+	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx &&
+	    !s->seek_paused && s->play_n_video_frames <= 0 ) {
 		int hold_wait_ms = 0;
 		int passthrough_active = (s->audio_sink && s->audio_sink->get_passthrough) ?
 			s->audio_sink->get_passthrough( s ) : 0;

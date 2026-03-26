@@ -429,8 +429,14 @@ static void _audio_decode( STREAM *s )
 	if( s->paused || stream_audio_paused ) {
 		s->audio_resume_pending = 1;
 		s->audio_resume_valid_pending = 0;
-		s->video_hold_for_delay = 1;
-		s->video_hold_for_resume_audio = 1;
+		// Only arm the video hold for real pause/resume, not during seek preview.
+		// Seek sets seek_paused before paused, so this distinguishes the two cases.
+		// Arming the hold during seek would block every preview frame behind audio
+		// readiness, destroying smooth scrubbing feedback.
+		if( !s->seek_paused ) {
+			s->video_hold_for_delay = 1;
+			s->video_hold_for_resume_audio = 1;
+		}
 		s->manual_audio_delay_applied_ms = 0;
 		s->pcm_accum_size = 0;
 	}

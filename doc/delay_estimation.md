@@ -43,7 +43,8 @@ State Machine Summary
      invalid or during throttle windows.
    - Static latency is no longer injected once last_good is present.
    - Validity is gated by a short streak of advancing samples to avoid
-     false positives after resume/seek (Sabrina/Kirkwood).
+     false positives after resume/seek (Sabrina/Kirkwood). The current
+     playhead-based threshold is 3 consecutive advancing queries.
 
 3) Throttle window
    - Use cached delay if valid.
@@ -124,8 +125,15 @@ Rules:
 5) Resume:
    - android_sync=0: if delay invalid on first audio after resume, rebase to
      static latency; when delay becomes valid (streak), rebase to measured delay.
-   - android_sync=1: free-run while delay invalid; when delay becomes valid
+   - android_sync=1 PCM: free-run while delay invalid; when delay becomes valid
      (streak), a one-time rebase aligns to measured delay.
+   - android_sync=1 passthrough / AC3 recoding: static passthrough delay is
+     considered valid immediately, but video resume hold is released only after
+     the first resumed audio write commits. This avoids anchoring before
+     post-resume compressed output has actually restarted.
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
   - Passthrough mode 2 (raw): playhead/timestamp are unreliable; static only.
+  - Cached/throttled AudioTrack delay reads preserve validity when the last
+    trusted source was playhead-based (`last_good_dynamic_valid`), so
+    `cached(throttle)` does not immediately invalidate a newly trusted delay.

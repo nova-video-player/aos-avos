@@ -2971,10 +2971,13 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
 		goto Discard;
 	}
-	// Block video output until audio delay estimation is valid to prevent
-	// render_offset from being anchored against an incorrect heard_ts.
-	// Blocking here creates backpressure: disp_q stops draining, so the
-	// decoder cannot advance the video timeline during the wait.
+	// For passthrough/AC3 recoding, wait for the first actual audio write
+	// before releasing video.  For PCM, do NOT wait for delay_valid: blocking
+	// video while the audio thread keeps writing lets audio run hundreds of ms
+	// ahead, producing a large initial A/V diff that takes many frames to
+	// converge.  The static/fallback delay is close enough for initial
+	// render_offset anchoring and the sync system self-corrects within a few
+	// frames once dynamic delay stabilises.
 	// Skip the hold during seek preview: play_n_video_frames > 0 means we are in
 	// _stream_play_n_frames() showing scrub thumbnails.  Audio is idle during seek
 	// so delay_valid can never become 1 and the hold just burns the 2-second timeout.
@@ -2985,18 +2988,20 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 			s->audio_sink->get_passthrough( s ) : 0;
 		int ac3_recoding = libavos_get_ac3_recoding_enabled();
 		int wait_for_resume_audio = ((passthrough_active > 0) || ac3_recoding) && s->video_hold_for_resume_audio;
-		while( !_engine_abort( s ) &&
-		       s->audio_ctx &&
-		       ((wait_for_resume_audio && s->video_hold_for_resume_audio) ||
-		        (!wait_for_resume_audio && !audio_interface_is_delay_valid( s->audio_ctx ))) &&
-		       hold_wait_ms < 2000 ) {
-			if( (hold_wait_ms % 200) == 0 ) {
-				DBG serprintf("video_hold_for_delay: waiting frame_time=%d (%d ms, pt=%d recode=%d wait_resume_audio=%d delay_valid=%d)\n",
-					frame->time, hold_wait_ms, passthrough_active, ac3_recoding,
-					wait_for_resume_audio, audio_interface_is_delay_valid( s->audio_ctx ));
+		// Only hold for passthrough/AC3 resume — PCM skips the wait entirely.
+		if( wait_for_resume_audio ) {
+			while( !_engine_abort( s ) &&
+			       s->audio_ctx &&
+			       s->video_hold_for_resume_audio &&
+			       hold_wait_ms < 2000 ) {
+				if( (hold_wait_ms % 200) == 0 ) {
+					DBG serprintf("video_hold_for_delay: waiting frame_time=%d (%d ms, pt=%d recode=%d wait_resume_audio=%d delay_valid=%d)\n",
+						frame->time, hold_wait_ms, passthrough_active, ac3_recoding,
+						wait_for_resume_audio, audio_interface_is_delay_valid( s->audio_ctx ));
+				}
+				msec_sleep( 10 );
+				hold_wait_ms += 10;
 			}
-			msec_sleep( 10 );
-			hold_wait_ms += 10;
 		}
 		s->video_hold_for_delay = 0;
 		s->video_hold_for_resume_audio = 0;

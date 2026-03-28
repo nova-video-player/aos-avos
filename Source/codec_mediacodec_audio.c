@@ -30,6 +30,7 @@
 #include "dec_audio.h"
 
 #include <time.h>
+#include <stdint.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 
@@ -42,6 +43,16 @@
 #define DBGSI if( 0 || Debug[DBG_SINK] )
 #define DBGSI2 if( 0 || Debug[DBG_SINK] > 1 )
 int acodecs_is_supported( int format, int is_video, int is_sw_allowed );
+
+#define MEDIACODEC_CAP_AC3             5
+#define MEDIACODEC_CAP_E_AC3           6
+#define MEDIACODEC_CAP_DTS             7
+#define MEDIACODEC_CAP_DTS_HD          8
+#define MEDIACODEC_CAP_MP3             9
+#define MEDIACODEC_CAP_AAC             10
+#define MEDIACODEC_CAP_DOLBY_TRUEHD    14
+#define MEDIACODEC_CAP_E_AC3_JOC       18
+#define MEDIACODEC_CAP_OPUS            20
 
 typedef struct PRIV {
 	struct dec_audio *dec_audio;
@@ -61,8 +72,14 @@ static int wave2libav_codecid( int codecid )
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS:
 		return AV_CODEC_ID_DTS;
+	case WAVE_FORMAT_MPEG:
+	case WAVE_FORMAT_MPEGLAYER3:
+		return AV_CODEC_ID_MP3;
 	case WAVE_FORMAT_TRUEHD:
 		return AV_CODEC_ID_TRUEHD;
+	case WAVE_FORMAT_AAC:
+	case WAVE_FORMAT_AAC_LATM:
+		return AV_CODEC_ID_AAC;
 	case WAVE_FORMAT_OPUS:
 		return AV_CODEC_ID_OPUS;
 	default:
@@ -72,11 +89,12 @@ static int wave2libav_codecid( int codecid )
 
 static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 {
-	if( !( audio->priv = amalloc( sizeof( PRIV ) ) ) ) {
-		return 1;
-	}
 	PRIV *p = (PRIV *)audio->priv;
 	sfdec_codec_t sfdec_codec;
+
+	if( !p ) {
+		return 1;
+	}
 	audio->bitsPerSample = 16;
 
 	memset( &p->avctx, 0, sizeof( p->avctx ) );
@@ -85,8 +103,20 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 	if( !p->aparser ) serprintf( "cannot open parser for %04X\r\n", codecid );
 
 	switch( audio->format ) {
+	case WAVE_FORMAT_MPEG:
+	case WAVE_FORMAT_MPEGLAYER3:
+		sfdec_codec = SFDEC_AUDIO_MP3;
+		break;
+	case WAVE_FORMAT_AAC:
+	case WAVE_FORMAT_AAC_LATM:
+		sfdec_codec = SFDEC_AUDIO_AAC;
+		break;
 	case WAVE_FORMAT_AC3:
 		sfdec_codec = SFDEC_AUDIO_AC3;
+		break;
+	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
+		sfdec_codec = SFDEC_AUDIO_EAC3;
 		break;
 	case WAVE_FORMAT_DTS:
 		sfdec_codec = SFDEC_AUDIO_DTS;
@@ -94,6 +124,9 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 		sfdec_codec = SFDEC_AUDIO_DTS_HD;
+		break;
+	case WAVE_FORMAT_TRUEHD:
+		sfdec_codec = SFDEC_AUDIO_TRUEHD;
 		break;
 	case WAVE_FORMAT_OPUS:
 		sfdec_codec = SFDEC_AUDIO_OPUS;
@@ -125,15 +158,19 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 static int mediacodec_audio_codec_delete( AUDIO_PROPERTIES *audio )
 {
 	PRIV *p = (PRIV *)audio->priv;
-	dec_audio_delete( p->dec_audio );
+	if( !p ) {
+		return 0;
+	}
+	if( p->dec_audio ) {
+		dec_audio_delete( p->dec_audio );
+		p->dec_audio = NULL;
+	}
 	if( p->aparser ) {
 		av_parser_close( p->aparser );
 		p->aparser = NULL;
 	}
-	if( p ) {
-		free( p );
-		p = NULL;
-	}
+	free( p );
+	audio->priv = NULL;
 	return 0;
 }
 static int mediacodec_audio_codec_new( AUDIO_PROPERTIES *audio )
@@ -146,12 +183,16 @@ DBGS serprintf( "mediacodec audio new\r\n");
 serprintf("mediacodec audio: cannot alloc context\n");
                 return 1;
         }
+	memset( audio->priv, 0, sizeof( PRIV ) );
         return 0;
 }
 
 static int mediacodec_audio_codec_close( AUDIO_PROPERTIES *audio )
 {
 	PRIV *p = (PRIV *)audio->priv;
+	if( !p || !p->dec_audio ) {
+		return 0;
+	}
 	dec_audio_stop_input( p->dec_audio );
 
 	return 0;
@@ -162,6 +203,9 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 {
 	DBGS serprintf("mediacodec_audio_codec_decode in\n");
 	PRIV *p = (PRIV *)audio->priv;
+	if( !p || !p->dec_audio ) {
+		return 1;
+	}
 	int t1 = time_update_time();
 	*_decoded = (int)dec_audio_send_input( p->dec_audio, data, size, (int64_t)avos_frame->time, 0, 1 );
 	sfdec_read_out_t read_out;
@@ -191,6 +235,9 @@ static int mediacodec_audio_codec_flush( AUDIO_PROPERTIES *audio )
 {
 	DBGS serprintf("mediacodec_flush in\n");
 	PRIV *p = (PRIV *)audio->priv;
+	if( !p || !p->dec_audio ) {
+		return 0;
+	}
 	dec_audio_flush( p->dec_audio );
 
 	DBGS serprintf("mediacodec_flush out\n");
@@ -206,6 +253,48 @@ static int mediacodec_audio_codec_get_rc( AUDIO_PROPERTIES *audio, STREAM_RC *rc
 
 static int mediacodec_audio_codec_is_supported( AUDIO_PROPERTIES *audio )
 {
+	int64_t capabilities = device_config_get_mediacodec_audio_capabilities();
+	int capability_bit = -1;
+
+	switch( audio->format ) {
+	case WAVE_FORMAT_MPEG:
+	case WAVE_FORMAT_MPEGLAYER3:
+		capability_bit = MEDIACODEC_CAP_MP3;
+		break;
+	case WAVE_FORMAT_AC3:
+		capability_bit = MEDIACODEC_CAP_AC3;
+		break;
+	case WAVE_FORMAT_EAC3:
+		capability_bit = MEDIACODEC_CAP_E_AC3;
+		break;
+	case WAVE_FORMAT_E_AC3_JOC:
+		capability_bit = MEDIACODEC_CAP_E_AC3_JOC;
+		break;
+	case WAVE_FORMAT_DTS:
+		capability_bit = MEDIACODEC_CAP_DTS;
+		break;
+	case WAVE_FORMAT_DTS_HD:
+	case WAVE_FORMAT_DTS_HD_MA:
+		capability_bit = MEDIACODEC_CAP_DTS_HD;
+		break;
+	case WAVE_FORMAT_AAC:
+	case WAVE_FORMAT_AAC_LATM:
+		capability_bit = MEDIACODEC_CAP_AAC;
+		break;
+	case WAVE_FORMAT_TRUEHD:
+		capability_bit = MEDIACODEC_CAP_DOLBY_TRUEHD;
+		break;
+	case WAVE_FORMAT_OPUS:
+		capability_bit = MEDIACODEC_CAP_OPUS;
+		break;
+	default:
+		break;
+	}
+
+	if( capability_bit >= 0 && capabilities >= 0 ) {
+		return (capabilities & ((int64_t)1 << capability_bit)) != 0;
+	}
+
 	if( acodecs_is_supported( audio->format, 0, 1 ) ) {
 		return 1;
 	}
@@ -225,12 +314,16 @@ static STREAM_DEC_AUDIO stream_dec_audio_mediacodec = {
 	.is_supported = mediacodec_audio_codec_is_supported,
 };
 
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_EAC3, stream_dec_audio_mediacodec, 8 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AC3, stream_dec_audio_mediacodec, 6 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS, stream_dec_audio_mediacodec, 8 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD, stream_dec_audio_mediacodec, 8 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD_MA, stream_dec_audio_mediacodec, 8 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AAC, stream_dec_audio_mediacodec, 8 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_TRUEHD, stream_dec_audio_mediacodec, 8 );
-//STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_OPUS, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AC3, stream_dec_audio_mediacodec, 6 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_EAC3, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_E_AC3_JOC, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_MPEG, stream_dec_audio_mediacodec, 2 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_MPEGLAYER3, stream_dec_audio_mediacodec, 2 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AAC, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_AAC_LATM, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_DTS_HD_MA, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_TRUEHD, stream_dec_audio_mediacodec, 8 );
+STREAM_REGISTER_DEC_AUDIO( WAVE_FORMAT_OPUS, stream_dec_audio_mediacodec, 8 );
 #endif

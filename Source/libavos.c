@@ -15,6 +15,7 @@
  */
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "global.h"
@@ -46,6 +47,8 @@ void device_config_set_pluginlib(int pluginlib);
 void device_config_set_subtitlepath(const char *path);
 void device_config_set_decoder(int decoder);
 void device_config_set_audio_interface(int audio_interface);
+void device_config_set_audio_decoder(int audio_decoder);
+void device_config_set_mediacodec_audio_capabilities(int64_t capabilities);
 void device_config_set_output_sample_rate(int sample_rate);
 #ifdef CONFIG_ANDROID
 void set_android_sync(int enable);
@@ -133,6 +136,16 @@ void libavos_set_decoder(int decoder)
 void libavos_set_audio_interface(int audio_interface)
 {
 	device_config_set_audio_interface(audio_interface);
+}
+
+void libavos_set_audio_decoder(int audio_decoder)
+{
+	device_config_set_audio_decoder(audio_decoder);
+}
+
+void libavos_set_mediacodec_audio_capabilities(int64_t capabilities)
+{
+	device_config_set_mediacodec_audio_capabilities(capabilities);
 }
 
 void libavos_set_codepage(int codepage)

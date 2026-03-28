@@ -17,6 +17,8 @@
 #ifndef DEVICE_CONFIG_H
 #define DEVICE_CONFIG_H
 
+#include <stdint.h>
+
 typedef enum { // don't forget to add string in DEVICE_HW_TYPE_NAMES
 	HW_TYPE_UNKNOWN,
 	HW_TYPE_DEFAULT_KK, // default on android 4.4 and above
@@ -101,6 +103,12 @@ enum mp_audio_interface_type {
 	MP_AUDIO_INTERFACE_OPENSLES,
 };
 
+enum mp_audio_decoder_type {
+	MP_AUDIO_DECODER_AUTO,
+	MP_AUDIO_DECODER_FFMPEG,
+	MP_AUDIO_DECODER_MEDIACODEC,
+};
+
 int device_has_hdd( void );
 int device_has_dsp( void );
 int device_has_dsp_overdrive( void );
@@ -117,6 +125,8 @@ int device_get_cpu_count(void);
 const char *device_config_get_subtitlepath(void);
 int device_config_get_decoder(void);
 int device_config_get_audio_interface(void);
+int device_config_get_audio_decoder(void);
+int64_t device_config_get_mediacodec_audio_capabilities(void);
 int device_config_get_output_sample_rate(void);
 int device_config_is_audio_format_supported(int format);
 int device_config_is_video_format_supported(int format);

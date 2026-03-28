@@ -21,6 +21,8 @@
 #include "util.h"
 #include "stream.h"
 
+#include <string.h>
+
 #ifdef CONFIG_ANDROID
 #include "android_config.h"
 int acodecs_is_supported(int format, int is_video, int is_sw_allowed);
@@ -205,7 +207,28 @@ int stream_unregister_dec_audio( int format )
 //	stream_get_audio_dec
 //
 // ************************************************************
-static STREAM_DEC_AUDIO *_get_audio_dec( AUDIO_PROPERTIES *audio )
+enum {
+	AUDIO_DECODER_GROUP_OTHER,
+	AUDIO_DECODER_GROUP_FFMPEG,
+	AUDIO_DECODER_GROUP_MEDIACODEC,
+	AUDIO_DECODER_GROUP_COUNT,
+};
+
+static int _get_audio_decoder_group( const STREAM_DEC_AUDIO *decoder )
+{
+	if( !decoder || !decoder->name ) {
+		return AUDIO_DECODER_GROUP_OTHER;
+	}
+	if( !strcmp( decoder->name, "ffmpeg" ) ) {
+		return AUDIO_DECODER_GROUP_FFMPEG;
+	}
+	if( !strcmp( decoder->name, "MediaCodec" ) ) {
+		return AUDIO_DECODER_GROUP_MEDIACODEC;
+	}
+	return AUDIO_DECODER_GROUP_OTHER;
+}
+
+static int _append_audio_decoders_for_group( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders, int max_decoders, int *count, int group )
 {
 DBGS serprintf("stream_get_audio_dec(%s)\r\n", audio_get_format_name(audio) ); 
 
@@ -213,12 +236,53 @@ DBGS serprintf("stream_get_audio_dec(%s)\r\n", audio_get_format_name(audio) );
 	while( a ) {
 		if( a->format == audio->format && a->max_channels >= audio->channels ) {
 DBGS serprintf("Trying codec %s\n", a->decoder->name);
-			if(!a->decoder->is_supported || a->decoder->is_supported(audio)) {
+			if( _get_audio_decoder_group( a->decoder ) == group &&
+			    (!a->decoder->is_supported || a->decoder->is_supported(audio)) ) {
+				int i;
+				for( i = 0; i < *count; ++i ) {
+					if( decoders[i] == a->decoder ) {
+						break;
+					}
+				}
+				if( i == *count && *count < max_decoders ) {
 DBGS serprintf("Using codec %s\n", a->decoder->name);
-				return (STREAM_DEC_AUDIO*)a->decoder;
+					decoders[*count] = (STREAM_DEC_AUDIO*)a->decoder;
+					(*count)++;
+				}
 			}
 		}
 		a = a->next;
+	}
+	return *count;
+}
+
+int stream_get_audio_decs( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders, int max_decoders )
+{
+	int count = 0;
+	int pref = device_config_get_audio_decoder();
+
+	if( !audio || !decoders || max_decoders <= 0 ) {
+		return 0;
+	}
+
+	_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_OTHER );
+	if( pref == MP_AUDIO_DECODER_MEDIACODEC ) {
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_MEDIACODEC );
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_FFMPEG );
+	} else {
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_FFMPEG );
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_MEDIACODEC );
+	}
+
+	return count;
+}
+
+static STREAM_DEC_AUDIO *_get_audio_dec( AUDIO_PROPERTIES *audio )
+{
+	STREAM_DEC_AUDIO *decoders[8];
+	int count = stream_get_audio_decs( audio, decoders, sizeof(decoders) / sizeof(decoders[0]) );
+	if( count > 0 ) {
+		return decoders[0];
 	}
 	return NULL;
 }

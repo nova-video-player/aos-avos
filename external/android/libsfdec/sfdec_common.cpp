@@ -37,6 +37,10 @@ const char *get_mimetype(sfdec_codec_t codec)
             return "video/mpeg2";
         case SFDEC_VIDEO_WMV:
             return "video/x-ms-wmv";
+	case SFDEC_AUDIO_MP3:
+            return "audio/mpeg";
+	case SFDEC_AUDIO_AAC:
+            return "audio/mp4a-latm";
 	case SFDEC_AUDIO_AC3:
             return "audio/ac3";
 	case SFDEC_AUDIO_EAC3:
@@ -45,6 +49,8 @@ const char *get_mimetype(sfdec_codec_t codec)
 	    return "audio/vnd.dts";
 	case SFDEC_AUDIO_DTS_HD:
 	    return "audio/vnd.dts.hd";
+	case SFDEC_AUDIO_TRUEHD:
+	    return "audio/true-hd";
 	case SFDEC_AUDIO_OPUS:
 	    return "audio/opus";
         case SFDEC_VIDEO_RAW:
@@ -52,4 +58,3 @@ const char *get_mimetype(sfdec_codec_t codec)
             return NULL;
     }
 }
-

@@ -23,6 +23,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -52,6 +53,8 @@ static int has_pluginlib = 0;
 static char *subtitle_path = NULL;
 static int mp_decoder = MP_DECODER_ANY;
 static int mp_audio_interface = MP_AUDIO_INTERFACE_ANY;
+static int mp_audio_decoder = MP_AUDIO_DECODER_AUTO;
+static int64_t mp_mediacodec_audio_capabilities = -1;
 static int output_sample_rate = -1;
 
 static const char *hw_type_names[] = DEVICE_HW_TYPE_NAMES;
@@ -320,6 +323,18 @@ void device_config_set_audio_interface(int audio_interface)
 	serprintf("device_config.mp_audio_interface  %d\n", mp_audio_interface);
 }
 
+void device_config_set_audio_decoder(int audio_decoder)
+{
+	mp_audio_decoder = audio_decoder;
+	serprintf("device_config.mp_audio_decoder  %d\n", mp_audio_decoder);
+}
+
+void device_config_set_mediacodec_audio_capabilities(int64_t capabilities)
+{
+	mp_mediacodec_audio_capabilities = capabilities;
+	serprintf("device_config.mp_mediacodec_audio_capabilities  %" PRId64 "\n", mp_mediacodec_audio_capabilities);
+}
+
 
 int device_config_get_decoder(void)
 {
@@ -329,6 +344,16 @@ int device_config_get_decoder(void)
 int device_config_get_audio_interface(void)
 {
 	return mp_audio_interface;
+}
+
+int device_config_get_audio_decoder(void)
+{
+	return mp_audio_decoder;
+}
+
+int64_t device_config_get_mediacodec_audio_capabilities(void)
+{
+	return mp_mediacodec_audio_capabilities;
 }
 
 void device_config_set_output_sample_rate(int sample_rate)

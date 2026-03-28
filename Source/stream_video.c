@@ -379,18 +379,27 @@ DBGS serprintf("_free_video_buffers\r\n");
 // *****************************************************************************
 static int stream_open_audio_dec( STREAM *s )
 {
-	if( s->audio_dec ) {
-DBGS serprintf("stream_open_audio_dec\r\n");
-		// open the decoder
-		if( s->audio_dec->new && s->audio_dec->new( s->audio ) ) {
-serprintf("error creating audio_dec!\r\n");
-			s->audio_dec = NULL;
-			return 1;
+	STREAM_DEC_AUDIO *decoders[8];
+	int ac3_recoding;
+	int i;
+	int count;
+#ifdef CONFIG_SPDIF
+	int passthrough_mode;
+#else
+	int passthrough_mode = 0;
+#endif
+
+	if( !s->audio_dec ) {
+serprintf("no audio dec found!\r\n");
+		return 1;
 	}
+
+DBGS serprintf("stream_open_audio_dec\r\n");
+
 	// Disable downmixing when AC3 recoding is enabled - we need original multichannel PCM for encoding
-	int ac3_recoding = libavos_get_ac3_recoding_enabled();
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
 DBGS serprintf("stream_open_audio_dec: downmix=%d max_channels=%d ac3_recoding=%d\r\n",
-			stream_audio_downmix, s->audio_max_channels, ac3_recoding);
+		stream_audio_downmix, s->audio_max_channels, ac3_recoding);
 	DBG serprintf("stream_open_audio_dec: input channels=%d rate=%d bits=%d passthrough=%d downmix_pref=%d max_pcm=%d ac3_recoding=%d\n",
 		s->audio->channels, s->audio->samplesPerSec, s->audio->bitsPerSample,
 		spdif_is_passthrough_on(), stream_audio_downmix, s->audio_max_channels, ac3_recoding);
@@ -402,9 +411,7 @@ DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r
 DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recoding\r\n");
 	}
 #ifdef CONFIG_SPDIF
-	int passthrough_mode = spdif_is_passthrough_on();
-#else
-	int passthrough_mode = 0;
+	passthrough_mode = spdif_is_passthrough_on();
 #endif
 	if( !passthrough_mode && !ac3_recoding ) {
 		int pcm_cap = libavos_get_max_pcm_channels();         // 0 if unknown
@@ -445,18 +452,37 @@ DBGS serprintf("stream_open_audio_dec: request_channels=%d (src=%d, cap=%d)\r\n"
 	}
 	DBG serprintf("stream_open_audio_dec: final request_channels=%d (src=%d passthrough=%d downmix_pref=%d ac3_recoding=%d)\n",
 		s->audio->request_channels, s->audio->channels, passthrough_mode, stream_audio_downmix, ac3_recoding);
-	if( s->audio_dec->open( s->audio ) ) {
-serprintf("error opening audio_dec!\r\n");
-		s->audio_dec = NULL;		
-		return 1;
-	}
-	DBG serprintf("stream_open_audio_dec: decoder opened channels=%d request_channels=%d bytesPerFrame=%d\n",
-		s->audio->channels, s->audio->request_channels,
-		s->audio->channels * s->audio->bitsPerSample / 8);
+
+	count = stream_get_audio_decs( s->audio, decoders, sizeof(decoders) / sizeof(decoders[0]) );
+	for( i = 0; i < count; ++i ) {
+		int created = 0;
+		s->audio_dec = decoders[i];
+		DBG serprintf("stream_open_audio_dec: trying decoder %s (%d/%d)\n", s->audio_dec->name, i + 1, count);
+
+		if( s->audio_dec->new ) {
+			if( s->audio_dec->new( s->audio ) ) {
+serprintf("error creating audio_dec %s!\r\n", s->audio_dec->name);
+				s->audio_dec = NULL;
+				continue;
+			}
+			created = 1;
+		}
+		if( s->audio_dec->open( s->audio ) ) {
+serprintf("error opening audio_dec %s!\r\n", s->audio_dec->name);
+			if( created && s->audio_dec->delete ) {
+				s->audio_dec->delete( s->audio );
+			}
+			s->audio_dec = NULL;
+			continue;
+		}
+
+		DBG serprintf("stream_open_audio_dec: decoder opened channels=%d request_channels=%d bytesPerFrame=%d\n",
+			s->audio->channels, s->audio->request_channels,
+			s->audio->channels * s->audio->bitsPerSample / 8);
 		s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
 
 		memset( &s->audio_rc, 0, sizeof( s->audio_rc ) );
-		if( s->audio_dec->get_rc ) {			
+		if( s->audio_dec->get_rc ) {
 			if( !s->audio_dec->get_rc( s->audio, &s->audio_rc ) ) {
 DBGS stream_show_rc( &s->audio_rc );
 			}
@@ -470,10 +496,11 @@ DBGS stream_show_rc( &s->audio_rc );
 			stream_dump_pcm = 0;
 			s->dump_pcm_fd = file_open( HDD_ROOT"audio.pcm", O_WRONLY | O_CREAT | O_TRUNC, 0600 );
 		}
-		
+
 		return 0;
 	}
 serprintf("no audio dec found!\r\n");
+	s->audio_dec = NULL;
 
 	return 1;
 }

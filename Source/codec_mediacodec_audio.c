@@ -37,6 +37,7 @@
 #ifdef CONFIG_STREAM
 
 #define DBGS if( 0 || Debug[DBG_STREAM] )
+#define DBG DBG_IF(Debug[DBG_STREAM])
 #define DBGCV if( 0 || Debug[DBG_CV] )
 #define DBGCV2 if( 0 || Debug[DBG_CV] > 1 )
 #define DBGCV3 if( 0 || Debug[DBG_CV] > 2 )

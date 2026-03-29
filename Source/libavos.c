@@ -15,6 +15,7 @@
  */
 
 #include <stdlib.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -123,6 +124,59 @@ void libavos_avsh(const char *cmd)
 #endif
 }
 
+static int ac3_recoding_enabled = 0;
+static int pcm_output_max_channels = 0;
+
+static void log_audio_capabilities64(const char *label, int64_t flags)
+{
+	int first = 1;
+	serprintf("%s: flags=0x%" PRIx64 " codecs=", label, flags);
+	if( flags & ((int64_t)1 << 5) ) {
+		serprintf("%sAC3", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 6) ) {
+		serprintf("%sE_AC3", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 7) ) {
+		serprintf("%sDTS", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 8) ) {
+		serprintf("%sDTS_HD", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 9) ) {
+		serprintf("%sMP3", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 10) ) {
+		serprintf("%sAAC_LC", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 14) ) {
+		serprintf("%sTRUEHD", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 18) ) {
+		serprintf("%sE_AC3_JOC", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 20) ) {
+		serprintf("%sOPUS", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 29) ) {
+		serprintf("%sDTS_HD_MA", first ? "" : ",");
+		first = 0;
+	}
+	if( first ) {
+		serprintf("<none>");
+	}
+	serprintf("\n");
+}
+
 void libavos_set_subtitlepath(const char *path)
 {
 	device_config_set_subtitlepath(path);
@@ -145,6 +199,7 @@ void libavos_set_audio_decoder(int audio_decoder)
 
 void libavos_set_mediacodec_audio_capabilities(int64_t capabilities)
 {
+	log_audio_capabilities64("libavos_set_mediacodec_audio_capabilities", capabilities);
 	device_config_set_mediacodec_audio_capabilities(capabilities);
 }
 
@@ -157,9 +212,6 @@ void libavos_set_output_sample_rate(int sample_rate)
 {
 	device_config_set_output_sample_rate(sample_rate);
 }
-
-static int ac3_recoding_enabled = 0;
-static int pcm_output_max_channels = 0;
 
 int libavos_get_ac3_recoding_enabled(void)
 {
@@ -190,6 +242,7 @@ void libavos_set_passthrough(int force_passthrough)
 void libavos_set_hdmi_supported_audio_codecs(long flag)
 {
 #ifdef CONFIG_ANDROID
+	log_audio_capabilities64("libavos_set_hdmi_supported_audio_codecs", flag);
 	set_hdmi_supported_audio_codecs(flag);
 #endif
 }

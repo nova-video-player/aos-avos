@@ -260,6 +260,7 @@ int stream_get_audio_decs( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders,
 {
 	int count = 0;
 	int pref = device_config_get_audio_decoder();
+	int i;
 
 	if( !audio || !decoders || max_decoders <= 0 ) {
 		return 0;
@@ -273,6 +274,18 @@ int stream_get_audio_decs( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders,
 		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_FFMPEG );
 		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_MEDIACODEC );
 	}
+
+	DBGS serprintf("stream_get_audio_decs: format=%s pref=%d count=%d",
+		audio_get_format_name(audio), pref, count);
+	if( count == 0 ) {
+		DBGS serprintf(" candidates=<none>");
+	} else {
+		DBGS serprintf(" candidates=");
+		for( i = 0; i < count; ++i ) {
+			DBGS serprintf("%s%s", i == 0 ? "" : ",", decoders[i]->name);
+		}
+	}
+	DBGS serprintf("\n");
 
 	return count;
 }

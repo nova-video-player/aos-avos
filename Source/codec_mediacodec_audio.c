@@ -60,6 +60,22 @@ typedef struct PRIV {
 	struct AVCodecContext avctx;
 } PRIV;
 
+static const char *mediacodec_capability_name( int capability_bit )
+{
+	switch( capability_bit ) {
+	case MEDIACODEC_CAP_AC3: return "AC3";
+	case MEDIACODEC_CAP_E_AC3: return "E_AC3";
+	case MEDIACODEC_CAP_DTS: return "DTS";
+	case MEDIACODEC_CAP_DTS_HD: return "DTS_HD";
+	case MEDIACODEC_CAP_MP3: return "MP3";
+	case MEDIACODEC_CAP_AAC: return "AAC";
+	case MEDIACODEC_CAP_DOLBY_TRUEHD: return "TRUEHD";
+	case MEDIACODEC_CAP_E_AC3_JOC: return "E_AC3_JOC";
+	case MEDIACODEC_CAP_OPUS: return "OPUS";
+	default: return "unknown";
+	}
+}
+
 static int wave2libav_codecid( int codecid )
 {
 	switch( codecid ) {
@@ -132,6 +148,7 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 		sfdec_codec = SFDEC_AUDIO_OPUS;
 		break;
 	default:
+		DBG serprintf("mediacodec_audio_codec_open: unsupported format=%s\n", audio_get_format_name(audio));
 		return 1;
 	}
 
@@ -148,10 +165,14 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 
 	DBGS serprintf("extraDataSize: %d, extraDataSize2 : %d, using %d\r\n", audio->extraDataSize, audio->extraDataSize2, extradata_size);
 	DBGS serprintf("codec_delay %lld seek_preroll %lld\n", audio->codec_delay, audio->seek_preroll);
+	DBG serprintf("mediacodec_audio_codec_open: format=%s sfdec_codec=%d channels=%d rate=%d extradata=%zu\n",
+		audio_get_format_name(audio), sfdec_codec, audio->channels, audio->samplesPerSec, extradata_size);
 
 	p->dec_audio = dec_audio_new( sfdec_codec, 0, 0, audio->samplesPerSec, audio->channels, audio->bitsPerSample, extradata, extradata_size, audio->codec_delay, audio->seek_preroll);
-	if(!p->dec_audio)
-	  return 1;
+	if(!p->dec_audio) {
+		DBG serprintf("mediacodec_audio_codec_open: dec_audio_new failed for format=%s\n", audio_get_format_name(audio));
+		return 1;
+	}
 	return 0;
 }
 
@@ -292,12 +313,22 @@ static int mediacodec_audio_codec_is_supported( AUDIO_PROPERTIES *audio )
 	}
 
 	if( capability_bit >= 0 && capabilities >= 0 ) {
-		return (capabilities & ((int64_t)1 << capability_bit)) != 0;
+		int supported = (capabilities & ((int64_t)1 << capability_bit)) != 0;
+		DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s capability=%s flags=0x%" PRIx64 " -> %s\n",
+			audio_get_format_name(audio),
+			mediacodec_capability_name(capability_bit),
+			capabilities,
+			supported ? "yes" : "no");
+		return supported;
 	}
 
 	if( acodecs_is_supported( audio->format, 0, 1 ) ) {
+		DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s using legacy JNI capability probe -> yes\n",
+			audio_get_format_name(audio));
 		return 1;
 	}
+	DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s using legacy JNI capability probe -> no\n",
+		audio_get_format_name(audio));
 	return 0;
 }
 

@@ -119,6 +119,8 @@ struct audio_ctx {
 	uint64_t headpos_last_frames;    // last raw playback head position
 	int headpos_smooth_valid;        // smoothed headpos validity
 	int startup_hold_active;         // clamp to static latency during initial timing warmup
+	int startup_hold_start_ms;       // when startup_hold was last armed (for timeout)
+	int frozen_ts_streak;            // consecutive getTimestamp calls with non-advancing framePosition
 	int startup_latency_log_count;   // cap initial latency diagnostics
 	int startup_delay_log_count;     // cap initial get_delay diagnostics
 	int delay_diag_count;            // throttling counter for aud_at_delay summary
@@ -1194,6 +1196,8 @@ ERR		LOG("audiotrack_start: track not valid, error");
 
 	// New playback run: keep startup delay clamp until timing is valid.
 	at->startup_hold_active = 1;
+	at->startup_hold_start_ms = atime();
+	at->frozen_ts_streak = 0;
 
 	JNIEnv *env_local = attach_thread_current_vm();
 	if (!env_local) {
@@ -1716,8 +1720,10 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 	// Require a streak of advancing timestamps before trusting them to avoid startup jumps.
 	if (nanoTime <= at->last_timestamp_ns || frames_presented <= at->last_timestamp_frames) {
 		at->ts_success_streak = 0;
+		at->frozen_ts_streak++;
 	} else {
 		at->ts_success_streak++;
+		at->frozen_ts_streak = 0;
 	}
 	if (at->ts_success_streak >= stable_streak_required)
 		at->ts_use_timestamp = 1;
@@ -1757,11 +1763,43 @@ DBG2		LOG("delay: latency=%d startup=%d fallback=%d", at->latency, at->startup_h
 			at->startup_hold_active = 0;
 		}
 
-		// Keep startup clamp but return fallback for heard-time only.
-		at->delay_valid = 0;
-		src = "fallback(startup_hold)";
-		ret = (startup_fallback > 0) ? startup_fallback : 0;
-		goto done;
+		if (at->startup_hold_active) {
+			// Fix A: getTimestamp() is returning a frozen framePosition after seek (observed on
+			// Google Streamer 4K).  The two normal exit conditions (delay_ms >= latency-20 and
+			// ts_success_streak >= 30) can never be met because the frozen framePosition prevents
+			// the streak from building and caps delay_ms below the threshold.
+			// Fix B: catch-all timeout in case any other device gets stuck in startup_hold.
+			// In both cases, if a fresh playhead-based delay is available and sane, trust it and
+			// exit the hold so delay_valid can be set and resume_rebase_delay_valid can fire.
+			const int frozen_ts_threshold = 10;
+			const int startup_hold_timeout_ms = 1500;
+			int frozen_escape = (at->frozen_ts_streak >= frozen_ts_threshold);
+			int timeout_escape = (at->startup_hold_start_ms > 0 &&
+			                      (now_ms - at->startup_hold_start_ms) >= startup_hold_timeout_ms);
+			if ((frozen_escape || timeout_escape) &&
+			     fallback_delay > 0 &&
+			     at->last_fallback_ms > 0 &&
+			     (now_ms - at->last_fallback_ms) < 500 &&
+			     fallback_delay >= at->latency / 4) {
+				at->startup_hold_active = 0;
+				at->frozen_ts_streak = 0;
+				at->ts_cached_delay_ms = fallback_delay;
+				at->ts_cached_valid = 1;
+				at->last_good_dynamic_delay_ms = fallback_delay;
+				at->last_good_dynamic_ms = now_ms;
+				at->last_good_dynamic_valid = 1;
+				at->delay_valid = 1;
+				src = frozen_escape ? "playhead(frozen_ts_exit)" : "playhead(startup_hold_timeout)";
+				ret = fallback_delay;
+				goto done;
+			}
+
+			// Keep startup clamp but return fallback for heard-time only.
+			at->delay_valid = 0;
+			src = "fallback(startup_hold)";
+			ret = (startup_fallback > 0) ? startup_fallback : 0;
+			goto done;
+		}
 	}
 
 DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
@@ -1844,10 +1882,10 @@ DBG3	LOG("get_delay: src=%s ret=%d latency=%d fallback=%d delay=%d ts_use=%d str
 		at->delay_diag_last_ts_use = at->ts_use_timestamp;
 	}
 	if (at && at->startup_delay_log_count < 5) {
-		DBG2 LOG("startup_delay[%d]: src=%s ret=%d valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d hold=%d",
+		DBG2 LOG("startup_delay[%d]: src=%s ret=%d valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d hold=%d frozen=%d",
 			at->startup_delay_log_count, src ? src : "unknown", ret, at->delay_valid,
 			at->latency, fallback_delay, delay_ms, at->ts_use_timestamp,
-			at->ts_success_streak, at->startup_hold_active);
+			at->ts_success_streak, at->startup_hold_active, at->frozen_ts_streak);
 		at->startup_delay_log_count++;
 	}
 #undef AUD_RETURN
@@ -2036,6 +2074,8 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->headpos_last_frames = 0;
 	at->headpos_smooth_valid = 0;
 	at->startup_hold_active = 1;
+	at->startup_hold_start_ms = atime();
+	at->frozen_ts_streak = 0;
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
 	at->can_write_last_playback_frames = 0;

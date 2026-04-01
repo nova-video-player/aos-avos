@@ -442,6 +442,12 @@ int avos_mp_video_setaudiotrack(avos_mp_t *mp, avos_mp_video_t *video, int track
 	return AVOS_ERR_OK;
 }
 
+int avos_mp_video_refreshaudiooutput(avos_mp_t *mp, avos_mp_video_t *video)
+{
+	stream_refresh_audio_stream(video->s);
+	return AVOS_ERR_OK;
+}
+
 int avos_mp_video_checksubtitles(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	stream_check_subtitles(video->s);

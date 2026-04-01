@@ -817,6 +817,7 @@ int	stream_seek_pos  ( STREAM *s, int pos,   int dir, int flags );
 int	stream_seek_frame( STREAM *s, int frame, int dir, int force_reload );
 int	stream_set_speed( STREAM *s, STREAM_SPEED speed );
 int	stream_set_audio_stream( STREAM *s, int audio_stream );
+int	stream_refresh_audio_stream( STREAM *s );
 int	stream_set_audio_filter_level( STREAM *s, int level, int night_on );
 void	stream_set_audio_downmix( int downmix );
 void	stream_disable_atempo_filter( int disable );

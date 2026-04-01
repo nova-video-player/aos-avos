@@ -376,6 +376,22 @@ Java_com_archos_medialib_LibAvos_nativeSetMediaCodecAudioCapabilities(JNIEnv *en
 }
 
 void
+Java_com_archos_medialib_LibAvos_nativeSetSpatializerCapabilities(JNIEnv *env, jobject thiz, jint spatializer_capabilities)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_spatializer_capabilities(spatializer_capabilities);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetSpatializerEnabled(JNIEnv *env, jobject thiz, jboolean enabled)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_spatializer_enabled(enabled ? 1 : 0);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
 Java_com_archos_medialib_LibAvos_nativeSetMaxPcmChannels(JNIEnv *env, jobject thiz, jint max_channels)
 {
     pthread_mutex_lock(&libavos.mtx);

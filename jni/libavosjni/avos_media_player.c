@@ -728,6 +728,14 @@ Java_com_archos_medialib_AvosMediaPlayer_setAudioTrack(JNIEnv *env, jobject thiz
 }
 
 void
+Java_com_archos_medialib_AvosMediaPlayer_refreshAudioOutput(JNIEnv *env, jobject thiz)
+{
+    avos_mp_t *mp = get_mp_or_throw(env, thiz);
+    if (!mp) return;
+    CHECK(avos->refreshaudiooutput(mp));
+}
+
+void
 Java_com_archos_medialib_AvosMediaPlayer_checkSubtitles(JNIEnv *env, jobject thiz, int track)
 {
     avos_mp_t *mp = get_mp_or_throw(env, thiz);

@@ -55,6 +55,8 @@ static int mp_decoder = MP_DECODER_ANY;
 static int mp_audio_interface = MP_AUDIO_INTERFACE_ANY;
 static int mp_audio_decoder = MP_AUDIO_DECODER_AUTO;
 static int64_t mp_mediacodec_audio_capabilities = -1;
+static int mp_spatializer_capabilities = 0;
+static int mp_spatializer_enabled = 1;
 static int output_sample_rate = -1;
 
 static const char *hw_type_names[] = DEVICE_HW_TYPE_NAMES;
@@ -335,6 +337,18 @@ void device_config_set_mediacodec_audio_capabilities(int64_t capabilities)
 	serprintf("device_config.mp_mediacodec_audio_capabilities  %" PRId64 "\n", mp_mediacodec_audio_capabilities);
 }
 
+void device_config_set_spatializer_capabilities(int capabilities)
+{
+	mp_spatializer_capabilities = capabilities;
+	serprintf("device_config.mp_spatializer_capabilities  %d\n", mp_spatializer_capabilities);
+}
+
+void device_config_set_spatializer_enabled(int enabled)
+{
+	mp_spatializer_enabled = enabled;
+	serprintf("device_config.mp_spatializer_enabled  %d\n", mp_spatializer_enabled);
+}
+
 
 int device_config_get_decoder(void)
 {
@@ -354,6 +368,16 @@ int device_config_get_audio_decoder(void)
 int64_t device_config_get_mediacodec_audio_capabilities(void)
 {
 	return mp_mediacodec_audio_capabilities;
+}
+
+int device_config_get_spatializer_capabilities(void)
+{
+	return mp_spatializer_capabilities;
+}
+
+int device_config_get_spatializer_enabled(void)
+{
+	return mp_spatializer_enabled;
 }
 
 void device_config_set_output_sample_rate(int sample_rate)

@@ -127,6 +127,8 @@ int device_config_get_decoder(void);
 int device_config_get_audio_interface(void);
 int device_config_get_audio_decoder(void);
 int64_t device_config_get_mediacodec_audio_capabilities(void);
+int device_config_get_spatializer_capabilities(void);
+int device_config_get_spatializer_enabled(void);
 int device_config_get_output_sample_rate(void);
 int device_config_is_audio_format_supported(int format);
 int device_config_is_video_format_supported(int format);

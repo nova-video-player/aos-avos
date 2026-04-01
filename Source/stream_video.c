@@ -4933,7 +4933,7 @@ serprintf("SSP: not open!\r\n");
 //	stream_set_audio_stream
 //
 // *****************************************************************************
-int stream_set_audio_stream( STREAM *s, int audio_stream )
+static int stream_set_audio_stream_internal( STREAM *s, int audio_stream, int force_refresh )
 {
 serprintf("stream_set_audio_stream( %d )\r\n", audio_stream );
 DBGS {
@@ -4957,7 +4957,7 @@ serprintf("SAS: not audio!\r\n");
 serprintf("SAS: audio_stream > av.as_max\n");	
 		return 1;
 	}
-	if( audio_stream == s->av.as ) {
+	if( !force_refresh && audio_stream == s->av.as ) {
 serprintf("SAS: audio_stream already set\n");	
 		return 0;
 	}
@@ -5053,6 +5053,16 @@ ErrorExit:
 	stream_un_pause( s, was_paused );
 	
 	return 0;
+}
+
+int stream_set_audio_stream( STREAM *s, int audio_stream )
+{
+	return stream_set_audio_stream_internal( s, audio_stream, 0 );
+}
+
+int stream_refresh_audio_stream( STREAM *s )
+{
+	return stream_set_audio_stream_internal( s, s->av.as, 1 );
 }
 
 

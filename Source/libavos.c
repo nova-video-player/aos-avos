@@ -50,6 +50,8 @@ void device_config_set_decoder(int decoder);
 void device_config_set_audio_interface(int audio_interface);
 void device_config_set_audio_decoder(int audio_decoder);
 void device_config_set_mediacodec_audio_capabilities(int64_t capabilities);
+void device_config_set_spatializer_capabilities(int capabilities);
+void device_config_set_spatializer_enabled(int enabled);
 void device_config_set_output_sample_rate(int sample_rate);
 #ifdef CONFIG_ANDROID
 void set_android_sync(int enable);
@@ -177,6 +179,28 @@ static void log_audio_capabilities64(const char *label, int64_t flags)
 	serprintf("\n");
 }
 
+static void log_spatializer_capabilities(const char *label, int capabilities)
+{
+	int first = 1;
+	serprintf("%s: flags=0x%x state=", label, capabilities);
+	if( capabilities & 1 ) {
+		serprintf("%ssupported", first ? "" : ",");
+		first = 0;
+	}
+	if( capabilities & (1 << 1) ) {
+		serprintf("%savailable", first ? "" : ",");
+		first = 0;
+	}
+	if( capabilities & (1 << 2) ) {
+		serprintf("%senabled", first ? "" : ",");
+		first = 0;
+	}
+	if( first ) {
+		serprintf("<none>");
+	}
+	serprintf("\n");
+}
+
 void libavos_set_subtitlepath(const char *path)
 {
 	device_config_set_subtitlepath(path);
@@ -201,6 +225,18 @@ void libavos_set_mediacodec_audio_capabilities(int64_t capabilities)
 {
 	log_audio_capabilities64("libavos_set_mediacodec_audio_capabilities", capabilities);
 	device_config_set_mediacodec_audio_capabilities(capabilities);
+}
+
+void libavos_set_spatializer_capabilities(int capabilities)
+{
+	log_spatializer_capabilities("libavos_set_spatializer_capabilities", capabilities);
+	device_config_set_spatializer_capabilities(capabilities);
+}
+
+void libavos_set_spatializer_enabled(int enabled)
+{
+	serprintf("libavos_set_spatializer_enabled: %d\n", enabled);
+	device_config_set_spatializer_enabled(enabled);
 }
 
 void libavos_set_codepage(int codepage)

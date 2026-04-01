@@ -55,6 +55,14 @@ extern int spdif_is_passthrough_on(void);
 #define AUDIO_CONTENT_TYPE_MOVIE 3
 #endif
 
+#ifndef AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_AUTO
+#define AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_AUTO 0
+#endif
+
+#ifndef AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER
+#define AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER 1
+#endif
+
 typedef unsigned char bool;
 
 #define NO_ERROR 0
@@ -73,6 +81,7 @@ struct audio_ctx {
 	uint32_t latency;
 	int passthrough;
 	int applied_passthrough;
+	int applied_spatialization_behavior;
 	JNIEnv * env;
 	int willDetach;
 	pthread_t attach_thread_id;
@@ -320,6 +329,28 @@ static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const cha
 	return result;
 }
 
+static int audiotrack_get_requested_spatialization_behavior(audio_ctx_t *at, int output_channels, int track_format)
+{
+	int capabilities = device_config_get_spatializer_capabilities();
+
+	if (device_get_android_api() < 32 || at->passthrough != 0)
+		return -1;
+
+	if (track_format != 2 && track_format != 3)
+		return -1;
+
+	if (output_channels <= 2)
+		return -1;
+
+	if ((capabilities & 1) == 0 || (capabilities & (1 << 1)) == 0)
+		return -1;
+
+	if (device_config_get_spatializer_enabled())
+		return AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_AUTO;
+
+	return AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER;
+}
+
 static inline int call_int_method_current_vm(JNIEnv *jni_env, jclass clas, const char * name, const char * signature, ...)
 {
 	jmethodID method = (*jni_env)->GetStaticMethodID(jni_env, clas, name, signature);
@@ -401,6 +432,7 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
 	at->applied_passthrough = -1;
+	at->applied_spatialization_behavior = -1;
 	at->startup_latency_log_count = 0;
 	at->startup_delay_log_count = 0;
 	at->delay_diag_count = 0;
@@ -607,6 +639,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int prev_channels = at->channel_count;
 	int prev_format = at->format;
 	int prev_applied_passthrough = at->applied_passthrough;
+	int prev_applied_spatialization_behavior = at->applied_spatialization_behavior;
 	size_t prev_frame_size = at->frame_size;
 
 	float as = get_effective_audio_speed();
@@ -759,12 +792,14 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		frame_size = (bits / 8) * output_channels;
 	}
 
+	int requested_spatialization_behavior = audiotrack_get_requested_spatialization_behavior(at, output_channels, track_format);
 	int same_config = 0;
 	if (at->init &&
 		prev_rate == rate &&
 		prev_channels == output_channels &&
 		prev_format == format &&
 		prev_applied_passthrough == at->passthrough &&
+		prev_applied_spatialization_behavior == requested_spatialization_behavior &&
 		prev_frame_size == frame_size) {
 		same_config = 1;
 	}
@@ -838,6 +873,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		at->obj = NULL;
 		at->init = 0;
 		at->applied_passthrough = -1;
+		at->applied_spatialization_behavior = -1;
 		reinit = 1;
 	}
 
@@ -925,6 +961,28 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			(*at->env)->ExceptionDescribe(at->env);
 			(*at->env)->ExceptionClear(at->env);
 			failed = 1;
+		}
+	}
+
+	int applied_spatialization_behavior = -1;
+	if (!failed && requested_spatialization_behavior != -1 && device_get_android_api() >= 32) {
+		jmethodID setSpatializationBehaviorMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setSpatializationBehavior", "(I)Landroid/media/AudioAttributes$Builder;");
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			DBG LOG("audiotrack_set_output_params: setSpatializationBehavior lookup failed");
+			(*at->env)->ExceptionClear(at->env);
+		} else if (setSpatializationBehaviorMethod) {
+			(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setSpatializationBehaviorMethod, requested_spatialization_behavior);
+			exception = (*at->env)->ExceptionOccurred(at->env);
+			if (exception) {
+				DBG LOG("audiotrack_set_output_params: setSpatializationBehavior(%d) failed", requested_spatialization_behavior);
+				(*at->env)->ExceptionDescribe(at->env);
+				(*at->env)->ExceptionClear(at->env);
+			} else {
+				applied_spatialization_behavior = requested_spatialization_behavior;
+				DBG LOG("audiotrack_set_output_params: spatialization behavior=%d channels=%d format=%d",
+					applied_spatialization_behavior, output_channels, track_format);
+			}
 		}
 	}
 
@@ -1115,15 +1173,12 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if(failed)
 		return -1;
 
+	audiotrack_reset_timing(at);
 	audiotrack_update_latency(at, at->env);
 
 	at->init = 1;
 	at->applied_passthrough = at->passthrough;
-	// Initialize timestamp tracking for dynamic latency calculation
-	at->i_samples_written = 0;
-	at->last_timestamp_ns = 0;
-	at->last_timestamp_frames = 0;
-	at->timestamp_written_offset = 0;
+	at->applied_spatialization_behavior = applied_spatialization_behavior;
 	DBG LOG("track created");
 
 	return 0;

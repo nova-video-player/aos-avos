@@ -212,8 +212,14 @@ static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int *used_put_time, in
 	if (p && s && s->audio_time > 0 && p->venc_put_time > 0 && p->venc_ref_time > 0) {
 		age_ms = atime() - p->venc_ref_time;
 		if (age_ms >= 0 && age_ms <= k_put_time_fresh_ms) {
-			heard_ts = p->venc_put_time;
-			use_put = 1;
+			// Skip put_time during startup_hold: audio_time has advanced past the seek
+			// position by ~latency, making venc_put_time a stale proxy for heard audio.
+			int in_startup_hold = s->audio_ctx &&
+				audio_interface_is_startup_hold_active(s->audio_ctx);
+			if (!in_startup_hold) {
+				heard_ts = p->venc_put_time;
+				use_put = 1;
+			}
 		}
 	}
 	if (!use_put) {

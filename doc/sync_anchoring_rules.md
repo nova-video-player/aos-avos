@@ -11,6 +11,11 @@
 - **Best delay provider**: Audio delay is chosen by a single provider: use stable `AudioTrack.getTimestamp()` when available; otherwise fall back to playback‑head latency, then static latency. Timestamp validity is gated by a streak of advancing samples and outlier rejection; fallback is always available when dynamic timing is unstable.
 - **Delay validity streak (AudioTrack)**: We require a short run of consecutive advancing samples before marking delay as valid. This avoids anchoring on transient/zero playhead values seen on Sabrina/Kirkwood right after resume or seek. The current playhead-based threshold is 3 consecutive advancing queries. Once the streak is met, we allow a one‑time rebase to measured delay.
 - **Sticky cached validity**: throttled/cached delay reads preserve validity when the last trusted dynamic source was playhead-based (`last_good_dynamic_valid`). This avoids flapping between `playhead(stable)` and `cached(throttle)` states on coarse playback-head devices.
+- **Startup-hold escape**: if AudioTrack timestamp reporting stays "successful"
+  but frame positions do not advance after seek/startup, `startup_hold` can
+  exit via a recent playback-head fallback delay instead of waiting forever
+  for timestamp convergence. A bounded timeout provides the same escape if
+  the timestamp path never stabilizes.
 - **`put_time_mode`**: Enabled when a sink exposes `put_time()`. In this mode the sync layer keeps audio as the master (via `heard_audio_ts`) but does not disable sync on early frames; the sink owns TS↔WC pacing.
 
 ## Time Domain Anchors (Single per Sink)
@@ -97,6 +102,9 @@
   - For PCM, while AudioTrack delay is invalid, video can free‑run against its current anchor (timing unavailable). This can show a small initial A/V offset.
   - For passthrough / AC3 recoding, resume hold is released only after the first resumed audio write commits, not merely when static passthrough delay reports valid.
   - When delay becomes valid (PCM streak threshold), a one‑time **delay‑valid rebase** aligns audio_time to `video_time + measured_delay`. This is why A/V appears to converge quickly after start on some devices.
+  - On devices where `getTimestamp()` freezes after seek/startup, AudioTrack
+    warmup may promote a recent playback-head fallback delay as valid so this
+    rebase can still happen instead of remaining stuck in startup hold.
 - **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and a short convergence window is applied (android_sync=0) to align with `heard_audio_ts`, then the sink is re‑anchored once and gating stops to avoid stutter.
   - Seek preview (`_stream_play_n_frames`) bypasses the resume hold under `android_sync=1`, so scrubbing keeps immediate image feedback even though real playback resume still uses the hold.
 - **Speed‑change realignment seek**: Uses `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` so the parser seeks to a keyframe, then `_stream_play_n_frames` drops frames until `ts_target`. Audio chunks are dropped until the same `ts_target`.

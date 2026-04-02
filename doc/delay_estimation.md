@@ -45,6 +45,11 @@ State Machine Summary
    - Validity is gated by a short streak of advancing samples to avoid
      false positives after resume/seek (Sabrina/Kirkwood). The current
      playhead-based threshold is 3 consecutive advancing queries.
+   - During `startup_hold`, if `getTimestamp()` keeps returning a
+     non-advancing frame position after seek/startup, the estimator can
+     escape the hold early by promoting a recent sane playback-head
+     fallback delay to valid. A bounded timeout provides the same escape
+     hatch if the timestamp path never converges.
 
 3) Throttle window
    - Use cached delay if valid.
@@ -134,6 +139,10 @@ Rules:
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
   - Passthrough mode 2 (raw): playhead/timestamp are unreliable; static only.
-  - Cached/throttled AudioTrack delay reads preserve validity when the last
-    trusted source was playhead-based (`last_good_dynamic_valid`), so
-    `cached(throttle)` does not immediately invalidate a newly trusted delay.
+- Cached/throttled AudioTrack delay reads preserve validity when the last
+  trusted source was playhead-based (`last_good_dynamic_valid`), so
+  `cached(throttle)` does not immediately invalidate a newly trusted delay.
+ - `startup_hold` is not allowed to remain permanent on devices with
+   frozen-but-successful `getTimestamp()` reporting. If timestamp-based
+   convergence cannot occur, a recent playback-head fallback delay can be
+   promoted to valid, and a timeout acts as a safety net.

@@ -1503,10 +1503,10 @@ DBG3		LOG("Using static latency for passthrough: %d ms", at->latency);
 
 		// User disabled dynamic latency, use static latency
 DBG3		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
-		// Treat static delay as stable/valid for sync gating.
-		if (at->ts_success_streak < stable_streak_required) {
-			at->ts_success_streak = stable_streak_required;
-		}
+		// Do NOT bump ts_success_streak here. Leaving it at 0 prevents
+		// resume_rebase_delay_valid in stream_audio.c from treating static
+		// latency as a "newly measured" delay and firing a bogus audio_time
+		// rebase that leaves render_offset_ns stale in codec_sfdec2.c.
 		at->delay_valid = 1;
 		AUD_RETURN("static(disabled)", at->latency);
 	}

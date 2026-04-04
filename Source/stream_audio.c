@@ -1314,6 +1314,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					if( size_written <= 0 ) {
 						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
+						if( s->video_hold_for_resume_audio ) {
+							DBG serprintf("stream_audio: releasing video hold on write failure (pt=%d recode=%d)\n",
+								passthrough_active, ac3_recoding);
+							s->video_hold_for_resume_audio = 0;
+						}
 						size = 0;
 						break;
 					}

@@ -1281,6 +1281,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// Sabrina (Chromecast 4K) often reports invalid AudioTrack delay at resume.
 						// Rebase once here using static latency to avoid a large AV offset while
 						// we wait for a stable timestamp.
+						int invalid_delay_rebase_fired = 0;
 						if( s->audio_ctx && s->video_time >= 0 && s->audio_time >= 0 &&
 							!audio_interface_is_delay_valid( s->audio_ctx ) ) {
 							int static_latency = audio_interface_get_latency( s->audio_ctx );
@@ -1292,10 +1293,21 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							_set_audio_time( s, new_audio_time );
 							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d latency=%d)\n",
 								old_audio_time, s->audio_time, s->video_time, static_latency);
+							invalid_delay_rebase_fired = 1;
 						}
 						// Do not arm delay-valid rebase for passthrough/system-encapsulation:
 						// AudioTrack delay validity does not represent true encoded pipeline latency.
 						s->audio_resume_valid_pending = passthrough_active ? 0 : 1;
+						// The invalid-delay rebase already places the anchor close enough for
+						// atempo to converge at 1x speed. The delay-valid rebase at streak=3
+						// consistently fires when sync is already near zero and causes a
+						// 167-305 ms snap (confirmed across multiple seek+resume cycles).
+						// Disarm for normal-speed PCM; passthrough and non-1x are not yet validated.
+						if( s->audio_resume_valid_pending && invalid_delay_rebase_fired &&
+							s->speed == STREAM_SPEED_NORMAL ) {
+							s->audio_resume_valid_pending = 0;
+							DBG serprintf("resume_rebase_valid: disarmed (PCM 1x, invalid-delay rebase applied)\n");
+						}
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );

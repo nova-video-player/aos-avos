@@ -150,19 +150,24 @@ static int _stream_is_sink_driven(STREAM *s)
 // True only while audio is genuinely not yet ready to anchor/sync:
 //   - audio_start_pending:       first audio write has not happened
 //   - audio_resume_pending:      first post-resume audio write has not happened
-//   - startup_hold_active:       AudioTrack timing not yet stable (startup clamp)
+//   - startup_hold_active && !dynamic: AudioTrack timing not yet stable and no fresh
+//                                delay available yet; once dynamic delay is valid the
+//                                startup clamp no longer blocks sync even if still active
 //   - both video hold flags set: pre-first-write resume hold (released on first write)
 // Note: video_hold_for_delay alone (after video_hold_for_resume_audio clears) means
 // the video thread is still waiting for delay validity, but audio is already running —
 // that is not "waiting for audio" from the sync-state perspective.
-static int _stream_is_waiting_for_audio(STREAM *s)
+static int _stream_is_waiting_for_audio(STREAM *s, const stream_delay_status_t *delay_status)
 {
 	if (!s) {
 		return 0;
 	}
+	int startup_blocking = s->audio_ctx &&
+	                       audio_interface_is_startup_hold_active(s->audio_ctx) &&
+	                       !(delay_status && delay_status->is_dynamic);
 	return s->audio_start_pending ||
 	       s->audio_resume_pending ||
-	       (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) ||
+	       startup_blocking ||
 	       (s->video_hold_for_delay && s->video_hold_for_resume_audio);
 }
 
@@ -171,7 +176,7 @@ static stream_sync_diag_state_t _stream_get_sync_diag_state(STREAM *s, const str
 	if (!s) {
 		return STREAM_SYNC_STATE_BOOTSTRAP;
 	}
-	if (_stream_is_waiting_for_audio(s)) {
+	if (_stream_is_waiting_for_audio(s, delay_status)) {
 		return STREAM_SYNC_STATE_WAIT_AUDIO;
 	}
 	if (delay_status && delay_status->is_dynamic) {

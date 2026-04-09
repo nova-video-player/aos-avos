@@ -42,7 +42,6 @@
 #include "h264.h"
 #include "hevc.h"
 
-int get_android_sync(void);
 #include "mpg4.h"
 #include "dts.h"
 #include "fb.h"
@@ -248,10 +247,10 @@ static void _video_init( STREAM *s, int time )
 		s->video_dec->seek( s->video_dec, time );
 	}
 	if( s->video_sink && s->video_sink->put_time ) {
-		// android_sync=1: let audio-driven anchoring seed the sink clock.
+		// Let audio-driven anchoring seed the sink clock.
 		// Avoid an early put_time(0) before audio is known/anchored.
-		if( get_android_sync() && s->audio && (s->audio->valid || (s->buffer && s->buffer->audio)) ) {
-			DBG serprintf("video_init: defer put_time (android_sync audio, valid=%d buffer_audio=%d)\n",
+		if( s->audio && (s->audio->valid || (s->buffer && s->buffer->audio)) ) {
+			DBG serprintf("video_init: defer put_time (audio-driven, valid=%d buffer_audio=%d)\n",
 				s->audio->valid, s->buffer ? s->buffer->audio : -1);
 		} else {
 			s->video_sink->put_time( s->video_sink, time );
@@ -3008,7 +3007,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	// Skip the hold during seek preview: play_n_video_frames > 0 means we are in
 	// _stream_play_n_frames() showing scrub thumbnails.  Audio is idle during seek
 	// so delay_valid can never become 1 and the hold just burns the 2-second timeout.
-	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx &&
+	if( s->video_hold_for_delay && s->audio_ctx &&
 	    !s->seek_paused && s->play_n_video_frames <= 0 ) {
 		int hold_wait_ms = 0;
 		int passthrough_active = (s->audio_sink && s->audio_sink->get_passthrough) ?

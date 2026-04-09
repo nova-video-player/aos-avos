@@ -56,6 +56,7 @@ static int sync_diag_count = 0;
 static int sync_diag_last_seek_epoch = -1;
 static int sync_diag_last_speed_x100 = -1;
 static int sync_diag_last_pause_state = -1;
+static int sync_diag_last_state = -1;
 
 static int stream_use_xbmc_smoothing = 1;
 
@@ -67,12 +68,20 @@ typedef struct {
 	int streak;             // current dynamic-valid streak
 } stream_delay_status_t;
 
+typedef enum {
+	STREAM_SYNC_STATE_BOOTSTRAP = 0,
+	STREAM_SYNC_STATE_WAIT_AUDIO,
+	STREAM_SYNC_STATE_FALLBACK_RUNNING,
+	STREAM_SYNC_STATE_DYNAMIC_RUNNING,
+} stream_sync_diag_state_t;
+
 static void _sync_diag_reset(void)
 {
 	sync_diag_count = 0;
 	sync_diag_last_seek_epoch = -1;
 	sync_diag_last_speed_x100 = -1;
 	sync_diag_last_pause_state = -1;
+	sync_diag_last_state = -1;
 }
 
 static int _sync_diag_should_log(STREAM *s)
@@ -136,6 +145,91 @@ static int stream_calc_lwma(int current, int *history, int *count)
 static int _stream_is_sink_driven(STREAM *s)
 {
 	return s && s->video_sink && s->video_sink->put_time;
+}
+
+// True only while audio is genuinely not yet ready to anchor/sync:
+//   - audio_start_pending:       first audio write has not happened
+//   - audio_resume_pending:      first post-resume audio write has not happened
+//   - startup_hold_active:       AudioTrack timing not yet stable (startup clamp)
+//   - both video hold flags set: pre-first-write resume hold (released on first write)
+// Note: video_hold_for_delay alone (after video_hold_for_resume_audio clears) means
+// the video thread is still waiting for delay validity, but audio is already running —
+// that is not "waiting for audio" from the sync-state perspective.
+static int _stream_is_waiting_for_audio(STREAM *s)
+{
+	if (!s) {
+		return 0;
+	}
+	return s->audio_start_pending ||
+	       s->audio_resume_pending ||
+	       (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) ||
+	       (s->video_hold_for_delay && s->video_hold_for_resume_audio);
+}
+
+static stream_sync_diag_state_t _stream_get_sync_diag_state(STREAM *s, const stream_delay_status_t *delay_status)
+{
+	if (!s) {
+		return STREAM_SYNC_STATE_BOOTSTRAP;
+	}
+	if (_stream_is_waiting_for_audio(s)) {
+		return STREAM_SYNC_STATE_WAIT_AUDIO;
+	}
+	if (delay_status && delay_status->is_dynamic) {
+		return STREAM_SYNC_STATE_DYNAMIC_RUNNING;
+	}
+	if (delay_status && delay_status->is_anchorable) {
+		return STREAM_SYNC_STATE_FALLBACK_RUNNING;
+	}
+	return STREAM_SYNC_STATE_BOOTSTRAP;
+}
+
+static const char *_stream_get_sync_diag_state_name(stream_sync_diag_state_t state)
+{
+	switch (state) {
+	case STREAM_SYNC_STATE_WAIT_AUDIO:
+		return "WAIT_AUDIO";
+	case STREAM_SYNC_STATE_FALLBACK_RUNNING:
+		return "FALLBACK_RUNNING";
+	case STREAM_SYNC_STATE_DYNAMIC_RUNNING:
+		return "DYNAMIC_RUNNING";
+	case STREAM_SYNC_STATE_BOOTSTRAP:
+	default:
+		return "BOOTSTRAP";
+	}
+}
+
+static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_delay_status_t *delay_status)
+{
+	stream_sync_diag_state_t state;
+
+	if (!s || Debug[DBG_SYNC] <= 1) {
+		return;
+	}
+
+	state = _stream_get_sync_diag_state(s, delay_status);
+	if (state != sync_diag_last_state || _sync_diag_should_log(s)) {
+		DBGY2 serprintf(
+			"sync_state[%s]: %s dyn=%d fallback=%d anchor=%d delay=%d streak=%d "
+			"start_pending=%d resume_pending=%d resume_valid_pending=%d hold=%d hold_resume=%d "
+			"sync_a=%d sync_v=%d seek_epoch=%d seek_done=%d\n",
+			origin,
+			_stream_get_sync_diag_state_name(state),
+			delay_status ? delay_status->is_dynamic : 0,
+			delay_status ? delay_status->is_fallback : 0,
+			delay_status ? delay_status->is_anchorable : 0,
+			delay_status ? delay_status->effective_delay_ms : 0,
+			delay_status ? delay_status->streak : 0,
+			s->audio_start_pending,
+			s->audio_resume_pending,
+			s->audio_resume_valid_pending,
+			s->video_hold_for_delay,
+			s->video_hold_for_resume_audio,
+			s->sync_a_time,
+			s->sync_v_time,
+			s->seek_epoch,
+			s->seek_converge_done);
+	}
+	sync_diag_last_state = state;
 }
 
 // ************************************************************
@@ -605,6 +699,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	int anchor_delay = current_av_delay;
 	int diag_log = _sync_diag_should_log(s);
 
+	_sync_diag_log_state(s, "audio", &delay_status);
+
 	if( !delay_valid && !anchor_valid ) {
 		// No usable timing (no dynamic and no static/last-good); disable delay compensation.
 		current_av_delay = 0;
@@ -775,11 +871,12 @@ int stream_sync_video( STREAM *s, int video_time )
 
 #ifdef CONFIG_ANDROID
 	{
-		int allow_static = 1;
-		int anchor_valid = 1;
+		stream_delay_status_t delay_status = _stream_get_delay_status(s, 1);
+		int anchor_valid = delay_status.is_anchorable;
 		int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough(s)) ? 1 : 0;
-		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
-		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : -1;
+		int delay_valid = delay_status.is_dynamic;
+
+		_sync_diag_log_state(s, "video", &delay_status);
 
 		// Late-audio start guard when dynamic delay is disabled:
 		// static latency is always "valid" in that mode and can over-shift heard time.
@@ -823,10 +920,9 @@ DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0
 	}
 #else
 	{
-		int allow_static = 0;
-		int anchor_valid = 1;
-		// Use the unified anchor delay to decide if timing is available.
-		_get_anchor_delay_ms(s, &anchor_valid, allow_static);
+		stream_delay_status_t delay_status = _stream_get_delay_status(s, 0);
+		int anchor_valid = delay_status.is_anchorable;
+		_sync_diag_log_state(s, "video", &delay_status);
 		if( !anchor_valid ) {
 DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d)\n",
 				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,

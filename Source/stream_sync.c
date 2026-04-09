@@ -57,6 +57,7 @@ static int sync_diag_last_seek_epoch = -1;
 static int sync_diag_last_speed_x100 = -1;
 static int sync_diag_last_pause_state = -1;
 static int sync_diag_last_state = -1;
+static int sync_diag_last_reanchor_pending = -1;
 
 static int stream_use_xbmc_smoothing = 1;
 
@@ -82,6 +83,7 @@ static void _sync_diag_reset(void)
 	sync_diag_last_speed_x100 = -1;
 	sync_diag_last_pause_state = -1;
 	sync_diag_last_state = -1;
+	sync_diag_last_reanchor_pending = -1;
 }
 
 static int _sync_diag_should_log(STREAM *s)
@@ -211,14 +213,20 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 		return;
 	}
 
+	// reanchor_pending: a one-shot valid-delay correction is armed and will
+	// fire once streak >= 3.  Shown as an overlay on the base state so the
+	// log makes the pending snap visible before it happens.
+	int reanchor_pending;
 	state = _stream_get_sync_diag_state(s, delay_status);
-	if (state != sync_diag_last_state || _sync_diag_should_log(s)) {
+	reanchor_pending = s->audio_resume_valid_pending;
+	if (state != sync_diag_last_state || reanchor_pending != sync_diag_last_reanchor_pending || _sync_diag_should_log(s)) {
 		DBGY2 serprintf(
-			"sync_state[%s]: %s dyn=%d fallback=%d anchor=%d delay=%d streak=%d "
-			"start_pending=%d resume_pending=%d resume_valid_pending=%d hold=%d hold_resume=%d "
+			"sync_state[%s]: %s reanchor_pending=%d dyn=%d fallback=%d anchor=%d delay=%d streak=%d "
+			"start_pending=%d resume_pending=%d hold=%d hold_resume=%d "
 			"sync_a=%d sync_v=%d seek_epoch=%d seek_done=%d\n",
 			origin,
 			_stream_get_sync_diag_state_name(state),
+			reanchor_pending,
 			delay_status ? delay_status->is_dynamic : 0,
 			delay_status ? delay_status->is_fallback : 0,
 			delay_status ? delay_status->is_anchorable : 0,
@@ -226,7 +234,6 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 			delay_status ? delay_status->streak : 0,
 			s->audio_start_pending,
 			s->audio_resume_pending,
-			s->audio_resume_valid_pending,
 			s->video_hold_for_delay,
 			s->video_hold_for_resume_audio,
 			s->sync_a_time,
@@ -235,6 +242,7 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 			s->seek_converge_done);
 	}
 	sync_diag_last_state = state;
+	sync_diag_last_reanchor_pending = reanchor_pending;
 }
 
 // ************************************************************

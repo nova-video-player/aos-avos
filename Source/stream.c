@@ -35,7 +35,6 @@
 #include <math.h>
 
 #ifdef CONFIG_ANDROID
-int get_android_sync(void);
 #endif
 extern int libavos_get_ac3_recoding_enabled(void);
 
@@ -588,11 +587,6 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 				anchor_ts = 0;
 			}
 			use_last_good = 1;
-		} else if( get_android_sync() && !delay_valid ) {
-			// android_sync=1: if delay is invalid, heard_ts can lag far behind stream time.
-			// Using it for timeline_map_apply bakes in large skew during speed changes.
-			// Fall back to the current stream time until delay is valid.
-			use_current = 1;
 		}
 	}
 
@@ -749,28 +743,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		}
 	}
 	if( s->video->valid ) {
-		if( get_android_sync() ) {
-			// For android_sync=1, always seed the anchor when audio_time exists.
-			// stream_sync_audio will override to audio_time if heard_ts is invalid.
-			if( s->audio_time != -1 ) {
-				int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
-				if( delay_valid ) {
-					_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
-				} else {
-					// android_sync=1: if timing is invalid, defer re-anchoring on speed change.
-					// Anchoring to a stale/invalid heard_ts can push the sink far behind the
-					// current video time, causing a visible "fast catch-up" burst. Wait for a
-					// valid delay before snapping the anchor.
-					int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
-					DBG serprintf("stream:stream_set_av_speed defer anchor (delay invalid, streak=%d v=%d a=%d heard_ts=%d)\n",
-						delay_streak, s->video_time, s->audio_time, anchor_ts);
-				}
-			} else {
-				DBG serprintf( "stream:stream_set_av_speed defer anchor (audio_time=%d)\n", s->audio_time );
-			}
-		} else {
-			_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
-		}
+		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
 	}
 
 	return 0;

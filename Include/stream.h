@@ -470,7 +470,7 @@ typedef struct STREAM {
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
 	int		put_time_mode;		// video sink uses put_time pacing
-	int		manual_audio_delay_target_ms;   // extra audio hold for android_sync=0, negative av_delay
+	int		manual_audio_delay_target_ms;   // extra audio hold for negative av_delay
 	int		manual_audio_delay_applied_ms;  // currently applied extra audio hold
 	// PCM accumulation buffer to coalesce tiny decoder output chunks.
 	unsigned char	*pcm_accum_data;
@@ -834,8 +834,7 @@ void    stream_audio_reset_ac3_passthrough_state(void);
 void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
 void	stream_un_pause ( STREAM *s, int was_paused );
-void    sfdec2_android_sync_on_pause( STREAM *s, int paused );
-void    sfdec2_android_sync_on_seek( STREAM *s );
+void    sfdec2_reset_sync_state_on_seek( STREAM *s );
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );
 int     stream_get_current_time ( STREAM *s, int *total_time );

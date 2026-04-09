@@ -2719,7 +2719,6 @@ DBGS serprintf("stream_pause\r\n");
 		}
 
 		s->paused = 1;
-		sfdec2_android_sync_on_pause( s, 1 );
 	}
 
 	_stream_wait_for_idle( s, 1000 );
@@ -2740,8 +2739,6 @@ serprintf("UNP: not_open\r\n");
 	}
 	if ( !was_paused ) {
 DBGS serprintf("stream_un_pause\r\n");
-		sfdec2_android_sync_on_pause( s, 0 );
-
 		float audio_speed = audio_interface_get_audio_speed();
 		int using_atempo = audio_interface_is_using_atempo();
 		if ( using_atempo || fabsf(audio_speed - 1.0f) > 1e-6f ) {
@@ -4685,7 +4682,7 @@ DBGV serprintf("play one frame\n");
 			DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
 		}
 	}
-	sfdec2_android_sync_on_seek( s );
+	sfdec2_reset_sync_state_on_seek( s );
 	
 DBGS serprintf("\nseeked to frame %d  time %d|%d   pos %lld|%lld <------------ took %3d/%3d\n", sc.frame, s->video_time, s->audio_time, s->video_pos, s->audio_pos, atime() - start1, atime()- start2 );
 	

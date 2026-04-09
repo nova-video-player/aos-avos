@@ -67,8 +67,6 @@ static int sfdec_force_hw   = -1;
 static int sfdec_force_blit = 0;
 static int sfdec_no_drop    = 0;
 static int sfdec_threshold  = 200;
-static int android_sync = 0;
-
 DECLARE_DEBUG_PARAM ("sfmf", sfdec_max_frames );
 DECLARE_DEBUG_PARAM ("sfhw", sfdec_force_hw );
 DECLARE_DEBUG_TOGGLE("sffb", sfdec_force_blit );
@@ -160,7 +158,7 @@ typedef struct priv {
 	int effective_av_delay_ms;
 	int drift_dir;
 	int drift_streak;
-	int hold_audio_until_ms;	// android_sync passthrough startup hold
+	int hold_audio_until_ms;	// passthrough startup hold
 	int hold_audio_start_ms;	// wall clock when passthrough startup hold started
 	int hold_audio_applied_ms;	// ms held during passthrough startup
 } priv_t;
@@ -222,8 +220,8 @@ static int _update_effective_av_delay_ts(priv_t *p, STREAM *s)
 	return RST_TO_TS_DELTA( effective_av_delay, int );
 }
 
-// Reproduce MediaCodec's releaseOutputBufferAtTime() pacing logic when we can't
-// use android_sync, so reordered frames still map to the correct WC deadline.
+// Reproduce MediaCodec-style WC pacing locally so reordered frames still map to
+// the correct deadline.
 static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 {
 	int frame_time = f ? f->time : -1;
@@ -598,7 +596,7 @@ static void *videosink_thread(void *ctx)
 			// No reliable audio timing: pace by WC using frame timestamps
 			blit_duration = _compute_blit_wait_ms( p, f, av_delay_ts );
 		} else {
-			// For non-android_sync, use the pacing logic that mimics MediaCodec's behavior
+			// Use the pacing logic that mimics MediaCodec's behavior
 			blit_duration = _compute_blit_wait_ms( p, f, av_delay_ts );
 		}
 
@@ -1304,13 +1302,7 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	return dec;
 }
 
-void sfdec2_android_sync_on_pause( STREAM *s, int paused )
-{
-	(void)s;
-	(void)paused;
-}
-
-void sfdec2_android_sync_on_seek( STREAM *s )
+void sfdec2_reset_sync_state_on_seek( STREAM *s )
 {
 	if( !s || !s->video_sink || !s->video_sink->priv )
 		return;
@@ -1329,17 +1321,6 @@ void sfdec2_android_sync_on_seek( STREAM *s )
 	p->last_user_av_delay = s->av_delay;
 	p->effective_av_delay_ms = s->av_delay;
 	pthread_mutex_unlock( &p->locked.mtx );
-}
-
-void set_android_sync(int sync)
-{
-	DBGSI serprintf("set_android_sync: %d\n", sync);
-	android_sync = 0;
-}
-
-int get_android_sync(void)
-{
-	return android_sync;
 }
 
 #define OMXC_REGISTER( format, mangler ) \

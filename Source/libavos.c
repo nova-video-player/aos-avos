@@ -53,10 +53,6 @@ void device_config_set_mediacodec_audio_capabilities(int64_t capabilities);
 void device_config_set_spatializer_capabilities(int capabilities);
 void device_config_set_spatializer_enabled(int enabled);
 void device_config_set_output_sample_rate(int sample_rate);
-#ifdef CONFIG_ANDROID
-void set_android_sync(int enable);
-#endif
-
 static pthread_t mainloop_thread;
 
 static long hdmi_audio_codecs_flag = 0;
@@ -333,15 +329,6 @@ int libavos_pcm_channel_mask_supported(int mask)
 void libavos_set_audio_speed(float speed)
 {
 	audio_interface_set_audio_speed(speed);
-}
-
-void libavos_set_android_frame_timing(int enable)
-{
-#ifdef CONFIG_ANDROID
-	set_android_sync(enable);
-#else
-	(void)enable;
-#endif
 }
 
 void libavos_enable_audio_speed(int enable)

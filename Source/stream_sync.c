@@ -59,6 +59,14 @@ static int sync_diag_last_pause_state = -1;
 
 static int stream_use_xbmc_smoothing = 1;
 
+typedef struct {
+	int effective_delay_ms; // effective delay currently used by sync math
+	int is_anchorable;      // safe to use for sink anchoring
+	int is_dynamic;         // based on fresh dynamic timing
+	int is_fallback;        // based on last-good or static latency
+	int streak;             // current dynamic-valid streak
+} stream_delay_status_t;
+
 static void _sync_diag_reset(void)
 {
 	sync_diag_count = 0;
@@ -125,6 +133,11 @@ static int stream_calc_lwma(int current, int *history, int *count)
 	return (int)(sum * 2 / (n * (n + 1)));
 }
 
+static int _stream_is_sink_driven(STREAM *s)
+{
+	return s && s->video_sink && s->video_sink->put_time;
+}
+
 // ************************************************************
 //
 //	stream_sync_restart
@@ -153,34 +166,51 @@ int stream_sync_restart( STREAM *s )
 //	stream_get_heard_audio_ts
 //
 // ************************************************************
-static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
+static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_static)
 {
-	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : 1;
-	int delay = stream_sync_av_delay(s);
-	int anchor_valid = delay_valid;
+	stream_delay_status_t status = { 0 };
+	int delay_valid = s && s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : 1;
+
+	status.streak = s && s->audio_ctx ? audio_interface_get_delay_valid_streak(s->audio_ctx) : 0;
+
+	if (delay_valid) {
+		status.effective_delay_ms = s ? stream_sync_av_delay(s) : 0;
+		status.is_anchorable = 1;
+		status.is_dynamic = 1;
+		return status;
+	}
 
 #ifdef CONFIG_ANDROID
-	if (!delay_valid) {
+	if (s) {
 		if (s->last_good_delay_valid) {
-			delay = s->last_good_delay_ms;
+			status.effective_delay_ms = s->last_good_delay_ms;
 			// Keep last-good delay as a usable anchor when timing drops invalid
 			// during steady playback. This avoids sudden loss of latency compensation.
-			anchor_valid = 1;
+			status.is_anchorable = 1;
+			status.is_fallback = 1;
 		} else if (allow_static && s->audio_ctx) {
 			int static_latency = audio_interface_get_latency(s->audio_ctx);
 			if (static_latency > 0) {
-				delay = static_latency;
-				anchor_valid = 1;
+				status.effective_delay_ms = static_latency;
+				status.is_anchorable = 1;
+				status.is_fallback = 1;
 			}
 		}
 	}
 #else
 	(void)allow_static;
 #endif
+
+	return status;
+}
+
+static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
+{
+	stream_delay_status_t status = _stream_get_delay_status(s, allow_static);
 	if (valid) {
-		*valid = anchor_valid;
+		*valid = status.is_anchorable;
 	}
-	return anchor_valid ? delay : 0;
+	return status.is_anchorable ? status.effective_delay_ms : 0;
 }
 
 int stream_get_anchor_delay_ms( STREAM *s, int allow_static )
@@ -201,16 +231,17 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int allow_static = 1;
 #endif
 
-	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
+	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
+	int delay_valid = delay_status.is_dynamic;
 	int suppress_static_heard_delay = 0;
 	int anchor_delay;
 	
 	// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
 	if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
-		anchor_delay = _get_anchor_delay_ms(s, NULL, allow_static);
+		anchor_delay = delay_status.effective_delay_ms;
 	} else {
 		anchor_delay = (s->smoothed_av_delay >= 0) ? s->smoothed_av_delay :
-			_get_anchor_delay_ms(s, NULL, allow_static);
+			delay_status.effective_delay_ms;
 	}
 #ifdef CONFIG_ANDROID
 	// Late-audio start guard for static delay: avoid subtracting static latency
@@ -457,7 +488,7 @@ int stream_sync_av_delay( STREAM *s )
 // ************************************************************
 static int _stream_av_diff( STREAM *s, int video_time, int audio_time )
 {
-	if( s && !s->put_time_mode && s->video_sink && s->video_sink->put_time ) {
+	if( s && !s->put_time_mode && _stream_is_sink_driven(s) ) {
 		// Lazy init: ensure put_time_mode is active once the sink is available.
 		s->put_time_mode = 1;
 	}
@@ -567,26 +598,20 @@ int stream_sync_audio( STREAM *s, int audio_time )
 #else
 	int allow_static = 0;
 #endif
-	int anchor_valid = 1;
-	int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
-	int current_av_delay = _get_anchor_delay_ms(s, &anchor_valid, allow_static);
+	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
+	int anchor_valid = delay_status.is_anchorable;
+	int delay_valid = delay_status.is_dynamic;
+	int current_av_delay = delay_status.effective_delay_ms;
 	int anchor_delay = current_av_delay;
 	int diag_log = _sync_diag_should_log(s);
 
-	static int last_anchor_delay = -1;
-	if( !delay_valid && s->last_good_delay_valid ) {
-		// After seek, prefer last known good delay over static latency.
-		current_av_delay = s->last_good_delay_ms;
-		anchor_delay = current_av_delay;
-		anchor_valid = 1;
-	}
 	if( !delay_valid && !anchor_valid ) {
 		// No usable timing (no dynamic and no static/last-good); disable delay compensation.
 		current_av_delay = 0;
 		anchor_delay = 0;
 	}
 	if( delay_valid ) {
-		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
+		int delay_streak = delay_status.streak;
 		int startup_hold_active = s->audio_ctx ? audio_interface_is_startup_hold_active( s->audio_ctx ) : 0;
 		int sensitive_phase =
 			startup_hold_active ||
@@ -623,7 +648,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	// Check if passthrough mode is active - static delay is immediately valid
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	
-	if( anchor_delay > 0 && s->video_sink && s->video_sink->put_time && audio_time != -1 && !passthrough_mode ) {
+	if( anchor_delay > 0 && _stream_is_sink_driven(s) && audio_time != -1 && !passthrough_mode ) {
 		int anchor_ts_raw = audio_time - anchor_delay;
 		if( anchor_ts_raw < 0 ) {
 			if (diag_log) {
@@ -635,7 +660,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		}
 	}
 
-	if( anchor_valid && s->video_sink && s->video_sink->put_time && audio_time != -1 ) {
+	if( anchor_valid && _stream_is_sink_driven(s) && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
 			if (diag_log) {
@@ -855,7 +880,7 @@ DBGY serprintf("{SSV %d}} ", video_time );
 			s->seek_converge_done = 0;
 		}
 		if( !s->seek_converge_done && atime() >= s->seek_converge_until_ms ) {
-			if( s->video_sink && s->video_sink->put_time ) {
+			if( _stream_is_sink_driven(s) ) {
 				int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
 DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
 					diff, anchor_ts);
@@ -947,7 +972,7 @@ DBGVY serprintf("(D %d)", diff );
 	
 DBGVY serprintf("(%3d|%3d|%3d)", rdiff, diff, s->delay );
 
-	if ( stream_no_sync || (s->video_sink && s->video_sink->put_time) ) {
+	if ( stream_no_sync || _stream_is_sink_driven(s) ) {
 		// ANDROID: this is the android mode with a put_time function in the video sink which basically disables the sync logic
 		goto EXIT;
 	}

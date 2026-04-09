@@ -454,6 +454,9 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
 {
     media_status_t err;
     if( render ) {
+        // The current sfdec2 path renders ASAP and no longer relies on libsfdec's
+        // internal timed-release scheduling. Keep the render_ts_ns / cadence-aware
+        // scheduling logic below intact for safekeeping and possible future reuse.
         if (render_ts_ns > 0) {
             err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, render_ts_ns);
         } else if (asap) {

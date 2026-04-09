@@ -67,7 +67,7 @@ static int sfdec_force_hw   = -1;
 static int sfdec_force_blit = 0;
 static int sfdec_no_drop    = 0;
 static int sfdec_threshold  = 200;
-static int android_sync = 1;
+static int android_sync = 0;
 
 DECLARE_DEBUG_PARAM ("sfmf", sfdec_max_frames );
 DECLARE_DEBUG_PARAM ("sfhw", sfdec_force_hw );
@@ -200,39 +200,36 @@ static INT64 _snap_timestamp_ns(priv_t *p, int frame_time)
 	return timestamp_us * 1000LL;
 }
 
-// For android_sync=1 reanchor windows, prefer the audio-thread put_time anchor
-// when it is fresh to avoid cross-thread heard-time skew.
-static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int *used_put_time, int *put_age_ms)
+static int _update_effective_av_delay_ts(priv_t *p, STREAM *s)
 {
-	const int k_put_time_fresh_ms = 100;
-	int use_put = 0;
-	int age_ms = 0;
-	int64_t heard_ts = 0;
+	int target_av_delay = s ? s->av_delay : 0;
+	int effective_av_delay = p->effective_av_delay_ms;
+	const int av_delay_slew_step_ms = 40;
 
-	if (p && s && s->audio_time > 0 && p->venc_put_time > 0 && p->venc_ref_time > 0) {
-		age_ms = atime() - p->venc_ref_time;
-		if (age_ms >= 0 && age_ms <= k_put_time_fresh_ms) {
-			heard_ts = p->venc_put_time;
-			use_put = 1;
-		}
+	if( effective_av_delay < target_av_delay ) {
+		int step = target_av_delay - effective_av_delay;
+		if( step > av_delay_slew_step_ms )
+			step = av_delay_slew_step_ms;
+		effective_av_delay += step;
+	} else if( effective_av_delay > target_av_delay ) {
+		int step = effective_av_delay - target_av_delay;
+		if( step > av_delay_slew_step_ms )
+			step = av_delay_slew_step_ms;
+		effective_av_delay -= step;
 	}
-	if (!use_put) {
-		heard_ts = s ? (int64_t)stream_get_heard_audio_ts(s, s->audio_time) : 0;
-	}
-	if (used_put_time) {
-		*used_put_time = use_put;
-	}
-	if (put_age_ms) {
-		*put_age_ms = age_ms;
-	}
-	return heard_ts;
+
+	p->effective_av_delay_ms = effective_av_delay;
+	return RST_TO_TS_DELTA( effective_av_delay, int );
 }
 
 // Reproduce MediaCodec's releaseOutputBufferAtTime() pacing logic when we can't
 // use android_sync, so reordered frames still map to the correct WC deadline.
-static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f)
+static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 {
-	INT64 timestamp_ns = _snap_timestamp_ns(p, f ? f->time : -1);
+	int frame_time = f ? f->time : -1;
+	if( frame_time >= 0 )
+		frame_time += av_delay_ts;
+	INT64 timestamp_ns = _snap_timestamp_ns(p, frame_time);
 	INT64 now_ns = _get_monotonic_ns();
 	INT64 start_off = p->sched_start_off_ns;
 	INT64 start_mono = p->sched_start_mono_ns;
@@ -411,73 +408,10 @@ static VIDEO_FRAME *videosink_get_frame(STREAM_SINK_VIDEO *sink, int index)
 static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
-	STREAM *s = (STREAM *)p->dec->ctx;
 
 	int now_ms = atime();
 	int dt = time    - p->venc_put_time;
 	int dr = now_ms - p->venc_ref_time;
-	int passthrough = _is_passthrough(s);
-	p->passthrough_cached = passthrough;
-
-	if (android_sync) {
-		// android_sync=1: keep MediaCodec pacing with a stable render offset.
-		// Avoid per-frame audio re-anchoring to prevent jitter on unreliable devices.
-		int speed_changed = 0;
-		float current_speed = audio_interface_get_audio_speed();
-		if (fabsf(current_speed - p->last_av_speed) > 0.001f) {
-			speed_changed = 1;
-			p->last_av_speed = current_speed;
-			DBGSI serprintf("videosink_put_time: speed changed to %.2f\n", current_speed);
-			p->grace_until_ms = now_ms + 1000;
-		}
-
-		int expected = p->venc_put_time + dr;
-		int diff = time - expected;
-		if (!speed_changed && p->venc_put_time && time < p->venc_put_time) {
-			time = p->venc_put_time;
-			diff = time - expected;
-		}
-
-		if (!p->venc_put_time) {
-			p->grace_until_ms = now_ms + 1000;
-		}
-		int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
-		int event_reanchor = speed_changed;
-		if (s) {
-			if (s->seek_epoch != p->last_seek_epoch) {
-				p->last_seek_epoch = s->seek_epoch;
-				event_reanchor = 1;
-			}
-			if (s->audio_resume_pending && !p->last_audio_resume_pending) {
-				event_reanchor = 1;
-			}
-			p->last_audio_resume_pending = s->audio_resume_pending;
-		}
-		// During grace, only allow reanchor on explicit events (seek/resume/speed).
-		int allow_reanchor = event_reanchor;
-		if (in_grace && !event_reanchor) {
-			allow_reanchor = 0;
-		}
-
-		p->venc_put_time = time;
-		p->venc_ref_time = atime();
-		// Render offset is initialized in the render thread once audio timing is usable.
-		if (allow_reanchor) {
-			pthread_mutex_lock(&p->locked.mtx);
-			// Event-driven: reset render offset only on seek/resume/speed.
-			p->render_offset_ns = -1;
-			p->render_offset_from_audio = 0;
-			p->pending_reanchor = 1;
-			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d\n",
-				diff, speed_changed);
-			pthread_mutex_unlock(&p->locked.mtx);
-		}
-
-		DBGSI serprintf("videosink_put_time: t=%d ref=%d offset=%lld target=%lld\n",
-			time, p->venc_ref_time, (long long)p->render_offset_ns, (long long)p->target_offset_ns);
-		DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr);
-		return 0;
-	}
 
 	// Detect speed change (explicit discontinuity)
 	int speed_changed = 0;
@@ -518,19 +452,13 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	p->venc_ref_time = atime();
 	if (allow_reanchor) {
 		pthread_mutex_lock(&p->locked.mtx);
-		if ( !android_sync ) {
-			p->sched_start_off_ns  = (INT64)time * 1000000LL;
-			p->sched_start_mono_ns = _get_monotonic_ns();
-			p->sched_last_off_ns   = p->sched_start_off_ns;
-			p->sched_last_mono_ns  = p->sched_start_mono_ns;
-			p->sched_late          = 0;
-			DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d)\n",
-				time, diff, speed_changed, discontinuity, no_sched_anchor);
-		} else {
-			p->render_offset_ns = -1;
-			DBGSI serprintf("videosink_put_time: reset render_offset_ns diff=%d speed=%d\n",
-				diff, speed_changed);
-		}
+		p->sched_start_off_ns  = (INT64)time * 1000000LL;
+		p->sched_start_mono_ns = _get_monotonic_ns();
+		p->sched_last_off_ns   = p->sched_start_off_ns;
+		p->sched_last_mono_ns  = p->sched_start_mono_ns;
+		p->sched_late          = 0;
+		DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d)\n",
+			time, diff, speed_changed, discontinuity, no_sched_anchor);
 		pthread_mutex_unlock(&p->locked.mtx);
 	}
 
@@ -618,19 +546,10 @@ static void *videosink_thread(void *ctx)
 	pthread_mutex_lock(&p->locked.mtx);
 	while (p->locked.run && !p->locked.error) {
 
-		// Detect pause/resume transitions to keep codec anchors aligned
 		if( s ) {
 			if( s->paused && !p->prev_paused ) {
-				if( android_sync ) {
-					sfdec_pause( p->sfdec );
-DBGSI serprintf("MediaCodec pause\n");
-				}
 				p->prev_paused = 1;
 			} else if( !s->paused && p->prev_paused ) {
-				if( android_sync ) {
-					sfdec_resume( p->sfdec );
-DBGSI serprintf("MediaCodec resume\n");
-				}
 				p->prev_paused = 0;
 			}
 		}
@@ -648,16 +567,11 @@ DBGSI serprintf("MediaCodec resume\n");
 
 		int do_render = 1;
  		int venc_time = _get_time(p);
- 		int blit_duration;
+		int blit_duration;
+		int av_delay_ts = 0;
 
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
-		int64_t render_ts_ns = 0;
-		int passthrough = p->passthrough_cached;
-		if (s && passthrough == 0) {
-			// put_time may be deferred at startup; fetch passthrough directly.
-			passthrough = _is_passthrough(s);
-		}
 
 		int delay_valid = 1;
 		if( s && s->audio_ctx ) {
@@ -667,36 +581,30 @@ DBGSI serprintf("MediaCodec resume\n");
 			int current_av_delay = s->av_delay;
 			if( p->last_user_av_delay != current_av_delay ) {
 				int delta = current_av_delay - p->last_user_av_delay;
-				if( android_sync ) {
-					DBGSI serprintf("android_sync: av_delay_change target %d -> %d (delta=%d) effective=%d frame=%d\n",
-						p->last_user_av_delay, current_av_delay, delta,
-						p->effective_av_delay_ms, f ? f->time : -1);
-				} else {
-					DBGSI serprintf("av_delay_change: %d -> %d (delta=%d) frame=%d blit=%d\n",
-						p->last_user_av_delay, current_av_delay, delta,
-						f ? f->time : -1, f ? f->blit_time : -1);
-					// Keep physical schedule anchor stable; apply only presentation offset shift.
-					// Use grace to prevent transient drop logic from fighting the user change.
-					p->grace_until_ms = atime() + 1000;
-				}
+				DBGSI serprintf("av_delay_change: %d -> %d (delta=%d) frame=%d blit=%d\n",
+					p->last_user_av_delay, current_av_delay, delta,
+					f ? f->time : -1, f ? f->blit_time : -1);
+				// Keep physical schedule anchor stable; apply only presentation offset shift.
+				// Use grace to prevent transient drop logic from fighting the user change.
+				p->grace_until_ms = atime() + 1000;
 				p->last_user_av_delay = current_av_delay;
 			}
+			av_delay_ts = _update_effective_av_delay_ts( p, s );
 		}
 
-		if( android_sync ) {
-			blit_duration = 0;
-		} else if( sfdec_force_blit ) {
+		if( sfdec_force_blit ) {
 			blit_duration = 0;
 		} else if( !delay_valid ) {
 			// No reliable audio timing: pace by WC using frame timestamps
-			blit_duration = _compute_blit_wait_ms( p, f );
+			blit_duration = _compute_blit_wait_ms( p, f, av_delay_ts );
 		} else {
 			// For non-android_sync, use the pacing logic that mimics MediaCodec's behavior
-			blit_duration = _compute_blit_wait_ms( p, f );
+			blit_duration = _compute_blit_wait_ms( p, f, av_delay_ts );
 		}
 
-DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d",
-	blit_duration, f->index, f->time, f->duration, f->blit_time, s ? s->av_delay : 0);
+DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d av_eff=%d av_ts=%d",
+	blit_duration, f->index, f->time, f->duration, f->blit_time,
+	s ? s->av_delay : 0, p->effective_av_delay_ms, av_delay_ts);
 		if( s && s->paused ) {
 DBGSI serprintf(" paused\n");
 		} else if (blit_duration > 0) {
@@ -707,20 +615,17 @@ DBGSI serprintf(" wait\n");
 			if( blit_duration > f->duration + 100 )
 				blit_duration = f->duration + 100;
 
-			if( !android_sync ) {
-				struct timespec ts_wait = ts;
-				timespec_add_ms(&ts_wait, blit_duration);
+			struct timespec ts_wait = ts;
+			timespec_add_ms(&ts_wait, blit_duration);
 
-				int rc = 0;
-				while (p->locked.run && rc == 0 && !has_state_l(p, THREAD_STATE_FLUSHING)) {
-					rc = pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
-				}
-				if (!p->locked.run) {
-DBGCV CLOG("stop thread 2");
-				}
+			int rc = 0;
+			while (p->locked.run && rc == 0 && !has_state_l(p, THREAD_STATE_FLUSHING)) {
+				rc = pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
 			}
-		// Android sync will happily drop the frames for us
-		} else if ( !android_sync ) {
+			if (!p->locked.run) {
+DBGCV CLOG("stop thread 2");
+			}
+		} else {
 			if( !delay_valid ) {
 DBGSI			serprintf(" timing invalid, skip drop\n");
 				goto render_now;
@@ -773,218 +678,9 @@ DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d 
 	blit_duration, f->index, f->time, venc_time, audio_time, video_time, smoothed_delay, audio_delay, latency_ms, late_threshold, speed, p->dropped);
 //CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d", f->index, (venc_time - f->blit_time), f->blit_time, venc_time, f->time);
 			}
-		} else {
-DBGSI serprintf(" ok\n");
 		}
 
 render_now:
-		if( android_sync ) {
-			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-			int anchor_delay_ms = 0;
-			int have_audio_time = (s && s->audio_time > 0);
-			int hold_passthrough = 0;
-
-			if (s) {
-				// Prefer the unified anchor delay when smoothed is missing or smaller.
-				int best_delay = stream_get_anchor_delay_ms(s, 1);
-				anchor_delay_ms = s->smoothed_av_delay;
-				if (anchor_delay_ms <= 0 || (best_delay > 0 && anchor_delay_ms < best_delay)) {
-					anchor_delay_ms = best_delay;
-				}
-			}
-			if (anchor_delay_ms < 0) {
-				anchor_delay_ms = 0;
-			}
-
-			if (passthrough == 2 && s && s->audio && s->audio->valid &&
-			    (s->audio_time < 0 || p->hold_audio_until_ms != 0)) {
-				if (p->hold_audio_until_ms == 0) {
-					int hold_ms = anchor_delay_ms > 0 ? anchor_delay_ms + 200 : 500;
-					int hold_start_ms = atime();
-					p->hold_audio_start_ms = hold_start_ms;
-					p->hold_audio_until_ms = hold_start_ms + hold_ms;
-					p->hold_audio_applied_ms = 0;
-					DBGSI serprintf("android_sync: hold video for passthrough start (%d ms)\n", hold_ms);
-				}
-				while (p->locked.run && !has_state_l(p, THREAD_STATE_FLUSHING) &&
-				       s->audio_time < 0 && atime() < p->hold_audio_until_ms) {
-					struct timespec ts_wait = ts;
-					timespec_add_ms(&ts_wait, 10);
-					pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
-				}
-				if (s->audio_time >= 0) {
-					int hold_end_ms = atime();
-					if (p->hold_audio_start_ms > 0 && hold_end_ms > p->hold_audio_start_ms) {
-						p->hold_audio_applied_ms = hold_end_ms - p->hold_audio_start_ms;
-					} else {
-						p->hold_audio_applied_ms = 0;
-					}
-					p->hold_audio_until_ms = 0;
-					p->hold_audio_start_ms = 0;
-					DBGSI serprintf("android_sync: passthrough hold done applied=%d ms\n",
-						p->hold_audio_applied_ms);
-				} else {
-					// Timeout reached: keep video blocked until audio becomes available.
-					hold_passthrough = 1;
-				}
-				// Audio time may have become valid while we were waiting.
-				have_audio_time = (s && s->audio_time > 0);
-			}
-
-			if (!hold_passthrough && p->render_offset_ns == -1) {
-				// Passthrough mode 2: align video to audible time (audio_time minus latency).
-				if (passthrough == 2 && have_audio_time) {
-					const int max_forward_lead_ms = 500;
-					int delay_for_pt = anchor_delay_ms > 0 ? anchor_delay_ms : 0;
-					if (p->hold_audio_applied_ms > 0) {
-						// Avoid double-counting startup hold + static latency.
-						delay_for_pt -= p->hold_audio_applied_ms;
-						if (delay_for_pt < 0) {
-							delay_for_pt = 0;
-						}
-					}
-					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_for_pt;
-					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
-						// Backward seek: avoid anchoring behind the current video frame.
-						// Only clamp after video_time is established; allow startup to align to audio.
-						heard_ts = f->time;
-					}
-					if (s && s->seek_epoch > 0 && heard_ts >= 0) {
-						int64_t forward_lead = (int64_t)f->time - heard_ts;
-						if (forward_lead > max_forward_lead_ms) {
-							DBGSI serprintf("android_sync: clamp passthrough forward lead %lld -> %d ms (f=%d heard=%lld)\n",
-								(long long)forward_lead, max_forward_lead_ms, f->time, (long long)heard_ts);
-							heard_ts = (int64_t)f->time - max_forward_lead_ms;
-						}
-					}
-					if (heard_ts < 0) {
-						heard_ts = 0;
-					}
-					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
-					p->render_offset_from_audio = 1;
-					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d passthrough=2 offset=%lld\n",
-						s->audio_time, delay_for_pt, p->render_offset_ns);
-				} else if (have_audio_time && anchor_delay_ms > 0) {
-					int used_put_time = 0;
-					int put_age_ms = 0;
-					int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
-					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
-						// Backward seek: avoid anchoring behind the current video frame.
-						// Only clamp after video_time is established; allow startup to align to audio.
-						heard_ts = f->time;
-					}
-					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
-					p->render_offset_from_audio = 1;
-					DBGSI2 serprintf("android_sync anchor_diag(init): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
-						s ? s->audio_time : -1, (long long)heard_ts,
-						used_put_time ? "put_time" : "recompute",
-						p ? p->venc_put_time : -1, put_age_ms,
-						s ? stream_get_anchor_delay_ms(s, 1) : -1,
-						s ? s->smoothed_av_delay : -1, (long long)p->render_offset_ns);
-					DBGSI serprintf("android_sync: init render_offset from audio_time=%d heard_ts=%lld offset=%lld\n",
-						s->audio_time, (long long)heard_ts, p->render_offset_ns);
-				} else {
-					p->render_offset_ns = now_ns + (int64_t)anchor_delay_ms * 1000000LL - (int64_t)f->time * 1000000LL;
-					p->render_offset_from_audio = 0;
-					DBGSI serprintf("android_sync: init render_offset from static delay=%d offset=%lld\n",
-						anchor_delay_ms, p->render_offset_ns);
-				}
-				// Render offset was reset due to an event; clear pending reanchor.
-				p->pending_reanchor = 0;
-			} else if (have_audio_time && p->render_offset_from_audio == 0 && anchor_delay_ms > 0) {
-				// Audio time became valid after a static init: re-anchor once to heard audio.
-				int used_put_time = 0;
-				int put_age_ms = 0;
-				int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
-				if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
-					// Same clamp rule as initial anchor; skip clamp during startup.
-					heard_ts = f->time;
-				}
-				p->render_offset_ns = now_ns - heard_ts * 1000000LL;
-				p->render_offset_from_audio = 1;
-				DBGSI2 serprintf("android_sync anchor_diag(reanchor): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
-					s ? s->audio_time : -1, (long long)heard_ts,
-					used_put_time ? "put_time" : "recompute",
-					p ? p->venc_put_time : -1, put_age_ms,
-					s ? stream_get_anchor_delay_ms(s, 1) : -1,
-					s ? s->smoothed_av_delay : -1, (long long)p->render_offset_ns);
-				DBGSI serprintf("android_sync: reanchor from audio_time=%d heard_ts=%lld offset=%lld\n",
-					s->audio_time, (long long)heard_ts, p->render_offset_ns);
-			} else if (have_audio_time && anchor_delay_ms > 0 && passthrough != 2) {
-				// Slew toward a new anchor only on explicit events (seek/resume/speed).
-				if (p->pending_reanchor) {
-					int used_put_time = 0;
-					int put_age_ms = 0;
-					int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
-					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
-						// Keep reanchor target consistent with init/reanchor clamp policy.
-						heard_ts = f->time;
-					}
-					p->target_offset_ns = now_ns - heard_ts * 1000000LL;
-					DBGSI2 serprintf("android_sync anchor_diag(slew_target): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld target=%lld\n",
-						s ? s->audio_time : -1, (long long)heard_ts,
-						used_put_time ? "put_time" : "recompute",
-						p ? p->venc_put_time : -1, put_age_ms,
-						s ? stream_get_anchor_delay_ms(s, 1) : -1,
-						s ? s->smoothed_av_delay : -1,
-						(long long)p->render_offset_ns, (long long)p->target_offset_ns);
-					if (p->target_offset_ns != p->render_offset_ns) {
-						p->slew_active = 1;
-					}
-					p->pending_reanchor = 0;
-				}
-			}
-
-			if (p->slew_active) {
-				int64_t delta = p->target_offset_ns - p->render_offset_ns;
-				int64_t step = 200000; // 0.2ms per frame: near-invisible correction
-				if (delta > step) {
-					delta = step;
-				} else if (delta < -step) {
-					delta = -step;
-				}
-				p->render_offset_ns += delta;
-				if (llabs(p->target_offset_ns - p->render_offset_ns) <= step) {
-					p->render_offset_ns = p->target_offset_ns;
-					p->slew_active = 0;
-				}
-			}
-
-			if (hold_passthrough) {
-				do_render = 0;
-			} else {
-				int av_delay_ts = 0;
-				int64_t av_delay_ns = 0;
-				if( s ) {
-					int target_av_delay = s->av_delay;
-					int effective_av_delay = p->effective_av_delay_ms;
-					const int av_delay_slew_step_ms = 40;
-					if( effective_av_delay < target_av_delay ) {
-						int step = target_av_delay - effective_av_delay;
-						if( step > av_delay_slew_step_ms )
-							step = av_delay_slew_step_ms;
-						effective_av_delay += step;
-					} else if( effective_av_delay > target_av_delay ) {
-						int step = effective_av_delay - target_av_delay;
-						if( step > av_delay_slew_step_ms )
-							step = av_delay_slew_step_ms;
-						effective_av_delay -= step;
-					}
-					p->effective_av_delay_ms = effective_av_delay;
-					av_delay_ts = RST_TO_TS_DELTA( effective_av_delay, int );
-					av_delay_ns = (int64_t)av_delay_ts * 1000000LL;
-				}
-				render_ts_ns = (int64_t)f->time * 1000000LL + p->render_offset_ns + av_delay_ns;
-				int64_t delta_ms = (render_ts_ns - now_ns) / 1000000LL;
-DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d av_delay=%d av_eff=%d av_delay_ts=%d\n",
-				render_ts_ns, now_ns, delta_ms, f->time, s ? s->av_delay : 0, p->effective_av_delay_ms, av_delay_ts);
-				if (delta_ms <= 0) {
-					DBGSI serprintf("android_sync: render late delta=%lld f_time=%d audio_time=%d delay_ms=%d seek_epoch=%d\n",
-						delta_ms, f->time, s ? s->audio_time : -1, anchor_delay_ms, s ? s->seek_epoch : -1);
-				}
-			}
-		}
-
 		if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
 			do_render = 0;
 		}
@@ -994,9 +690,7 @@ DBGSI		serprintf("android_sync: render_ts=%lld now=%lld delta_ms=%lld f_time=%d 
 		if (do_render) {
 DBGCV3 CLOG("render ->");
 			int start = time_update_time();
-			// For android_sync we rely on MediaCodec projection; only non-android_sync uses ASAP.
-			int asap = !android_sync;
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, asap, render_ts_ns);
+			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 1, 0);
 			int took = time_update_time() - start;
 			p->dropped = 0;
 DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );
@@ -1004,9 +698,7 @@ DBGCV3 CLOG("render <-");
 		} else {
 			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 		}
-		// "Paused" here usually means "seek". Avoid resetting MediaCodec timing
-		// every frame under android_sync to prevent ASAP rendering.
-		if( s && s->paused && !android_sync ) {
+		if( s && s->paused ) {
 			sfdec_reset_ts(p->sfdec);
 		}
 
@@ -1525,10 +1217,6 @@ DBGCV	CLOG();
 	XDM_id_flush( &p->XDM_ctx );
 	XDM_ts_flush( &p->XDM_ctx );
 	sfdec_flush(p->sfdec);
-	if( android_sync ) {
-		sfdec_seek_reset( p->sfdec );
-DBGCV CLOG("MediaCodec seek reset");
-	}
 
 	while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_RENDERING)) {
 		pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
@@ -1618,117 +1306,35 @@ static STREAM_DEC_VIDEO *new_dec(void)
 
 void sfdec2_android_sync_on_pause( STREAM *s, int paused )
 {
-	if( !s || !android_sync || !s->video_sink || !s->video_sink->priv )
-		return;
-	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
-		return;
-
-	priv_t *p = (priv_t*) s->video_sink->priv;
-	pthread_mutex_lock( &p->locked.mtx );
-	if( paused ) {
-		int active = (s->audio_time > 0 || s->video_time > 0);
-		if( !active ) {
-			p->pause_start_ms = 0;
-			p->pause_armed = 0;
-			pthread_mutex_unlock( &p->locked.mtx );
-			return;
-		}
-		p->pause_start_ms = atime();
-		p->pause_armed = 1;
-DBGSI		serprintf("android_sync: pause start at %d\n", p->pause_start_ms);
-		pthread_mutex_unlock( &p->locked.mtx );
-		return;
-	}
-
-	if( !p->pause_armed ) {
-DBGSI		serprintf("android_sync: resume shift skipped (pause not armed)\n");
-		p->pause_start_ms = 0;
-		pthread_mutex_unlock( &p->locked.mtx );
-		return;
-	}
-
-DBGSI	serprintf("android_sync: resume check audio_time=%d video_time=%d diff=%d\n",
-		s->audio_time, s->video_time, s->video_time - s->audio_time);
-DBGSI	serprintf("android_sync: resume state offset=%lld pending=%d seek_epoch=%d\n",
-		(long long)p->render_offset_ns, p->pending_reanchor, s->seek_epoch);
-
-	// If audio_time is stale vs video_time, invalidate audio timing and re-anchor on first post-resume audio.
-	if( s->audio_time >= 0 && s->video_time >= 0 && (s->video_time - s->audio_time) > 500 ) {
-DBGSI		serprintf("android_sync: resume invalidates stale audio_time (a=%d v=%d)\n",
-			s->audio_time, s->video_time);
-		s->audio_time = -1;
-		s->sync_a_time = -1;
-		p->render_offset_ns = -1;
-		p->render_offset_from_audio = 0;
-		p->pause_start_ms = 0;
-		p->pause_armed = 0;
-		pthread_mutex_unlock( &p->locked.mtx );
-		return;
-	}
-
-	// Shift render_offset_ns by paused duration to avoid fast catch-up on resume.
-	if( p->pause_start_ms > 0 && p->render_offset_ns != -1 ) {
-		int pause_ms = atime() - p->pause_start_ms;
-		if( pause_ms > 0 ) {
-			p->render_offset_ns += (int64_t)pause_ms * 1000000LL;
-DBGSI			serprintf("android_sync: resume shift offset by %dms -> %lld\n",
-				pause_ms, p->render_offset_ns);
-		}
-	} else {
-DBGSI		serprintf("android_sync: resume shift skipped (pause_start=%d offset=%lld)\n",
-			p->pause_start_ms, (long long)p->render_offset_ns);
-	}
-	p->pause_start_ms = 0;
-	p->pause_armed = 0;
-	pthread_mutex_unlock( &p->locked.mtx );
+	(void)s;
+	(void)paused;
 }
 
 void sfdec2_android_sync_on_seek( STREAM *s )
 {
-	if( !s || !android_sync || !s->video_sink || !s->video_sink->priv )
+	if( !s || !s->video_sink || !s->video_sink->priv )
 		return;
 	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
 		return;
 
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
-DBGSI	serprintf("android_sync: seek check audio_time=%d video_time=%d diff=%d\n",
-		s->audio_time, s->video_time, s->video_time - s->audio_time);
-DBGSI	serprintf("android_sync: seek state offset=%lld pending=%d seek_epoch=%d\n",
-		(long long)p->render_offset_ns, p->pending_reanchor, s->seek_epoch);
-	int was_holding = (p->hold_audio_until_ms != 0);
 	p->venc_put_time = 0;
 	p->venc_ref_time = 0;
-	p->render_offset_ns = -1;
-	p->render_offset_from_audio = 0;
-	p->slew_active = 0;
-	p->target_offset_ns = 0;
-	p->pending_reanchor = 0;
-	p->last_seek_epoch = 0;
-	p->last_audio_resume_pending = 0;
-	p->effective_av_delay_ms = s->av_delay;
+	p->sched_start_off_ns = 0;
+	p->sched_start_mono_ns = 0;
+	p->sched_last_off_ns = 0;
+	p->sched_last_mono_ns = 0;
+	p->sched_late = 0;
 	p->last_user_av_delay = s->av_delay;
-	if (!was_holding) {
-		p->hold_audio_until_ms = 0;
-		p->hold_audio_start_ms = 0;
-		p->hold_audio_applied_ms = 0;
-	}
-	// If audio_time is stale vs video_time after seek, invalidate and re-anchor on first audio.
-	if( s->audio_time >= 0 && s->video_time >= 0 && (s->video_time - s->audio_time) > 500 ) {
-DBGSI		serprintf("android_sync: seek invalidates stale audio_time (a=%d v=%d)\n",
-			s->audio_time, s->video_time);
-		s->audio_time = -1;
-		s->sync_a_time = -1;
-		p->render_offset_ns = -1;
-	}
-DBGSI	serprintf("android_sync: seek reset anchors\n");
+	p->effective_av_delay_ms = s->av_delay;
 	pthread_mutex_unlock( &p->locked.mtx );
 }
 
 void set_android_sync(int sync)
 {
 	DBGSI serprintf("set_android_sync: %d\n", sync);
-	android_sync = sync;
+	android_sync = 0;
 }
 
 int get_android_sync(void)

@@ -29,7 +29,6 @@
 #include <math.h>
 
 #ifdef CONFIG_ANDROID
-int get_android_sync(void);
 #endif
 
 #define DBGS DBG_IF(Debug[DBG_STREAM])
@@ -577,7 +576,7 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 				} else {
 					if( cdata.time != STREAM_NO_PTS_VALUE ) {
 						int pts = cdata.time;
-						if( !get_android_sync() && s->put_time_mode &&
+						if( s->put_time_mode &&
 							s->audio_time < 0 && !s->audio_start_pending &&
 							s->video_time >= 0 && s->video_time < 1000 ) {
 							// Startup: delay audio_time until the first audible output.
@@ -1195,7 +1194,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					// Startup A/V alignment: if audio is significantly ahead at the very
 					// beginning, delay audio output briefly so video can catch up.
-					if( !get_android_sync() && s->put_time_mode && s->video && s->video->valid &&
+					if( s->put_time_mode && s->video && s->video->valid &&
 						s->video_time >= 0 && s->video_time < 1000 &&
 						s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
 						if( s->audio_start_target_ts == STREAM_NO_PTS_VALUE ) {
@@ -1232,9 +1231,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
 					}
 
-					// android_sync=0 cannot sustain large negative AV offsets by video pacing alone.
-					// Apply user negative AV delay as additional audio hold (silence insertion).
-					if( !get_android_sync() && s->put_time_mode && s->audio_sink ) {
+					// Internal video pacing alone cannot sustain large negative A/V offsets.
+					// Apply user negative A/V delay as additional audio hold (silence insertion).
+					if( s->put_time_mode && s->audio_sink ) {
 						int passthrough = s->audio_sink->get_passthrough ? s->audio_sink->get_passthrough( s ) : 0;
 						int target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
 						s->manual_audio_delay_target_ms = target_ms;
@@ -1282,7 +1281,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// Sabrina (Chromecast 4K) often reports invalid AudioTrack delay at resume.
 						// Rebase once here using static latency to avoid a large AV offset while
 						// we wait for a stable timestamp.
-						if( !get_android_sync() && s->audio_ctx && s->video_time >= 0 && s->audio_time >= 0 &&
+						if( s->audio_ctx && s->video_time >= 0 && s->audio_time >= 0 &&
 							!audio_interface_is_delay_valid( s->audio_ctx ) ) {
 							int static_latency = audio_interface_get_latency( s->audio_ctx );
 							int old_audio_time = s->audio_time;
@@ -1334,7 +1333,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					if( s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
 						int start_time = s->audio_start_pts;
-						if( !get_android_sync() && s->put_time_mode && s->video_time >= 0 ) {
+						if( s->put_time_mode && s->video_time >= 0 ) {
 							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
 							int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
 							if( anchor_delay < 0 ) anchor_delay = 0;

@@ -229,7 +229,14 @@ int audio_interface_is_startup_hold_active(audio_ctx_t *ctx)
 	return impl->is_startup_hold_active(ctx);
 }
 
-void audio_interface_flush_output(audio_ctx_t *ctx) 
+void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx)
+{
+	if (impl && impl->invalidate_delay_cache) {
+		impl->invalidate_delay_cache(ctx);
+	}
+}
+
+void audio_interface_flush_output(audio_ctx_t *ctx)
 {
 	impl->flush_output(ctx);
 }

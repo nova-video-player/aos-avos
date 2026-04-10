@@ -752,6 +752,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( speed_changed ) {
 		s->smoothed_av_delay = -1;
 		s->av_delay_history_count = 0;
+		if( s->audio_ctx ) {
+			audio_interface_invalidate_delay_cache( s->audio_ctx );
+		}
 	}
 
 	return 0;

@@ -1780,8 +1780,16 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 		at->ts_success_streak++;
 		at->frozen_ts_streak = 0;
 	}
-	if (at->ts_success_streak >= stable_streak_required)
+	if (at->ts_success_streak >= stable_streak_required) {
+		if (!at->ts_use_timestamp) {
+			// First transition to timestamp-based delay: discard the warmup-era cached value
+			// (which comes from the near-empty-buffer playhead fallback and is far too low).
+			// The first live getTimestamp measurement will initialize ts_cached_delay_ms from
+			// the raw value without smoothing, giving a much better initial estimate.
+			at->ts_cached_valid = 0;
+		}
 		at->ts_use_timestamp = 1;
+	}
 
 	// Cache the timestamp for debugging/monitoring
 	at->last_timestamp_ns = nanoTime;
@@ -2003,6 +2011,15 @@ static int audiotrack_get_delay_valid_streak(audio_ctx_t *at)
 {
 	// Sabrina can report late/unstable timestamps; expose streak to gate rebases.
 	return at ? at->ts_success_streak : 0;
+}
+
+static void audiotrack_invalidate_delay_cache(audio_ctx_t *at)
+{
+	if (!at) {
+		return;
+	}
+	at->ts_last_query_ms = 0;
+	at->ts_cached_valid = 0;
 }
 
 static int audiotrack_is_startup_hold_active(audio_ctx_t *at)
@@ -2291,6 +2308,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.delay_valid = audiotrack_is_delay_valid,
 	.delay_valid_streak = audiotrack_get_delay_valid_streak,
 	.is_startup_hold_active = audiotrack_is_startup_hold_active,
+	.invalidate_delay_cache = audiotrack_invalidate_delay_cache,
 };
 
 #ifdef DEBUG_MSG

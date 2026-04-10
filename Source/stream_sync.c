@@ -988,8 +988,12 @@ DBGY serprintf("{SSV %d}} ", video_time );
 
 	// if video is in the future, delay it
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
-	// if we sample post sink, allow us to start 500ms early
-	int max_rst = s->vtime_post_sink ? 500 : 0;
+	// Legacy post-sink pipelines needed a large early-start allowance because
+	// video_time was sampled after the sink. In put_time mode the sink is
+	// already paced from audio-driven anchors, so carrying that 500 ms grace
+	// forward lets video render materially ahead of heard audio during atempo
+	// speed states. Keep the grace only for non-put_time sinks.
+	int max_rst = (s->vtime_post_sink && !s->put_time_mode) ? 500 : 0;
 	if( s->seek_epoch > 0 && s->put_time_mode && !s->seek_converge_done ) {
 		// During post-seek convergence, don't allow early start.
 		max_rst = 0;

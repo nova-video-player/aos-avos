@@ -723,7 +723,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		int delay_streak = delay_status.streak;
 		int startup_hold_active = s->audio_ctx ? audio_interface_is_startup_hold_active( s->audio_ctx ) : 0;
 		int sensitive_phase =
-			startup_hold_active ||
+			(startup_hold_active && !delay_valid) ||
 			s->audio_start_pending ||
 			s->audio_resume_pending ||
 			(s->seek_epoch > 0 && !s->seek_converge_done);

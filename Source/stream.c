@@ -746,6 +746,11 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
 	}
 
+	if( speed_changed ) {
+		s->smoothed_av_delay = -1;
+		s->av_delay_history_count = 0;
+	}
+
 	return 0;
 }
 

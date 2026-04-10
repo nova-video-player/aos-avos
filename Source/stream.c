@@ -576,8 +576,7 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 		if( !delay_valid && speed_changed && s->last_good_delay_valid && s->audio_time >= 0 ) {
 			int effective_delay = s->last_good_delay_ms;
 			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
-				int current_atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
-				effective_delay += current_atempo_delay - s->last_good_atempo_delay_ms;
+				effective_delay += s->audio_filter_atempo->delay( s->audio_filter_atempo );
 				if( effective_delay < 0 ) {
 					effective_delay = 0;
 				}
@@ -679,6 +678,10 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed speed_change prev=%.3f target=%.3f using_atempo=%d atempo_delay=%d use_current_ts=%d cur_ts=%d anchor_ts=%d speed_anchor_ts=%d\n",
 			previous_speed, av_speed, using_atempo, atempo_delay, use_current_ts_for_speed,
 			current_time_ts, anchor_ts, speed_anchor_ts );
+		DBG serprintf( "stream:stream_set_av_speed snapshot smoothed=%d last_good=%d last_good_valid=%d last_good_atempo=%d hist=%d sink_driven=%d\n",
+			s->smoothed_av_delay, s->last_good_delay_ms, s->last_good_delay_valid,
+			s->last_good_atempo_delay_ms, s->av_delay_history_count,
+			(s->video_sink && s->video_sink->put_time) ? 1 : 0 );
 		if( use_last_good_for_speed ) {
 			int current_atempo_delay = 0;
 			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {

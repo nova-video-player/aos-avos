@@ -423,6 +423,7 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	ctx->sample_rate = audio->samplesPerSec;
 	ctx->current_speed = 1.0f;
 	ctx->delay_log_count = 0;
+	ctx->last_delay_ms = -1;
 
 	// Determine sample format
 	ctx->format = get_sample_format_from_bits(audio->bitsPerSample);
@@ -595,6 +596,15 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
     }
 
     int samples_to_read = MIN(target_samples, available_samples);
+
+	// FFmpeg atempo can occasionally emit two output chunks for one input chunk
+	// after runtime speed changes.  If we only read target_samples here, a full
+	// extra chunk survives in FIFO until the next call, which creates a visible
+	// one-cycle delay oscillation (0 -> target -> 0 backlog).  Drain the backlog
+	// when at least one full extra target chunk is pending.
+	if (target_samples > 0 && available_samples >= (target_samples * 2)) {
+		samples_to_read = available_samples;
+	}
 
     // If backlog grows significantly (e.g., during start-up), drain what we can
     if (available_samples > 0 && samples_to_read <= 0) {

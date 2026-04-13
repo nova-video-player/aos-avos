@@ -835,6 +835,7 @@ void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
 void	stream_un_pause ( STREAM *s, int was_paused );
 void    sfdec2_reset_sync_state_on_seek( STREAM *s );
+void    sfdec2_refresh_sched_anchor( STREAM *s );
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );
 int     stream_get_current_time ( STREAM *s, int *total_time );

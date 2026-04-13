@@ -1013,6 +1013,12 @@ DBGY serprintf("{SSV %d}} ", video_time );
 DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
 					diff, anchor_ts);
 				anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
+				// The audio path may have already called put_time() with the same
+				// heard timestamp, making this call a no-op in codec_sfdec2
+				// (disc=0, allow_reanchor=0 → sched anchors unchanged).  Force a
+				// scheduler reset so the wall-clock anchor is always refreshed at
+				// the converge point regardless of whether the value changed.
+				sfdec2_refresh_sched_anchor( s );
 				s->video_sink->put_time( s->video_sink, anchor_ts );
 				s->sink_ref_time = anchor_ts;
 				s->vid_ref_time = s->video_time;

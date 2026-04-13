@@ -464,6 +464,23 @@ DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 	return 0;
 }
 
+// Zero the scheduler anchors so the next put_time() call sees no_sched_anchor=1
+// and is forced to reanchor even if the heard timestamp hasn't changed.
+// Used by the post-seek converge path when the normal put_time() would be a no-op.
+void sfdec2_refresh_sched_anchor( STREAM *s )
+{
+	if( !s || !s->video_sink || !s->video_sink->priv )
+		return;
+	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
+		return;
+	priv_t *p = (priv_t*) s->video_sink->priv;
+	p->sched_start_off_ns  = 0;
+	p->sched_start_mono_ns = 0;
+	p->sched_last_off_ns   = 0;
+	p->sched_last_mono_ns  = 0;
+	p->sched_late          = 0;
+}
+
 static int videosink_get_time( STREAM_SINK_VIDEO *sink )
 {
 	priv_t *p = (priv_t *) sink->priv;

@@ -667,17 +667,26 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	s->video_speed_den = target_den;
 
 	if( speed_changed ) {
+		s->audio_speed_diag_epoch++;
+		s->audio_speed_diag_writes_left = 20;
+		s->audio_speed_last_atempo_delay_ms = -1;
+		s->audio_speed_atempo_stable_count = 0;
+		s->audio_speed_last_atempo_state = -1;
+		s->audio_speed_stabilized_atempo_delay_ms = -1;
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
 		int atempo_delay = 0;
 		if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
 			atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
 		}
+		s->audio_speed_stabilized_atempo_delay_ms = atempo_delay;
 		DBG serprintf( "stream:stream_set_av_speed delay_valid=%d streak=%d v=%d a=%d heard_ts=%d av_delay=%d\n",
 			delay_valid, delay_streak, s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ) );
 		DBG serprintf( "stream:stream_set_av_speed speed_change prev=%.3f target=%.3f using_atempo=%d atempo_delay=%d use_current_ts=%d cur_ts=%d anchor_ts=%d speed_anchor_ts=%d\n",
 			previous_speed, av_speed, using_atempo, atempo_delay, use_current_ts_for_speed,
 			current_time_ts, anchor_ts, speed_anchor_ts );
+		DBG serprintf( "stream:stream_set_av_speed epoch=%d writes_budget=%d\n",
+			s->audio_speed_diag_epoch, s->audio_speed_diag_writes_left );
 		DBG serprintf( "stream:stream_set_av_speed snapshot smoothed=%d last_good=%d last_good_valid=%d last_good_atempo=%d hist=%d sink_driven=%d\n",
 			s->smoothed_av_delay, s->last_good_delay_ms, s->last_good_delay_valid,
 			s->last_good_atempo_delay_ms, s->av_delay_history_count,

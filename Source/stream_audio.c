@@ -62,6 +62,25 @@ extern int libavos_get_max_pcm_channels(void);
 
 static int pcm_channel_cap = 0;
 
+static int _stream_audio_speed_diag_active( STREAM *s )
+{
+	return s && s->audio_speed_diag_writes_left > 0;
+}
+
+static int _stream_audio_time_diag_active( STREAM *s )
+{
+	if( !s ) {
+		return 0;
+	}
+	if( _stream_audio_speed_diag_active( s ) ) {
+		return 1;
+	}
+	if( s->audio_time >= 0 && s->video_time >= 0 && ABS( s->audio_time - s->video_time ) >= 120 ) {
+		return 1;
+	}
+	return 0;
+}
+
 static int stream_audio_format_supports_passthrough(int format)
 {
 	switch( format ) {
@@ -297,8 +316,15 @@ DBGA serprintf(" <<%d>> ", s->audio_time);
 static void _add_audio_time( STREAM *s, int time )
 {
 	if( s->audio_time != -1 ) {
+		int before = s->audio_time;
 		s->audio_time += time;
 DBGA serprintf(" <+%d> ", time);
+		if( _stream_audio_time_diag_active( s ) ) {
+			DBG serprintf("audio_time_apply: delta=%d before=%d after=%d video=%d remainder_us=%lld speed=%.3f\n",
+				time, before, s->audio_time, s->video_time,
+				(long long)s->audio_time_remainder_us,
+				audio_interface_get_audio_speed() );
+		}
 		stream_sync_audio( s, s->audio_time );
 	}
 }
@@ -845,8 +871,24 @@ serprintf(" ae! ");
 				}
 
 				if (use_atempo && audio_frame.size > 0) {
+					if( _stream_audio_speed_diag_active( s ) ) {
+						int before_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
+							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+						DBG serprintf("atempo_diag: epoch=%d speed=%.3f in_size=%d in_rate=%d in_ch=%d in_fake=%d fifo_before=%d audio_time=%d video_time=%d\n",
+							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
+							audio_frame.size, audio_frame.samplesPerSec, audio_frame.channels,
+							audio_frame.fakeSize, before_delay, s->audio_time, s->video_time);
+					}
 					DBG serprintf("stream_audio: applying atempo filter\n");
 					s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame);
+					if( _stream_audio_speed_diag_active( s ) ) {
+						int after_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
+							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+						DBG serprintf("atempo_diag: epoch=%d speed=%.3f out_size=%d out_rate=%d out_ch=%d out_fake=%d fifo_after=%d audio_time=%d video_time=%d\n",
+							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
+							audio_frame.size, audio_frame.samplesPerSec, audio_frame.channels,
+							audio_frame.fakeSize, after_delay, s->audio_time, s->video_time);
+					}
 				}
 
 				if( run_filter ) {
@@ -1188,6 +1230,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
 				int total_size = audio_frame.size;
+				int loop_write_count = 0;
 				while( size > 0 ) {
 					if( _abort( s ) ) {
 						return;
@@ -1312,6 +1355,18 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG3 serprintf("stream_audio: sink->write returned %d\n", size_written);
+					loop_write_count++;
+					if( _stream_audio_speed_diag_active( s ) ) {
+						int sink_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : -1;
+						int atempo_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
+							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+						DBG serprintf("audio_write_diag: epoch=%d speed=%.3f atempo=%d req=%d wrote=%d total=%d effective=%lld bps=%lld audio_time=%d video_time=%d sink_delay=%d smoothed=%d last_good=%d\n",
+							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
+							atempo_delay, audio_frame.size, size_written, total_size,
+							(long long)effective_size, (long long)bytes_per_sec, s->audio_time,
+							s->video_time, sink_delay, s->smoothed_av_delay, s->last_good_delay_ms);
+						s->audio_speed_diag_writes_left--;
+					}
 					if (startup_write_log_count < 5) {
 						DBG2 serprintf("startup_write[%d]: before_time=%d video=%d fmt=%04X req=%d wrote=%d effective_size=%lld bytes_per_sec=%lld ref=%d start_pending=%d resume_pending=%d\n",
 							startup_write_log_count, s->audio_time, s->video_time, audio_frame.format,
@@ -1391,11 +1446,21 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 
 						if( chunk_time_us > 0 ) {
+							int64_t remainder_before = s->audio_time_remainder_us;
 							s->audio_time_remainder_us += chunk_time_us;
 							int add_ms = (int)(s->audio_time_remainder_us / 1000);
 							s->audio_time_remainder_us %= 1000;
 
 							if( add_ms > 0 ) {
+								if( _stream_audio_time_diag_active( s ) ) {
+									int atempo_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
+										s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+									DBG serprintf("audio_time_step: epoch=%d speed=%.3f chunk_us=%lld remainder_before=%lld remainder_after=%lld add_ms=%d size_written=%d total=%d atempo=%d before=%d video=%d loop=%d\n",
+										s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
+										(long long)chunk_time_us, (long long)remainder_before,
+										(long long)s->audio_time_remainder_us, add_ms, size_written, total_size,
+										atempo_delay, s->audio_time, s->video_time, loop_write_count);
+								}
 								if( use_atempo ) {
 									_add_audio_time( s, add_ms );
 								} else {

@@ -96,9 +96,36 @@ struct ctx {
 	int last_delay_ms;                  // Last reported delay (ms)
 	int last_speed_change_ms;           // Timestamp of last speed change (ms)
 	int delay_log_count;                // throttle noisy delay diagnostics
+	int last_fifo_ms;                   // FIFO depth at last _delay() call (ms)
+	int last_fifo_samples;              // FIFO depth at last _delay() call (samples)
+	int last_input_samples;             // input samples from last _filter() call
+	int last_target_samples;            // target output samples from last _filter() call
+	int last_output_samples;            // actual output samples from last _filter() call
 };
 
 static int _flush(STREAM_FILTER_AUDIO *f);
+
+static void atempo_reset_runtime_baseline(struct ctx *ctx, const char *reason)
+{
+	if (!ctx) {
+		return;
+	}
+	if (ctx->fifo) {
+		int fifo_samples = av_audio_fifo_size(ctx->fifo);
+		int fifo_ms = (ctx->sample_rate > 0) ? (fifo_samples * 1000) / ctx->sample_rate : -1;
+		DBGA serprintf("atempo: reset runtime baseline reason=%s fifo_samples=%d fifo_ms=%d last_delay=%d\n",
+			reason ? reason : "unknown", fifo_samples, fifo_ms, ctx->last_delay_ms);
+		av_audio_fifo_reset(ctx->fifo);
+	}
+	ctx->last_delay_ms = -1;
+	ctx->last_speed_change_ms = 0;
+	ctx->delay_log_count = 0;
+	ctx->last_fifo_ms = -1;
+	ctx->last_fifo_samples = -1;
+	ctx->last_input_samples = -1;
+	ctx->last_target_samples = -1;
+	ctx->last_output_samples = -1;
+}
 
 static int atempo_update_speed(struct ctx *ctx, float speed)
 {
@@ -118,10 +145,20 @@ static int atempo_update_speed(struct ctx *ctx, float speed)
 	}
 
 	DBGA serprintf("atempo: runtime tempo update %.3f -> %.3f\n", ctx->current_speed, speed);
-	DBGA serprintf("atempo: runtime tempo fifo_samples=%d fifo_ms=%d\n",
+	DBGA serprintf("atempo_var: reason=speed_change prev_speed=%.3f new_speed=%.3f delay=%d fifo_samples=%d fifo_ms=%d last_in=%d last_target=%d last_out=%d\n",
+		ctx->current_speed, speed, ctx->last_delay_ms,
 		ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1,
-		ctx->fifo ? (av_audio_fifo_size(ctx->fifo) * 1000) / ctx->sample_rate : -1);
+		(ctx->fifo && ctx->sample_rate > 0) ? (av_audio_fifo_size(ctx->fifo) * 1000) / ctx->sample_rate : -1,
+		ctx->last_input_samples, ctx->last_target_samples, ctx->last_output_samples);
 	ctx->current_speed = speed;
+
+	// Reusing the same FFmpeg atempo runtime state across tempo changes can
+	// carry a stale FIFO backlog into the next steady state. Reset the wrapper
+	// locally on every tempo change and let the normal cadence rebuild delay
+	// from the new speed.
+	atempo_reset_runtime_baseline(ctx, "speed_change");
+	// Re-arm the post-speed-change window after the reset clears it.
+	ctx->last_speed_change_ms = atime();
 	return 0;
 }
 
@@ -424,6 +461,11 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	ctx->current_speed = 1.0f;
 	ctx->delay_log_count = 0;
 	ctx->last_delay_ms = -1;
+	ctx->last_fifo_ms = -1;
+	ctx->last_fifo_samples = -1;
+	ctx->last_input_samples = -1;
+	ctx->last_target_samples = -1;
+	ctx->last_output_samples = -1;
 
 	// Determine sample format
 	ctx->format = get_sample_format_from_bits(audio->bitsPerSample);
@@ -543,6 +585,9 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 
 	int ret;
 	int bytes_per_sample = av_get_bytes_per_sample(ctx->format) * ctx->channels;
+	int fifo_before_push = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1;
+	int drained_frames = 0;
+	int drained_samples = 0;
 
 	// Setup input frame
 	ctx->in_frame->nb_samples = frame->size / bytes_per_sample;
@@ -578,6 +623,8 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		}
 
 		av_audio_fifo_write(ctx->fifo, (void **)ctx->out_frame->data, ctx->out_frame->nb_samples);
+		drained_frames++;
+		drained_samples += ctx->out_frame->nb_samples;
 		av_frame_unref(ctx->out_frame);
 	}
 
@@ -596,15 +643,13 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
     }
 
     int samples_to_read = MIN(target_samples, available_samples);
+	int fifo_after_push = available_samples;
 
-	// FFmpeg atempo can occasionally emit two output chunks for one input chunk
-	// after runtime speed changes.  If we only read target_samples here, a full
-	// extra chunk survives in FIFO until the next call, which creates a visible
-	// one-cycle delay oscillation (0 -> target -> 0 backlog).  Drain the backlog
-	// when at least one full extra target chunk is pending.
-	if (target_samples > 0 && available_samples >= (target_samples * 2)) {
-		samples_to_read = available_samples;
-	}
+	// Keep wrapper output bounded to the expected output duration for this input
+	// chunk. FFmpeg can emit bursty output after runtime tempo changes, but
+	// draining the whole FIFO here turns those bursts into audio-time jumps and
+	// persistent A/V drift. Leave any extra samples buffered; the normal per-call
+	// cadence will absorb them. The speed-change FIFO reset handles stale backlog.
 
     // If backlog grows significantly (e.g., during start-up), drain what we can
     if (available_samples > 0 && samples_to_read <= 0) {
@@ -637,8 +682,15 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
         frame->size = 0;
     }
 
+	int fifo_after_read = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1;
+	ctx->last_input_samples = input_samples;
+	ctx->last_target_samples = target_samples;
+	ctx->last_output_samples = samples_to_read;
+	DBGA serprintf("atempo_flow: speed=%.3f in=%d target=%d drained_frames=%d drained_samples=%d fifo_before=%d fifo_after_push=%d out=%d fifo_after_read=%d\n",
+		speed, input_samples, target_samples, drained_frames, drained_samples,
+		fifo_before_push, fifo_after_push, samples_to_read, fifo_after_read);
 	DBG serprintf("atempo: filter speed=%.3f in=%d samples out=%d samples fifo=%d\n",
-		speed, ctx->in_frame->nb_samples, samples_to_read, av_audio_fifo_size(ctx->fifo));
+		speed, ctx->in_frame->nb_samples, samples_to_read, fifo_after_read);
 
 	return 0;
 }
@@ -739,16 +791,38 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 
 	{
 		int emit_delay_log = 0;
+		int delta_delay = (ctx->last_delay_ms >= 0) ? (delay_ms - ctx->last_delay_ms) : 0;
+		int fifo_samples = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : 0;
+		int delta_fifo_ms = (ctx->last_fifo_ms >= 0) ? (fifo_ms - ctx->last_fifo_ms) : 0;
+		int delta_fifo_samples = (ctx->last_fifo_samples >= 0) ? (fifo_samples - ctx->last_fifo_samples) : 0;
+		int now_ms = atime();
+		const char *reason = "steady";
+		if (ctx->last_speed_change_ms > 0) {
+			int elapsed_ms = now_ms - ctx->last_speed_change_ms;
+			if (elapsed_ms >= 0 && elapsed_ms < 1500) {
+				reason = "post_speed_change";
+			}
+		}
 		if (Debug[DBG_AUD] > 2) {
 			emit_delay_log = 1;
 		} else if (Debug[DBG_AUD] > 1 && (ctx->delay_log_count % 100) == 0) {
 			emit_delay_log = 1;
 		}
+		if (ABS(delta_delay) >= 16 || ABS(delta_fifo_ms) >= 16 || ABS(delta_fifo_samples) >= 512) {
+			emit_delay_log = 1;
+		}
 		if (emit_delay_log) {
 			serprintf("atempo: delay=%d ms (fifo_ms=%d, atempo_ms=%d, speed=%.2f)\n",
 				delay_ms, fifo_ms, atempo_internal_ms, ctx->current_speed);
+			serprintf("atempo_var: reason=%s speed=%.3f delay=%d->%d delta=%d fifo_ms=%d->%d delta=%d fifo_samples=%d->%d delta=%d in=%d target=%d out=%d\n",
+				reason, ctx->current_speed, ctx->last_delay_ms, delay_ms, delta_delay,
+				ctx->last_fifo_ms, fifo_ms, delta_fifo_ms,
+				ctx->last_fifo_samples, fifo_samples, delta_fifo_samples,
+				ctx->last_input_samples, ctx->last_target_samples, ctx->last_output_samples);
 		}
 		ctx->delay_log_count++;
+		ctx->last_fifo_ms = fifo_ms;
+		ctx->last_fifo_samples = fifo_samples;
 	}
 
 	ctx->last_delay_ms = delay_ms;

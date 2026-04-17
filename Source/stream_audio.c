@@ -1220,10 +1220,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				if (sample_rate == 0) sample_rate = 48000;
 
 				// For A/V sync scaling, we need the PCM-equivalent duration of written data.
-				// In passthrough, compressed payload size does not represent played duration
-				// (notably EAC3 mode 2 system encapsulation), so prefer fakeSize when available.
+				// Mode 2 / AC3 recoding: fakeSize carries the PCM-equivalent payload size.
+				// Mode 1 (IEC): each write IS one complete IEC burst whose duration equals
+				// write_size / container_bytes_per_sec.  fakeSize is a sub-burst unit and
+				// would grossly underestimate the burst duration (e.g. one TrueHD subframe
+				// vs. the full 20 ms major-frame burst), so use the actual write size.
 				int64_t effective_size = ((audio_frame.fakeSize > 0) &&
-					(ac3_recoding || passthrough_active)) ?
+					(ac3_recoding || (passthrough_active && passthrough != 1))) ?
 					audio_frame.fakeSize : audio_frame.size;
 				int64_t bytes_per_sec = (int64_t)sample_rate * channels * bytes_per_sample;
 
@@ -1512,14 +1515,25 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									passthrough_active, audio_frame.fakeSize, size_written, bpf, s->audio->bytesPerFrame, s->audio->format);
 							}
 #endif
-							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / bpf;
+							// Mode 1 IEC: the write IS the full IEC burst; use size_written so the
+							// clock advances by the complete burst duration (e.g. 20 ms for TrueHD,
+							// 32 ms for EAC3).  fakeSize is a per-subframe unit and under-counts by
+							// up to 96x.  Mode 2 / AC3 recoding: fakeSize carries the correct
+							// PCM-equivalent payload size.
+							int pt_bytes = (passthrough_active && (passthrough != 1 || ac3_recoding) &&
+								audio_frame.fakeSize > 0) ? audio_frame.fakeSize : size_written;
+							s->audio_samples += pt_bytes / bpf;
 							// Use actual source sample rate for sync when passthrough is inactive.
-							// TrueHD passthrough forces 192kHz container rate, but actual content is 48k/96k.
 							// When decoding to PCM, use decoded frame rate if available (most reliable),
 							// else fallback to the currently configured rate.
+							// For IEC mode 1, samples are counted at container rate (e.g. 192 kHz)
+							// so we must also divide by the container rate, not the content rate.
 							int sync_rate = s->audio->samplesPerSec;
 							if (!passthrough_active && audio_frame.samplesPerSec > 0) {
 								sync_rate = audio_frame.samplesPerSec;
+							} else if (passthrough_active && passthrough == 1 && !ac3_recoding &&
+								audio_frame.samplesPerSec > 0) {
+								sync_rate = audio_frame.samplesPerSec; // container rate (192 kHz)
 							}
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)sync_rate;
 							int prev_audio_time = s->audio_time;

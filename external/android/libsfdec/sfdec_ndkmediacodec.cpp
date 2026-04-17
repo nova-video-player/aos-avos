@@ -181,7 +181,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (!mime_type)
         return NULL;
 
-    DBG LOG("(NdkMediaCodec): %s with extradata size %d", mime_type, extradata_size);
+    DBG LOG("(NdkMediaCodec): %s with extradata size %zu", mime_type, extradata_size);
 
     sfdec_priv_t *sfdec = new sfdec_priv_t();
     if (sfdec == NULL)
@@ -203,7 +203,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->playback_speed_den = 1;
     sfdec->playback_speed_num = 1;
 
-    DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
+    DBG LOG("sfdec->mCodec %p sfdec->mFormat %p", (void *)sfdec->mCodec, (void *)sfdec->mFormat);
 
     if (codec_name) {
         LOG("Grabbing codec by name %s", codec_name);
@@ -352,7 +352,8 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
 
     memcpy(buf, data, size);
 
-    DBG LOG("queueInputBuffer: index %d size %d time %lld flag %d\n", index, size, time_us, flag);
+    DBG LOG("queueInputBuffer: index %zd size %zu time %lld flag %d\n",
+            index, size, (long long)time_us, flag);
     err = AMediaCodec_queueInputBuffer(sfdec->mCodec,
             index,
             0,
@@ -412,7 +413,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
             read_out->flag |= SFDEC_READ_BUF;
             read_out->buf.sfbuf = sfbuf;
             read_out->buf.time_us = info.presentationTimeUs;
-            DBG LOG("buf: %d / time: %lld", index, info.presentationTimeUs);
+            DBG LOG("buf: %zd / time: %lld", index, (long long)info.presentationTimeUs);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
 
@@ -463,7 +464,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
         } else {
             int64_t timestamp_ns = sfbuf->timestamp_us * 1000LL;
-            DBG LOG("Received og timestamp %lld us", sfbuf->timestamp_us);
+            DBG LOG("Received og timestamp %lld us", (long long)sfbuf->timestamp_us);
             if (sfdec->video_frame_rate_den) {
                 int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
                 int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
@@ -512,14 +513,14 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             if (!asap) {
                 if (delta < -DROP_THRESHOLD_NS) {
                     sfdec->n_late++;
-                    DBG LOG("Dropping frame: %lld ns late", -delta);
+                    DBG LOG("Dropping frame: %lld ns late", (long long)(-delta));
                     err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
                     CHECK_STATUS(err);
                     sfbuf->released = true;
                     return 0;
                 } else if (delta < -LATE_THRESHOLD_NS) {
                     sfdec->n_late++;
-                    DBG LOG("Late frame (%lld ns), rendering ASAP", -delta);
+                    DBG LOG("Late frame (%lld ns), rendering ASAP", (long long)(-delta));
                     asap = 1;
                 } else if (delta < 0) {
                     sfdec->n_late++;

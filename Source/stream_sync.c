@@ -787,12 +787,48 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	if( anchor_valid && _stream_is_sink_driven(s) && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
+			int force_passthrough_reanchor =
+				passthrough_mode &&
+				s->video_sink &&
+				s->video_sink->put_time &&
+				// Force the passthrough anchor only for the first valid audio
+				// sample of the new seek/resume cycle. audio_resume_pending can
+				// stay true across several writes, so using it directly causes
+				// repeated reanchors on the same playback window.
+				(s->sink_ref_time == -1 || s->sync_a_time == -1);
 			if (diag_log) {
 				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d\n",
 					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts);
 			}
 			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
+			// In passthrough mode the audio seek may land ahead of the video
+			// seek point (e.g. TrueHD major sync frames or EAC3 GOP boundaries),
+			// causing a long video freeze while the scheduler waits for heard
+			// audio to catch up to the first video frame. When audio PTS overshoots
+			// video PTS at the very first anchor, clamp so the startup hold does
+			// not exceed ~50 ms.  Restrict to the first anchor only (sink_ref==-1):
+			// once steady-state anchoring is running the clamp must not fire again
+			// or it will continuously pull the anchor forward as audio_time advances.
+			if( passthrough_mode && s->sink_ref_time == -1 &&
+				anchor_ts < audio_time - 50 && audio_time > s->video_time ) {
+				int clamped = audio_time - 50;
+				DBG serprintf( "stream_sync_audio: passthrough startup hold clamp: anchor %d->%d (audio=%d video=%d)\n",
+					anchor_ts, clamped, audio_time, s->video_time );
+				anchor_ts = clamped;
+			}
+			// Passthrough resume/seek can leave an old sink anchor in place even
+			// though the first valid post-seek audio timestamp has already moved.
+			// Treat that first passthrough audio sample as a forced reanchor event
+			// so a stale sink_ref_time does not block the new explicit anchor.
+			// This must be one-shot per cycle; otherwise repeated writes keep
+			// reapplying the same anchor and destabilize sync.
+			if( force_passthrough_reanchor && s->sink_ref_time != -1 ) {
+				DBG serprintf("stream_sync_audio: passthrough explicit reanchor: old_sink=%d audio=%d video=%d seek_epoch=%d resume_pending=%d sync_a=%d\n",
+					s->sink_ref_time, audio_time, s->video_time, s->seek_epoch,
+					s->audio_resume_pending, s->sync_a_time);
+				sfdec2_refresh_sched_anchor( s );
+			}
 			s->video_sink->put_time( s->video_sink, anchor_ts );
 			// Audio-driven anchor is authoritative in put_time mode.
 			// Prevent the video path from re-anchoring to a different reference.

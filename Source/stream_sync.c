@@ -22,11 +22,10 @@
 #include "stream.h"
 #include "stream_sync.h"
 
-#ifdef CONFIG_ANDROID
-#endif
-
 #ifdef CONFIG_AUDIO_AC3
 extern int libavos_get_ac3_recoding_enabled(void);
+#else
+static inline int libavos_get_ac3_recoding_enabled(void) { return 0; }
 #endif
 
 #ifdef CONFIG_STREAM
@@ -264,6 +263,11 @@ int stream_sync_restart( STREAM *s )
 	
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
+	s->sink_ref_time = -1;
+	s->vid_ref_time = -1;
+	s->mode2_fill_active = 0;
+	s->mode2_fill_start_wall_ms = 0;
+	s->mode2_fill_start_pts = STREAM_NO_PTS_VALUE;
 	_sync_diag_reset();
 
 	return 0;
@@ -332,47 +336,86 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		return fallback_ts;
 	}
 #ifdef CONFIG_ANDROID
+	int allow_static = 1;
 #else
 	int allow_static = 0;
-#endif
-#ifdef CONFIG_ANDROID
-	int allow_static = 1;
 #endif
 
 	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
 	int delay_valid = delay_status.is_dynamic;
-	int suppress_static_heard_delay = 0;
-	int anchor_delay;
+	int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+	int heard_delay;
 	
 	// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
 	if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
-		anchor_delay = delay_status.effective_delay_ms;
+		heard_delay = delay_status.effective_delay_ms;
 	} else {
-		anchor_delay = (s->smoothed_av_delay >= 0) ?
+		heard_delay = (s->smoothed_av_delay >= 0) ?
 			s->smoothed_av_delay + _stream_get_atempo_delay( s ) :
 			delay_status.effective_delay_ms;
 	}
+
+	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
+	int wall_now = atime();
+
+	// 1. DYNAMIC STARTUP SHIELD (Mode 2 Fill Window)
+	if (is_mode2_sync) {
+		// Initialize fill window if we are at the very start of a seek epoch
+		if (!s->mode2_fill_active && s->sink_ref_time == -1) {
+			s->mode2_fill_active = 1;
+			s->mode2_fill_start_wall_ms = wall_now;
+			s->mode2_fill_start_pts = s->audio_time;
+			DBG serprintf("mode2_fill_start: wall=%d pts=%d video=%d\n", 
+				wall_now, s->mode2_fill_start_pts, s->video_time);
+		}
+
+		if (s->mode2_fill_active) {
+			int fill_duration = wall_now - s->mode2_fill_start_wall_ms;
+			int real_dynamic = s->audio_ctx && !audio_interface_is_startup_hold_active(s->audio_ctx);
+
+			// Synthetic Heard TS: strictly track real-world time during fill
+			int heard_ts = s->mode2_fill_start_pts - static_latency + fill_duration;
+
+			// CLAMP: Apply the 50ms startup clamp to the synthetic timeline.
+			if( s->sink_ref_time == -1 && 
+				heard_ts < s->audio_time - 50 && s->audio_time > s->video_time ) {
+				int clamped = s->audio_time - 50;
+				DBG serprintf( "stream_get_heard_audio_ts: mode2 startup hold clamp: %d->%d (audio=%d video=%d)\n",
+					heard_ts, clamped, s->audio_time, s->video_time );
+				heard_ts = clamped;
+				// Rebase synthetic start so pacing continues from this clamped point
+				s->mode2_fill_start_pts = heard_ts + static_latency - fill_duration;
+			}
+
+			if (real_dynamic || fill_duration >= 1500) {
+				// EXIT: Handoff to normal logical clock
+				s->mode2_fill_active = 0;
+				// Rebase audio_time so that (audio_time - static_latency) matches the last synthetic baseline.
+				s->audio_time = heard_ts + static_latency;
+				DBG serprintf("mode2_fill_exit: wall=%d dur=%d rebase_audio=%d real_dynamic=%d\n",
+					wall_now, fill_duration, s->audio_time, real_dynamic);
+			} else {
+				// ACTIVE: Follow the synthetic wall-clock Pace
+				return heard_ts;
+			}
+		}
+	}
+
 #ifdef CONFIG_ANDROID
-	// Late-audio start guard for static delay: avoid subtracting static latency
-	// when audio starts significantly after video at the very beginning.
-	if( delay_valid && s->put_time_mode && s->audio_ctx &&
+	// 2. LATE-AUDIO GUARD (Standard logic for Mode 1 or small latencies)
+	if( !is_mode2_sync && delay_valid && s->put_time_mode && s->audio_ctx &&
 		s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
 		int audio_lead = s->audio_time - s->sync_v_time;
-		int static_latency = audio_interface_get_latency( s->audio_ctx );
 		if( static_latency > 0 && s->smoothed_av_delay == static_latency && audio_lead > 150 ) {
-			delay_valid = 0;
-			anchor_delay = 0;
-			suppress_static_heard_delay = 1;
+			heard_delay = 0;
 		}
 	}
 #endif
-	int heard_delay = anchor_delay;
+
 	if (!delay_valid) {
-		// Use raw delay (playhead/static) for heard-time only; do not anchor sync.
-		heard_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : 0;
 #ifdef CONFIG_ANDROID
 		// When atempo is active, include filter delay in heard-time even if timing is invalid.
-		// Otherwise speed changes can anchor without accounting for the atempo pipeline latency.
 		if( audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() ) {
 			int chain_delay = stream_sync_av_delay( s );
 			if( chain_delay > heard_delay ) {
@@ -381,38 +424,30 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		}
 #endif
 #ifdef CONFIG_ANDROID
-		// Startup grace: if timing is invalid at the very start, include static latency
-		// in heard-time to avoid large initial A/V offset.
-		if( s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&
+		// Startup grace for Mode 1: if timing is invalid at the very start, include static latency.
+		if( !is_mode2_sync && s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&
 			s->sync_v_time < 500 && s->audio_ctx ) {
-			int static_latency = audio_interface_get_latency( s->audio_ctx );
 			if( static_latency > heard_delay ) {
 				heard_delay = static_latency;
 			}
 		}
-		if( suppress_static_heard_delay ) {
-			// Dynamic delay is disabled and audio starts late: avoid applying static latency
-			// to heard-time during startup to prevent large A/V offset.
-			heard_delay = 0;
-		}
 #endif
 	}
-	if (_sync_diag_should_log(s)) {
-		DBGY2 serprintf("heard_ts_delay: audio_time=%d smoothed=%d delay_valid=%d anchor_delay=%d heard_delay=%d av_delay=%d ctx=%p\n",
-			s->audio_time, s->smoothed_av_delay, delay_valid, anchor_delay, heard_delay, s->av_delay, s->audio_ctx);
+
+	int heard_ts = s->audio_time - heard_delay;
+
+	// 3. STARTUP CLAMP (Non-Mode 2 only)
+	if( !is_mode2_sync && passthrough_mode && s->sink_ref_time == -1 &&
+		heard_ts < s->audio_time - 50 && s->audio_time > s->video_time ) {
+		int clamped = s->audio_time - 50;
+		DBG serprintf( "stream_get_heard_audio_ts: mode1 startup hold clamp: %d->%d (audio=%d video=%d)\n",
+			heard_ts, clamped, s->audio_time, s->video_time );
+		heard_ts = clamped;
 	}
 
-	// Keep heard-time in physical timeline. Manual user AV delay is applied
-	// only at final presentation scheduling in sink/renderer paths.
-	int heard_ts = s->audio_time - heard_delay;
-	// For passthrough mode, allow negative heard_ts at startup.
-	// This preserves the full delay offset so video doesn't advance before audio catches up.
-	// Non-passthrough modes clamp to 0 to avoid negative timeline issues with dynamic delays.
-	if( heard_ts < 0 ) {
-		int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-		if( !passthrough_mode ) {
-			heard_ts = 0;
-		}
+	// Preserves full physical delay offset for passthrough startup.
+	if( heard_ts < 0 && !passthrough_mode ) {
+		heard_ts = 0;
 	}
 
 	if (_sync_diag_should_log(s)) {
@@ -449,11 +484,12 @@ int stream_sync_init( STREAM *s, int time )
 	s->last_good_delay_valid = 0;
 	s->last_good_atempo_delay_ms = 0;
 	s->warmup_video_frames = 0;
+	s->mode2_fill_active = 0;
+	s->mode2_fill_start_wall_ms = 0;
+	s->mode2_fill_start_pts = STREAM_NO_PTS_VALUE;
 
-	if( s->video->valid ) {
+	if( time != -1 ) {
 		s->video_time = time;
-	} else if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
-		s->audio_time = time;
 	}
 
 	if( s->video->valid && s->audio->valid && !s->slideshow ) {
@@ -771,6 +807,11 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	}
 	// Check if passthrough mode is active - static delay is immediately valid
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	if( passthrough_mode == 1 ) {
+		DBG serprintf("pt_mode1_sync_audio: in=%d stored=%d sync_a=%d video=%d seek_epoch=%d anchor_valid=%d delay_valid=%d anchor_delay=%d current_delay=%d sink_ref=%d\n",
+			audio_time, s->audio_time, s->sync_a_time, s->video_time, s->seek_epoch,
+			anchor_valid, delay_valid, anchor_delay, current_av_delay, s->sink_ref_time);
+	}
 	
 	if( anchor_delay > 0 && _stream_is_sink_driven(s) && audio_time != -1 && !passthrough_mode ) {
 		int anchor_ts_raw = audio_time - anchor_delay;
@@ -786,43 +827,22 @@ int stream_sync_audio( STREAM *s, int audio_time )
 
 	if( anchor_valid && _stream_is_sink_driven(s) && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
+			// Centralized heard_ts calculation (includes Mode 2 Fill and Startup Clamps)
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
+
 			int force_passthrough_reanchor =
-				passthrough_mode &&
+				(passthrough_mode > 0) && 
 				s->video_sink &&
 				s->video_sink->put_time &&
-				// Force the passthrough anchor only for the first valid audio
-				// sample of the new seek/resume cycle. audio_resume_pending can
-				// stay true across several writes, so using it directly causes
-				// repeated reanchors on the same playback window.
 				(s->sink_ref_time == -1 || s->sync_a_time == -1);
+
 			if (diag_log) {
-				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d\n",
-					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts);
+				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d mode2_fill=%d\n",
+					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts, s->mode2_fill_active);
 			}
 			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
-			// In passthrough mode the audio seek may land ahead of the video
-			// seek point (e.g. TrueHD major sync frames or EAC3 GOP boundaries),
-			// causing a long video freeze while the scheduler waits for heard
-			// audio to catch up to the first video frame. When audio PTS overshoots
-			// video PTS at the very first anchor, clamp so the startup hold does
-			// not exceed ~50 ms.  Restrict to the first anchor only (sink_ref==-1):
-			// once steady-state anchoring is running the clamp must not fire again
-			// or it will continuously pull the anchor forward as audio_time advances.
-			if( passthrough_mode && s->sink_ref_time == -1 &&
-				anchor_ts < audio_time - 50 && audio_time > s->video_time ) {
-				int clamped = audio_time - 50;
-				DBG serprintf( "stream_sync_audio: passthrough startup hold clamp: anchor %d->%d (audio=%d video=%d)\n",
-					anchor_ts, clamped, audio_time, s->video_time );
-				anchor_ts = clamped;
-			}
-			// Passthrough resume/seek can leave an old sink anchor in place even
-			// though the first valid post-seek audio timestamp has already moved.
-			// Treat that first passthrough audio sample as a forced reanchor event
-			// so a stale sink_ref_time does not block the new explicit anchor.
-			// This must be one-shot per cycle; otherwise repeated writes keep
-			// reapplying the same anchor and destabilize sync.
+
 			if( force_passthrough_reanchor && s->sink_ref_time != -1 ) {
 				DBG serprintf("stream_sync_audio: passthrough explicit reanchor: old_sink=%d audio=%d video=%d seek_epoch=%d resume_pending=%d sync_a=%d\n",
 					s->sink_ref_time, audio_time, s->video_time, s->seek_epoch,
@@ -831,7 +851,6 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			}
 			s->video_sink->put_time( s->video_sink, anchor_ts );
 			// Audio-driven anchor is authoritative in put_time mode.
-			// Prevent the video path from re-anchoring to a different reference.
 			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time = s->video_time;
 		}
@@ -885,9 +904,7 @@ DBGY serprintf("{{A %d}} ", diff );
 		}
 		return 1;
 	}
-	// allow audio to play from now on
 	s->sync_audio = 0;
-	
 	return 0;
 }
 

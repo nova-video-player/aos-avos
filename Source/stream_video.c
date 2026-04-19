@@ -230,6 +230,7 @@ static void _video_init( STREAM *s, int time )
 	}
 	
 	stream_sync_restart( s );
+	s->video_time = time;
 	
 	s->seek	       = 0;
 	s->time_parsed = 0;
@@ -2879,9 +2880,14 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 			// After seek, defer anchoring until we have a post-seek audio timestamp
 			// to avoid seeding the sink clock from a stale reference.
 			if( s->sync_a_time == -1 ) {
+				DBG serprintf("SINK_REF_DEFERRED: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d seek_epoch=%d\n",
+					frame->time, s->video_time, s->audio_time, s->sync_a_time, s->seek_epoch);
 				return;
 			}
 			int anchor_ts = stream_get_heard_audio_ts( s, frame->time );
+			DBG serprintf(
+				"SINK_REF_CANDIDATE: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d anchor_ts=%d seek_epoch=%d put_mode=1\n",
+				frame->time, s->video_time, s->audio_time, s->sync_a_time, anchor_ts, s->seek_epoch );
 			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time  = frame->time;
 			s->video_sink->put_time( s->video_sink, anchor_ts );
@@ -2913,8 +2919,16 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
+	int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	int total_audio_delay = stream_sync_av_delay( s );
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
 		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
+	if( s->put_time_mode && s->audio_time >= 0 ) {
+		DBG serprintf("video_sync_diag: frame=%d video=%d audio=%d heard=%d diff=%d put_mode=%d sink_ref=%d sink_delay=%d audio_delay=%d speed=%.3f\n",
+			time, s->video_time, s->audio_time, heard_audio_ts,
+			time - heard_audio_ts, s->put_time_mode, s->sink_ref_time,
+			s->sink_delay, total_audio_delay, audio_interface_get_audio_speed() );
+	}
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;
@@ -2993,6 +3007,14 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 {
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
 		goto Discard;
+	}
+	if( s->put_time_mode && s->audio_time >= 0 ) {
+		int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
+		int total_audio_delay = stream_sync_av_delay( s );
+		DBG serprintf("video_sched_diag: frame=%d video=%d audio=%d heard=%d frame_minus_heard=%d audio_delay=%d sink_ref=%d speed=%.3f seek_epoch=%d\n",
+			frame->time, s->video_time, s->audio_time, heard_audio_ts,
+			frame->time - heard_audio_ts, total_audio_delay, s->sink_ref_time,
+			audio_interface_get_audio_speed(), s->seek_epoch );
 	}
 	// For passthrough/AC3 recoding, wait for the first actual audio write
 	// before releasing video.  For PCM, do NOT wait for delay_valid: blocking

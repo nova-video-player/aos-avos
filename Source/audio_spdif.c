@@ -85,24 +85,35 @@ static int passthrough_on = -1;
 static AVFormatContext *fctxt;
 static buf_t b;
 static AVCodecParserContext *aparser;
-static AVCodecContext avctx;
+static AVCodecContext *avctx;
 
 static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
 static int _spdif_frame_samples(const AUDIO_PROPERTIES *a)
 {
-	// Prefer parser-derived frame sample count when available.
-	// EAC3 can vary (256/512/768/1536 samples), so fixed 1536 causes drift.
-	if (avctx.frame_size > 0) {
-		return avctx.frame_size;
+	// 1. Highly preferred: parser-derived logical duration.
+	// Most FFmpeg parsers (MLP/TrueHD, EAC3) populate this after successful parsing.
+	if (aparser && aparser->duration > 0) {
+		return aparser->duration;
 	}
 
-	// Conservative fallback for legacy behavior when parser metadata is missing.
-	if (a && (a->format == WAVE_FORMAT_AC3 ||
-	          a->format == WAVE_FORMAT_EAC3 ||
-	          a->format == WAVE_FORMAT_E_AC3_JOC ||
-	          a->format == WAVE_FORMAT_DTS)) {
-		return 1536;
+	// 2. Secondary preference: codec-specific context metadata.
+	if (avctx && avctx->frame_size > 0) {
+		return avctx->frame_size;
+	}
+
+	// 3. Last resort: logical base units for known formats.
+	// These represent the standard logical frame duration regardless of compression ratio.
+	if (a) {
+		if (a->format == WAVE_FORMAT_AC3 ||
+		    a->format == WAVE_FORMAT_EAC3 ||
+		    a->format == WAVE_FORMAT_E_AC3_JOC ||
+		    a->format == WAVE_FORMAT_DTS) {
+			return 1536; // 32ms at 48kHz
+		}
+		if (a->format == WAVE_FORMAT_TRUEHD) {
+			return 1280; // 26.6ms logical major sync base (common parser unit)
+		}
 	}
 
 	return 0;
@@ -184,7 +195,11 @@ DBGCA2 serprintf("spdif_encapsulate %5d", size );
 	if( aparser ) {
 		unsigned char *out = NULL;
 		int out_size;
-		int parsed = av_parser_parse2( 	aparser, &avctx, 
+		if (avctx) {
+			if (avctx->sample_rate == 0) avctx->sample_rate = a->samplesPerSec;
+			if (avctx->ch_layout.nb_channels == 0) av_channel_layout_default(&avctx->ch_layout, a->channels);
+		}
+		int parsed = av_parser_parse2( 	aparser, avctx, 
 						&out, &out_size, 
 						data, size,
 						AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0 );
@@ -212,7 +227,12 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			// Use parser frame_size when available (required for variable-size EAC3 frames).
 			{
 				int samples = _spdif_frame_samples(a);
-				frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : out_size;
+				if (samples > 0) {
+					frame->fakeSize = samples * a->bytesPerFrame;
+				} else {
+					// Fallback to physical size if parser is blind
+					frame->fakeSize = out_size;
+				}
 			}
 			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d, rate=%d, parser=1\n",
 			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
@@ -248,6 +268,10 @@ static int spdif_free( void )
 	if (fctxt) {
 		avformat_free_context(fctxt);
 		fctxt = NULL;
+	}
+	if (avctx) {
+		avcodec_free_context(&avctx);
+		avctx = NULL;
 	}
 	// Clear buffer position to prevent stale data
 	b.pos = 0;
@@ -382,7 +406,10 @@ DBGS serprintf( "spdif_init\n");
 
 	// try to get a parser for this codec
 	// Skip parser for AC3 recoding - the encoder already produces complete syncframes
-	memset( &avctx, 0, sizeof( avctx ));
+	avctx = avcodec_alloc_context3(NULL);
+	if (avctx) {
+		avcodec_parameters_to_context(avctx, stream->codecpar);
+	}
 	if ( !libavos_get_ac3_recoding_enabled() ) {
 		aparser = av_parser_init(stream->codecpar->codec_id);
 		if( !aparser ) {
@@ -426,6 +453,14 @@ DBGS serprintf("audio format is %d, %d channels, %dkHz, %d bits, %d B/s, %d B/f\
 		aparser = av_parser_init(wave2libav_codecid(codecid));
 		if (!aparser) {
 DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
+		} else {
+			if (!avctx) {
+				avctx = avcodec_alloc_context3(NULL);
+			}
+			if (avctx) {
+				if (avctx->sample_rate == 0) avctx->sample_rate = audio->samplesPerSec;
+				if (avctx->ch_layout.nb_channels == 0) av_channel_layout_default(&avctx->ch_layout, audio->channels);
+			}
 		}
 	}
 

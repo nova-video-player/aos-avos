@@ -180,9 +180,8 @@ Native determines IEC support by inspecting codec flags set by Java:
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
-- **Mode 2 A/V timing**: timing is based on compressed-frame duration via `fakeSize`
-  (PCM-equivalent bytes), not raw payload size. For E-AC3/DD+, parser `frame_size`
-  is preferred when available; fixed 1536-sample fallback is used otherwise.
+- **Mode 2 A/V timing**: timing is based on logical PCM-equivalent duration via `fakeSize`. `fakeSize` is derived with multi-layered priority: **Parser Duration** > **Context FrameSize** > **Logical Base Units** (1536 for EAC3/AC3, 1280 for TrueHD). This ensures accurate clocking even with high packet cadences.
+- **Startup Fill Window**: All Mode 2 passthrough and AC3 recoding benefit from a centralized **Synthetic Fill Window** during startup, ensuring smooth wall-clock paced synchronization while the physical HAL buffer fills.
 
 ## Debug Tips
 

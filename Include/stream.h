@@ -763,11 +763,14 @@ typedef struct STREAM {
 
 	int		cpu_prio;
 	
-	int 		fps_start;
+	int		fps_start;
 	int		fps_count;
 	void		*surface_handle;
-} STREAM;
 
+	int		mode2_fill_active;
+	int		mode2_fill_start_wall_ms;
+	int		mode2_fill_start_pts;
+} STREAM;
 #define STREAM_POS_MAX 1000
 
 //
@@ -840,8 +843,13 @@ void    stream_audio_reset_ac3_passthrough_state(void);
 void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
 void	stream_un_pause ( STREAM *s, int was_paused );
+#ifdef CONFIG_SFDEC
 void    sfdec2_reset_sync_state_on_seek( STREAM *s );
 void    sfdec2_refresh_sched_anchor( STREAM *s );
+#else
+static inline void sfdec2_reset_sync_state_on_seek( STREAM *s ) {}
+static inline void sfdec2_refresh_sched_anchor( STREAM *s ) {}
+#endif
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );
 int     stream_get_current_time ( STREAM *s, int *total_time );

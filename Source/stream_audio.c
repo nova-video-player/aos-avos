@@ -303,8 +303,16 @@ void stream_audio_flush( STREAM *s )
 // ************************************************************
 static void _set_audio_time( STREAM *s, int time )
 {
+	int passthrough = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
+		s->audio_sink->get_passthrough( s ) : 0;
+	int old_time = s ? s->audio_time : -1;
 	s->audio_time = time;
 DBGA serprintf(" <<%d>> ", s->audio_time);
+	if( passthrough == 1 ) {
+		DBG serprintf("pt_mode1_audio_time_set: old=%d new=%d video=%d sync_a=%d seek_epoch=%d start_pending=%d resume_pending=%d ref=%d\n",
+			old_time, s->audio_time, s->video_time, s->sync_a_time, s->seek_epoch,
+			s->audio_start_pending, s->audio_resume_pending, s->audio_ref_time);
+	}
 	stream_sync_audio( s, s->audio_time );
 }
 
@@ -316,9 +324,16 @@ DBGA serprintf(" <<%d>> ", s->audio_time);
 static void _add_audio_time( STREAM *s, int time )
 {
 	if( s->audio_time != -1 ) {
+		int passthrough = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
+			s->audio_sink->get_passthrough( s ) : 0;
 		int before = s->audio_time;
 		s->audio_time += time;
 DBGA serprintf(" <+%d> ", time);
+		if( passthrough == 1 ) {
+			DBG serprintf("pt_mode1_audio_time_add: delta=%d before=%d after=%d video=%d sync_a=%d seek_epoch=%d remainder_us=%lld\n",
+				time, before, s->audio_time, s->video_time, s->sync_a_time,
+				s->seek_epoch, (long long)s->audio_time_remainder_us);
+		}
 		if( _stream_audio_time_diag_active( s ) ) {
 			DBG serprintf("audio_time_apply: delta=%d before=%d after=%d video=%d remainder_us=%lld speed=%.3f\n",
 				time, before, s->audio_time, s->video_time,
@@ -604,7 +619,7 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 						int pts = cdata.time;
 						if( s->put_time_mode &&
 							s->audio_time < 0 && !s->audio_start_pending &&
-							s->video_time >= 0 && s->video_time < 1000 ) {
+							s->video_time >= 0 ) {
 							// Startup: delay audio_time until the first audible output.
 							// Capture a fixed target based on the first audio PTS so the hold
 							// does not chase a moving audio_time.
@@ -859,7 +874,7 @@ serprintf(" ae! ");
 				if (!using_atempo_pref) {
 					use_atempo = 0;  // User chose AudioTrack-based speed
 				}
-				if (passthrough == 1 || passthrough == 2) {
+				if (passthrough > 0) {
 					use_atempo = 0;  // Passthrough mode active
 				}
 				if (atempo_gate_log_count < 10) {
@@ -1222,12 +1237,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// For A/V sync scaling, we need the PCM-equivalent duration of written data.
 				// Mode 2 / AC3 recoding: fakeSize carries the PCM-equivalent payload size.
 				// Mode 1 (IEC): each write IS one complete IEC burst whose duration equals
-				// write_size / container_bytes_per_sec.  fakeSize is a sub-burst unit and
-				// would grossly underestimate the burst duration (e.g. one TrueHD subframe
-				// vs. the full 20 ms major-frame burst), so use the actual write size.
-				int64_t effective_size = ((audio_frame.fakeSize > 0) &&
-					(ac3_recoding || (passthrough_active && passthrough != 1))) ?
-					audio_frame.fakeSize : audio_frame.size;
 				int64_t bytes_per_sec = (int64_t)sample_rate * channels * bytes_per_sample;
 
 				// slowly drain the audio data we have, while updating the audio time...
@@ -1239,9 +1248,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						return;
 					}
 					// Startup A/V alignment: if audio is significantly ahead at the very
-					// beginning, delay audio output briefly so video can catch up.
+					// beginning or after a seek, delay audio output briefly so video can catch up.
 					if( s->put_time_mode && s->video && s->video->valid &&
-						s->video_time >= 0 && s->video_time < 1000 &&
 						s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
 						if( s->audio_start_target_ts == STREAM_NO_PTS_VALUE ) {
 							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
@@ -1250,22 +1258,31 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							if( static_latency > anchor_delay ) {
 								anchor_delay = static_latency;
 							}
+							// For seeking, we must account for the fact that video_time may already
+							// be at the seek target.
 							s->audio_start_target_ts = s->audio_start_pts - anchor_delay;
+							// Guard against underflow
 							if( s->audio_start_target_ts < 0 ) s->audio_start_target_ts = 0;
-							if (startup_anchor_log_count < 5) {
-								DBG2 serprintf("startup_anchor_target[%d]: pts=%d video=%d anchor=%d static=%d target=%d put_time=%d sync_mode=%d\n",
-									startup_anchor_log_count, s->audio_start_pts, s->video_time,
-									anchor_delay, static_latency, s->audio_start_target_ts,
-									s->put_time_mode, s->sync_mode);
-								startup_anchor_log_count++;
-							}
+
+							DBG serprintf("startup_anchor_target: pts=%d video=%d anchor=%d static=%d target=%d\n",
+								s->audio_start_pts, s->video_time, anchor_delay, static_latency, s->audio_start_target_ts);
 						}
-						int diff = s->video_time - s->audio_start_target_ts;
-						if( diff < -150 ) {
-							DBG serprintf("startup_audio_hold: v=%d target=%d diff=%d\n",
-								s->video_time, s->audio_start_target_ts, diff);
-							msec_sleep( 10 );
-							continue;
+
+						// Only hold if we have a valid video time to compare against.
+						if (s->video_time >= 0) {
+							int diff = s->video_time - s->audio_start_target_ts;
+							// Relax hold threshold for TrueHD (very high packet cadence) to avoid startup freeze.
+							// TrueHD emits tiny 833us bursts; holding on each one creates a massive bottleneck.
+							int hold_threshold = (audio_frame.format == WAVE_FORMAT_TRUEHD) ? -300 : -32;
+							if( diff < hold_threshold ) {
+								// Audio is too far ahead of its 'audible' start point relative to video.
+								if (loop_write_count % 10 == 0) {
+									DBG serprintf("startup_audio_hold: v=%d target=%d diff=%d fmt=%04X loop=%d\n",
+										s->video_time, s->audio_start_target_ts, diff, audio_frame.format, loop_write_count);
+								}
+								msec_sleep( 10 );
+								continue;
+							}
 						}
 					}
 					// Do not split compressed passthrough bursts. IEC61937 / raw codec frames
@@ -1358,6 +1375,19 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG3 serprintf("stream_audio: sink->write returned %d\n", size_written);
+
+					// For A/V sync scaling, we need the PCM-equivalent duration of written data.
+					// Mode 2 / AC3 recoding: fakeSize carries the PCM-equivalent payload size.
+					// Mode 1 (IEC): each write IS one complete IEC burst whose duration equals
+					// the container rate (e.g. 32ms for 48kHz EAC3).
+					int64_t effective_chunk_size = size_written;
+					if ((passthrough_active && passthrough != 1) || ac3_recoding) {
+						if (audio_frame.fakeSize > 0) {
+							// Scaled proportional to actual write size to handle partial writes correctly
+							effective_chunk_size = (int64_t)(((int64_t)size_written * audio_frame.fakeSize) / audio_frame.size);
+						}
+					}
+
 					loop_write_count++;
 					if( _stream_audio_speed_diag_active( s ) ) {
 						int sink_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : -1;
@@ -1366,14 +1396,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						DBG serprintf("audio_write_diag: epoch=%d speed=%.3f atempo=%d req=%d wrote=%d total=%d effective=%lld bps=%lld audio_time=%d video_time=%d sink_delay=%d smoothed=%d last_good=%d\n",
 							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
 							atempo_delay, audio_frame.size, size_written, total_size,
-							(long long)effective_size, (long long)bytes_per_sec, s->audio_time,
+							(long long)effective_chunk_size, (long long)bytes_per_sec, s->audio_time,
 							s->video_time, sink_delay, s->smoothed_av_delay, s->last_good_delay_ms);
 						s->audio_speed_diag_writes_left--;
 					}
 					if (startup_write_log_count < 5) {
 						DBG2 serprintf("startup_write[%d]: before_time=%d video=%d fmt=%04X req=%d wrote=%d effective_size=%lld bytes_per_sec=%lld ref=%d start_pending=%d resume_pending=%d\n",
 							startup_write_log_count, s->audio_time, s->video_time, audio_frame.format,
-							audio_frame.size, size_written, (long long)effective_size, (long long)bytes_per_sec,
+							audio_frame.size, size_written, (long long)effective_chunk_size, (long long)bytes_per_sec,
 							s->audio_ref_time, s->audio_start_pending, s->audio_resume_pending);
 						startup_write_log_count++;
 					}
@@ -1402,26 +1432,20 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						size = 0;
 					}
 					if( s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
-						int start_time = s->audio_start_pts;
-						if( s->put_time_mode && s->video_time >= 0 ) {
-							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
-							int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
-							if( anchor_delay < 0 ) anchor_delay = 0;
-							if( static_latency > anchor_delay ) {
-								anchor_delay = static_latency;
-							}
-							if( anchor_delay > 0 ) {
-								// Align heard audio to current video time at startup.
-								start_time = s->video_time + anchor_delay;
-							}
-							if (startup_anchor_log_count < 5) {
-								DBG2 serprintf("startup_anchor_commit[%d]: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d sync_mode=%d\n",
-									startup_anchor_log_count, s->audio_start_pts, s->video_time,
-									anchor_delay, static_latency, start_time,
-									s->put_time_mode, s->sync_mode);
-								startup_anchor_log_count++;
-							}
+						int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
+						int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+						if( anchor_delay < 0 ) anchor_delay = 0;
+						if( static_latency > anchor_delay ) {
+							anchor_delay = static_latency;
 						}
+						// Anchor to first audio PTS. This represents 'generation time'.
+						// The sync machinery (heard_ts) will subtract latency to find 'heard time'.
+						int start_time = s->audio_start_pts;
+						if( start_time < 0 ) start_time = 0;
+
+						DBG serprintf("startup_anchor_commit: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d\n",
+							s->audio_start_pts, s->video_time, anchor_delay, static_latency, start_time, s->put_time_mode);
+
 						_set_audio_time( s, start_time );
 						s->audio_start_pending = 0;
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
@@ -1431,6 +1455,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// Update audio time based on actual written output (not decoded bytes).
 					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
 						int64_t chunk_time_us = 0;
+
 						// Byte-ratio timing is valid for PCM-like fixed-rate outputs.
 						// Keep VBR and incomplete-metadata paths on conservative fallback timing.
 						int use_rational_timing = (!s->audio->vbr &&
@@ -1442,10 +1467,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							total_size > 0);
 
 						if( use_rational_timing ) {
-							chunk_time_us = ((int64_t)size_written * effective_size * 1000000) /
-								((int64_t)total_size * bytes_per_sec);
+							chunk_time_us = ((int64_t)effective_chunk_size * 1000000) / bytes_per_sec;
 						} else if( s->audio->bytesPerSec > 0 ) {
-							chunk_time_us = ((int64_t)size_written * 1000000) / s->audio->bytesPerSec;
+							chunk_time_us = ((int64_t)effective_chunk_size * 1000000) / s->audio->bytesPerSec;
 						}
 
 						if( chunk_time_us > 0 ) {
@@ -1520,8 +1544,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// 32 ms for EAC3).  fakeSize is a per-subframe unit and under-counts by
 							// up to 96x.  Mode 2 / AC3 recoding: fakeSize carries the correct
 							// PCM-equivalent payload size.
-							int pt_bytes = (passthrough_active && (passthrough != 1 || ac3_recoding) &&
-								audio_frame.fakeSize > 0) ? audio_frame.fakeSize : size_written;
+							int pt_bytes = size_written;
+							if (passthrough_active && (passthrough != 1 || ac3_recoding) && audio_frame.fakeSize > 0) {
+								pt_bytes = audio_frame.fakeSize;
+							}
 							s->audio_samples += pt_bytes / bpf;
 							// Use actual source sample rate for sync when passthrough is inactive.
 							// When decoding to PCM, use decoded frame rate if available (most reliable),
@@ -1553,6 +1579,12 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								_set_audio_time( s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int) );
 								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
 									s->audio_ref_time, delta);
+							}
+							if( passthrough == 1 ) {
+								DBG serprintf("pt_mode1_samples_clock: fake=%d pt_bytes=%d size_written=%d audio_samples=%lld bpf=%d sync_rate=%d delta_ms=%d ref=%d prev=%d now=%d format=%04X\n",
+									audio_frame.fakeSize, pt_bytes, size_written, (long long)s->audio_samples,
+									bpf, sync_rate, delta, s->audio_ref_time, prev_audio_time,
+									s->audio_time, s->audio->format);
 							}
 							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d sync_rate=%d configured_rate=%d\n",
 								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta, sync_rate, s->audio->samplesPerSec);

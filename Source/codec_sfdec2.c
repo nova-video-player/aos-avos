@@ -234,6 +234,8 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	INT64 target_ns = timestamp_ns - start_off + start_mono;
 	INT64 delta = target_ns - now_ns;
 	int asap = 0;
+	int reset_sched = 0;
+	int late_before = p->sched_late;
 
 	if( !start_off ||
 	    (now_ns - p->sched_last_mono_ns) > 500 * NSEC_PER_MSEC ||
@@ -241,6 +243,7 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 		p->sched_start_mono_ns = now_ns + 100 * NSEC_PER_MSEC;
 		p->sched_start_off_ns = timestamp_ns;
 		asap = 1;
+		reset_sched = 1;
 	}
 
 	target_ns = timestamp_ns - p->sched_start_off_ns + p->sched_start_mono_ns;
@@ -261,8 +264,22 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	p->sched_last_mono_ns = now_ns;
 	p->sched_last_off_ns = timestamp_ns;
 
-	if( asap )
+	if( asap ) {
+		DBGSI serprintf(
+			"sink_wait_calc: frame=%d base=%d ts_ms=%d now_mono_ms=%lld target_mono_ms=%lld wait_ms=0 asap=1 reset=%d late=%d->%d start_off_ms=%lld start_mono_ms=%lld av_ts=%d\n",
+			f ? f->index : -1,
+			f ? f->time : -1,
+			frame_time,
+			(long long)(now_ns / NSEC_PER_MSEC),
+			(long long)(target_ns / NSEC_PER_MSEC),
+			reset_sched,
+			late_before,
+			p->sched_late,
+			(long long)(p->sched_start_off_ns / NSEC_PER_MSEC),
+			(long long)(p->sched_start_mono_ns / NSEC_PER_MSEC),
+			av_delay_ts);
 		return 0;
+	}
 
 	delta = target_ns - now_ns;
 	if( delta > (INT64)INT_MAX * NSEC_PER_MSEC )
@@ -270,7 +287,24 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	if( delta < (INT64)INT_MIN * NSEC_PER_MSEC )
 		delta = (INT64)INT_MIN * NSEC_PER_MSEC;
 
-	return (int)( delta / 1000000LL );
+	{
+		int wait_ms = (int)( delta / 1000000LL );
+		DBGSI serprintf(
+			"sink_wait_calc: frame=%d base=%d ts_ms=%d now_mono_ms=%lld target_mono_ms=%lld wait_ms=%d asap=0 reset=%d late=%d->%d start_off_ms=%lld start_mono_ms=%lld av_ts=%d\n",
+			f ? f->index : -1,
+			f ? f->time : -1,
+			frame_time,
+			(long long)(now_ns / NSEC_PER_MSEC),
+			(long long)(target_ns / NSEC_PER_MSEC),
+			wait_ms,
+			reset_sched,
+			late_before,
+			p->sched_late,
+			(long long)(p->sched_start_off_ns / NSEC_PER_MSEC),
+			(long long)(p->sched_start_mono_ns / NSEC_PER_MSEC),
+			av_delay_ts);
+		return wait_ms;
+	}
 }
 
 static inline void timespec_add_ns(struct timespec *a, INT64 ns)
@@ -446,6 +480,23 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor ) {
 		allow_reanchor = 0;
 	}
+	DBGSI serprintf(
+		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d speed=%.3f speed_changed=%d disc=%d grace=%d no_sched=%d allow_reanchor=%d\n",
+		time,
+		now_ms,
+		p->venc_put_time,
+		p->venc_ref_time,
+		dt,
+		dr,
+		expected,
+		diff,
+		abs_diff,
+		current_speed,
+		speed_changed,
+		discontinuity,
+		in_grace,
+		no_sched_anchor,
+		allow_reanchor);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 	if (allow_reanchor) {
@@ -584,6 +635,7 @@ static void *videosink_thread(void *ctx)
  		int venc_time = _get_time(p);
 		int blit_duration;
 		int av_delay_ts = 0;
+		int sink_now = venc_time;
 
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -617,9 +669,10 @@ static void *videosink_thread(void *ctx)
 			blit_duration = _compute_blit_wait_ms( p, f, av_delay_ts );
 		}
 
-DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d av_eff=%d av_ts=%d",
+DBGSI serprintf("[%3d|%2d] : f->time: %8d|%d | %d av_delay=%d av_eff=%d av_ts=%d sink_now=%d put=%d ref=%d",
 	blit_duration, f->index, f->time, f->duration, f->blit_time,
-	s ? s->av_delay : 0, p->effective_av_delay_ms, av_delay_ts);
+	s ? s->av_delay : 0, p->effective_av_delay_ms, av_delay_ts,
+	sink_now, p->venc_put_time, p->venc_ref_time);
 		if( s && s->paused ) {
 DBGSI serprintf(" paused\n");
 		} else if (blit_duration > 0) {
@@ -698,6 +751,35 @@ DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d 
 render_now:
 		if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
 			do_render = 0;
+		}
+
+		if( do_render ) {
+			DBGSI serprintf(
+				"sink_render: f=%d time=%d blit=%d venc_time=%d put=%d ref=%d av_user=%d av_eff=%d delay_valid=%d dropped=%d grace=%d sched_off_ms=%lld sched_mono_ms=%lld\n",
+				f ? f->index : -1,
+				f ? f->time : -1,
+				f ? f->blit_time : -1,
+				venc_time,
+				p->venc_put_time,
+				p->venc_ref_time,
+				s ? s->av_delay : 0,
+				p->effective_av_delay_ms,
+				delay_valid,
+				p->dropped,
+				(p->grace_until_ms > atime()) ? (p->grace_until_ms - atime()) : 0,
+				(long long)(p->sched_start_off_ns / NSEC_PER_MSEC),
+				(long long)(p->sched_start_mono_ns / NSEC_PER_MSEC));
+		} else {
+			DBGSI serprintf(
+				"sink_drop: f=%d time=%d blit=%d venc_time=%d put=%d ref=%d delay_valid=%d dropped=%d\n",
+				f ? f->index : -1,
+				f ? f->time : -1,
+				f ? f->blit_time : -1,
+				venc_time,
+				p->venc_put_time,
+				p->venc_ref_time,
+				delay_valid,
+				p->dropped);
 		}
 
 		pthread_mutex_unlock(&p->locked.mtx);

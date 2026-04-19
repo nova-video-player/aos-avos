@@ -455,13 +455,26 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
 {
     media_status_t err;
     if( render ) {
+        int64_t now_ns = get_monotonic_ns();
+        LOG("sfdec_render: index=%zu ts_us=%lld render=%d asap=%d render_ts_ns=%lld start_off_ns=%lld start_mono_ns=%lld last_off_ns=%lld last_mono_ns=%lld now_ns=%lld reset_age_ms=%lld",
+            sfbuf ? sfbuf->index : (size_t)-1,
+            sfbuf ? (long long)sfbuf->timestamp_us : -1LL,
+            render, asap, (long long)render_ts_ns,
+            (long long)sfdec->start_off,
+            (long long)sfdec->start_monotonic,
+            (long long)sfdec->last_off,
+            (long long)sfdec->last_monotonic,
+            (long long)now_ns,
+            (long long)((sfdec->last_reset_monotonic > 0) ? ((now_ns - sfdec->last_reset_monotonic) / 1000000LL) : -1));
         // The current sfdec2 path renders ASAP and no longer relies on libsfdec's
         // internal timed-release scheduling. Keep the render_ts_ns / cadence-aware
         // scheduling logic below intact for safekeeping and possible future reuse.
         if (render_ts_ns > 0) {
             err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, render_ts_ns);
+            LOG("sfdec_render_release: mode=at_time index=%zu when_ns=%lld", sfbuf->index, (long long)render_ts_ns);
         } else if (asap) {
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
+            LOG("sfdec_render_release: mode=asap index=%zu", sfbuf->index);
         } else {
             int64_t timestamp_ns = sfbuf->timestamp_us * 1000LL;
             DBG LOG("Received og timestamp %lld us", (long long)sfbuf->timestamp_us);
@@ -533,10 +546,11 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
 
-            if (asap)
+            if (asap) {
                 DBG LOG("Scheduling frame in a jiffy");
-            else
-                DBG LOG("Scheduling frame in %lld", ts - now_ts);
+            } else {
+                DBG LOG("Scheduling frame in %lld", (long long)(ts - now_ts));
+            }
 
             sfdec->last_monotonic = now_ts;
             sfdec->last_off = timestamp_ns;
@@ -545,9 +559,16 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
             else
                 err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, ts);
+            LOG("sfdec_render_release: mode=%s index=%zu target_ns=%lld delta_ns=%lld ts_ns=%lld",
+                asap ? "asap" : "scheduled",
+                sfbuf->index,
+                (long long)ts,
+                (long long)(ts - now_ts),
+                (long long)timestamp_ns);
         }
     } else {
         err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
+        LOG("sfdec_render_release: mode=drop index=%zu", sfbuf ? sfbuf->index : (size_t)-1);
     }
     CHECK_STATUS(err);
     sfbuf->released = true;

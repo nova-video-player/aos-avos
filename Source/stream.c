@@ -211,6 +211,9 @@ static void _stream_reset( STREAM *s )
 	// set pointer for "audio"/"video"
 	av_init_props( s );
 	memset( &s->audio_sink_props, 0, sizeof( AUDIO_PROPERTIES ) );
+	s->audio_time = -1;
+	s->video_time = -1;
+	s->audio_ref_time = -1;
 	// Ensure we don't carry a stale delay across new streams.
 	s->smoothed_av_delay = -1;
 }

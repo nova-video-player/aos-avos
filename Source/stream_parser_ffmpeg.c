@@ -466,12 +466,21 @@ serprintf("FF: parse H264 SPS\n");
                                 break;
                             }
                         }
+                        int dovi_codec_supported = 1;
 #ifdef CONFIG_ANDROID
-                        if(side_data && side_data_size > 0 && acodecs_is_type_supported("video/dolby-vision", 0)) {
-#else
-                        if(side_data && side_data_size > 0) {
+                        dovi_codec_supported = acodecs_is_type_supported("video/dolby-vision", 0);
 #endif
+                        if(side_data && side_data_size > 0 && dovi_codec_supported) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
+                            serprintf("Dolby Vision config: codec=%d dv_profile=%d dv_level=%d bl_compat_id=%d rpu=%d el=%d bl=%d codec_supported=%d\r\n",
+                                      video->format,
+                                      dovi_record->dv_profile,
+                                      dovi_record->dv_level,
+                                      dovi_record->dv_bl_signal_compatibility_id,
+                                      dovi_record->rpu_present_flag,
+                                      dovi_record->el_present_flag,
+                                      dovi_record->bl_present_flag,
+                                      dovi_codec_supported);
                             if (video->format == VIDEO_FORMAT_HEVC) {
                                 switch(dovi_record->dv_profile) {
                                     // Mapping source: Kodi's DVDVideoCodecAndroidMediaCodec.cpp
@@ -507,7 +516,17 @@ serprintf("FF: parse H264 SPS\n");
                             video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
                             video->format = VIDEO_FORMAT_DOLBY_VISION;
 
-                            serprintf("HELLO, This is a dolby vision content!\r\n");
+                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d\r\n",
+                                      video->format,
+                                      video->dv_profile,
+                                      video->fourcc);
+                        } else if (side_data && side_data_size > 0) {
+                            AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
+                            serprintf("Dolby Vision config ignored: codec=%d dv_profile=%d bl_compat_id=%d codec_supported=%d\r\n",
+                                      video->format,
+                                      dovi_record->dv_profile,
+                                      dovi_record->dv_bl_signal_compatibility_id,
+                                      dovi_codec_supported);
                         }
 			}
 		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO ){

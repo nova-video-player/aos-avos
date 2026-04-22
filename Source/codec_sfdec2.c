@@ -1064,6 +1064,13 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 		DBGCV2 serprintf("dovi profile den %s\n", acodecs_get_for_profile("video/dolby-vision", 8));
 		DBGCV serprintf("dovi profile myself %s\n", acodecs_get_for_profile("video/dolby-vision", video->dv_profile));
         decoder_name = acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+		serprintf("Dolby Vision decoder selection: requested_profile=%d resolved_decoder=%s hdr_primaries=%d hdr_trc=%d hdr_space=%d hdr_range=%d\n",
+		          video->dv_profile,
+		          decoder_name ? decoder_name : "(default)",
+		          video->color_primaries,
+		          video->color_trc,
+		          video->color_space,
+		          video->color_range);
     }
 
 	width = video->width;
@@ -1082,6 +1089,13 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	if (!p->sfdec) {
 		CLOG("sfdec_new failed codec=%d flags=0x%x decoder_name=%s w=%d h=%d",
 			sfdec_codec, flags, decoder_name ? decoder_name : "(default)", width, height);
+		if (video->format == VIDEO_FORMAT_DOLBY_VISION) {
+			serprintf("Dolby Vision decoder init failed: requested_profile=%d resolved_decoder=%s codec=%d flags=0x%x\n",
+			          video->dv_profile,
+			          decoder_name ? decoder_name : "(default)",
+			          sfdec_codec,
+			          flags);
+		}
 		goto err;
 	}
 

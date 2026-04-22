@@ -467,8 +467,10 @@ serprintf("FF: parse H264 SPS\n");
                             }
                         }
                         int dovi_codec_supported = 1;
+                        int dovi_mode = 0;
 #ifdef CONFIG_ANDROID
                         dovi_codec_supported = acodecs_is_type_supported("video/dolby-vision", 0);
+                        dovi_mode = acodecs_get_dovi_mode();
 #endif
                         if(side_data && side_data_size > 0 && dovi_codec_supported) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
@@ -522,8 +524,13 @@ serprintf("FF: parse H264 SPS\n");
                                 force_dovi = (dovi_decoder != NULL);
                             }
 
+                            if (dovi_mode == 2 && dovi_codec_supported) {
+                                force_dovi = 1;
+                            }
+
                             if (video->format == VIDEO_FORMAT_HEVC &&
                                 dovi_record->dv_profile == 7 &&
+                                dovi_mode != 2 &&
                                 dovi_record->dv_bl_signal_compatibility_id != 0 &&
                                 dovi_record->dv_bl_signal_compatibility_id != 2 &&
                                 dovi_record->dv_bl_signal_compatibility_id != 3) {
@@ -536,13 +543,14 @@ serprintf("FF: parse H264 SPS\n");
                                 video->format = VIDEO_FORMAT_DOLBY_VISION;
                             }
 
-                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s prefer_hevc_fallback=%d bl_compat_id=%d\r\n",
+                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s prefer_hevc_fallback=%d bl_compat_id=%d dovi_mode=%d\r\n",
                                       video->format,
                                       video->dv_profile,
                                       video->fourcc,
                                       dovi_decoder ? dovi_decoder : "(none)",
                                       prefer_hevc_fallback,
-                                      video->dv_bl_signal_compatibility_id);
+                                      video->dv_bl_signal_compatibility_id,
+                                      dovi_mode);
                             if (!force_dovi) {
                                 serprintf("Dolby Vision fallback: keeping base codec=%d because %s (profile=%d bl_compat_id=%d)\r\n",
                                           video->format,

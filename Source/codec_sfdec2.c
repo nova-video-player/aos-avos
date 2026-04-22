@@ -999,7 +999,12 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
                 extradata_size = rcv_size;
 	}
 
-	switch (video->format) {
+	int effective_format = video->format;
+	int effective_fourcc = video->fourcc;
+	int tried_hevc_fallback = 0;
+
+retry_decoder_open:
+	switch (effective_format) {
 		case VIDEO_FORMAT_DOLBY_VISION:
 			sfdec_codec = SFDEC_VIDEO_DOLBY_VISION;
 			break;
@@ -1037,7 +1042,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			sfdec_codec = SFDEC_VIDEO_WMV;
 			break;
 		default:
-			CLOG("open reject: unsupported format=%d subfmt=%d profile=%d", video->format, video->subfmt, video->profile);
+			CLOG("open reject: unsupported format=%d subfmt=%d profile=%d", effective_format, video->subfmt, video->profile);
 			return 1;
 		}
 
@@ -1052,9 +1057,8 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	if (sfdec_force_hw == 0)
 		flags |= SFDEC_FLAG_SWDEC;
 
-
     const char *decoder_name = NULL;
-    if (video->format == VIDEO_FORMAT_DOLBY_VISION) {
+    if (effective_format == VIDEO_FORMAT_DOLBY_VISION) {
 		DBGCV2 serprintf("dovi profile dtr %s\n", acodecs_get_for_profile("video/dolby-vision", 16));
 		DBGCV2 serprintf("dovi profile dth %s\n", acodecs_get_for_profile("video/dolby-vision", 64));
 		DBGCV2 serprintf("dovi profile st %s\n", acodecs_get_for_profile("video/dolby-vision", 256));
@@ -1089,12 +1093,19 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	if (!p->sfdec) {
 		CLOG("sfdec_new failed codec=%d flags=0x%x decoder_name=%s w=%d h=%d",
 			sfdec_codec, flags, decoder_name ? decoder_name : "(default)", width, height);
-		if (video->format == VIDEO_FORMAT_DOLBY_VISION) {
+		if (effective_format == VIDEO_FORMAT_DOLBY_VISION) {
 			serprintf("Dolby Vision decoder init failed: requested_profile=%d resolved_decoder=%s codec=%d flags=0x%x\n",
 			          video->dv_profile,
 			          decoder_name ? decoder_name : "(default)",
 			          sfdec_codec,
 			          flags);
+			if (!tried_hevc_fallback) {
+				tried_hevc_fallback = 1;
+				effective_format = VIDEO_FORMAT_HEVC;
+				effective_fourcc = VIDEO_FOURCC_HEVC;
+				serprintf("Dolby Vision fallback retry: reopening as HEVC after decoder init failure\n");
+				goto retry_decoder_open;
+			}
 		}
 		goto err;
 	}
@@ -1111,6 +1122,15 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	if (sfdec_start(p->sfdec) != 0) {
 		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",
 			sfdec_codec, flags, decoder_name ? decoder_name : "(default)");
+		if (effective_format == VIDEO_FORMAT_DOLBY_VISION && !tried_hevc_fallback) {
+			tried_hevc_fallback = 1;
+			effective_format = VIDEO_FORMAT_HEVC;
+			effective_fourcc = VIDEO_FOURCC_HEVC;
+			serprintf("Dolby Vision fallback retry: reopening as HEVC after decoder start failure\n");
+			sfdec_delete(p->sfdec);
+			p->sfdec = NULL;
+			goto retry_decoder_open;
+		}
 		goto err;
 	}
 
@@ -1154,9 +1174,12 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->last_user_av_delay = sctx ? sctx->av_delay : 0;
 	p->effective_av_delay_ms = sctx ? sctx->av_delay : 0;
 
-	video->colorspace = AV_IMAGE_HW;
+	VIDEO_PROPERTIES opened_video = *video;
+	opened_video.format = effective_format;
+	opened_video.fourcc = effective_fourcc;
+	opened_video.colorspace = AV_IMAGE_HW;
 	dec->video = &dec->_video;
-	memcpy(dec->video, video, sizeof(VIDEO_PROPERTIES));
+	memcpy(dec->video, &opened_video, sizeof(VIDEO_PROPERTIES));
 
 	XDM_id_flush( &p->XDM_ctx );
 	XDM_ts_flush( &p->XDM_ctx );

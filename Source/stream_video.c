@@ -784,6 +784,7 @@ DBGS stream_show_rc( &s->video_rc );
 		if( !s->video_sink ) {
 serprintf("stream: no video sink!\r\n");
 		}
+		s->video_sink->ctx = s;
 serprintf("VID_SNK: [%s]\n", s->video_sink->name);	
 		s->output_frame_fn = _output_frame_no_resize;
 		if( stream_sink_video_allocates_frames(s->video_sink) ) {

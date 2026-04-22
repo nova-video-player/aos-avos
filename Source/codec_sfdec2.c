@@ -147,8 +147,8 @@ typedef struct priv {
 	int pending_reanchor;
 	int last_seek_epoch;
 	int last_audio_resume_pending;
-
 	STREAM_DEC_VIDEO *dec;
+	STREAM *s;
 	int64_t render_offset_ns;
 	int render_offset_from_audio;
 	float last_av_speed;
@@ -440,6 +440,7 @@ static VIDEO_FRAME *videosink_get_frame(STREAM_SINK_VIDEO *sink, int index)
 static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
+	if (!p->s && sink->ctx) p->s = (STREAM*)sink->ctx;
 
 	int now_ms = atime();
 	int dt = time    - p->venc_put_time;
@@ -475,13 +476,15 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
+	int calib_st = (p->s) ? p->s->mode2_calib_state : -1;
+
 	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
 	int allow_reanchor = speed_changed || discontinuity || no_sched_anchor;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor ) {
 		allow_reanchor = 0;
 	}
 	DBGSI serprintf(
-		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d speed=%.3f speed_changed=%d disc=%d grace=%d no_sched=%d allow_reanchor=%d\n",
+		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d speed=%.3f speed_changed=%d disc=%d grace=%d no_sched=%d allow_reanchor=%d calib_st=%d\n",
 		time,
 		now_ms,
 		p->venc_put_time,
@@ -496,7 +499,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		discontinuity,
 		in_grace,
 		no_sched_anchor,
-		allow_reanchor);
+		allow_reanchor,
+		calib_st);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 	if (allow_reanchor) {
@@ -525,6 +529,7 @@ void sfdec2_refresh_sched_anchor( STREAM *s )
 	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
 		return;
 	priv_t *p = (priv_t*) s->video_sink->priv;
+	p->s = (STREAM*)s->video_sink->ctx;
 	p->sched_start_off_ns  = 0;
 	p->sched_start_mono_ns = 0;
 	p->sched_last_off_ns   = 0;

@@ -657,6 +657,7 @@ typedef struct _video_props {
 
     // for dolby vision
     int dv_profile;
+    int dv_bl_signal_compatibility_id;
 
     // for color metadata (values from FFmpeg AVCOL_* enums)
     int color_primaries;    // AVCOL_PRI_* (e.g. BT709=1, BT2020=9)

@@ -473,7 +473,9 @@ serprintf("FF: parse H264 SPS\n");
                         if(side_data && side_data_size > 0 && dovi_codec_supported) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                             int force_dovi = 0;
+                            int prefer_hevc_fallback = 0;
                             char *dovi_decoder = NULL;
+                            video->dv_bl_signal_compatibility_id = dovi_record->dv_bl_signal_compatibility_id;
                             serprintf("Dolby Vision config: codec=%d dv_profile=%d dv_level=%d bl_compat_id=%d rpu=%d el=%d bl=%d codec_supported=%d\r\n",
                                       video->format,
                                       dovi_record->dv_profile,
@@ -520,20 +522,33 @@ serprintf("FF: parse H264 SPS\n");
                                 force_dovi = (dovi_decoder != NULL);
                             }
 
+                            if (video->format == VIDEO_FORMAT_HEVC &&
+                                dovi_record->dv_profile == 7 &&
+                                dovi_record->dv_bl_signal_compatibility_id != 0 &&
+                                dovi_record->dv_bl_signal_compatibility_id != 2 &&
+                                dovi_record->dv_bl_signal_compatibility_id != 3) {
+                                prefer_hevc_fallback = 1;
+                                force_dovi = 0;
+                            }
+
                             if (force_dovi) {
                                 video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
                                 video->format = VIDEO_FORMAT_DOLBY_VISION;
                             }
 
-                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s\r\n",
+                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s prefer_hevc_fallback=%d bl_compat_id=%d\r\n",
                                       video->format,
                                       video->dv_profile,
                                       video->fourcc,
-                                      dovi_decoder ? dovi_decoder : "(none)");
+                                      dovi_decoder ? dovi_decoder : "(none)",
+                                      prefer_hevc_fallback,
+                                      video->dv_bl_signal_compatibility_id);
                             if (!force_dovi) {
-                                serprintf("Dolby Vision fallback: keeping base codec=%d because no usable Dolby Vision decoder matched profile=%d\r\n",
+                                serprintf("Dolby Vision fallback: keeping base codec=%d because %s (profile=%d bl_compat_id=%d)\r\n",
                                           video->format,
-                                          video->dv_profile);
+                                          prefer_hevc_fallback ? "HDR-compatible base layer is preferred" : "no usable Dolby Vision decoder matched",
+                                          video->dv_profile,
+                                          video->dv_bl_signal_compatibility_id);
                             }
 
                             if (dovi_decoder)

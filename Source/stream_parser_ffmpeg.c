@@ -472,6 +472,8 @@ serprintf("FF: parse H264 SPS\n");
 #endif
                         if(side_data && side_data_size > 0 && dovi_codec_supported) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
+                            int force_dovi = 0;
+                            char *dovi_decoder = NULL;
                             serprintf("Dolby Vision config: codec=%d dv_profile=%d dv_level=%d bl_compat_id=%d rpu=%d el=%d bl=%d codec_supported=%d\r\n",
                                       video->format,
                                       dovi_record->dv_profile,
@@ -513,13 +515,29 @@ serprintf("FF: parse H264 SPS\n");
                                 serprintf("Dolby Vision in an unknown codec %d", video->format);
                             }
 
-                            video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
-                            video->format = VIDEO_FORMAT_DOLBY_VISION;
+                            if (video->dv_profile) {
+                                dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+                                force_dovi = (dovi_decoder != NULL);
+                            }
 
-                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d\r\n",
+                            if (force_dovi) {
+                                video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
+                                video->format = VIDEO_FORMAT_DOLBY_VISION;
+                            }
+
+                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s\r\n",
                                       video->format,
                                       video->dv_profile,
-                                      video->fourcc);
+                                      video->fourcc,
+                                      dovi_decoder ? dovi_decoder : "(none)");
+                            if (!force_dovi) {
+                                serprintf("Dolby Vision fallback: keeping base codec=%d because no usable Dolby Vision decoder matched profile=%d\r\n",
+                                          video->format,
+                                          video->dv_profile);
+                            }
+
+                            if (dovi_decoder)
+                                afree(dovi_decoder);
                         } else if (side_data && side_data_size > 0) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                             serprintf("Dolby Vision config ignored: codec=%d dv_profile=%d bl_compat_id=%d codec_supported=%d\r\n",

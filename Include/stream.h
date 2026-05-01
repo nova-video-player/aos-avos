@@ -784,6 +784,7 @@ typedef struct STREAM {
 
 	int		mode2_last_anchor_audio;
 	int		mode2_last_anchor_wall_ms;
+	int		interpolated_last_heard_ts;
 	int		mode2_latency_calibration_ms;
 	int		mode2_last_calib_epoch;
 } STREAM;

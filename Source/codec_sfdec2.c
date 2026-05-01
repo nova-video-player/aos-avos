@@ -459,10 +459,41 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int expected = p->venc_put_time + dr;
 	int diff = time - expected;
 	int abs_diff = diff < 0 ? -diff : diff;
-	const int drift_threshold_ms = 200;
+	int drift_threshold_ms = 200;
+	int passthrough_mode = (p->s && p->s->audio_sink && p->s->audio_sink->get_passthrough) ?
+		p->s->audio_sink->get_passthrough( p->s ) : 0;
+	if( p->s && p->s->put_time_mode && !passthrough_mode ) {
+		int frame_ms = (p->s->video && p->s->video->msPerFrame > 0) ?
+			p->s->video->msPerFrame : 33;
+		drift_threshold_ms = MAX( 160, frame_ms * 4 );
+	}
 	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
+	int reanchor_discontinuity = discontinuity;
+	int smooth_burst_mode = p->s && p->s->put_time_mode &&
+		(!passthrough_mode || passthrough_mode >= 2) && !speed_changed;
+	if( discontinuity && smooth_burst_mode ) {
+		int frame_ms = (p->s->video && p->s->video->msPerFrame > 0) ?
+			p->s->video->msPerFrame : 33;
+		int hard_drift_ms = (passthrough_mode >= 2) ?
+			MAX( 1500, frame_ms * 16 ) : MAX( 350, frame_ms * 8 );
+		if( !passthrough_mode ) {
+			p->drift_streak++;
+		}
+		// PCM and mode-2 passthrough heard time can legitimately move in write
+		// bursts while the physical sink clock remains continuous.  Keep the
+		// existing scheduler anchor unless this is hard drift.
+		reanchor_discontinuity = (abs_diff >= hard_drift_ms);
+	} else if( !discontinuity ) {
+		p->drift_streak = 0;
+	}
 	if( discontinuity ) {
-		p->grace_until_ms = now_ms + 1000;
+		if( passthrough_mode ) {
+			if( !smooth_burst_mode || reanchor_discontinuity ) {
+				p->grace_until_ms = now_ms + 1000;
+			}
+		} else if( reanchor_discontinuity && !speed_changed ) {
+			p->grace_until_ms = 0;
+		}
 	}
 
 	if( !speed_changed && !discontinuity && p->venc_put_time && time < p->venc_put_time ) {
@@ -479,12 +510,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int calib_st = (p->s) ? p->s->mode2_calib_state : -1;
 
 	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
-	int allow_reanchor = speed_changed || discontinuity || no_sched_anchor;
+	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor ) {
 		allow_reanchor = 0;
 	}
 	DBGSI serprintf(
-		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d speed=%.3f speed_changed=%d disc=%d grace=%d no_sched=%d allow_reanchor=%d calib_st=%d\n",
+		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d thresh=%d streak=%d speed=%.3f speed_changed=%d disc=%d reanchor_disc=%d grace=%d no_sched=%d allow_reanchor=%d calib_st=%d\n",
 		time,
 		now_ms,
 		p->venc_put_time,
@@ -494,9 +525,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		expected,
 		diff,
 		abs_diff,
+		drift_threshold_ms,
+		p->drift_streak,
 		current_speed,
 		speed_changed,
 		discontinuity,
+		reanchor_discontinuity,
 		in_grace,
 		no_sched_anchor,
 		allow_reanchor,
@@ -725,7 +759,20 @@ DBGSI serprintf(" grace\n");
 			if( latency_ms > 200 ) {
 				late_threshold = -MAX( 40, latency_ms );
 			}
-			if( blit_duration < late_threshold && p->dropped < 5 ) {
+			int passthrough_mode = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
+				s->audio_sink->get_passthrough( s ) : 0;
+			if( !passthrough_mode && fabsf( audio_interface_get_audio_speed() - 1.0f ) < 1e-6f && s && s->video ) {
+				int frame_ms = s->video->msPerFrame > 0 ? s->video->msPerFrame : 0;
+				late_threshold = -MAX( 50, frame_ms * 4 );
+			}
+			int max_consecutive_drops = 5;
+			if( passthrough_mode && s && s->video ) {
+				int frame_ms = s->video->msPerFrame > 0 ? s->video->msPerFrame : 33;
+				int lateness_ms = blit_duration < 0 ? -blit_duration : 0;
+				int catchup_window_ms = MAX( lateness_ms, latency_ms * 4 );
+				max_consecutive_drops = MAX( 5, catchup_window_ms / frame_ms );
+			}
+			if( blit_duration < late_threshold && p->dropped < max_consecutive_drops ) {
 			if( 1 ) {
 				// drop frames if thread is stopped or we are too late (more than 40ms) 
 				// but don't drop too many consecutives frames
@@ -740,15 +787,8 @@ DBGSI serprintf(" grace\n");
 				audio_time = s->audio_time;
 				video_time = s->video_time;
 			}
-			if( fabsf( speed - 1.0f ) < 1e-6f && s && s->video ) {
-				int frame_ms = s->video->msPerFrame > 0 ? s->video->msPerFrame : 0;
-				int relaxed = -MAX( 50, frame_ms * 4 );
-				if( late_threshold > relaxed ) {
-					late_threshold = relaxed;
-				}
-			}
-DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d smoothed=%d audio_delay=%d latency=%d threshold=%d speed=%.3f dropped=%d\n",
-	blit_duration, f->index, f->time, venc_time, audio_time, video_time, smoothed_delay, audio_delay, latency_ms, late_threshold, speed, p->dropped);
+DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d smoothed=%d audio_delay=%d latency=%d threshold=%d speed=%.3f dropped=%d max_drops=%d\n",
+	blit_duration, f->index, f->time, venc_time, audio_time, video_time, smoothed_delay, audio_delay, latency_ms, late_threshold, speed, p->dropped, max_consecutive_drops);
 //CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d", f->index, (venc_time - f->blit_time), f->blit_time, venc_time, f->time);
 			}
 		}

@@ -1345,17 +1345,19 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// Rebase once here using static latency to avoid a large AV offset while
 						// we wait for a stable timestamp.
 						int invalid_delay_rebase_fired = 0;
-						if( s->audio_ctx && s->video_time >= 0 && s->audio_time >= 0 &&
+						if( s->audio_ctx && !passthrough_active &&
+							s->video_time >= 0 && s->audio_time >= 0 &&
 							!audio_interface_is_delay_valid( s->audio_ctx ) ) {
 							int static_latency = audio_interface_get_latency( s->audio_ctx );
 							int old_audio_time = s->audio_time;
-							int new_audio_time = s->video_time;
+							int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
+							int new_audio_time = rebase_video_time;
 							if( static_latency > 0 ) {
 								new_audio_time += static_latency;
 							}
 							_set_audio_time( s, new_audio_time );
-							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d latency=%d)\n",
-								old_audio_time, s->audio_time, s->video_time, static_latency);
+							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d sync_v=%d latency=%d)\n",
+								old_audio_time, s->audio_time, s->video_time, s->sync_v_time, static_latency);
 							invalid_delay_rebase_fired = 1;
 						}
 						// Do not arm delay-valid rebase for passthrough/system-encapsulation:
@@ -1506,14 +1508,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						audio_interface_get_delay_valid_streak( s->audio_ctx ) >= 3 ) {
 						int delay = audio_interface_get_delay( s->audio_ctx );
 						int old_audio_time = s->audio_time;
-						int new_audio_time = s->video_time;
+						int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
+						int new_audio_time = rebase_video_time;
 						if( delay > 0 ) {
 							new_audio_time += delay;
 						}
 						_set_audio_time( s, new_audio_time );
 						s->audio_resume_valid_pending = 0;
-						DBG serprintf("resume_rebase_delay_valid: audio_time %d -> %d (video=%d delay=%d streak=%d)\n",
-							old_audio_time, s->audio_time, s->video_time, delay,
+						DBG serprintf("resume_rebase_delay_valid: audio_time %d -> %d (video=%d sync_v=%d delay=%d streak=%d)\n",
+							old_audio_time, s->audio_time, s->video_time, s->sync_v_time, delay,
 							audio_interface_get_delay_valid_streak( s->audio_ctx ));
 					}
 

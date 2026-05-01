@@ -456,7 +456,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
     media_status_t err;
     if( render ) {
         int64_t now_ns = get_monotonic_ns();
-        LOG("sfdec_render: index=%zu ts_us=%lld render=%d asap=%d render_ts_ns=%lld start_off_ns=%lld start_mono_ns=%lld last_off_ns=%lld last_mono_ns=%lld now_ns=%lld reset_age_ms=%lld",
+        DBG LOG("sfdec_render: index=%zu ts_us=%lld render=%d asap=%d render_ts_ns=%lld start_off_ns=%lld start_mono_ns=%lld last_off_ns=%lld last_mono_ns=%lld now_ns=%lld reset_age_ms=%lld",
             sfbuf ? sfbuf->index : (size_t)-1,
             sfbuf ? (long long)sfbuf->timestamp_us : -1LL,
             render, asap, (long long)render_ts_ns,
@@ -471,10 +471,10 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         // scheduling logic below intact for safekeeping and possible future reuse.
         if (render_ts_ns > 0) {
             err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, render_ts_ns);
-            LOG("sfdec_render_release: mode=at_time index=%zu when_ns=%lld", sfbuf->index, (long long)render_ts_ns);
+            DBG LOG("sfdec_render_release: mode=at_time index=%zu when_ns=%lld", sfbuf->index, (long long)render_ts_ns);
         } else if (asap) {
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
-            LOG("sfdec_render_release: mode=asap index=%zu", sfbuf->index);
+            DBG LOG("sfdec_render_release: mode=asap index=%zu", sfbuf->index);
         } else {
             int64_t timestamp_ns = sfbuf->timestamp_us * 1000LL;
             DBG LOG("Received og timestamp %lld us", (long long)sfbuf->timestamp_us);
@@ -559,7 +559,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
             else
                 err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, ts);
-            LOG("sfdec_render_release: mode=%s index=%zu target_ns=%lld delta_ns=%lld ts_ns=%lld",
+            DBG LOG("sfdec_render_release: mode=%s index=%zu target_ns=%lld delta_ns=%lld ts_ns=%lld",
                 asap ? "asap" : "scheduled",
                 sfbuf->index,
                 (long long)ts,
@@ -568,7 +568,7 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         }
     } else {
         err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
-        LOG("sfdec_render_release: mode=drop index=%zu", sfbuf ? sfbuf->index : (size_t)-1);
+        DBG LOG("sfdec_render_release: mode=drop index=%zu", sfbuf ? sfbuf->index : (size_t)-1);
     }
     CHECK_STATUS(err);
     sfbuf->released = true;

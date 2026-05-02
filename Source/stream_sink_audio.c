@@ -46,6 +46,40 @@ static int _close( STREAM *s )
 static int start( STREAM *s )
 {
 	AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
+	int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+		s->audio_sink->get_passthrough( s ) : 0;
+	DBGS serprintf("stream_sink_audio_start: passthrough=%d sink_format=%04X sink_rate=%d sink_channels=%d sink_bits=%d source_rate=%d source_channels=%d source_bits=%d request_channels=%d\n",
+		passthrough, sink->format, sink->samplesPerSec, sink->channels,
+		sink->bitsPerSample, sink->sourceSamples, sink->sourceChannels,
+		sink->sourceBitsPerSample, sink->request_channels);
+	if( !s->mode2_calib_config_valid ||
+		s->mode2_calib_config_passthrough != passthrough ||
+		s->mode2_calib_config_format != sink->format ||
+		s->mode2_calib_config_rate != sink->samplesPerSec ||
+		s->mode2_calib_config_channels != sink->channels ||
+		s->mode2_calib_config_bits != sink->bitsPerSample ) {
+		DBGS serprintf("stream_sink_audio_start: mode2 calib config reset old_valid=%d old=(pass=%d fmt=%04X rate=%d ch=%d bits=%d calib=%d) new=(pass=%d fmt=%04X rate=%d ch=%d bits=%d source_ch=%d)\n",
+			s->mode2_calib_config_valid,
+			s->mode2_calib_config_passthrough,
+			s->mode2_calib_config_format,
+			s->mode2_calib_config_rate,
+			s->mode2_calib_config_channels,
+			s->mode2_calib_config_bits,
+			s->mode2_latency_calibration_ms,
+			passthrough,
+			sink->format,
+			sink->samplesPerSec,
+			sink->channels,
+			sink->bitsPerSample,
+			sink->sourceChannels);
+		s->mode2_latency_calibration_ms = 0;
+		s->mode2_calib_config_valid = 1;
+		s->mode2_calib_config_passthrough = passthrough;
+		s->mode2_calib_config_format = sink->format;
+		s->mode2_calib_config_rate = sink->samplesPerSec;
+		s->mode2_calib_config_channels = sink->channels;
+		s->mode2_calib_config_bits = sink->bitsPerSample;
+	}
 	if( audio_interface_set_output_params( s->audio_ctx, sink->samplesPerSec, sink->channels, sink->bitsPerSample, sink->format ) ) {
 serprintf("stream_sink_audio_start: cannot set params: fs %d  ch %d  bits %d\r\n", sink->samplesPerSec, sink->channels, sink->bitsPerSample );
 		return 1;

@@ -140,6 +140,8 @@ struct audio_ctx {
 	uint64_t can_write_last_playback_frames; // last playhead seen by passthrough can_write gate
 	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
+	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
+	int passthrough_playhead_ever_advanced;  // use fast fallback until passthrough playhead proves alive
 };
 
 static int audiotrack_log_underruns = 0;
@@ -1258,7 +1260,12 @@ ERR		LOG("audiotrack_start: track not valid, error");
 	if (!env_local) {
 		return -1;
 	}
+	if (at->passthrough && at->passthrough_restart_after_flush) {
+DBG		LOG("audiotrack_start: deferring passthrough restart until first post-flush write");
+		return 0;
+	}
 	call_void_method_with_env(at, env_local, "play", "()V");
+	at->passthrough_restart_after_flush = 0;
 
 	return 0;
 }
@@ -1306,7 +1313,9 @@ ERR		LOG("track not valid, error");
 
 static int audiotrack_can_write(audio_ctx_t *at, int len)
 {
-	const int passthrough_stall_fallback_ms = 250;
+	const int passthrough_stall_fallback_min_ms = 250;
+	const int passthrough_stall_fallback_margin_ms = 250;
+	const int passthrough_stall_fallback_max_ms = 1500;
 
 	if (!at->init) {
 		ERR LOG("audiotrack_can_write: track not valid, error");
@@ -1369,6 +1378,18 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	int64_t frames_available = (int64_t)at->frame_count - frames_pending;
 	int can_write = (frames_available >= frames_requested);
 	int now_ms = atime();
+	int passthrough_stall_fallback_ms = passthrough_stall_fallback_min_ms;
+	if (frames_presented > 0) {
+		at->passthrough_playhead_ever_advanced = 1;
+	}
+	if (at->passthrough_playhead_ever_advanced) {
+		passthrough_stall_fallback_ms = at->latency + passthrough_stall_fallback_margin_ms;
+		if (passthrough_stall_fallback_ms < passthrough_stall_fallback_min_ms) {
+			passthrough_stall_fallback_ms = passthrough_stall_fallback_min_ms;
+		} else if (passthrough_stall_fallback_ms > passthrough_stall_fallback_max_ms) {
+			passthrough_stall_fallback_ms = passthrough_stall_fallback_max_ms;
+		}
+	}
 
 	if (frames_presented != at->can_write_last_playback_frames) {
 		at->can_write_last_playback_frames = frames_presented;
@@ -1378,8 +1399,9 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 			at->can_write_stall_start_ms = now_ms;
 		} else if (now_ms - at->can_write_stall_start_ms >= passthrough_stall_fallback_ms) {
 			at->passthrough_can_write_blind = 1;
-			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled (pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
+			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled for %dms (threshold=%d latency=%d pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
 				at->format, at->passthrough, len,
+				now_ms - at->can_write_stall_start_ms, passthrough_stall_fallback_ms, at->latency,
 				(long long)frames_pending, (long long)frames_available, (long long)frames_requested);
 			return 1;
 		}
@@ -1413,6 +1435,11 @@ DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d
 
 	// Track samples written for dynamic latency calculation
 	if (ret > 0) {
+		if (at->passthrough && at->passthrough_restart_after_flush) {
+DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush write");
+			call_void_method(at, "play", "()V");
+			at->passthrough_restart_after_flush = 0;
+		}
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
 
 		if (audiotrack_log_underruns) {
@@ -1975,6 +2002,10 @@ ERR		LOG("track not valid, error");
 	// Reset timing state after flush
 	at->i_samples_written = 0;
 	audiotrack_reset_timing(at);
+	if (at->passthrough) {
+		DBG LOG("audiotrack_flush_output: scheduling passthrough restart after flush");
+		at->passthrough_restart_after_flush = 1;
+	}
 }
 
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out)
@@ -2027,6 +2058,10 @@ static int audiotrack_is_startup_hold_active(audio_ctx_t *at)
 	return at ? at->startup_hold_active : 0;
 }
 
+static int audiotrack_passthrough_playhead_advanced(audio_ctx_t *at)
+{
+	return at ? at->passthrough_playhead_ever_advanced : 1;
+}
 
 // Compute latency using playback head position as a safe fallback when getTimestamp is
 // unavailable or unstable. Do not reuse stale headpos; a zero value means timing is unavailable.
@@ -2153,6 +2188,8 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->can_write_last_playback_frames = 0;
 	at->can_write_stall_start_ms = 0;
 	at->passthrough_can_write_blind = 0;
+	at->passthrough_restart_after_flush = 0;
+	at->passthrough_playhead_ever_advanced = 0;
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
@@ -2308,6 +2345,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.delay_valid = audiotrack_is_delay_valid,
 	.delay_valid_streak = audiotrack_get_delay_valid_streak,
 	.is_startup_hold_active = audiotrack_is_startup_hold_active,
+	.passthrough_playhead_advanced = audiotrack_passthrough_playhead_advanced,
 	.invalidate_delay_cache = audiotrack_invalidate_delay_cache,
 };
 

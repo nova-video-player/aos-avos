@@ -229,6 +229,14 @@ int audio_interface_is_startup_hold_active(audio_ctx_t *ctx)
 	return impl->is_startup_hold_active(ctx);
 }
 
+int audio_interface_passthrough_playhead_advanced(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->passthrough_playhead_advanced) {
+		return 1;
+	}
+	return impl->passthrough_playhead_advanced(ctx);
+}
+
 void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx)
 {
 	if (impl && impl->invalidate_delay_cache) {

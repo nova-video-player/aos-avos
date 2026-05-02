@@ -775,6 +775,7 @@ typedef struct STREAM {
 	int		mode2_calib_start_wall_ms;
 	int		mode2_calib_measure_sum;
 	int		mode2_calib_measure_count;
+	int		mode2_calib_last_audio_time;
 	int		mode2_calib_first_avg_diff;
 	int		mode2_calib_consensus_count;
 
@@ -786,7 +787,12 @@ typedef struct STREAM {
 	int		mode2_last_anchor_wall_ms;
 	int		interpolated_last_heard_ts;
 	int		mode2_latency_calibration_ms;
-	int		mode2_last_calib_epoch;
+	int		mode2_calib_config_valid;
+	int		mode2_calib_config_passthrough;
+	int		mode2_calib_config_format;
+	int		mode2_calib_config_rate;
+	int		mode2_calib_config_channels;
+	int		mode2_calib_config_bits;
 } STREAM;
 #define STREAM_POS_MAX 1000
 

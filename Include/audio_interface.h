@@ -63,6 +63,7 @@ typedef int (*audio_interface_impl_delay_valid)(audio_ctx_t *ctx);
 // expose a stability streak so callers can avoid rebasing on the first valid sample.
 typedef int (*audio_interface_impl_delay_valid_streak)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_is_startup_hold_active)(audio_ctx_t *ctx);
+typedef int (*audio_interface_impl_passthrough_playhead_advanced)(audio_ctx_t *ctx);
 typedef void (*audio_interface_impl_invalidate_delay_cache)(audio_ctx_t *ctx);
 
 
@@ -94,6 +95,7 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_delay_valid delay_valid;
 	audio_interface_impl_delay_valid_streak delay_valid_streak;
 	audio_interface_impl_is_startup_hold_active is_startup_hold_active;
+	audio_interface_impl_passthrough_playhead_advanced passthrough_playhead_advanced;
 	audio_interface_impl_invalidate_delay_cache invalidate_delay_cache;
 } audio_interface_impl_t;
 
@@ -114,6 +116,7 @@ int audio_interface_is_delay_valid(audio_ctx_t *ctx);
 // Returns the number of consecutive valid-delay samples (0 if unsupported).
 int audio_interface_get_delay_valid_streak(audio_ctx_t *ctx);
 int audio_interface_is_startup_hold_active(audio_ctx_t *ctx);
+int audio_interface_passthrough_playhead_advanced(audio_ctx_t *ctx);
 void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx);
 void audio_interface_flush_output(audio_ctx_t *ctx);
 int audio_interface_preload(audio_ctx_t *ctx);

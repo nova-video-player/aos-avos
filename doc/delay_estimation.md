@@ -138,11 +138,20 @@ Rules:
      post-resume compressed output has actually restarted.
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
-  - Passthrough mode 2 (raw): playhead/timestamp are unreliable; static only.
+  - Passthrough mode 2 (raw): playhead/timestamp are unreliable for delay
+    estimation; the scheduler uses static latency plus the mode 2 calibration
+    and fill-window guards described in `sync_anchoring_rules.md`.
 - Cached/throttled AudioTrack delay reads preserve validity when the last
   trusted source was playhead-based (`last_good_dynamic_valid`), so
   `cached(throttle)` does not immediately invalidate a newly trusted delay.
- - `startup_hold` is not allowed to remain permanent on devices with
-   frozen-but-successful `getTimestamp()` reporting. If timestamp-based
-   convergence cannot occur, a recent playback-head fallback delay can be
-   promoted to valid, and a timeout acts as a safety net.
+- `startup_hold` is not allowed to remain permanent on devices with
+  frozen-but-successful `getTimestamp()` reporting. If timestamp-based
+  convergence cannot occur, a recent playback-head fallback delay can be
+  promoted to valid, and a timeout acts as a safety net.
+
+Observability limits:
+- AudioTrack delay APIs stop at the Android output boundary. They do not report
+  downstream soundbar/AVR decode, DSP, ARC, or eARC latency.
+- Internal diff convergence is therefore a scheduler consistency signal, not a
+  physical lipsync proof. Route- or format-specific downstream delay must be
+  represented as a user/route offset outside the core delay estimator.

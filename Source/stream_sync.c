@@ -520,7 +520,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 					cap_video_time = s->sync_v_time;
 				}
 				if( cap_video_time >= 0 ) {
-					const int rebase_video_margin_ms = 200;
+					const int rebase_video_margin_ms = 0;
 					int rebase_cap = cap_video_time + effective_latency + rebase_video_margin_ms;
 					if( rebase_audio > rebase_cap ) {
 						DBG serprintf("mode2_fill_exit: capping rebase_audio %d->%d (video=%d sync_v=%d cap_video=%d effective_latency=%d)\n",
@@ -614,7 +614,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	// then jump at burst time, creating a visible sawtooth in the A/V diff.
 	if (is_mode2_sync && !s->mode2_fill_active) {
 		heard_ts = _stream_interpolate_heard_ts( s, wall_now, heard_delay,
-			1500, 0, 1, 0, 0 );
+			1500, 0, 1, 50, 0 );
 	}
 
 	// Preserves full physical delay offset for passthrough startup.

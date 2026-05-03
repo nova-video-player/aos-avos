@@ -275,6 +275,7 @@ int stream_sync_restart( STREAM *s )
 	s->mode2_calib_measure_count = 0;
 	s->mode2_calib_last_audio_time = -1;
 	s->mode2_calib_first_avg_diff = 0;
+	s->mode2_calib_saved_calib = 0;
 	s->mode2_calib_consensus_count = 0;
 	s->mode2_calib_vel_start_wall_ms = 0;
 	s->mode2_calib_vel_start_vtime = 0;
@@ -419,6 +420,25 @@ static int _mode2_calib_diff_in_range( int diff, int min_ms, int video_ahead_max
 		return 1;
 	}
 	return 0;
+}
+
+static int _mode2_calib_target_is_plausible( STREAM *s, int target_calib, int min_ms,
+	int video_ahead_max_ms, int audio_ahead_max_ms )
+{
+	int format = 0;
+	if( s ) {
+		format = s->mode2_calib_config_valid && s->mode2_calib_config_format ?
+			s->mode2_calib_config_format : ( s->audio ? s->audio->format : 0 );
+	}
+	// DDP/JOC can carry a negative model bias that matches physical sync on
+	// tested passthrough routes. Do not "perfect" that bias away with internal
+	// calibration; positive corrections are still allowed when they pass the
+	// normal plausibility bounds.
+	if( format == WAVE_FORMAT_E_AC3_JOC && target_calib < 0 ) {
+		return 0;
+	}
+	return _mode2_calib_diff_in_range( -target_calib, min_ms,
+		video_ahead_max_ms, audio_ahead_max_ms );
 }
 
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
@@ -677,6 +697,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->mode2_calib_measure_count = 0;
 	s->mode2_calib_last_audio_time = -1;
 	s->mode2_calib_first_avg_diff = 0;
+	s->mode2_calib_saved_calib = 0;
 	s->mode2_calib_consensus_count = 0;
 	s->mode2_calib_vel_start_wall_ms = 0;
 	s->mode2_calib_vel_start_vtime = 0;
@@ -1286,7 +1307,7 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		int epoch_elapsed = wall_now - s->mode2_calib_start_wall_ms;
 		const int calib_vel_window_ms = 500;
 		const int calib_vel_min_advance_ms = 400;
-		const int calib_measure_window_ms = 1200;
+		const int calib_measure_window_ms = 800;
 		const int calib_settle_gap_ms = 250;
 		const int calib_min_ms = 10;
 		const int calib_audio_ahead_max_ms = 300;
@@ -1352,10 +1373,11 @@ DBGY serprintf("{SSV %d}} ", video_time );
 						// the startup fill anchor was poisoned, not that the route
 						// has a real multi-second latency.
 						s->mode2_calib_first_avg_diff = target_calib;
+						s->mode2_calib_saved_calib = s->mode2_latency_calibration_ms;
 						s->mode2_calib_consensus_count = 1;
 						if( target_calib > -calib_provisional_max_ms &&
 							target_calib < calib_provisional_max_ms &&
-							_mode2_calib_diff_in_range( -target_calib, calib_min_ms,
+							_mode2_calib_target_is_plausible( s, target_calib, calib_min_ms,
 								calib_video_ahead_max_ms, calib_audio_ahead_max_ms ) ) {
 							s->mode2_latency_calibration_ms = target_calib;
 							DBG serprintf("mode2_calib_provisional: window A=%d target=%d calib=%d\n",
@@ -1379,36 +1401,55 @@ DBGY serprintf("{SSV %d}} ", video_time );
 							int final_calib = (s->mode2_calib_first_avg_diff + target_calib) / 2;
 							
 							// Safety cap: only calibrate bounded, plausible sink latency offsets.
-							if ( _mode2_calib_diff_in_range( -final_calib, calib_min_ms,
+							if ( _mode2_calib_target_is_plausible( s, final_calib, calib_min_ms,
 								calib_video_ahead_max_ms, calib_audio_ahead_max_ms ) ) {
 								s->mode2_latency_calibration_ms = final_calib;
 								s->mode2_calib_state = 0; // LOCKED
 								DBG serprintf("mode2_calibration_locked: consensus reached! A=%d B=%d lock=%d calib=%d\n",
 									s->mode2_calib_first_avg_diff, target_calib, final_calib, s->mode2_latency_calibration_ms);
 							} else {
+								if( s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
+									s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
+									sfdec2_refresh_sched_anchor( s );
+								}
 								s->mode2_calib_state = 0; // SKIP (out of range)
-								DBG serprintf("mode2_calibration_skip: out of range (%d), keeping calib=%d\n",
+								DBG serprintf("mode2_calibration_skip: out of range (%d), restored calib=%d\n",
 									final_calib, s->mode2_latency_calibration_ms);
 							}
 						} else {
-							// DISAGREEMENT: Discard Window A and try again.  Keep the
-							// currently active calibration until a later pair agrees.
+							// DISAGREEMENT: discard the provisional Window A change
+							// before retrying with Window B as the new baseline.
 							int prev_target = s->mode2_calib_first_avg_diff;
+							if( s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
+								s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
+								sfdec2_refresh_sched_anchor( s );
+							}
 							s->mode2_calib_first_avg_diff = target_calib; // Window B target becomes new Window A
+							s->mode2_calib_saved_calib = s->mode2_latency_calibration_ms;
 							s->mode2_calib_start_wall_ms = wall_now + calib_settle_gap_ms;
 							s->mode2_calib_measure_sum = 0;
 							s->mode2_calib_measure_count = 0;
 							s->mode2_calib_last_audio_time = -1;
-							DBG serprintf("mode2_calib_consensus: disagreement (A=%d B=%d residual=%d current_calib=%d). Retrying.\n",
+							DBG serprintf("mode2_calib_consensus: disagreement (A=%d B=%d residual=%d restored_calib=%d). Retrying.\n",
 								prev_target, target_calib, avg_diff, s->mode2_latency_calibration_ms);
 
 							if (epoch_elapsed > 8000) {
+								if( s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
+									s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
+									sfdec2_refresh_sched_anchor( s );
+								}
 								s->mode2_calib_state = 0;
-								DBG serprintf("mode2_calib_consensus: timeout. Calibration abandoned.\n");
+								DBG serprintf("mode2_calib_consensus: timeout. Calibration abandoned with calib=%d.\n",
+									s->mode2_latency_calibration_ms);
 							}
 						}
 					}
 				} else {
+					if( s->mode2_calib_consensus_count > 0 &&
+						s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
+						s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
+						sfdec2_refresh_sched_anchor( s );
+					}
 					s->mode2_calib_state = 0;
 				}
 			}

@@ -777,6 +777,7 @@ typedef struct STREAM {
 	int		mode2_calib_measure_count;
 	int		mode2_calib_last_audio_time;
 	int		mode2_calib_first_avg_diff;
+	int		mode2_calib_saved_calib;
 	int		mode2_calib_consensus_count;
 
 	int		mode2_calib_vel_start_wall_ms;

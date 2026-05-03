@@ -637,6 +637,31 @@ int spdif_is_passthrough_on()
 	return passthrough_on;
 }
 
+int spdif_format_passthrough_supported(int format)
+{
+#ifdef CONFIG_ANDROID
+	switch( format ) {
+	case WAVE_FORMAT_AC3:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_AC3) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
+	case WAVE_FORMAT_EAC3:
+	case WAVE_FORMAT_E_AC3_JOC:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
+	case WAVE_FORMAT_DTS_HD_MA:
+	case WAVE_FORMAT_DTS_HD:
+	case WAVE_FORMAT_DTS:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
+	case WAVE_FORMAT_TRUEHD:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DOLBY_TRUEHD);
+	default:
+		return 0;
+	}
+#else
+	(void)format;
+	return 1;
+#endif
+}
+
 static STREAM_DEC_AUDIO stream_spdif = 
 {
 	.name    = "spdif",

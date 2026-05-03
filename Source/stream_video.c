@@ -412,6 +412,14 @@ DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recodin
 	}
 #ifdef CONFIG_SPDIF
 	passthrough_mode = spdif_is_passthrough_on();
+	// If passthrough is globally enabled but this format is not actually
+	// passthrough-capable on this device (e.g. TrueHD on a device without
+	// ENCODING_DOLBY_TRUEHD), fall through to PCM decode using pcm_cap,
+	// same as passthrough=0 mode. Android will route multichannel PCM as
+	// the device supports.
+	if( passthrough_mode && !spdif_format_passthrough_supported( s->audio->format ) ) {
+		passthrough_mode = 0;
+	}
 #endif
 	if( !passthrough_mode && !ac3_recoding ) {
 		int pcm_cap = libavos_get_max_pcm_channels();         // 0 if unknown

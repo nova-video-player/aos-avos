@@ -24,6 +24,7 @@ int spdif_init(AUDIO_PROPERTIES *);
 int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded );
 int spdif_set_passthrough(int on);
 int spdif_is_passthrough_on();
+int spdif_format_passthrough_supported(int format);
 void set_hdmi_supported_audio_codecs(long flag);
 long get_hdmi_supported_audio_codecs();
 int get_hdmi_supports_iec_8ch192khz(void);
@@ -33,6 +34,7 @@ static inline int spdif_init(AUDIO_PROPERTIES *a) { return 0; }
 static inline int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded ) { return 0; }
 static inline int spdif_set_passthrough(int on) { return 0; }
 static inline int spdif_is_passthrough_on() { return 0; }
+static inline int spdif_format_passthrough_supported(int format) { (void)format; return 0; }
 static inline void set_hdmi_supported_audio_codecs(long flag) {}
 static inline long get_hdmi_supported_audio_codecs() { return 0; }
 static inline int get_hdmi_supports_iec_8ch192khz(void) { return 0; }

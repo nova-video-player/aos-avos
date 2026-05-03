@@ -89,30 +89,84 @@ static AVCodecContext *avctx;
 
 static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
-static int _spdif_frame_samples(const AUDIO_PROPERTIES *a)
+static int _spdif_frame_samples(const AUDIO_PROPERTIES *a, int passthrough_mode)
 {
-	// 1. Highly preferred: parser-derived logical duration.
-	// Most FFmpeg parsers (MLP/TrueHD, EAC3) populate this after successful parsing.
-	if (aparser && aparser->duration > 0) {
-		return aparser->duration;
-	}
-
-	// 2. Secondary preference: codec-specific context metadata.
+	// 1. Primary: codec-specific context metadata (avctx.frame_size).
+	// This is more reliable than parser duration for DTS frames.
 	if (avctx && avctx->frame_size > 0) {
 		return avctx->frame_size;
 	}
 
-	// 3. Last resort: logical base units for known formats.
+	// 2. Mode 2 only: Skip parser for DTS/DTS-HD formats - parser returns wrong duration (512)
+	// that doesn't match Android mode 2 timing requirements.
+	// Use fallback directly for these formats.
+	// This restores Android mode 2 compatibility with legacy AVOS behavior.
+	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
+		    a->format == WAVE_FORMAT_DTS_HD ||
+		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
+		return 1536;
+	}
+
+	// 3. Secondary: parser-derived logical duration.
+	// Most FFmpeg parsers (MLP/TrueHD, EAC3) populate this correctly.
+	if (aparser && aparser->duration > 0) {
+		return aparser->duration;
+	}
+
+	// 4. Last resort: logical base units for known formats.
 	// These represent the standard logical frame duration regardless of compression ratio.
 	if (a) {
 		if (a->format == WAVE_FORMAT_AC3 ||
 		    a->format == WAVE_FORMAT_EAC3 ||
-		    a->format == WAVE_FORMAT_E_AC3_JOC ||
-		    a->format == WAVE_FORMAT_DTS) {
+		    a->format == WAVE_FORMAT_E_AC3_JOC) {
 			return 1536; // 32ms at 48kHz
 		}
 		if (a->format == WAVE_FORMAT_TRUEHD) {
 			return 1280; // 26.6ms logical major sync base (common parser unit)
+		}
+	}
+
+	return 0;
+}
+
+// Detailed version that captures decision path for debug logging
+static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough_mode, int *avctx_size, int *parser_duration, int *fallback_samples)
+{
+	*avctx_size = 0;
+	*parser_duration = 0;
+	*fallback_samples = 0;
+
+	// 1. Primary: codec-specific context metadata (avctx.frame_size).
+	if (avctx && avctx->frame_size > 0) {
+		*avctx_size = avctx->frame_size;
+		return avctx->frame_size;
+	}
+
+	// 2. Mode 2 only: Skip parser for DTS/DTS-HD formats.
+	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
+		    a->format == WAVE_FORMAT_DTS_HD ||
+		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
+		*fallback_samples = 1536;
+		return 1536;
+	}
+
+	// 3. Secondary: parser-derived logical duration.
+	if (aparser && aparser->duration > 0) {
+		*parser_duration = aparser->duration;
+		return aparser->duration;
+	}
+
+	// 4. Last resort: logical base units for known formats.
+	if (a) {
+		if (a->format == WAVE_FORMAT_AC3 ||
+		    a->format == WAVE_FORMAT_EAC3 ||
+		    a->format == WAVE_FORMAT_E_AC3_JOC) {
+			*fallback_samples = 1536;
+			return 1536;
+		}
+		if (a->format == WAVE_FORMAT_TRUEHD) {
+			*fallback_samples = 1280;
+			return 1280;
 		}
 	}
 
@@ -182,7 +236,7 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		frame->error = 0;
 		frame->format = a->format;
 		{
-			int samples = _spdif_frame_samples(a);
+			int samples = _spdif_frame_samples(a, passthrough_on);
 			frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : size;
 		}
 		*decoded = size;
@@ -224,10 +278,14 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			frame->format = a->format;  // Preserve codec ID (AC3/EAC3/DTS) for downstream logic
 
 			// fakeSize carries PCM-equivalent duration for timing.
-			// Use parser frame_size when available (required for variable-size EAC3 frames).
+			// Use _spdif_frame_samples() with priority: avctx.frame_size > mode2-DTS fallback (1536)
+			// > parser duration > fallback (1536 for AC3/EAC3, 1280 for TrueHD).
 			{
-				int samples = _spdif_frame_samples(a);
+				int avctx_size, parser_duration, fallback_samples;
+				int samples = _spdif_frame_samples_debug(a, passthrough_on, &avctx_size, &parser_duration, &fallback_samples);
 				if (samples > 0) {
+					DBGCA2 serprintf("Mode 2 timing: format=%04X samples=%d fakeSize=%d avctx_size=%d parser_dur=%d fallback=%d\n",
+						a->format, samples, samples * a->bytesPerFrame, avctx_size, parser_duration, fallback_samples);
 					frame->fakeSize = samples * a->bytesPerFrame;
 				} else {
 					// Fallback to physical size if parser is blind
@@ -242,7 +300,7 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			spdif_put( out, out_size, &dummy );
 			spdif_get( frame );
 			{
-				int samples = _spdif_frame_samples(a);
+				int samples = _spdif_frame_samples(a, passthrough_on);
 				if (samples > 0) {
 					frame->fakeSize = samples * a->bytesPerFrame;
 				}

@@ -97,6 +97,34 @@ static int stream_audio_format_supports_passthrough(int format)
 	}
 }
 
+static int stream_audio_format_passthrough_available(int format)
+{
+	if( !stream_audio_format_supports_passthrough( format ) ) {
+		return 0;
+	}
+#ifdef CONFIG_SPDIF
+	return spdif_format_passthrough_supported( format );
+#else
+	return 1;
+#endif
+}
+
+static int stream_audio_requested_passthrough_for_format(int format)
+{
+#ifdef CONFIG_SPDIF
+	int passthrough_mode = spdif_is_passthrough_on();
+	if( passthrough_mode && !stream_audio_format_passthrough_available( format ) ) {
+		DBG serprintf("stream_audio: passthrough mode %d disabled for unsupported format %04X\n",
+			passthrough_mode, format);
+		passthrough_mode = 0;
+	}
+	return passthrough_mode;
+#else
+	(void)format;
+	return 0;
+#endif
+}
+
 void stream_audio_reset_ac3_passthrough_state(void)
 {
 	ac3_sink_configured = 0;
@@ -197,17 +225,15 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 		}
 	}
 
-#ifdef CONFIG_SPDIF
-	// When passthrough is disabled and AC3 recoding is disabled,
-	// audio will be decoded to PCM regardless of source format.
-	// Force sink format to PCM to ensure AudioTrack is created with correct format.
-	// (AC3 recoding paths will override this to WAVE_FORMAT_AC3 after calling this function)
-	if( !spdif_is_passthrough_on() && !libavos_get_ac3_recoding_enabled() ) {
+	// When passthrough is disabled, or when the current route does not support
+	// this compressed format, decode to PCM and configure the sink as PCM before
+	// the first decoded frame arrives.
+	if( !libavos_get_ac3_recoding_enabled() &&
+	    !stream_audio_requested_passthrough_for_format( sink->format ) ) {
 		if( sink->format != WAVE_FORMAT_PCM ) {
 			sink->format = WAVE_FORMAT_PCM;
 		}
 	}
-#endif
 }
 
 static int stream_audio_setup_ac3_sink(STREAM *s)
@@ -663,10 +689,10 @@ DBGS serprintf("~");
 
 		int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 		int ac3_recoding = libavos_get_ac3_recoding_enabled();
-		int passthrough_supported = stream_audio_format_supports_passthrough( s->audio->format );
+		int passthrough_supported = stream_audio_format_passthrough_available( s->audio->format );
 		int passthrough_active = passthrough && passthrough_supported;
 		if( passthrough && !passthrough_supported ) {
-			DBG serprintf("stream_audio: codec %04X not supported for passthrough, decoding as PCM\n",
+			DBG serprintf("stream_audio: codec %04X not supported by route for passthrough, decoding as PCM\n",
 				s->audio->format);
 			if( s->audio_sink ) {
 				s->audio_sink->set_passthrough( s, 0 );
@@ -1060,18 +1086,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// Reconfigure audio sink with new parameters
 					if( s->audio_sink ) {
 						if( s->audio_sink_open ) {
-#ifdef CONFIG_SPDIF
-							int passthrough_mode = spdif_is_passthrough_on();
-							// s->audio->format is already updated to the new format at this point.
-							// If the new format is not passthrough-capable (e.g. PCM 0x0001 after
-							// TrueHD fallback decode), use the PCM reconfigure path so the HAL
-							// passthrough reset sequence is not applied to what is purely a PCM track.
-							if( passthrough_mode && !spdif_format_passthrough_supported( s->audio->format ) ) {
-								passthrough_mode = 0;
-							}
-#else
-							int passthrough_mode = 0;
-#endif
+							int passthrough_mode = stream_audio_requested_passthrough_for_format( s->audio->format );
 							if( passthrough_mode == 0 ) {
 								s->audio_sink->flush( s );
 							}
@@ -1161,11 +1176,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							if( !libavos_get_ac3_recoding_enabled() || !ac3_sink_configured ) {
 								stream_audio_copy_sink_from_source( s );
 							}
-							// Set passthrough mode based on whether SPDIF passthrough is enabled
-							int passthrough_mode = 0;
+							// Set passthrough mode based on whether this route supports the sink format.
+							int passthrough_mode = stream_audio_requested_passthrough_for_format( sink->format );
 #ifdef CONFIG_SPDIF
-							if(spdif_is_passthrough_on() && spdif_init(sink)) {
-								passthrough_mode = spdif_is_passthrough_on();
+							if(passthrough_mode && spdif_init(sink)) {
 								DBG serprintf("stream_audio: regular passthrough enabled, mode=%d\n", passthrough_mode);
 							}
 #endif
@@ -1694,16 +1708,21 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 				// Don't update audio_format_configured - let _audio_decode set it.
 				DBG serprintf("AC3 recoding: waiting for AC3 sink setup (source=%04X, sink=%04X)\n",
 					s->audio->format, sink->format);
-			} else if(spdif_is_passthrough_on() && spdif_init(sink) && s->audio_sink) {
-				// Only call spdif_init if passthrough is actually enabled to avoid unnecessary side effects
-				s->audio_sink->set_passthrough(s, spdif_is_passthrough_on() );
-				audio_format_configured = sink->format;
-			} else
+			} else {
+				int passthrough_mode = stream_audio_requested_passthrough_for_format( sink->format );
+				if(passthrough_mode && spdif_init(sink) && s->audio_sink) {
+					// Only call spdif_init if passthrough is actually enabled to avoid unnecessary side effects
+					s->audio_sink->set_passthrough(s, passthrough_mode );
+					audio_format_configured = sink->format;
+				} else
 #endif
 			{
 				s->audio_sink->set_passthrough(s, 0);
 				audio_format_configured = sink->format;
 			}
+#ifdef CONFIG_SPDIF
+			}
+#endif
 		}
 skip_format_change:
 

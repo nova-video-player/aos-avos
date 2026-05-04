@@ -1062,6 +1062,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( s->audio_sink_open ) {
 #ifdef CONFIG_SPDIF
 							int passthrough_mode = spdif_is_passthrough_on();
+							// s->audio->format is already updated to the new format at this point.
+							// If the new format is not passthrough-capable (e.g. PCM 0x0001 after
+							// TrueHD fallback decode), use the PCM reconfigure path so the HAL
+							// passthrough reset sequence is not applied to what is purely a PCM track.
+							if( passthrough_mode && !spdif_format_passthrough_supported( s->audio->format ) ) {
+								passthrough_mode = 0;
+							}
 #else
 							int passthrough_mode = 0;
 #endif

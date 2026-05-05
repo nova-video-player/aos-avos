@@ -1304,6 +1304,12 @@ ERR		LOG("track not valid, error");
 	if (!env_local) {
 		return -1;
 	}
+	// Flush buffered audio before stop. The track is in PAUSED state (stream_pause()
+	// is always called before audiotrack_stop()), so flush() is valid here.
+	// Without this, AudioTrack.stop() starts a drain into the HAL pipeline; when
+	// release() is called immediately after, residual HAL audio from the old file
+	// can overlap the startup of the next playback and corrupt its timing window.
+	call_void_method_with_env(at, env_local, "flush", "()V");
 	call_void_method_with_env(at, env_local, "stop", "()V");
 	at->timestamp_written_offset = at->i_samples_written;
 	at->last_timestamp_frames = 0;

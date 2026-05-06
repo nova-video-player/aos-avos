@@ -592,21 +592,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		}
 	}
 
-#ifdef CONFIG_ANDROID
-	// 2. LATE-AUDIO GUARD (PCM only)
-	// Passthrough modes intentionally use platform static latency as their stable
-	// output delay. Do not suppress that offset here; this guard only handles PCM
-	// starts where static latency can over-shift heard time before dynamic timing
-	// has settled.
-	if( !is_mode2_sync && !passthrough_mode && delay_valid && s->put_time_mode && s->audio_ctx &&
-		s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
-		int audio_lead = s->audio_time - s->sync_v_time;
-		if( static_latency > 0 && s->smoothed_av_delay == static_latency && audio_lead > 150 ) {
-			heard_delay = 0;
-		}
-	}
-#endif
-
 	if (!delay_valid) {
 #ifdef CONFIG_ANDROID
 		// When atempo is active, include filter delay in heard-time even if timing is invalid.
@@ -1217,10 +1202,13 @@ int stream_sync_video( STREAM *s, int video_time )
 
 		_sync_diag_log_state(s, "video", &delay_status);
 
-		// Late-audio start guard when dynamic delay is disabled:
-		// static latency is always "valid" in that mode and can over-shift heard time.
-		// If audio starts significantly after video, suppress anchor validity briefly.
+		// PCM static-start guard: keep heard_ts calculation pure and handle the
+		// late-audio startup heuristic here as a video-release decision. Static
+		// fallback can over-shift heard time before dynamic timing settles, so if
+		// audio is already far ahead of early video, briefly suppress anchoring.
 		if( !passthrough_mode && anchor_valid && delay_valid == 1 && s->put_time_mode &&
+			delay_status.source == STREAM_DELAY_SOURCE_STATIC &&
+			delay_status.effective_delay_ms > 0 &&
 			s->audio_time > 0 && s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
 			int audio_lead = s->audio_time - s->sync_v_time;
 			if( audio_lead > 150 ) {

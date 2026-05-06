@@ -126,6 +126,14 @@ Rules:
    - If `delay_valid` is false, heard_delay = raw delay from AudioTrack
      (playhead/static). If atempo is active, include atempo chain delay so
      speed changes remain latency-aware.
+   - Keep heard_ts calculation pure: do not suppress static delay inside
+     `stream_get_heard_audio_ts()` to handle late audio startup.
+
+3b) PCM late-audio startup guard:
+   - If the delay source is static fallback and audio starts significantly ahead
+     of early video, suppress video anchoring briefly in `stream_sync_video()`.
+   - This keeps the heuristic as a video-release decision instead of mutating the
+     audible-time estimate used by all anchors.
 
 4) Mapping on speed change:
    - Default: anchor at `heard_audio_ts`.

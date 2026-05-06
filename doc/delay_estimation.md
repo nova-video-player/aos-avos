@@ -145,6 +145,11 @@ Rules:
      static latency; when delay becomes valid (streak), rebase to measured delay.
    - android_sync=1 PCM: free-run while delay invalid; when delay becomes valid
      (streak), a one-time rebase aligns to measured delay.
+   - On the first resumed PCM write, AVOS may perform an invalid-delay rebase
+     using static latency to avoid a large offset while AudioTrack timing warms
+     up. At normal speed, if that rebase fired, the later measured-delay rebase
+     is disarmed because it has caused visible snaps when sync is already near
+     zero. Non-1x PCM keeps the measured-delay rebase armed.
    - android_sync=1 passthrough / AC3 recoding: static passthrough delay is
      considered valid immediately, but video resume hold is released only after
      the first resumed audio write commits. This avoids anchoring before

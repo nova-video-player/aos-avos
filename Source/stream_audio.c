@@ -370,6 +370,55 @@ DBGA serprintf(" <+%d> ", time);
 	}
 }
 
+static int _stream_audio_resume_rebase_invalid_delay( STREAM *s, int passthrough_active )
+{
+	if( !s || !s->audio_ctx || passthrough_active ||
+		s->video_time < 0 || s->audio_time < 0 ||
+		audio_interface_is_delay_valid( s->audio_ctx ) ) {
+		return 0;
+	}
+
+	int static_latency = audio_interface_get_latency( s->audio_ctx );
+	int old_audio_time = s->audio_time;
+	int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
+	int new_audio_time = rebase_video_time;
+	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
+	if( static_latency > 0 ) {
+		new_audio_time += static_latency;
+	}
+	_set_audio_time( s, new_audio_time );
+	DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d sync_v=%d latency=%d source=%s)\n",
+		old_audio_time, s->audio_time, s->video_time, s->sync_v_time,
+		static_latency, delay_source ? delay_source : "none");
+	return 1;
+}
+
+static int _stream_audio_resume_rebase_valid_delay( STREAM *s, int passthrough_active )
+{
+	if( !s || !s->audio_resume_valid_pending || !s->audio_ctx || passthrough_active ||
+		s->video_time < 0 || s->audio_time < 0 ||
+		!audio_interface_is_delay_valid( s->audio_ctx ) ||
+		audio_interface_get_delay_valid_streak( s->audio_ctx ) < 3 ) {
+		return 0;
+	}
+
+	int delay = audio_interface_get_delay( s->audio_ctx );
+	int streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
+	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
+	int old_audio_time = s->audio_time;
+	int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
+	int new_audio_time = rebase_video_time;
+	if( delay > 0 ) {
+		new_audio_time += delay;
+	}
+	_set_audio_time( s, new_audio_time );
+	s->audio_resume_valid_pending = 0;
+	DBG serprintf("resume_rebase_delay_valid: audio_time %d -> %d (video=%d sync_v=%d delay=%d streak=%d source=%s)\n",
+		old_audio_time, s->audio_time, s->video_time, s->sync_v_time, delay,
+		streak, delay_source ? delay_source : "none");
+	return 1;
+}
+
 void stream_audio_debug( STREAM *s, int samples, int decoded, int time );
 
 // ************************************************************
@@ -1365,22 +1414,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// Sabrina (Chromecast 4K) often reports invalid AudioTrack delay at resume.
 						// Rebase once here using static latency to avoid a large AV offset while
 						// we wait for a stable timestamp.
-						int invalid_delay_rebase_fired = 0;
-						if( s->audio_ctx && !passthrough_active &&
-							s->video_time >= 0 && s->audio_time >= 0 &&
-							!audio_interface_is_delay_valid( s->audio_ctx ) ) {
-							int static_latency = audio_interface_get_latency( s->audio_ctx );
-							int old_audio_time = s->audio_time;
-							int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
-							int new_audio_time = rebase_video_time;
-							if( static_latency > 0 ) {
-								new_audio_time += static_latency;
-							}
-							_set_audio_time( s, new_audio_time );
-							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d sync_v=%d latency=%d)\n",
-								old_audio_time, s->audio_time, s->video_time, s->sync_v_time, static_latency);
-							invalid_delay_rebase_fired = 1;
-						}
+						int invalid_delay_rebase_fired =
+							_stream_audio_resume_rebase_invalid_delay( s, passthrough_active );
 						// Do not arm delay-valid rebase for passthrough/system-encapsulation:
 						// AudioTrack delay validity does not represent true encoded pipeline latency.
 						s->audio_resume_valid_pending = passthrough_active ? 0 : 1;
@@ -1519,27 +1554,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 						}
 					}
+
 					// If delay becomes valid after resume, rebase once using measured delay.
 					// On Sabrina, the first "valid" timestamp can be unstable; wait for a small
 					// success streak before snapping to avoid visible jitter.
-					if( s->audio_resume_valid_pending && s->audio_ctx &&
-						!passthrough_active &&
-						s->video_time >= 0 && s->audio_time >= 0 &&
-						audio_interface_is_delay_valid( s->audio_ctx ) &&
-						audio_interface_get_delay_valid_streak( s->audio_ctx ) >= 3 ) {
-						int delay = audio_interface_get_delay( s->audio_ctx );
-						int old_audio_time = s->audio_time;
-						int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
-						int new_audio_time = rebase_video_time;
-						if( delay > 0 ) {
-							new_audio_time += delay;
-						}
-						_set_audio_time( s, new_audio_time );
-						s->audio_resume_valid_pending = 0;
-						DBG serprintf("resume_rebase_delay_valid: audio_time %d -> %d (video=%d sync_v=%d delay=%d streak=%d)\n",
-							old_audio_time, s->audio_time, s->video_time, s->sync_v_time, delay,
-							audio_interface_get_delay_valid_streak( s->audio_ctx ));
-					}
+					_stream_audio_resume_rebase_valid_delay( s, passthrough_active );
 
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time

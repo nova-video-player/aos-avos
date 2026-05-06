@@ -524,8 +524,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	}
 
 #ifdef CONFIG_ANDROID
-	// 2. LATE-AUDIO GUARD (Standard logic for Mode 1 or small latencies)
-	if( !is_mode2_sync && delay_valid && s->put_time_mode && s->audio_ctx &&
+	// 2. LATE-AUDIO GUARD (PCM only)
+	// Passthrough modes intentionally use platform static latency as their stable
+	// output delay. Do not suppress that offset here; this guard only handles PCM
+	// starts where static latency can over-shift heard time before dynamic timing
+	// has settled.
+	if( !is_mode2_sync && !passthrough_mode && delay_valid && s->put_time_mode && s->audio_ctx &&
 		s->sync_v_time >= 0 && s->sync_v_time < 1000 ) {
 		int audio_lead = s->audio_time - s->sync_v_time;
 		if( static_latency > 0 && s->smoothed_av_delay == static_latency && audio_lead > 150 ) {

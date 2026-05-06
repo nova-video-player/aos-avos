@@ -139,8 +139,8 @@ Rules:
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
   - Passthrough mode 2 (raw): playhead/timestamp are unreliable for delay
-    estimation; the scheduler uses static latency plus the mode 2 calibration
-    and fill-window guards described in `sync_anchoring_rules.md`.
+    estimation; the scheduler uses platform static latency plus the fill-window
+    and interpolation guards described in `sync_anchoring_rules.md`.
 - Cached/throttled AudioTrack delay reads preserve validity when the last
   trusted source was playhead-based (`last_good_dynamic_valid`), so
   `cached(throttle)` does not immediately invalidate a newly trusted delay.

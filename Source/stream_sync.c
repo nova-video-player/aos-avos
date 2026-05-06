@@ -269,17 +269,8 @@ int stream_sync_restart( STREAM *s )
 	s->mode2_fill_active = 0;
 	s->mode2_fill_start_wall_ms = 0;
 	s->mode2_fill_start_pts = STREAM_NO_PTS_VALUE;
-	s->mode2_calib_state = 0;
-	s->mode2_calib_start_wall_ms = 0;
-	s->mode2_calib_measure_sum = 0;
-	s->mode2_calib_measure_count = 0;
-	s->mode2_calib_last_audio_time = -1;
-	s->mode2_calib_first_avg_diff = 0;
-	s->mode2_calib_saved_calib = 0;
-	s->mode2_calib_consensus_count = 0;
-	s->mode2_calib_vel_start_wall_ms = 0;
-	s->mode2_calib_vel_start_vtime = 0;
-	s->mode2_calib_vel_check_done = 0;
+	s->mode2_fill_vel_start_wall_ms = 0;
+	s->mode2_fill_vel_start_audio = 0;
 	s->mode2_last_anchor_audio = -1;
 	s->mode2_last_anchor_wall_ms = 0;
 	s->interpolated_last_heard_ts = -1;
@@ -408,39 +399,6 @@ static int _stream_interpolate_heard_ts( STREAM *s, int wall_now, int heard_dela
 	return heard_ts;
 }
 
-static int _mode2_calib_diff_in_range( int diff, int min_ms, int video_ahead_max_ms, int audio_ahead_max_ms )
-{
-	// Video-ahead offsets can be as large as the passthrough sink latency when
-	// direct-output accounting stalls; audio-ahead corrections stay tighter to
-	// avoid overcompensating on transient burst timing.
-	if( diff > min_ms && diff < video_ahead_max_ms ) {
-		return 1;
-	}
-	if( diff < -min_ms && diff > -audio_ahead_max_ms ) {
-		return 1;
-	}
-	return 0;
-}
-
-static int _mode2_calib_target_is_plausible( STREAM *s, int target_calib, int min_ms,
-	int video_ahead_max_ms, int audio_ahead_max_ms )
-{
-	int format = 0;
-	if( s ) {
-		format = s->mode2_calib_config_valid && s->mode2_calib_config_format ?
-			s->mode2_calib_config_format : ( s->audio ? s->audio->format : 0 );
-	}
-	// DDP/JOC can carry a negative model bias that matches physical sync on
-	// tested passthrough routes. Do not "perfect" that bias away with internal
-	// calibration; positive corrections are still allowed when they pass the
-	// normal plausibility bounds.
-	if( format == WAVE_FORMAT_E_AC3_JOC && target_calib < 0 ) {
-		return 0;
-	}
-	return _mode2_calib_diff_in_range( -target_calib, min_ms,
-		video_ahead_max_ms, audio_ahead_max_ms );
-}
-
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
@@ -470,11 +428,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
 	int wall_now = atime();
 
-	// Apply Permanent Calibration (Mode 2 only)
-	if (is_mode2_sync) {
-		heard_delay += s->mode2_latency_calibration_ms;
-	}
-
 	// 1. DYNAMIC STARTUP SHIELD (Mode 2 Fill Window)
 	if (is_mode2_sync) {
 		// Initialize fill window if we are at the very start of a seek epoch
@@ -482,32 +435,27 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			s->mode2_fill_active = 1;
 			s->mode2_fill_start_wall_ms = wall_now;
 			s->mode2_fill_start_pts = s->audio_time;
-			// Reset velocity check for new fill
-			s->mode2_calib_vel_start_wall_ms = wall_now;
-			s->mode2_calib_vel_start_vtime = s->audio_time; // Borrow for audio velocity check
+			s->mode2_fill_vel_start_wall_ms = wall_now;
+			s->mode2_fill_vel_start_audio = s->audio_time;
 			DBG serprintf("mode2_fill_start: wall=%d pts=%d video=%d\n", 
 				wall_now, s->mode2_fill_start_pts, s->video_time);
 		}
 
 		if (s->mode2_fill_active) {
 			int fill_duration = wall_now - s->mode2_fill_start_wall_ms;
-			int effective_latency = static_latency + s->mode2_latency_calibration_ms;
+			int effective_latency = static_latency;
 			if( effective_latency < 0 ) {
 				effective_latency = 0;
 			}
-
-			// AUDIO VELOCITY GATE: Wait for audio_time to advance at 1.0x speed for 500ms
-			// as a signal that the physical playhead is physically moving.
-			int audio_vel_elapsed = wall_now - s->mode2_calib_vel_start_wall_ms;
+			int audio_vel_elapsed = wall_now - s->mode2_fill_vel_start_wall_ms;
 			int real_dynamic = 0;
-			if (audio_vel_elapsed >= 500) {
-				int a_adv = s->audio_time - s->mode2_calib_vel_start_vtime;
-				if (a_adv >= 450) {
+			if( audio_vel_elapsed >= 500 ) {
+				int a_adv = s->audio_time - s->mode2_fill_vel_start_audio;
+				if( a_adv >= 450 ) {
 					real_dynamic = 1;
 				} else {
-					// Reset audio velocity window and keep waiting
-					s->mode2_calib_vel_start_wall_ms = wall_now;
-					s->mode2_calib_vel_start_vtime = s->audio_time;
+					s->mode2_fill_vel_start_wall_ms = wall_now;
+					s->mode2_fill_vel_start_audio = s->audio_time;
 				}
 			}
 
@@ -555,13 +503,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				// SEAMLESS HANDOFF: Force the video scheduler to refresh its anchor
 				// using the newly rebased timeline to avoid a discontinuity jump.
 				sfdec2_refresh_sched_anchor( s );
-
-				// Transition to Velocity Stabilization Phase (Video)
-				s->mode2_calib_state = 1;
-				s->mode2_calib_vel_start_wall_ms = wall_now;
-				s->mode2_calib_vel_start_vtime = s->video_time;
-				s->mode2_calib_vel_check_done = 0;
-				s->mode2_calib_start_wall_ms = wall_now; // Epoch start for timeout
 
 				// Initialize Interpolator Reference for a perfect handoff
 				s->mode2_last_anchor_audio = s->audio_time;
@@ -651,10 +592,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	static int last_diag_wall = 0;
 	if (wall_now > last_diag_wall + 2000) {
 		last_diag_wall = wall_now;
-		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d dyn=%d fill=%d calib_st=%d calib=%d\n",
+		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d dyn=%d fill=%d\n",
 			wall_now, s->audio_time, heard_ts, heard_delay, s->smoothed_av_delay, 
-			delay_status.effective_delay_ms, delay_status.is_dynamic, s->mode2_fill_active,
-			s->mode2_calib_state, s->mode2_latency_calibration_ms);
+			delay_status.effective_delay_ms, delay_status.is_dynamic, s->mode2_fill_active);
 	}
 
 	return heard_ts;
@@ -691,27 +631,11 @@ int stream_sync_init( STREAM *s, int time )
 	s->mode2_fill_active = 0;
 	s->mode2_fill_start_wall_ms = 0;
 	s->mode2_fill_start_pts = STREAM_NO_PTS_VALUE;
-	s->mode2_calib_state = 0;
-	s->mode2_calib_start_wall_ms = 0;
-	s->mode2_calib_measure_sum = 0;
-	s->mode2_calib_measure_count = 0;
-	s->mode2_calib_last_audio_time = -1;
-	s->mode2_calib_first_avg_diff = 0;
-	s->mode2_calib_saved_calib = 0;
-	s->mode2_calib_consensus_count = 0;
-	s->mode2_calib_vel_start_wall_ms = 0;
-	s->mode2_calib_vel_start_vtime = 0;
-	s->mode2_calib_vel_check_done = 0;
+	s->mode2_fill_vel_start_wall_ms = 0;
+	s->mode2_fill_vel_start_audio = 0;
 	s->mode2_last_anchor_audio = -1;
 	s->mode2_last_anchor_wall_ms = 0;
 	s->interpolated_last_heard_ts = -1;
-	s->mode2_latency_calibration_ms = 0;
-	s->mode2_calib_config_valid = 0;
-	s->mode2_calib_config_passthrough = 0;
-	s->mode2_calib_config_format = 0;
-	s->mode2_calib_config_rate = 0;
-	s->mode2_calib_config_channels = 0;
-	s->mode2_calib_config_bits = 0;
 
 	if( time != -1 ) {
 		s->video_time = time;
@@ -1065,8 +989,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				(s->sink_ref_time == -1 || s->sync_a_time == -1);
 
 			if (diag_log) {
-				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d mode2_fill=%d calib_st=%d\n",
-					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts, s->mode2_fill_active, s->mode2_calib_state);
+				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d mode2_fill=%d\n",
+					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts, s->mode2_fill_active);
 			}
 			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
@@ -1120,8 +1044,8 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	if( s->put_time_mode && s->audio_time != -1 ) {
 		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
 		// CRITICAL: For Mode 2, use the raw logical heard-time for flow control.
-		// Decouple from synthetic wall-clock pacing (fill window) and calibration biases
-		// to prevent the audio thread from blocking itself.
+		// Decouple from synthetic wall-clock pacing (fill window) to prevent the audio
+		// thread from blocking itself.
 		int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 		int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
 		if (is_mode2_sync) {
@@ -1296,164 +1220,6 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		s->video_sink->put_time( s->video_sink, anchor_ts );
 		s->sink_ref_time = anchor_ts;
 		s->vid_ref_time = s->video_time;
-	}
-
-	// CALIBRATION MEASUREMENT (Mode 2 only)
-	// Measurement is now performed in the video thread because in put_time_mode
-	// steady-state synchronization is video-driven. The audio thread (stream_sync_audio)
-	// often early-returns before reaching the sync check block.
-	if (s->mode2_calib_state == 1) {
-		int wall_now = atime();
-		int epoch_elapsed = wall_now - s->mode2_calib_start_wall_ms;
-		const int calib_vel_window_ms = 500;
-		const int calib_vel_min_advance_ms = 400;
-		const int calib_measure_window_ms = 800;
-		const int calib_settle_gap_ms = 250;
-		const int calib_min_ms = 10;
-		const int calib_audio_ahead_max_ms = 300;
-		const int calib_consensus_ms = 20;
-		const int calib_provisional_max_ms = 500;
-		// audio_ctx may be absent during teardown; fall back to the conservative
-		// audio-ahead cap instead of deriving a large latency-based range.
-		int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
-		int calib_video_ahead_max_ms = static_latency > 100 ?
-			static_latency - 50 : calib_audio_ahead_max_ms;
-		if( calib_video_ahead_max_ms < calib_audio_ahead_max_ms ) {
-			calib_video_ahead_max_ms = calib_audio_ahead_max_ms;
-		} else if( calib_video_ahead_max_ms > 1200 ) {
-			calib_video_ahead_max_ms = 1200;
-		}
-
-		if (!s->mode2_calib_vel_check_done) {
-			// VELOCITY GATE: Wait for video pipeline to reach 1.0x speed
-			int vel_elapsed = wall_now - s->mode2_calib_vel_start_wall_ms;
-			if (vel_elapsed >= calib_vel_window_ms) {
-				int v_adv = s->video_time - s->mode2_calib_vel_start_vtime;
-				if (v_adv >= calib_vel_min_advance_ms) {
-					// STABLE: Start the first bounded measurement window now
-					s->mode2_calib_vel_check_done = 1;
-					s->mode2_calib_start_wall_ms = wall_now;
-					s->mode2_calib_measure_sum = 0;
-					s->mode2_calib_measure_count = 0;
-					s->mode2_calib_last_audio_time = -1;
-					DBG serprintf("mode2_calib_gate: opened (v_adv=%d over %dms). Starting measurement.\n", v_adv, vel_elapsed);
-				} else {
-					// Still stalled/ramping: reset velocity window and keep waiting
-					s->mode2_calib_vel_start_wall_ms = wall_now;
-					s->mode2_calib_vel_start_vtime = s->video_time;
-					if (epoch_elapsed > 5000) {
-						// Safety Timeout: give up on calibration for this epoch
-						s->mode2_calib_state = 0;
-						DBG serprintf("mode2_calib_gate: timeout (v_adv=%d). Skipping calibration.\n", v_adv);
-					}
-				}
-			}
-		} else {
-			// MEASUREMENT PHASE: Pipeline is stable, accumulate A/V diff samples
-			int calib_diff = diff;
-			// SEAMLESS SETTLE GAP: Only accumulate if we have passed the start wall
-			// (handles the 500ms silent gap between Window A and B).
-			if (wall_now >= s->mode2_calib_start_wall_ms &&
-				(s->mode2_calib_last_audio_time < 0 ||
-					s->audio_time > s->mode2_calib_last_audio_time)) {
-				s->mode2_calib_measure_sum += calib_diff;
-				s->mode2_calib_measure_count++;
-				s->mode2_calib_last_audio_time = s->audio_time;
-			}
-
-			int measurement_elapsed = wall_now - s->mode2_calib_start_wall_ms;
-			if (measurement_elapsed >= calib_measure_window_ms) {
-				if (s->mode2_calib_measure_count > 0) {
-					int avg_diff = s->mode2_calib_measure_sum / s->mode2_calib_measure_count;
-					int target_calib = s->mode2_latency_calibration_ms - avg_diff;
-
-					if (s->mode2_calib_consensus_count == 0) {
-						// Window A complete: apply only bounded, plausible
-						// corrections provisionally. Large candidates usually mean
-						// the startup fill anchor was poisoned, not that the route
-						// has a real multi-second latency.
-						s->mode2_calib_first_avg_diff = target_calib;
-						s->mode2_calib_saved_calib = s->mode2_latency_calibration_ms;
-						s->mode2_calib_consensus_count = 1;
-						if( target_calib > -calib_provisional_max_ms &&
-							target_calib < calib_provisional_max_ms &&
-							_mode2_calib_target_is_plausible( s, target_calib, calib_min_ms,
-								calib_video_ahead_max_ms, calib_audio_ahead_max_ms ) ) {
-							s->mode2_latency_calibration_ms = target_calib;
-							DBG serprintf("mode2_calib_provisional: window A=%d target=%d calib=%d\n",
-								avg_diff, target_calib, s->mode2_latency_calibration_ms);
-							sfdec2_refresh_sched_anchor( s );
-						} else {
-							DBG serprintf("mode2_calib_candidate: window A=%d target=%d current_calib=%d. Waiting for window B.\n",
-								avg_diff, target_calib, s->mode2_latency_calibration_ms);
-						}
-						s->mode2_calib_start_wall_ms = wall_now + calib_settle_gap_ms;
-						s->mode2_calib_measure_sum = 0;
-						s->mode2_calib_measure_count = 0;
-						s->mode2_calib_last_audio_time = -1;
-					} else {
-						// Window B complete: Check for Agreement (Consensus)
-						int target_agreement = target_calib - s->mode2_calib_first_avg_diff;
-						if (target_agreement < 0) target_agreement = -target_agreement;
-
-						if (target_agreement <= calib_consensus_ms) {
-							// CONSENSUS REACHED: Lock the average of both absolute targets.
-							int final_calib = (s->mode2_calib_first_avg_diff + target_calib) / 2;
-							
-							// Safety cap: only calibrate bounded, plausible sink latency offsets.
-							if ( _mode2_calib_target_is_plausible( s, final_calib, calib_min_ms,
-								calib_video_ahead_max_ms, calib_audio_ahead_max_ms ) ) {
-								s->mode2_latency_calibration_ms = final_calib;
-								s->mode2_calib_state = 0; // LOCKED
-								DBG serprintf("mode2_calibration_locked: consensus reached! A=%d B=%d lock=%d calib=%d\n",
-									s->mode2_calib_first_avg_diff, target_calib, final_calib, s->mode2_latency_calibration_ms);
-							} else {
-								if( s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
-									s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
-									sfdec2_refresh_sched_anchor( s );
-								}
-								s->mode2_calib_state = 0; // SKIP (out of range)
-								DBG serprintf("mode2_calibration_skip: out of range (%d), restored calib=%d\n",
-									final_calib, s->mode2_latency_calibration_ms);
-							}
-						} else {
-							// DISAGREEMENT: discard the provisional Window A change
-							// before retrying with Window B as the new baseline.
-							int prev_target = s->mode2_calib_first_avg_diff;
-							if( s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
-								s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
-								sfdec2_refresh_sched_anchor( s );
-							}
-							s->mode2_calib_first_avg_diff = target_calib; // Window B target becomes new Window A
-							s->mode2_calib_saved_calib = s->mode2_latency_calibration_ms;
-							s->mode2_calib_start_wall_ms = wall_now + calib_settle_gap_ms;
-							s->mode2_calib_measure_sum = 0;
-							s->mode2_calib_measure_count = 0;
-							s->mode2_calib_last_audio_time = -1;
-							DBG serprintf("mode2_calib_consensus: disagreement (A=%d B=%d residual=%d restored_calib=%d). Retrying.\n",
-								prev_target, target_calib, avg_diff, s->mode2_latency_calibration_ms);
-
-							if (epoch_elapsed > 8000) {
-								if( s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
-									s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
-									sfdec2_refresh_sched_anchor( s );
-								}
-								s->mode2_calib_state = 0;
-								DBG serprintf("mode2_calib_consensus: timeout. Calibration abandoned with calib=%d.\n",
-									s->mode2_latency_calibration_ms);
-							}
-						}
-					}
-				} else {
-					if( s->mode2_calib_consensus_count > 0 &&
-						s->mode2_latency_calibration_ms != s->mode2_calib_saved_calib ) {
-						s->mode2_latency_calibration_ms = s->mode2_calib_saved_calib;
-						sfdec2_refresh_sched_anchor( s );
-					}
-					s->mode2_calib_state = 0;
-				}
-			}
-		}
 	}
 
 	// Legacy post-sink pipelines needed a large early-start allowance because

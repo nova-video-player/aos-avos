@@ -507,15 +507,13 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
-	int calib_st = (p->s) ? p->s->mode2_calib_state : -1;
-
 	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
 	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor ) {
 		allow_reanchor = 0;
 	}
 	DBGSI serprintf(
-		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d thresh=%d streak=%d speed=%.3f speed_changed=%d disc=%d reanchor_disc=%d grace=%d no_sched=%d allow_reanchor=%d calib_st=%d\n",
+		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d thresh=%d streak=%d speed=%.3f speed_changed=%d disc=%d reanchor_disc=%d grace=%d no_sched=%d allow_reanchor=%d\n",
 		time,
 		now_ms,
 		p->venc_put_time,
@@ -533,8 +531,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		reanchor_discontinuity,
 		in_grace,
 		no_sched_anchor,
-		allow_reanchor,
-		calib_st);
+		allow_reanchor);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 	if (allow_reanchor) {

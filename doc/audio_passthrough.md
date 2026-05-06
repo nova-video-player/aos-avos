@@ -148,10 +148,9 @@ Native determines IEC support by inspecting codec flags set by Java:
 - `atempo` may still be instantiated for later non-passthrough speed changes,
   but no samples flow through it in passthrough and its delay is not counted in
   passthrough / AC3 recoding sync or speed-anchor calculations.
-- Mode 2 keeps a bounded latency calibration on top of static latency. The
-  calibration survives seeks for the same output configuration and is reset
-  when passthrough mode, encoded format, sample rate, channel count, or bit
-  depth changes.
+- Mode 2 uses the platform-reported static latency (`AudioTrack.getLatency()` /
+  `getOutputLatency`) plus wall-clock interpolation for bursty compressed
+  writes. There is no adaptive per-route calibration layer.
 
 ## State Diagram
 
@@ -194,9 +193,9 @@ Native determines IEC support by inspecting codec flags set by Java:
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
 - **Mode 2 A/V timing**: timing is based on logical PCM-equivalent duration via `fakeSize`. `fakeSize` is derived with multi-layered priority: **Parser Duration** > **Context FrameSize** > **Logical Base Units** (1536 for EAC3/AC3, 1280 for TrueHD). This ensures accurate clocking even with high packet cadences.
-- **Startup Fill Window**: All Mode 2 passthrough and AC3 recoding benefit from a centralized **Synthetic Fill Window** during startup, ensuring smooth wall-clock paced synchronization while the physical HAL buffer fills. The fill window uses effective latency (`static latency + mode2 calibration`), suppresses fill-start clamping until the passthrough playhead has proven it advances, and caps fill-exit rebasing against recent video progress.
-- **Mode 2 Calibration**: Calibration samples are accepted only while `audio_time` advances. Window A may apply a bounded provisional correction, and Window B must confirm the absolute target before the calibration is locked. Calibration bounds are asymmetric: audio-ahead corrections stay tight, while video-ahead/audio-late corrections may scale with reported passthrough latency up to a fixed cap.
-- **Physical Route Latency Limit**: Mode 2 calibration corrects AVOS' internal timing model, not unreported downstream latency added by a soundbar or AVR after HDMI/ARC. Format-specific external decode delay still requires a route/user offset outside the scheduler model.
+- **Startup Fill Window**: All Mode 2 passthrough and AC3 recoding benefit from a centralized **Synthetic Fill Window** during startup, ensuring smooth wall-clock paced synchronization while the physical HAL buffer fills. The fill window uses platform static latency, suppresses fill-start clamping until the passthrough playhead has proven it advances, and caps fill-exit rebasing against recent video progress.
+- **Steady Mode 2 Timing**: After fill exit, Mode 2 keeps heard time continuous with wall-clock interpolation between compressed write bursts while preserving the static passthrough latency offset reported by the platform.
+- **Physical Route Latency Limit**: AudioTrack latency APIs stop at the Android output boundary. Unreported downstream latency added by a soundbar or AVR after HDMI/ARC still requires a route/user offset outside the scheduler model.
 
 ## Debug Tips
 

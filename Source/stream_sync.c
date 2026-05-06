@@ -428,7 +428,13 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
 	int wall_now = atime();
 
-	// 1. DYNAMIC STARTUP SHIELD (Mode 2 Fill Window)
+	// Mode 2 startup fill:
+	// Compressed writes can advance audio_time before the high-latency passthrough
+	// route is audibly stable. During this startup/seek window, drive heard_ts from
+	// wall-clock time plus platform static latency instead of the bursty producer
+	// cadence. This gives the video scheduler a monotonic audible-time baseline
+	// until submitted audio is advancing at real-time speed, then hands off to the
+	// steady-state static-latency interpolator.
 	if (is_mode2_sync) {
 		// Initialize fill window if we are at the very start of a seek epoch
 		if (!s->mode2_fill_active && s->sink_ref_time == -1) {
@@ -451,6 +457,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			int real_dynamic = 0;
 			if( audio_vel_elapsed >= 500 ) {
 				int a_adv = s->audio_time - s->mode2_fill_vel_start_audio;
+				// Exit once submitted audio has advanced close to real time for a
+				// short window. This proves the producer side is no longer in the
+				// initial fill burst pattern; it is not a latency calibration signal.
 				if( a_adv >= 450 ) {
 					real_dynamic = 1;
 				} else {

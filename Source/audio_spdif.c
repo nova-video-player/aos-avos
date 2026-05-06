@@ -648,7 +648,10 @@ int spdif_format_passthrough_supported(int format)
 	case WAVE_FORMAT_E_AC3_JOC:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
 	case WAVE_FORMAT_DTS_HD_MA:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
 	case WAVE_FORMAT_DTS_HD:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
 	case WAVE_FORMAT_DTS:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
 	case WAVE_FORMAT_TRUEHD:

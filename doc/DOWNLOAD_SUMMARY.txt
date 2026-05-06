@@ -1,0 +1,44 @@
+================================================================================
+SOFA HRTF Files Download Summary
+Downloaded: Sat Dec 13 11:09:12 CET 2025
+================================================================================
+
+DOWNLOAD STATUS:
+✓ TV Speakers Profile: HRIR_FULL2DEG_TV_speakers.sofa
+  Source: https://sofacoustics.org/data/database/fhk/HRIR_FULL2DEG.sofa
+  Size:  19M
+  Location: /Users/marc/Documents/git/nova-clean/native/avos/assets/sofa/HRIR_FULL2DEG_TV_speakers.sofa
+
+✓ Headphones Profile: subject_003_headphones.sofa
+  Source: https://sofacoustics.org/data/database/cipic/
+  Size: 1.8M
+  Location: /Users/marc/Documents/git/nova-clean/native/avos/assets/sofa/subject_003_headphones.sofa
+
+INTEGRATION LOCATIONS:
+✓ Native Source: /Users/marc/Documents/git/nova-clean/native/avos/Source/stream_filter_audio_mysofa.c
+✓ Android Assets: /Users/marc/Documents/git/nova-clean/Video/src/main/assets/sofa
+✓ Java Helper: /Users/marc/Documents/git/nova-clean/MediaLib/src/com/archos/medialib/SofaProfileManager.java
+✓ Documentation: /Users/marc/Documents/git/nova-clean/native/avos/assets/sofa/SOFA_INTEGRATION.md
+
+NEXT STEPS:
+1. Rebuild Nova Video Player:
+   cd /Users/marc/Documents/git/nova-clean/Video
+   ./gradlew clean
+   ./gradlew aND
+
+2. Test SOFA spatial audio in PlayerService:
+   - toggleSofaMode() for cycling through modes
+   - setSofaMode(1) for TV speakers
+   - setSofaMode(2) for headphones
+
+3. Verify filter integration:
+   - Check logcat: adb logcat | grep "sofa\|mysofa"
+   - Play video and toggle SOFA mode in player menu
+
+REFERENCES:
+- SOFA Convention: https://www.sofaconventions.org/
+- CIPIC Database: https://www.ece.ucdavis.edu/cipic/
+- FFmpeg sofalizer: https://ffmpeg.org/ffmpeg-filters.html#sofalizer
+- libmysofa: https://github.com/hoene/libmysofa
+
+================================================================================

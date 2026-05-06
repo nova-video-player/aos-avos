@@ -213,6 +213,14 @@ int audio_interface_is_delay_valid(audio_ctx_t *ctx)
 	return impl->delay_valid(ctx);
 }
 
+const char *audio_interface_get_delay_source(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->delay_source) {
+		return "unsupported";
+	}
+	return impl->delay_source(ctx);
+}
+
 int audio_interface_get_delay_valid_streak(audio_ctx_t *ctx)
 {
 	if (!impl || !impl->delay_valid_streak) {

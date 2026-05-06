@@ -2044,6 +2044,11 @@ static int audiotrack_is_delay_valid(audio_ctx_t *at)
 	return at ? at->delay_valid : 0;
 }
 
+static const char *audiotrack_get_delay_source(audio_ctx_t *at)
+{
+	return (at && at->last_delay_src[0]) ? at->last_delay_src : "unknown";
+}
+
 static int audiotrack_get_delay_valid_streak(audio_ctx_t *at)
 {
 	// Sabrina can report late/unstable timestamps; expose streak to gate rebases.
@@ -2349,6 +2354,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.get_passthrough = audiotrack_get_passthrough,
 	.change_audio_speed = audiotrack_change_audio_speed,
 	.delay_valid = audiotrack_is_delay_valid,
+	.delay_source = audiotrack_get_delay_source,
 	.delay_valid_streak = audiotrack_get_delay_valid_streak,
 	.is_startup_hold_active = audiotrack_is_startup_hold_active,
 	.passthrough_playhead_advanced = audiotrack_passthrough_playhead_advanced,

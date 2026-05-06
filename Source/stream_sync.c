@@ -22,6 +22,8 @@
 #include "stream.h"
 #include "stream_sync.h"
 
+#include <string.h>
+
 #ifdef CONFIG_AUDIO_AC3
 extern int libavos_get_ac3_recoding_enabled(void);
 #else
@@ -61,6 +63,14 @@ static int sync_diag_last_reanchor_pending = -1;
 
 static int stream_use_xbmc_smoothing = 1;
 
+typedef enum {
+	STREAM_DELAY_SOURCE_NONE = 0,
+	STREAM_DELAY_SOURCE_DYNAMIC,
+	STREAM_DELAY_SOURCE_LAST_GOOD,
+	STREAM_DELAY_SOURCE_STATIC,
+	STREAM_DELAY_SOURCE_UNKNOWN,
+} stream_delay_source_t;
+
 typedef struct {
 	int effective_delay_ms; // effective delay currently used by sync math
 	int is_anchorable;      // safe to use for sink anchoring
@@ -71,6 +81,8 @@ typedef struct {
 	int is_dynamic;
 	int is_fallback;        // based on last-good or static latency
 	int streak;             // current dynamic-valid streak
+	stream_delay_source_t source;
+	const char *source_tag;
 } stream_delay_status_t;
 
 typedef enum {
@@ -88,6 +100,45 @@ static void _sync_diag_reset(void)
 	sync_diag_last_pause_state = -1;
 	sync_diag_last_state = -1;
 	sync_diag_last_reanchor_pending = -1;
+}
+
+static const char *_stream_delay_source_name(stream_delay_source_t source)
+{
+	switch (source) {
+	case STREAM_DELAY_SOURCE_DYNAMIC:
+		return "dynamic";
+	case STREAM_DELAY_SOURCE_LAST_GOOD:
+		return "last_good";
+	case STREAM_DELAY_SOURCE_STATIC:
+		return "static";
+	case STREAM_DELAY_SOURCE_NONE:
+		return "none";
+	case STREAM_DELAY_SOURCE_UNKNOWN:
+	default:
+		return "unknown";
+	}
+}
+
+static stream_delay_source_t _classify_audio_delay_source(const char *tag, int delay_valid)
+{
+	if( !tag || !tag[0] ) {
+		return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
+	}
+	if( !strncmp( tag, "static", 6 ) ) {
+		return STREAM_DELAY_SOURCE_STATIC;
+	}
+	if( !strncmp( tag, "last_good", 9 ) || !strncmp( tag, "cached", 6 ) ) {
+		return STREAM_DELAY_SOURCE_LAST_GOOD;
+	}
+	if( !strncmp( tag, "playhead", 8 ) || !strncmp( tag, "dynamic", 7 ) ) {
+		return STREAM_DELAY_SOURCE_DYNAMIC;
+	}
+	if( !strncmp( tag, "fallback", 8 ) || !strncmp( tag, "throttle_none", 13 ) ||
+		!strncmp( tag, "outlier", 7 ) || !strncmp( tag, "exception", 9 ) ||
+		!strncmp( tag, "track_null", 10 ) ) {
+		return STREAM_DELAY_SOURCE_NONE;
+	}
+	return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
 }
 
 static int _sync_diag_should_log(STREAM *s)
@@ -225,7 +276,7 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 	reanchor_pending = s->audio_resume_valid_pending;
 	if (state != sync_diag_last_state || reanchor_pending != sync_diag_last_reanchor_pending || _sync_diag_should_log(s)) {
 		DBGY2 serprintf(
-			"sync_state[%s]: %s reanchor_pending=%d dyn=%d fallback=%d anchor=%d delay=%d streak=%d "
+			"sync_state[%s]: %s reanchor_pending=%d dyn=%d fallback=%d anchor=%d delay=%d source=%s tag=%s streak=%d "
 			"start_pending=%d resume_pending=%d hold=%d hold_resume=%d "
 			"sync_a=%d sync_v=%d seek_epoch=%d seek_done=%d\n",
 			origin,
@@ -235,6 +286,8 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 			delay_status ? delay_status->is_fallback : 0,
 			delay_status ? delay_status->is_anchorable : 0,
 			delay_status ? delay_status->effective_delay_ms : 0,
+			delay_status ? _stream_delay_source_name(delay_status->source) : "none",
+			delay_status && delay_status->source_tag ? delay_status->source_tag : "none",
 			delay_status ? delay_status->streak : 0,
 			s->audio_start_pending,
 			s->audio_resume_pending,
@@ -293,11 +346,19 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 {
 	stream_delay_status_t status = { 0 };
 	int delay_valid = s && s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : 1;
+	const char *source_tag = s && s->audio_ctx ? audio_interface_get_delay_source(s->audio_ctx) : "no_ctx";
+
+	status.source_tag = source_tag;
+	status.source = _classify_audio_delay_source(source_tag, delay_valid);
 
 	status.streak = s && s->audio_ctx ? audio_interface_get_delay_valid_streak(s->audio_ctx) : 0;
 
 	if (delay_valid) {
 		status.effective_delay_ms = s ? stream_sync_av_delay(s) : 0;
+		if( s && s->audio_ctx ) {
+			status.source_tag = audio_interface_get_delay_source(s->audio_ctx);
+			status.source = _classify_audio_delay_source(status.source_tag, delay_valid);
+		}
 		status.is_anchorable = 1;
 		status.is_dynamic = 1;
 		return status;
@@ -311,12 +372,16 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 			// during steady playback. This avoids sudden loss of latency compensation.
 			status.is_anchorable = 1;
 			status.is_fallback = 1;
+			status.source = STREAM_DELAY_SOURCE_LAST_GOOD;
+			status.source_tag = "last_good(stream)";
 		} else if (allow_static && s->audio_ctx) {
 			int static_latency = audio_interface_get_latency(s->audio_ctx);
 			if (static_latency > 0) {
 				status.effective_delay_ms = static_latency;
 				status.is_anchorable = 1;
 				status.is_fallback = 1;
+				status.source = STREAM_DELAY_SOURCE_STATIC;
+				status.source_tag = "static(stream)";
 			}
 		}
 	}
@@ -610,9 +675,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	static int last_diag_wall = 0;
 	if (wall_now > last_diag_wall + 2000) {
 		last_diag_wall = wall_now;
-		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d dyn=%d fill=%d\n",
+		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d dyn=%d source=%s tag=%s fill=%d\n",
 			wall_now, s->audio_time, heard_ts, heard_delay, s->smoothed_av_delay, 
-			delay_status.effective_delay_ms, delay_status.is_dynamic, s->mode2_fill_active);
+			delay_status.effective_delay_ms, delay_status.is_dynamic,
+			_stream_delay_source_name(delay_status.source),
+			delay_status.source_tag ? delay_status.source_tag : "none",
+			s->mode2_fill_active);
 	}
 
 	return heard_ts;
@@ -975,9 +1043,11 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	// Check if passthrough mode is active - static delay is immediately valid
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	if( passthrough_mode == 1 ) {
-		DBG serprintf("pt_mode1_sync_audio: in=%d stored=%d sync_a=%d video=%d seek_epoch=%d anchor_valid=%d delay_valid=%d anchor_delay=%d current_delay=%d sink_ref=%d\n",
+		DBG serprintf("pt_mode1_sync_audio: in=%d stored=%d sync_a=%d video=%d seek_epoch=%d anchor_valid=%d delay_valid=%d source=%s tag=%s anchor_delay=%d current_delay=%d sink_ref=%d\n",
 			audio_time, s->audio_time, s->sync_a_time, s->video_time, s->seek_epoch,
-			anchor_valid, delay_valid, anchor_delay, current_av_delay, s->sink_ref_time);
+			anchor_valid, delay_valid, _stream_delay_source_name(delay_status.source),
+			delay_status.source_tag ? delay_status.source_tag : "none",
+			anchor_delay, current_av_delay, s->sink_ref_time);
 	}
 	
 	if( anchor_delay > 0 && _stream_is_sink_driven(s) && audio_time != -1 && !passthrough_mode ) {
@@ -1007,8 +1077,11 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				(s->sink_ref_time == -1 || s->sync_a_time == -1);
 
 			if (diag_log) {
-				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d av_delay=%d anchor=%d mode2_fill=%d\n",
-					audio_time, s->smoothed_av_delay, current_av_delay, s->av_delay, anchor_ts, s->mode2_fill_active);
+				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d source=%s tag=%s av_delay=%d anchor=%d mode2_fill=%d\n",
+					audio_time, s->smoothed_av_delay, current_av_delay,
+					_stream_delay_source_name(delay_status.source),
+					delay_status.source_tag ? delay_status.source_tag : "none",
+					s->av_delay, anchor_ts, s->mode2_fill_active);
 			}
 			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
@@ -1178,9 +1251,11 @@ int stream_sync_video( STREAM *s, int video_time )
 			if( passthrough_mode && s->put_time_mode ) {
 				return 1;
 			}
-DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d)\n",
+DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d source=%s tag=%s)\n",
 				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
-				s->put_time_mode, delay_valid);
+				s->put_time_mode, delay_valid,
+				_stream_delay_source_name(delay_status.source),
+				delay_status.source_tag ? delay_status.source_tag : "none");
 			return 0;
 		}
 	}

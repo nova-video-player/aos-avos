@@ -77,8 +77,8 @@ typedef struct {
 	// Mirrors audio_interface_is_delay_valid(). On Android this usually means a
 	// trusted timestamp/playhead delay, but it can also be true for deliberate
 	// static fallbacks when dynamic timing is disabled, unavailable, or bypassed
-	// for passthrough. Do not assume this always means a live dynamic sample.
-	int is_dynamic;
+	// for passthrough. Check source before assuming a live dynamic sample.
+	int is_delay_valid;
 	int is_fallback;        // based on last-good or static latency
 	int streak;             // current dynamic-valid streak
 	stream_delay_source_t source;
@@ -221,7 +221,7 @@ static int _stream_is_waiting_for_audio(STREAM *s, const stream_delay_status_t *
 	}
 	int startup_blocking = s->audio_ctx &&
 	                       audio_interface_is_startup_hold_active(s->audio_ctx) &&
-	                       !(delay_status && delay_status->is_dynamic);
+	                       !(delay_status && delay_status->is_delay_valid);
 	return s->audio_start_pending ||
 	       s->audio_resume_pending ||
 	       startup_blocking ||
@@ -236,7 +236,7 @@ static stream_sync_diag_state_t _stream_get_sync_diag_state(STREAM *s, const str
 	if (_stream_is_waiting_for_audio(s, delay_status)) {
 		return STREAM_SYNC_STATE_WAIT_AUDIO;
 	}
-	if (delay_status && delay_status->is_dynamic) {
+	if (delay_status && delay_status->is_delay_valid) {
 		return STREAM_SYNC_STATE_DYNAMIC_RUNNING;
 	}
 	if (delay_status && delay_status->is_anchorable) {
@@ -276,13 +276,13 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 	reanchor_pending = s->audio_resume_valid_pending;
 	if (state != sync_diag_last_state || reanchor_pending != sync_diag_last_reanchor_pending || _sync_diag_should_log(s)) {
 		DBGY2 serprintf(
-			"sync_state[%s]: %s reanchor_pending=%d dyn=%d fallback=%d anchor=%d delay=%d source=%s tag=%s streak=%d "
+			"sync_state[%s]: %s reanchor_pending=%d delay_valid=%d fallback=%d anchor=%d delay=%d source=%s tag=%s streak=%d "
 			"start_pending=%d resume_pending=%d hold=%d hold_resume=%d "
 			"sync_a=%d sync_v=%d seek_epoch=%d seek_done=%d\n",
 			origin,
 			_stream_get_sync_diag_state_name(state),
 			reanchor_pending,
-			delay_status ? delay_status->is_dynamic : 0,
+			delay_status ? delay_status->is_delay_valid : 0,
 			delay_status ? delay_status->is_fallback : 0,
 			delay_status ? delay_status->is_anchorable : 0,
 			delay_status ? delay_status->effective_delay_ms : 0,
@@ -360,7 +360,7 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 			status.source = _classify_audio_delay_source(status.source_tag, delay_valid);
 		}
 		status.is_anchorable = 1;
-		status.is_dynamic = 1;
+		status.is_delay_valid = 1;
 		return status;
 	}
 
@@ -480,7 +480,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 #endif
 
 	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
-	int delay_valid = delay_status.is_dynamic;
+	int delay_valid = delay_status.is_delay_valid;
 	int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
 	int heard_delay;
 	
@@ -660,9 +660,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	static int last_diag_wall = 0;
 	if (wall_now > last_diag_wall + 2000) {
 		last_diag_wall = wall_now;
-		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d dyn=%d source=%s tag=%s fill=%d\n",
+		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d delay_valid=%d source=%s tag=%s fill=%d\n",
 			wall_now, s->audio_time, heard_ts, heard_delay, s->smoothed_av_delay, 
-			delay_status.effective_delay_ms, delay_status.is_dynamic,
+			delay_status.effective_delay_ms, delay_status.is_delay_valid,
 			_stream_delay_source_name(delay_status.source),
 			delay_status.source_tag ? delay_status.source_tag : "none",
 			s->mode2_fill_active);
@@ -965,7 +965,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 #endif
 	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
 	int anchor_valid = delay_status.is_anchorable;
-	int delay_valid = delay_status.is_dynamic;
+	int delay_valid = delay_status.is_delay_valid;
 	int current_av_delay = delay_status.effective_delay_ms;
 	int anchor_delay = current_av_delay;
 	int diag_log = _sync_diag_should_log(s);
@@ -1198,7 +1198,7 @@ int stream_sync_video( STREAM *s, int video_time )
 		stream_delay_status_t delay_status = _stream_get_delay_status(s, 1);
 		int anchor_valid = delay_status.is_anchorable;
 		int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough(s)) ? 1 : 0;
-		int delay_valid = delay_status.is_dynamic;
+		int delay_valid = delay_status.is_delay_valid;
 
 		_sync_diag_log_state(s, "video", &delay_status);
 

@@ -26,7 +26,7 @@
 - The short real-time advancement check is only a fill-window exit gate: it does not estimate, persist, or apply any latency correction.
 - **Integrated Startup Clamp**: A 50ms startup clamp allows video to start promptly on high-latency devices. For Mode 2, this clamp is integrated into the synthetic window via a base re-alignment to ensure continuity, but it is suppressed until the passthrough playhead has proven it advances. This prevents blind startup writes from poisoning the fill base before platform timing is trustworthy.
 - **Mode 2 Fill Exit Cap**: At fill exit, the audio rebase is capped against recent video progress plus effective latency and a small margin. This prevents multi-second anchors when video startup is still held or barely moving.
-- **Steady State**: Once the physical buffer is stable, `heard_audio_ts` follows the logical clock. For Mode 2, the delay offset is the platform static latency, with wall-clock interpolation between compressed write bursts.
+- **Steady State**: Once the physical buffer is stable, `heard_audio_ts` follows the logical clock. For Mode 2, the delay offset is the platform static latency, with wall-clock interpolation between compressed write bursts. Without this interpolation, `audio_time - static_latency` advances in burst-sized steps, so the video scheduler sees a sawtooth A/V diff even when average latency is correct.
 - **Rebase Handoff**: At the end of the fill window, `audio_time` is rebased to the synthetic baseline to ensure a continuous transition to logical clocking without "jumps."
 
 ## Mapping Rules

@@ -64,7 +64,11 @@ static int stream_use_xbmc_smoothing = 1;
 typedef struct {
 	int effective_delay_ms; // effective delay currently used by sync math
 	int is_anchorable;      // safe to use for sink anchoring
-	int is_dynamic;         // based on fresh dynamic timing
+	// Mirrors audio_interface_is_delay_valid(). On Android this usually means a
+	// trusted timestamp/playhead delay, but it can also be true for deliberate
+	// static fallbacks when dynamic timing is disabled, unavailable, or bypassed
+	// for passthrough. Do not assume this always means a live dynamic sample.
+	int is_dynamic;
 	int is_fallback;        // based on last-good or static latency
 	int streak;             // current dynamic-valid streak
 } stream_delay_status_t;
@@ -562,10 +566,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int heard_ts = s->audio_time - heard_delay;
 
 	// PCM AudioTrack timing is sampled in chunks: audio_time advances when we write,
-	// while the physical playhead advances continuously between writes.  Interpolate
-	// heard time during steady put_time playback, but do not predict past the latest
-	// audio_time - delay frontier.  This scales with wall time and write cadence instead
-	// of a fixed per-call or per-frame slew.
+	// while the physical playhead advances continuously between writes. Interpolate
+	// heard time during steady put_time playback, but cap it to the latest submitted
+	// audio_time - delay frontier so this cannot become an unbounded predictor. This
+	// scales with wall time and write cadence instead of a fixed per-call or per-frame
+	// slew.
 	if( !is_mode2_sync && !passthrough_mode && s->put_time_mode && delay_valid ) {
 		heard_ts = _stream_interpolate_heard_ts( s, wall_now, heard_delay,
 			0, 1, 0, 0, 1 );

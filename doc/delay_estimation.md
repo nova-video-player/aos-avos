@@ -99,6 +99,11 @@ Definitions:
 - `heard_delay`: delay used for heard_ts only (audible-time estimate).
 
 Rules:
+0) PCM policy:
+   - PCM should prefer dynamic AudioTrack timing when stable. Static latency is
+     only a warmup/fallback anchor because PCM queued delay changes with buffer
+     fill, resume, speed filtering, and device timing behavior.
+
 1) Choose delay candidate (raw):
    - If `delay_valid`, use dynamic delay (timestamp or playhead).
    - Else if `last_good_delay` exists, use it as a candidate.

@@ -554,7 +554,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				s->mode2_fill_start_pts = heard_ts + effective_latency - fill_duration;
 			}
 
-			if (real_dynamic || fill_duration >= 2000) {
+			int audible_start_reached = (heard_ts >= 0);
+			if ((real_dynamic && audible_start_reached) || fill_duration >= 2000) {
 				// EXIT: Handoff to normal logical clock
 				s->mode2_fill_active = 0;
 				// Rebase audio_time so that (audio_time - effective latency) matches the last synthetic baseline.
@@ -586,6 +587,10 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				s->mode2_last_anchor_audio = s->audio_time;
 				s->mode2_last_anchor_wall_ms = wall_now;
 			} else {
+				if (real_dynamic && !audible_start_reached) {
+					DBG serprintf("mode2_fill_hold: real_dynamic=1 but heard_ts=%d audio=%d latency=%d dur=%d\n",
+						heard_ts, s->audio_time, effective_latency, fill_duration);
+				}
 				// ACTIVE: Follow the synthetic wall-clock Pace
 				return heard_ts;
 			}

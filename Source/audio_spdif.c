@@ -91,29 +91,34 @@ static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver
 
 static int _spdif_frame_samples(const AUDIO_PROPERTIES *a, int passthrough_mode)
 {
+	// DTS frame duration is not fixed at 1536 samples. In mode 2 the raw
+	// AudioTrack path consumes parser output directly, so use the parser's
+	// duration for the logical clock when available. Forcing 1536 on 512-sample
+	// DTS frames advances AVOS audio time 3x too fast and causes large A/V drift.
+	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
+		    a->format == WAVE_FORMAT_DTS_HD ||
+		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
+		if (aparser && aparser->duration > 0) {
+			return aparser->duration;
+		}
+		if (avctx && avctx->frame_size > 0) {
+			return avctx->frame_size;
+		}
+		return 512;
+	}
+
 	// 1. Primary: codec-specific context metadata (avctx.frame_size).
-	// This is more reliable than parser duration for DTS frames.
 	if (avctx && avctx->frame_size > 0) {
 		return avctx->frame_size;
 	}
 
-	// 2. Mode 2 only: Skip parser for DTS/DTS-HD formats - parser returns wrong duration (512)
-	// that doesn't match Android mode 2 timing requirements.
-	// Use fallback directly for these formats.
-	// This restores Android mode 2 compatibility with legacy AVOS behavior.
-	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
-		    a->format == WAVE_FORMAT_DTS_HD ||
-		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
-		return 1536;
-	}
-
-	// 3. Secondary: parser-derived logical duration.
+	// 2. Secondary: parser-derived logical duration.
 	// Most FFmpeg parsers (MLP/TrueHD, EAC3) populate this correctly.
 	if (aparser && aparser->duration > 0) {
 		return aparser->duration;
 	}
 
-	// 4. Last resort: logical base units for known formats.
+	// 3. Last resort: logical base units for known formats.
 	// These represent the standard logical frame duration regardless of compression ratio.
 	if (a) {
 		if (a->format == WAVE_FORMAT_AC3 ||
@@ -136,27 +141,37 @@ static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough
 	*parser_duration = 0;
 	*fallback_samples = 0;
 
+	// Mode 2 DTS uses raw parser output as the AudioTrack write unit, so its
+	// logical duration must follow the parser. DTS commonly uses 512-sample
+	// frames; treating every frame as 1536 samples over-advances audio time.
+	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
+		    a->format == WAVE_FORMAT_DTS_HD ||
+		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
+		if (aparser && aparser->duration > 0) {
+			*parser_duration = aparser->duration;
+			return aparser->duration;
+		}
+		if (avctx && avctx->frame_size > 0) {
+			*avctx_size = avctx->frame_size;
+			return avctx->frame_size;
+		}
+		*fallback_samples = 512;
+		return 512;
+	}
+
 	// 1. Primary: codec-specific context metadata (avctx.frame_size).
 	if (avctx && avctx->frame_size > 0) {
 		*avctx_size = avctx->frame_size;
 		return avctx->frame_size;
 	}
 
-	// 2. Mode 2 only: Skip parser for DTS/DTS-HD formats.
-	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
-		    a->format == WAVE_FORMAT_DTS_HD ||
-		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
-		*fallback_samples = 1536;
-		return 1536;
-	}
-
-	// 3. Secondary: parser-derived logical duration.
+	// 2. Secondary: parser-derived logical duration.
 	if (aparser && aparser->duration > 0) {
 		*parser_duration = aparser->duration;
 		return aparser->duration;
 	}
 
-	// 4. Last resort: logical base units for known formats.
+	// 3. Last resort: logical base units for known formats.
 	if (a) {
 		if (a->format == WAVE_FORMAT_AC3 ||
 		    a->format == WAVE_FORMAT_EAC3 ||
@@ -277,9 +292,9 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			frame->error = 0;
 			frame->format = a->format;  // Preserve codec ID (AC3/EAC3/DTS) for downstream logic
 
-			// fakeSize carries PCM-equivalent duration for timing.
-			// Use _spdif_frame_samples() with priority: avctx.frame_size > mode2-DTS fallback (1536)
-			// > parser duration > fallback (1536 for AC3/EAC3, 1280 for TrueHD).
+			// fakeSize carries PCM-equivalent duration for timing. DTS mode 2 follows
+			// parser duration because the raw write unit can be 512 samples; AC3/EAC3
+			// and TrueHD keep their codec base-unit fallbacks when parser metadata is absent.
 			{
 				int avctx_size, parser_duration, fallback_samples;
 				int samples = _spdif_frame_samples_debug(a, passthrough_on, &avctx_size, &parser_duration, &fallback_samples);

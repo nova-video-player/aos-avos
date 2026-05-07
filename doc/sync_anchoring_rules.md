@@ -39,7 +39,7 @@
 - **android_sync=0**: `codec_sfdec2.c` owns TS↔WC anchoring and pacing (blit wait/drop).
 - **android_sync=1**: The sink bypasses wait/drop and delegates scheduling to MediaCodec via `render_ts_ns`.
   - **passthrough=2 post-seek re-init rule**: synchronization anchors (`sink_ref_time`) are strictly reset on every seek. This ensures the startup fill logic (including the clamp) re-fires for every new seek epoch.
-  - **passthrough=2 timing source**: audio TS progression uses compressed-frame `fakeSize` as logical PCM-duration. `fakeSize` is derived via: **Parser Duration** > **Context FrameSize** > **Logical Base Units** (1536 for EAC3, 1280 for TrueHD).
+  - **passthrough=2 timing source**: audio TS progression uses compressed-frame `fakeSize` as logical PCM-duration. DTS/DTS-HD follows parser duration first because raw mode 2 writes can be 512-sample DTS frames; otherwise the clock can run 3x too fast. Other formats use codec metadata when available, then logical base units (1536 for EAC3, 1280 for TrueHD).
   - **passthrough=2 delay source**: the scheduler uses static passthrough latency from the platform plus startup fill and steady-state interpolation. It does not maintain an adaptive calibration offset.
 - **Manual A/V delay policy**: keep anchors physical; apply user delay at final presentation scheduling.
 

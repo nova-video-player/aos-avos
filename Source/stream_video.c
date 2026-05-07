@@ -917,6 +917,16 @@ DBGS serprintf("stream_close_audio_dec\r\n");
 static void stream_close_audio_filter( STREAM *s )
 {
 DBGS serprintf("stream_close_audio_filter\r\n");
+	// Close and delete JNI filter
+	if( s->audio_filter_jni ) {
+		if( s->audio_filter_jni->close ) {
+			s->audio_filter_jni->close( s->audio_filter_jni );
+		}
+		if( s->audio_filter_jni->delete ) {
+			s->audio_filter_jni->delete( s->audio_filter_jni );
+		}
+		s->audio_filter_jni = NULL;
+	}
 	// Close and delete compression filter
 	if( s->audio_filter_compress ) {
 		if( s->audio_filter_compress->close ) {
@@ -4999,6 +5009,8 @@ serprintf("SAS: audio_stream already set\n");
 	thread_state_set( &s->sub_tstate,    THREAD_IDLE );
 	
 	// close old audio decoder
+	stream_close_audio_filter( s );
+	s->pcm_accum_size = 0;
 	stream_close_audio_dec( s );
 
 	// stop audio sink
@@ -5040,6 +5052,12 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 		// no audio, disable it
 		stream_drop_audio( s );
 	} else {
+		if( stream_open_audio_filter( s ) ) {
+			stream_close_audio_dec( s );
+			stream_drop_audio( s );
+			goto ErrorExit;
+		}
+
 		// Re-evaluate sync mode for the new audio track
 		int default_sync_mode = stream_parser_get_sync_mode();
 		if (s->audio->valid && s->audio->format == WAVE_FORMAT_FLAC) {
@@ -5068,6 +5086,7 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 
 			if( s->audio_sink->start( s ) ) {
 				// no audio, close the codec
+				stream_close_audio_filter( s );
 				stream_close_audio_dec( s );
 				// drop audio
 				stream_drop_audio( s );

@@ -203,6 +203,12 @@ static int get_sample_format_from_bits(int bits_per_sample)
 	}
 }
 
+static const char *sample_format_name(enum AVSampleFormat format)
+{
+	const char *name = av_get_sample_fmt_name(format);
+	return name ? name : "unknown";
+}
+
 static int rebuild_filter_graph(struct ctx *ctx, float speed)
 {
 	int ret;
@@ -290,7 +296,7 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 	char args[512];
 	snprintf(args, sizeof(args),
 		"channel_layout=%s:sample_fmt=%s:time_base=1/%d:sample_rate=%d",
-		ctx->channel_layout, av_get_sample_fmt_name(ctx->format),
+		ctx->channel_layout, sample_format_name(ctx->format),
 		ctx->sample_rate, ctx->sample_rate);
 
 	ret = avfilter_init_str(ctx->abuffer_ctx, args);
@@ -358,7 +364,7 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 	}
 
 	snprintf(args, sizeof(args), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
-		av_get_sample_fmt_name(ctx->format), ctx->sample_rate, ctx->channel_layout);
+		sample_format_name(ctx->format), ctx->sample_rate, ctx->channel_layout);
 	ret = avfilter_init_str(ctx->aformat_out_ctx, args);
 	if (ret < 0) {
 		serprintf("atempo: failed to init output aformat: %s\n", av_err2str(ret));
@@ -437,7 +443,7 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 	ctx->filter_initialized = 1;
 
 	DBGA serprintf("atempo: filter graph configured for speed %.3f (internal=flt output=%s)\n",
-		speed, av_get_sample_fmt_name(ctx->format));
+		speed, sample_format_name(ctx->format));
 
 	return 0;
 }
@@ -504,7 +510,7 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	}
 
 	DBGA serprintf("atempo: initialized for %d channels, %d Hz, format %s\n",
-		ctx->channels, ctx->sample_rate, av_get_sample_fmt_name(ctx->format));
+		ctx->channels, ctx->sample_rate, sample_format_name(ctx->format));
 
 	return 0;
 
@@ -536,6 +542,68 @@ static int _close(STREAM_FILTER_AUDIO *f)
 	return 0;
 }
 
+static int atempo_reconfigure_format(struct ctx *ctx, int channels,
+	int sample_rate, enum AVSampleFormat format)
+{
+	if (!ctx || channels <= 0 || sample_rate <= 0 || format == AV_SAMPLE_FMT_NONE) {
+		return -1;
+	}
+
+	DBGA serprintf("atempo: reconfigure format %dch/%dHz/%s -> %dch/%dHz/%s\n",
+		ctx->channels, ctx->sample_rate, sample_format_name(ctx->format),
+		channels, sample_rate, sample_format_name(format));
+
+	if (ctx->filter_graph) {
+		avfilter_graph_free(&ctx->filter_graph);
+		ctx->abuffer_ctx = NULL;
+		ctx->aformat_in_ctx = NULL;
+		ctx->atempo_ctx = NULL;
+		ctx->aformat_out_ctx = NULL;
+		ctx->abuffersink_ctx = NULL;
+	}
+
+	if (ctx->fifo) {
+		av_audio_fifo_free(ctx->fifo);
+		ctx->fifo = NULL;
+	}
+	if (ctx->output_buffer) {
+		afree(ctx->output_buffer);
+		ctx->output_buffer = NULL;
+		ctx->output_buffer_size = 0;
+	}
+
+	ctx->channels = channels;
+	ctx->sample_rate = sample_rate;
+	ctx->format = format;
+	ctx->filter_initialized = 0;
+	ctx->current_speed = 1.0f;
+
+	AVChannelLayout ch_layout = {0};
+	av_channel_layout_default(&ch_layout, ctx->channels);
+	int ret = av_channel_layout_describe(&ch_layout, (char *)ctx->channel_layout, sizeof(ctx->channel_layout));
+	av_channel_layout_uninit(&ch_layout);
+	if (ret < 0) {
+		serprintf("atempo: failed to describe reconfigured channel layout: %s\n", av_err2str(ret));
+		return -1;
+	}
+
+	if (ctx->in_frame) {
+		av_channel_layout_uninit(&ctx->in_frame->ch_layout);
+		ctx->in_frame->format = ctx->format;
+		ctx->in_frame->sample_rate = ctx->sample_rate;
+		av_channel_layout_default(&ctx->in_frame->ch_layout, ctx->channels);
+	}
+
+	ctx->fifo = av_audio_fifo_alloc(ctx->format, ctx->channels, ctx->sample_rate * 2);
+	if (!ctx->fifo) {
+		serprintf("atempo: failed to allocate reconfigured audio FIFO\n");
+		return -1;
+	}
+
+	atempo_reset_runtime_baseline(ctx, "format_change");
+	return 0;
+}
+
 static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 {
 	struct ctx *ctx = f->priv;
@@ -553,6 +621,19 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		speed = SPEED_MIN;
 	} else if (speed > SPEED_MAX) {
 		speed = SPEED_MAX;
+	}
+
+	int frame_channels = frame->channels ? frame->channels : ctx->channels;
+	int frame_sample_rate = frame->samplesPerSec ? frame->samplesPerSec : ctx->sample_rate;
+	enum AVSampleFormat frame_format = frame->bits ? get_sample_format_from_bits(frame->bits) : ctx->format;
+	if (frame_channels != ctx->channels ||
+	    frame_sample_rate != ctx->sample_rate ||
+	    frame_format != ctx->format) {
+		if (atempo_reconfigure_format(ctx, frame_channels, frame_sample_rate, frame_format) < 0) {
+			serprintf("atempo: failed to reconfigure for frame format %dch/%dHz/%s\n",
+				frame_channels, frame_sample_rate, sample_format_name(frame_format));
+			return -1;
+		}
 	}
 
 	// Initialize filter graph on first call or update speed at runtime

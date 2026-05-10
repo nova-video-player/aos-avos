@@ -54,6 +54,7 @@ extern int stream_pdrop_threshold;
 static volatile int	stream_dbg_delay = 0;
 static int atempo_delay_log_count = 0;
 static int _stream_get_atempo_delay( STREAM *s );
+static int _stream_get_video_handoff_lead_ms( STREAM *s );
 static int sync_diag_count = 0;
 static int sync_diag_last_seek_epoch = -1;
 static int sync_diag_last_speed_x100 = -1;
@@ -555,7 +556,14 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			}
 
 			int audible_start_reached = (heard_ts >= 0);
-			if ((real_dynamic && audible_start_reached) || fill_duration >= 2000) {
+			int video_handoff_ready = 1;
+			int video_handoff_lead = -1;
+			int min_video_handoff_lead = _stream_get_video_handoff_lead_ms( s );
+			if( s->video && s->video->valid && !s->slideshow && s->video_time >= 0 ) {
+				video_handoff_lead = (s->sync_v_time >= 0) ? s->sync_v_time - s->video_time : -1;
+				video_handoff_ready = video_handoff_lead >= min_video_handoff_lead;
+			}
+			if ((real_dynamic && audible_start_reached && video_handoff_ready) || fill_duration >= 2000) {
 				// EXIT: Handoff to normal logical clock
 				s->mode2_fill_active = 0;
 				// Rebase audio_time so that (audio_time - effective latency) matches the last synthetic baseline.
@@ -576,8 +584,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 					}
 				}
 				s->audio_time = rebase_audio;
-				DBG serprintf("mode2_fill_exit: wall=%d dur=%d rebase_audio=%d real_dynamic=%d playhead_proven=%d\n",
-					wall_now, fill_duration, s->audio_time, real_dynamic, passthrough_playhead_proven);
+				DBG serprintf("mode2_fill_exit: wall=%d dur=%d rebase_audio=%d real_dynamic=%d playhead_proven=%d video_lead=%d min_video_lead=%d\n",
+					wall_now, fill_duration, s->audio_time, real_dynamic, passthrough_playhead_proven,
+					video_handoff_lead, min_video_handoff_lead);
 
 				// SEAMLESS HANDOFF: Force the video scheduler to refresh its anchor
 				// using the newly rebased timeline to avoid a discontinuity jump.
@@ -590,6 +599,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				if (real_dynamic && !audible_start_reached) {
 					DBG serprintf("mode2_fill_hold: real_dynamic=1 but heard_ts=%d audio=%d latency=%d dur=%d\n",
 						heard_ts, s->audio_time, effective_latency, fill_duration);
+				} else if (real_dynamic && audible_start_reached && !video_handoff_ready) {
+					DBG serprintf("mode2_fill_hold: waiting video lead=%d min=%d (video=%d sync_v=%d dur=%d)\n",
+						video_handoff_lead, min_video_handoff_lead, s->video_time, s->sync_v_time, fill_duration);
 				}
 				// ACTIVE: Follow the synthetic wall-clock Pace
 				return heard_ts;
@@ -679,6 +691,29 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 {
 	return _stream_get_heard_audio_ts_internal( s, fallback_ts );
+}
+
+static int _stream_get_video_handoff_lead_ms( STREAM *s )
+{
+	int frame_ms = 40;
+	if( s && s->video ) {
+		if( s->video->msPerFrame > 0 ) {
+			frame_ms = s->video->msPerFrame;
+		} else if( s->video->frame_rate_num > 0 && s->video->frame_rate_den > 0 ) {
+			frame_ms = (int)((1000LL * s->video->frame_rate_den + s->video->frame_rate_num - 1) /
+				s->video->frame_rate_num);
+		} else if( s->video->framesPerSec > 0 ) {
+			frame_ms = (1000 + s->video->framesPerSec - 1) / s->video->framesPerSec;
+		}
+	}
+
+	int lead_ms = frame_ms * 2;
+	if( lead_ms < 32 ) {
+		lead_ms = 32;
+	} else if( lead_ms > 100 ) {
+		lead_ms = 100;
+	}
+	return lead_ms;
 }
 
 // ************************************************************

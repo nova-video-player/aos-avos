@@ -388,7 +388,9 @@ static int wave2libav_codecid( int codecid )
 	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS:
-		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS)) {
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS) ||
+		   CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
+		   CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA)) {
 			serprintf("DTS encoding passthrough supported\n");
 			return AV_CODEC_ID_DTS;
 		} else {
@@ -699,6 +701,7 @@ static STREAM_REG_DEC_AUDIO reg_spdif_eac3              = { WAVE_FORMAT_EAC3,   
 static STREAM_REG_DEC_AUDIO reg_spdif_eac3_joc          = { WAVE_FORMAT_E_AC3_JOC,&stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_dts		= { WAVE_FORMAT_DTS,	&stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_dts_hd		= { WAVE_FORMAT_DTS_HD,    &stream_spdif, 8 };
+static STREAM_REG_DEC_AUDIO reg_spdif_dts_hd_ma		= { WAVE_FORMAT_DTS_HD_MA, &stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_truehd	= { WAVE_FORMAT_TRUEHD,	&stream_spdif, 8 };
 static void register_spdif(void) __attribute__((constructor));
 static void register_spdif(void) {
@@ -707,6 +710,7 @@ static void register_spdif(void) {
 	stream_register_dec_audio_head( &reg_spdif_eac3_joc);
 	stream_register_dec_audio_head( &reg_spdif_dts);
 	stream_register_dec_audio_head( &reg_spdif_dts_hd);
+	stream_register_dec_audio_head( &reg_spdif_dts_hd_ma);
 	stream_register_dec_audio_head( &reg_spdif_truehd);
 }
 

@@ -31,6 +31,7 @@
 #include "iso639.h"
 #include "android_codec.h"
 #include "util.h"
+#include "dts.h"
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
@@ -588,6 +589,16 @@ DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 				audio->codec_id	     = codecpar->codec_id;
 				strnZcpy( audio->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				audio->format        = get_ff_format( codecpar->codec_id, NULL );
+#ifdef CONFIG_DTS
+				if( audio->format == WAVE_FORMAT_DTS && codecpar->profile > 0 ) {
+					int dts_format = DTS_get_format_from_profile( codecpar->profile );
+					if( dts_format != WAVE_FORMAT_DTS ) {
+						audio->format = dts_format;
+						DBG serprintf("stream_parser_ffmpeg: detected DTS profile=%d -> format=%04X\n",
+							codecpar->profile, audio->format);
+					}
+				}
+#endif
 				if( audio->format == WAVE_FORMAT_EAC3 &&
 				    codecpar->profile == AV_PROFILE_EAC3_DDP_ATMOS ) {
 					audio->format = WAVE_FORMAT_E_AC3_JOC;

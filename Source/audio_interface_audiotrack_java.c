@@ -1210,6 +1210,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
 			ERR LOG("audiotrack ctor failed (status=%d) - backing off and retrying", status);
 			failed = 1;
+			if (at->obj) {
+				(*at->env)->DeleteGlobalRef(at->env, at->obj);
+				at->obj = NULL;
+			}
 			if (at->format == WAVE_FORMAT_AC3 && track_format == 5 &&
 			    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3)) {
 				DBG LOG("audiotrack_set_output_params: AC3 AudioTrack failed, retrying as EAC3 compatibility layer");
@@ -1241,7 +1245,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 		// Diagnostic: compare requested compressed config vs actual AudioTrack config.
 		// Some HALs may silently force PCM/stereo while passthrough remains enabled.
-		{
+		if (!failed) {
 			int actual_format = call_int_method(at, "getAudioFormat", "()I");
 			int actual_chmask = call_int_method(at, "getChannelConfiguration", "()I");
 			int actual_rate = call_int_method(at, "getSampleRate", "()I");

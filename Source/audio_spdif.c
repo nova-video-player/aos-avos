@@ -531,6 +531,15 @@ DBGS serprintf( "spdif_open\n");
 DBGS serprintf("audio format is %d, %d channels, %dkHz, %d bits, %d B/s, %d B/f\n", audio->format, audio->channels, audio->samplesPerSec/1000, audio->bitsPerSample, audio->bytesPerSec, audio->bytesPerFrame);
 
 	int codecid = audio->format;
+	if (audio->sourceSamples == 0) {
+		audio->sourceSamples = audio->samplesPerSec;
+	}
+	if (audio->sourceChannels == 0) {
+		audio->sourceChannels = audio->channels;
+	}
+	if (audio->sourceBitsPerSample == 0) {
+		audio->sourceBitsPerSample = audio->bitsPerSample;
+	}
 
 	if (!aparser && !libavos_get_ac3_recoding_enabled()) {
 		aparser = av_parser_init(wave2libav_codecid(codecid));

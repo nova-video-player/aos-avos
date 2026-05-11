@@ -969,6 +969,63 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 	}
 }
 
+static int stream_restart_audio_as_pcm( STREAM *s, const char *reason )
+{
+	if( !s || !s->audio || !s->audio->valid || !s->audio_sink ) {
+		return 1;
+	}
+#ifdef CONFIG_SPDIF
+	if( !spdif_is_passthrough_on() ) {
+		return 1;
+	}
+	serprintf("stream_restart_audio_as_pcm: disabling passthrough after %s\n",
+		reason ? reason : "sink failure");
+	stream_close_audio_filter( s );
+	stream_close_audio_dec( s );
+	spdif_set_passthrough( 0 );
+	s->audio_sink->set_passthrough( s, 0 );
+	if( s->audio->sourceSamples > 0 ) {
+		s->audio->samplesPerSec = s->audio->sourceSamples;
+	}
+	if( s->audio->sourceChannels > 0 ) {
+		s->audio->channels = s->audio->sourceChannels;
+	}
+	if( s->audio->sourceBitsPerSample > 0 ) {
+		s->audio->bitsPerSample = s->audio->sourceBitsPerSample;
+	}
+	if( s->audio->channels > 0 && s->audio->bitsPerSample > 0 ) {
+		s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
+	}
+	if( s->audio->bytesPerFrame > 0 && s->audio->samplesPerSec > 0 ) {
+		s->audio->bytesPerSec = s->audio->bytesPerFrame * s->audio->samplesPerSec;
+	}
+	stream_audio_copy_sink_from_source( s );
+	s->audio_dec = stream_get_audio_dec( s->audio );
+	if( !s->audio_dec || stream_open_audio_dec( s ) ) {
+		serprintf("stream_restart_audio_as_pcm: cannot open PCM decoder\n");
+		return 1;
+	}
+	if( stream_open_audio_filter( s ) ) {
+		serprintf("stream_restart_audio_as_pcm: cannot open PCM audio filter\n");
+		stream_close_audio_dec( s );
+		return 1;
+	}
+	stream_audio_copy_sink_from_source( s );
+	s->audio_sink->set_passthrough( s, 0 );
+	if( s->audio_sink->start( s ) ) {
+		serprintf("stream_restart_audio_as_pcm: cannot start PCM audio sink\n");
+		stream_close_audio_filter( s );
+		stream_close_audio_dec( s );
+		return 1;
+	}
+	serprintf("stream_restart_audio_as_pcm: PCM fallback started\n");
+	return 0;
+#else
+	(void)reason;
+	return 1;
+#endif
+}
+
 // *****************************************************************************
 //
 //	stream_close_video_dec
@@ -2353,10 +2410,12 @@ serprintf("cannot open audio!\n");
 
 				if( s->audio_sink->start( s ) ) {
 serprintf("cannot start audio!\n");
-					// cannot start, close the codec
-					stream_close_audio_dec( s );
-					// drop audio
-					stream_drop_audio( s );
+					if( stream_restart_audio_as_pcm( s, "passthrough sink start failure" ) ) {
+						// cannot start, close the codec
+						stream_close_audio_dec( s );
+						// drop audio
+						stream_drop_audio( s );
+					}
 				}
 			}
 		}
@@ -5085,11 +5144,13 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 #endif
 
 			if( s->audio_sink->start( s ) ) {
-				// no audio, close the codec
-				stream_close_audio_filter( s );
-				stream_close_audio_dec( s );
-				// drop audio
-				stream_drop_audio( s );
+				if( stream_restart_audio_as_pcm( s, "passthrough sink restart failure" ) ) {
+					// no audio, close the codec
+					stream_close_audio_filter( s );
+					stream_close_audio_dec( s );
+					// drop audio
+					stream_drop_audio( s );
+				}
 			}
 		}
 	}

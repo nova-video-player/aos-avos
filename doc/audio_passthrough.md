@@ -104,7 +104,11 @@ Native determines IEC support by inspecting codec flags set by Java:
 `audio_interface_audiotrack_java.c`:
 
 - **Mode 2**: uses codec-specific `AudioTrack` encodings (AC3/EAC3/DTS/TrueHD, etc.)
-  - output channels often forced to 2 (stereo container)
+  - unsupported route/codec combinations are rejected before `AudioTrack` setup and fall back to PCM decode unless passthrough is explicitly forced
+  - AC3/EAC3/DTS core use stereo channel masks as codec-specific compressed transport
+  - E-AC3 JOC uses `ENCODING_E_AC3_JOC` only on API 29+ when advertised; otherwise it falls back to base `ENCODING_E_AC3`
+  - DTS-HD MA uses `ENCODING_DTS_HD_MA` only on API 34+ when advertised; otherwise it falls back to generic `ENCODING_DTS_HD`, then DTS core
+  - TrueHD uses `ENCODING_DOLBY_TRUEHD` only when the route advertises TrueHD; multichannel masks follow the source channel count, with a stereo retry only if the platform rejects the multichannel `AudioTrack`
   - content sample rate is preserved (e.g., 48kHz)
 - **Mode 1**: IEC61937
   - container rates like 192kHz for EAC3/TrueHD/DTS-HD
@@ -192,6 +196,9 @@ Native determines IEC support by inspecting codec flags set by Java:
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
+- **Unsupported passthrough formats**: if passthrough is requested but the current route does not advertise the codec, native disables passthrough for that stream and decodes PCM. Mode 2 should not create a codec-specific `AudioTrack` for unsupported TrueHD/DTS-HD/JOC just by changing the channel mask.
+- **Forced passthrough**: force mode can expose codecs beyond route-reported support for devices with incomplete capability reporting. In that case `AudioTrack` construction is the final guard; if it rejects a codec-specific configuration, format-specific fallbacks may be attempted before giving up.
+- **Codec-specific fallback vs IEC fallback**: stereo in mode 1 describes the IEC transport container. Stereo in mode 2 is only valid for codec families that Android expects as stereo compressed transport, or as a compatibility retry after a route has advertised support but rejected a multichannel codec-specific mask.
 - **Mode 2 A/V timing**: timing is based on logical PCM-equivalent duration via `fakeSize`. For DTS/DTS-HD, raw mode 2 writes follow the parser's frame duration because DTS may use 512-sample frames; treating every DTS write as 1536 samples advances the AVOS audio clock too quickly. Other formats use codec metadata when available, then logical base units (1536 for EAC3/AC3, 1280 for TrueHD). This ensures accurate clocking even with high packet cadences.
 - **Startup Fill Window**: All Mode 2 passthrough and AC3 recoding benefit from a centralized **Synthetic Fill Window** during startup, ensuring smooth wall-clock paced synchronization while the physical HAL buffer fills. The fill window uses platform static latency, suppresses fill-start clamping until the passthrough playhead has proven it advances, and caps fill-exit rebasing against recent video progress. The fill exit gate waits until submitted audio is advancing near real time and the synthetic heard timestamp has reached the audible start boundary (`heard_ts >= 0`), or until the timeout fallback; it is not an adaptive latency calibration.
 - **Steady Mode 2 Timing**: After fill exit, Mode 2 keeps heard time continuous with wall-clock interpolation between compressed write bursts while preserving the static passthrough latency offset reported by the platform. Without this interpolation, `audio_time - static_latency` advances in burst-sized steps, so the video scheduler sees a sawtooth A/V diff even when average latency is correct.

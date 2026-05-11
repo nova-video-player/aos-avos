@@ -377,12 +377,20 @@ static int wave2libav_codecid( int codecid )
 			return 0;
 		}
 	case WAVE_FORMAT_EAC3:
-	case WAVE_FORMAT_E_AC3_JOC:
 		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
 			serprintf("EAC3 encoding passthrough supported\n");
 			return AV_CODEC_ID_EAC3;
 		} else {
 			serprintf("EAC3 encoding passthrough NOT supported\n");
+			return 0;
+		}
+	case WAVE_FORMAT_E_AC3_JOC:
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3_JOC) ||
+		   CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
+			serprintf("EAC3_JOC encoding passthrough supported\n");
+			return AV_CODEC_ID_EAC3;
+		} else {
+			serprintf("EAC3_JOC encoding passthrough NOT supported\n");
 			return 0;
 		}
 	case WAVE_FORMAT_DTS_HD_MA:
@@ -662,13 +670,17 @@ int spdif_format_passthrough_supported(int format)
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_AC3) ||
 		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
 	case WAVE_FORMAT_EAC3:
-	case WAVE_FORMAT_E_AC3_JOC:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
+	case WAVE_FORMAT_E_AC3_JOC:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3_JOC) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
 	case WAVE_FORMAT_DTS_HD_MA:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA) ||
-		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
 	case WAVE_FORMAT_DTS_HD:
-		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
 	case WAVE_FORMAT_DTS:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
 	case WAVE_FORMAT_TRUEHD:

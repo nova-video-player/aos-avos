@@ -32,6 +32,7 @@
 
 extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
+extern long get_hdmi_supported_audio_codecs(void);
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int spdif_is_passthrough_on(void);
 #include "jni.h"
@@ -42,6 +43,16 @@ extern int spdif_is_passthrough_on(void);
 #define ERR  if(1)
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
+
+#define AUDIO_FORMAT_ENCODING_E_AC3_JOC 18
+#define HDMI_ENCODING_AC3 5
+#define HDMI_ENCODING_E_AC3 6
+#define HDMI_ENCODING_E_AC3_JOC 18
+#define HDMI_ENCODING_DTS 7
+#define HDMI_ENCODING_DTS_HD 8
+#define HDMI_ENCODING_DTS_HD_MA 29
+#define HDMI_ENCODING_DOLBY_TRUEHD 14
+#define HDMI_CHECK_BIT(value, position) (((value) >> (position)) & 1)
 
 #ifndef AUDIO_USAGE_MEDIA
 #define AUDIO_USAGE_MEDIA 1
@@ -709,14 +720,30 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 		switch( at->format ) {
 			case WAVE_FORMAT_AC3:
-				track_format = 5; // AudioFormat.ENCODING_AC3
+				if (HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_AC3)) {
+					track_format = 5; // AudioFormat.ENCODING_AC3
+				} else if (HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3)) {
+					track_format = 6; // AudioFormat.ENCODING_E_AC3 compatibility fallback
+				} else {
+					track_format = 5; // Try AC3 when caps are missing/unknown.
+				}
 				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 				output_channels = 2;
 				// Keep content rate (typically 48kHz from demuxer)
 				break;
 			case WAVE_FORMAT_EAC3:
-			case WAVE_FORMAT_E_AC3_JOC:
 				track_format = 6; // AudioFormat.ENCODING_E_AC3
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
+				// Keep content rate (typically 48kHz), not IEC container rate (192kHz)
+				break;
+			case WAVE_FORMAT_E_AC3_JOC:
+				if (device_get_android_api() >= 29 &&
+				    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3_JOC)) {
+					track_format = AUDIO_FORMAT_ENCODING_E_AC3_JOC; // AudioFormat.ENCODING_E_AC3_JOC
+				} else {
+					track_format = 6; // AudioFormat.ENCODING_E_AC3 base-layer fallback
+				}
 				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 				output_channels = 2;
 				// Keep content rate (typically 48kHz), not IEC container rate (192kHz)
@@ -727,11 +754,43 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				output_channels = 2;
 				break;
 			case WAVE_FORMAT_DTS_HD_MA:
+				if (device_get_android_api() >= 34 &&
+				    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DTS_HD_MA)) {
+					track_format = 29; // AudioFormat.ENCODING_DTS_HD_MA
+				} else if (HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DTS_HD)) {
+					track_format = 8; // AudioFormat.ENCODING_DTS_HD
+				} else if (HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DTS)) {
+					track_format = 7; // AudioFormat.ENCODING_DTS core fallback
+				} else {
+					track_format = device_get_android_api() >= 34 ? 29 : 8; // Try best DTS-HD mode when caps are missing/unknown.
+				}
+				if (track_format != 7 && channels > 2) {
+					output_channels = channels > 8 ? 8 : channels;
+					track_chanmask = audiotrack_default_channel_mask(output_channels);
+					if (!track_chanmask) {
+						track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+						output_channels = 2;
+					}
+				} else {
+					track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+					output_channels = 2;
+				}
+				break;
 			case WAVE_FORMAT_DTS_HD:
-				track_format = 8; // AudioFormat.ENCODING_DTS_HD
-				if (get_hdmi_supports_iec_8ch192khz()) {
-					track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-					output_channels = 8;
+				if (HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DTS_HD)) {
+					track_format = 8; // AudioFormat.ENCODING_DTS_HD
+				} else if (HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DTS)) {
+					track_format = 7; // AudioFormat.ENCODING_DTS core fallback
+				} else {
+					track_format = 8; // Try DTS-HD when caps are missing/unknown; creation fallback remains below.
+				}
+				if (track_format == 8 && channels > 2) {
+					output_channels = channels > 8 ? 8 : channels;
+					track_chanmask = audiotrack_default_channel_mask(output_channels);
+					if (!track_chanmask) {
+						track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+						output_channels = 2;
+					}
 				} else {
 					track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
 					output_channels = 2;
@@ -739,11 +798,20 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				break;
 			case WAVE_FORMAT_TRUEHD:
 				track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
-				// Android encapsulates the bitstream internally, so force stereo just like AC3/EAC3.
-				// Using a 7.1 mask here makes AudioSystem reject the track when HDMI is set to "Auto"
-				// (Chromecast/Google TV case), resulting in complete silence.
-				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-				output_channels = 2;
+				if (device_get_android_api() >= 25 && channels > 2 &&
+				    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DOLBY_TRUEHD)) {
+					output_channels = channels > 8 ? 8 : channels;
+					track_chanmask = audiotrack_default_channel_mask(output_channels);
+					if (!track_chanmask) {
+						track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+						output_channels = 2;
+					}
+				} else {
+					// Some Android TV routes reject TrueHD with a 7.1 mask in "Auto".
+					// Retry creation below with stereo before giving up.
+					track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+					output_channels = 2;
+				}
 				break;
 			default:
 				// Fallback to IEC61937 for unknown formats
@@ -1142,9 +1210,31 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		if (status != 1) { // STATE_INITIALIZED is 1 ; 0 for uninit
 			ERR LOG("audiotrack ctor failed (status=%d) - backing off and retrying", status);
 			failed = 1;
+			if (at->format == WAVE_FORMAT_AC3 && track_format == 5 &&
+			    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3)) {
+				DBG LOG("audiotrack_set_output_params: AC3 AudioTrack failed, retrying as EAC3 compatibility layer");
+				return audiotrack_set_output_params(at, rate, 2, 16, WAVE_FORMAT_EAC3);
+			}
 			// If DTS HD failed, fallback to DTS for DTS core mode
+			if ((at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) &&
+			    track_format != 7 && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
+				DBG LOG("audiotrack_set_output_params: DTS-HD multichannel AudioTrack failed, retrying with stereo channel mask");
+				return audiotrack_set_output_params(at, rate, 2, bits, at->format);
+			}
+			if (at->format == WAVE_FORMAT_DTS_HD_MA && track_format == 29) {
+				DBG LOG("audiotrack_set_output_params: DTS-HD-MA AudioTrack failed, retrying as generic DTS-HD");
+				return audiotrack_set_output_params(at, rate, channels, bits, WAVE_FORMAT_DTS_HD);
+			}
 			if (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) {
 				return audiotrack_set_output_params(at, 48000, 2, 16, WAVE_FORMAT_DTS);
+			}
+			if (at->format == WAVE_FORMAT_TRUEHD && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
+				DBG LOG("audiotrack_set_output_params: TrueHD multichannel AudioTrack failed, retrying with stereo channel mask");
+				return audiotrack_set_output_params(at, rate, 2, bits, WAVE_FORMAT_TRUEHD);
+			}
+			if (at->format == WAVE_FORMAT_E_AC3_JOC && track_format == AUDIO_FORMAT_ENCODING_E_AC3_JOC) {
+				DBG LOG("audiotrack_set_output_params: EAC3_JOC AudioTrack failed, retrying as EAC3 base layer");
+				return audiotrack_set_output_params(at, rate, 2, 16, WAVE_FORMAT_EAC3);
 			}
 			msec_sleep(100); // give AudioFlinger more time to recover before re-entering
 		}

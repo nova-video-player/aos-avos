@@ -739,8 +739,8 @@ DBGS serprintf("~");
 		int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 		int ac3_recoding = libavos_get_ac3_recoding_enabled();
 		int passthrough_supported = stream_audio_format_passthrough_available( s->audio->format );
-		int passthrough_active = passthrough && passthrough_supported;
-		if( passthrough && !passthrough_supported ) {
+		int passthrough_active = passthrough && (passthrough_supported || ac3_recoding);
+		if( passthrough && !passthrough_supported && !ac3_recoding ) {
 			DBG serprintf("stream_audio: codec %04X not supported by route for passthrough, decoding as PCM\n",
 				s->audio->format);
 			if( s->audio_sink ) {

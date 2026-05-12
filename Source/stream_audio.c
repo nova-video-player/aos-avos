@@ -1320,7 +1320,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// Startup A/V alignment: if audio is significantly ahead at the very
 					// beginning or after a seek, delay audio output briefly so video can catch up.
 					if( s->put_time_mode && s->video && s->video->valid &&
-						s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
+						s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE &&
+						!passthrough_active ) {
 						if( s->audio_start_target_ts == STREAM_NO_PTS_VALUE ) {
 							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
 							int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
@@ -1513,6 +1514,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// Update audio time based on actual written output (not decoded bytes).
 					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
 						int64_t chunk_time_us = 0;
+						int audio_time_before_step = s->audio_time;
 
 						// Byte-ratio timing is valid for PCM-like fixed-rate outputs.
 						// Keep VBR and incomplete-metadata paths on conservative fallback timing.
@@ -1550,6 +1552,27 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									_add_audio_time( s, add_ms );
 								} else {
 									_add_audio_time( s, RST_TO_TS_DELTA(add_ms, int) );
+								}
+							}
+							if( passthrough_active && passthrough >= 2 ) {
+								static int mode2_write_diag_last_wall = 0;
+								int now_ms = atime();
+								if( now_ms > mode2_write_diag_last_wall + 2000 ) {
+									int latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+									int heard_latency = latency;
+									int raw_heard = s->audio_time - heard_latency;
+									int heard = stream_get_heard_audio_ts( s, s->audio_time );
+									int diff = STREAM_NO_PTS_VALUE;
+									if( s->sync_v_time != STREAM_NO_PTS_VALUE ) {
+										diff = s->sync_v_time - heard;
+									}
+									mode2_write_diag_last_wall = now_ms;
+									DBG serprintf("mode2_write_timeline: wall=%d fmt=%04X pt=%d recode=%d req=%d wrote=%d fake=%d effective=%lld chunk_us=%lld add_ms=%d before=%d after=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d\n",
+										now_ms, audio_frame.format, passthrough, ac3_recoding,
+										audio_frame.size, size_written, audio_frame.fakeSize,
+										(long long)effective_chunk_size, (long long)chunk_time_us,
+										add_ms, audio_time_before_step, s->audio_time,
+										heard, raw_heard, s->video_time, s->sync_v_time, diff, heard_latency);
 								}
 							}
 						}

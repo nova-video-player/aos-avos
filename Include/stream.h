@@ -767,15 +767,16 @@ typedef struct STREAM {
 	int		fps_count;
 	void		*surface_handle;
 
-	int		mode2_fill_active;
-	int		mode2_fill_start_wall_ms;
-	int		mode2_fill_start_pts;
-	int		mode2_fill_vel_start_wall_ms;
-	int		mode2_fill_vel_start_audio;
-
-	int		mode2_last_anchor_audio;
-	int		mode2_last_anchor_wall_ms;
-	int		interpolated_last_heard_ts;
+	int		heard_interp_anchor_audio;
+	int		heard_interp_anchor_wall_ms;
+	int		heard_interp_last_ts;
+	int		mode2_clock_anchor_heard_ts;
+	int		mode2_clock_anchor_audio;
+	int		mode2_clock_anchor_wall_ms;
+	int		mode2_clock_anchor_seek_epoch;
+	int		mode2_clock_anchor_latency_ms;
+	int		mode2_clock_last_heard_ts;
+	int		mode2_clock_last_audio_time;
 } STREAM;
 #define STREAM_POS_MAX 1000
 

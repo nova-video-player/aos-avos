@@ -54,7 +54,7 @@ extern int stream_pdrop_threshold;
 static volatile int	stream_dbg_delay = 0;
 static int atempo_delay_log_count = 0;
 static int _stream_get_atempo_delay( STREAM *s );
-static int _stream_get_video_handoff_lead_ms( STREAM *s );
+static void _stream_reset_mode2_clock( STREAM *s );
 static int sync_diag_count = 0;
 static int sync_diag_last_seek_epoch = -1;
 static int sync_diag_last_speed_x100 = -1;
@@ -324,14 +324,10 @@ int stream_sync_restart( STREAM *s )
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
 
-	s->mode2_fill_active = 0;
-	s->mode2_fill_start_wall_ms = 0;
-	s->mode2_fill_start_pts = STREAM_NO_PTS_VALUE;
-	s->mode2_fill_vel_start_wall_ms = 0;
-	s->mode2_fill_vel_start_audio = 0;
-	s->mode2_last_anchor_audio = -1;
-	s->mode2_last_anchor_wall_ms = 0;
-	s->interpolated_last_heard_ts = -1;
+	s->heard_interp_anchor_audio = -1;
+	s->heard_interp_anchor_wall_ms = 0;
+	s->heard_interp_last_ts = -1;
+	_stream_reset_mode2_clock( s );
 
 	_sync_diag_reset();
 
@@ -415,15 +411,15 @@ static int _stream_interpolate_heard_ts( STREAM *s, int wall_now, int heard_dela
 	int current_heard_ts = -1;
 	int candidate_heard_ts = s->audio_time - heard_delay;
 	int heard_ts;
-	if( s->mode2_last_anchor_audio != -1 ) {
-		elapsed = wall_now - s->mode2_last_anchor_wall_ms;
+	if( s->heard_interp_anchor_audio != -1 ) {
+		elapsed = wall_now - s->heard_interp_anchor_wall_ms;
 		if( elapsed < 0 ) {
 			elapsed = 0;
 		}
 		if( elapsed_cap_ms > 0 && elapsed > elapsed_cap_ms ) {
 			elapsed = elapsed_cap_ms;
 		}
-		current_heard_ts = s->mode2_last_anchor_audio - heard_delay + elapsed;
+		current_heard_ts = s->heard_interp_anchor_audio - heard_delay + elapsed;
 	}
 
 	if( cap_to_candidate && current_heard_ts != -1 ) {
@@ -433,40 +429,110 @@ static int _stream_interpolate_heard_ts( STREAM *s, int wall_now, int heard_dela
 		} else if( accept_audio_regression ) {
 			heard_ts = candidate_heard_ts;
 		}
-		s->mode2_last_anchor_audio = heard_ts + heard_delay;
-		s->mode2_last_anchor_wall_ms = wall_now;
-		s->interpolated_last_heard_ts = heard_ts;
+		s->heard_interp_anchor_audio = heard_ts + heard_delay;
+		s->heard_interp_anchor_wall_ms = wall_now;
+		s->heard_interp_last_ts = heard_ts;
 		return heard_ts;
 	}
 
-	if( s->audio_time > s->mode2_last_anchor_audio ) {
+	if( s->audio_time > s->heard_interp_anchor_audio ) {
 		int accept_forward = 1;
 		if( max_forward_lead_ms > 0 && current_heard_ts != -1 ) {
 			accept_forward = candidate_heard_ts <= current_heard_ts + max_forward_lead_ms;
 		}
 		if( accept_forward ) {
-			s->mode2_last_anchor_audio = s->audio_time;
-			s->mode2_last_anchor_wall_ms = wall_now;
+			s->heard_interp_anchor_audio = s->audio_time;
+			s->heard_interp_anchor_wall_ms = wall_now;
 		}
-	} else if( s->audio_time < s->mode2_last_anchor_audio && accept_audio_regression ) {
-		s->mode2_last_anchor_audio = s->audio_time;
+	} else if( s->audio_time < s->heard_interp_anchor_audio && accept_audio_regression ) {
+		s->heard_interp_anchor_audio = s->audio_time;
 		if( relatch_wall_on_regression ) {
-			s->mode2_last_anchor_wall_ms = wall_now;
+			s->heard_interp_anchor_wall_ms = wall_now;
 		}
 	}
-	if( s->mode2_last_anchor_audio == -1 ) {
+	if( s->heard_interp_anchor_audio == -1 ) {
 		return s->audio_time - heard_delay;
 	}
-	elapsed = wall_now - s->mode2_last_anchor_wall_ms;
+	elapsed = wall_now - s->heard_interp_anchor_wall_ms;
 	if( elapsed < 0 ) {
 		elapsed = 0;
 	}
 	if( elapsed_cap_ms > 0 && elapsed > elapsed_cap_ms ) {
 		elapsed = elapsed_cap_ms;
 	}
-	heard_ts = s->mode2_last_anchor_audio - heard_delay + elapsed;
-	s->interpolated_last_heard_ts = heard_ts;
+	heard_ts = s->heard_interp_anchor_audio - heard_delay + elapsed;
+	s->heard_interp_last_ts = heard_ts;
 	return heard_ts;
+}
+
+static void _stream_reset_mode2_clock( STREAM *s )
+{
+	if( !s ) {
+		return;
+	}
+	s->mode2_clock_anchor_heard_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_clock_anchor_audio = STREAM_NO_PTS_VALUE;
+	s->mode2_clock_anchor_wall_ms = 0;
+	s->mode2_clock_anchor_seek_epoch = -1;
+	s->mode2_clock_anchor_latency_ms = 0;
+	s->mode2_clock_last_heard_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_clock_last_audio_time = STREAM_NO_PTS_VALUE;
+}
+
+static int _stream_mode2_wall_heard_ts( STREAM *s, int wall_now, int heard_delay )
+{
+	int raw_heard_ts = s->audio_time - heard_delay;
+	int reason = 0;
+	const char *reason_name = "keep";
+
+	if( s->mode2_clock_anchor_heard_ts == STREAM_NO_PTS_VALUE ||
+		s->mode2_clock_anchor_audio == STREAM_NO_PTS_VALUE ) {
+		reason = 1;
+		reason_name = "init";
+	} else if( s->mode2_clock_anchor_seek_epoch != s->seek_epoch ) {
+		reason = 1;
+		reason_name = "seek";
+	} else if( s->audio_time < s->mode2_clock_anchor_audio ) {
+		reason = 1;
+		reason_name = "audio_regress";
+	} else if( wall_now < s->mode2_clock_anchor_wall_ms ) {
+		reason = 1;
+		reason_name = "wall_regress";
+	}
+
+	if( reason ) {
+		s->mode2_clock_anchor_heard_ts = raw_heard_ts;
+		s->mode2_clock_anchor_audio = s->audio_time;
+		s->mode2_clock_anchor_wall_ms = wall_now;
+		s->mode2_clock_anchor_seek_epoch = s->seek_epoch;
+		s->mode2_clock_anchor_latency_ms = heard_delay;
+		s->mode2_clock_last_heard_ts = raw_heard_ts;
+		s->mode2_clock_last_audio_time = s->audio_time;
+		DBG serprintf("mode2_clock_anchor: reason=%s wall=%d audio=%d raw_heard=%d latency=%d seek_epoch=%d\n",
+			reason_name, wall_now, s->audio_time, raw_heard_ts, heard_delay, s->seek_epoch);
+		return raw_heard_ts;
+	}
+
+	int elapsed = wall_now - s->mode2_clock_anchor_wall_ms;
+	if( elapsed < 0 ) {
+		elapsed = 0;
+	}
+
+	int heard_ts = s->mode2_clock_anchor_heard_ts + elapsed;
+	if( s->mode2_clock_last_heard_ts != STREAM_NO_PTS_VALUE &&
+		heard_ts < s->mode2_clock_last_heard_ts ) {
+		heard_ts = s->mode2_clock_last_heard_ts;
+	}
+
+	s->mode2_clock_last_heard_ts = heard_ts;
+	s->mode2_clock_last_audio_time = s->audio_time;
+	return heard_ts;
+}
+
+static int _stream_mode2_heard_delay( STREAM *s, int static_latency, int fallback_delay )
+{
+	(void)s;
+	return static_latency > 0 ? static_latency : fallback_delay;
 }
 
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
@@ -482,11 +548,18 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
 	int delay_valid = delay_status.is_delay_valid;
+	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
+	int use_mode2_wall_clock = passthrough_mode >= 2;
 	int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
 	int heard_delay;
 	
-	// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
-	if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
+	if( is_mode2_sync ) {
+		// Mode 2 tracks submitted compressed time. Use configured sink latency as
+		// the single offset; dynamic timestamps remain diagnostics only here.
+		heard_delay = _stream_mode2_heard_delay( s, static_latency, delay_status.effective_delay_ms );
+	} else if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
+		// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
 		heard_delay = delay_status.effective_delay_ms;
 	} else {
 		heard_delay = (s->smoothed_av_delay >= 0) ?
@@ -494,122 +567,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			delay_status.effective_delay_ms;
 	}
 
-	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
 	int wall_now = atime();
 
-	// Mode 2 startup fill:
-	// Compressed writes can advance audio_time before the high-latency passthrough
-	// route is audibly stable. During this startup/seek window, drive heard_ts from
-	// wall-clock time plus platform static latency instead of the bursty producer
-	// cadence. This gives the video scheduler a monotonic audible-time baseline
-	// until submitted audio is advancing at real-time speed, then hands off to the
-	// steady-state static-latency interpolator.
-	if (is_mode2_sync) {
-		// Initialize fill window if we are at the very start of a seek epoch
-		if (!s->mode2_fill_active && s->sink_ref_time == -1) {
-			s->mode2_fill_active = 1;
-			s->mode2_fill_start_wall_ms = wall_now;
-			s->mode2_fill_start_pts = s->audio_time;
-			s->mode2_fill_vel_start_wall_ms = wall_now;
-			s->mode2_fill_vel_start_audio = s->audio_time;
-			DBG serprintf("mode2_fill_start: wall=%d pts=%d video=%d\n", 
-				wall_now, s->mode2_fill_start_pts, s->video_time);
-		}
-
-		if (s->mode2_fill_active) {
-			int fill_duration = wall_now - s->mode2_fill_start_wall_ms;
-			int effective_latency = static_latency;
-			if( effective_latency < 0 ) {
-				effective_latency = 0;
-			}
-			int audio_vel_elapsed = wall_now - s->mode2_fill_vel_start_wall_ms;
-			int real_dynamic = 0;
-			if( audio_vel_elapsed >= 500 ) {
-				int a_adv = s->audio_time - s->mode2_fill_vel_start_audio;
-				// Exit once submitted audio has advanced close to real time for a
-				// short window. This proves the producer side is no longer in the
-				// initial fill burst pattern; it is not a latency calibration signal.
-				if( a_adv >= 450 ) {
-					real_dynamic = 1;
-				} else {
-					s->mode2_fill_vel_start_wall_ms = wall_now;
-					s->mode2_fill_vel_start_audio = s->audio_time;
-				}
-			}
-
-			// Synthetic Heard TS: strictly track real-world time during fill
-			int heard_ts = s->mode2_fill_start_pts - effective_latency + fill_duration;
-
-			// CLAMP: Apply the 50ms startup clamp to the synthetic timeline.
-			int passthrough_playhead_proven = s->audio_ctx ?
-				audio_interface_passthrough_playhead_advanced( s->audio_ctx ) : 1;
-			if( s->sink_ref_time == -1 &&
-				passthrough_playhead_proven &&
-				heard_ts < s->audio_time - 50 ) {
-				int clamped = s->audio_time - 50;
-				DBG serprintf( "stream_get_heard_audio_ts: mode2 startup hold clamp: %d->%d (audio=%d video=%d)\n",
-					heard_ts, clamped, s->audio_time, s->video_time );
-				heard_ts = clamped;
-				// Rebase synthetic start so pacing continues from this clamped point
-				s->mode2_fill_start_pts = heard_ts + effective_latency - fill_duration;
-			}
-
-			int audible_start_reached = (heard_ts >= 0);
-			int video_handoff_ready = 1;
-			int video_handoff_lead = -1;
-			int min_video_handoff_lead = _stream_get_video_handoff_lead_ms( s );
-			if( s->video && s->video->valid && !s->slideshow && s->video_time >= 0 ) {
-				video_handoff_lead = (s->sync_v_time >= 0) ? s->sync_v_time - s->video_time : -1;
-				video_handoff_ready = video_handoff_lead >= min_video_handoff_lead;
-			}
-			if ((real_dynamic && audible_start_reached && video_handoff_ready) || fill_duration >= 2000) {
-				// EXIT: Handoff to normal logical clock
-				s->mode2_fill_active = 0;
-				// Rebase audio_time so that (audio_time - effective latency) matches the last synthetic baseline.
-				int rebase_audio = heard_ts + effective_latency;
-				int cap_video_time = s->video_time;
-				if( s->sync_v_time >= 0 &&
-					(cap_video_time < 0 || s->sync_v_time > cap_video_time) &&
-					(cap_video_time < 0 || s->sync_v_time - cap_video_time < 1000) ) {
-					cap_video_time = s->sync_v_time;
-				}
-				if( cap_video_time >= 0 ) {
-					const int rebase_video_margin_ms = 0;
-					int rebase_cap = cap_video_time + effective_latency + rebase_video_margin_ms;
-					if( rebase_audio > rebase_cap ) {
-						DBG serprintf("mode2_fill_exit: capping rebase_audio %d->%d (video=%d sync_v=%d cap_video=%d effective_latency=%d)\n",
-							rebase_audio, rebase_cap, s->video_time, s->sync_v_time, cap_video_time, effective_latency);
-						rebase_audio = rebase_cap;
-					}
-				}
-				s->audio_time = rebase_audio;
-				DBG serprintf("mode2_fill_exit: wall=%d dur=%d rebase_audio=%d real_dynamic=%d playhead_proven=%d video_lead=%d min_video_lead=%d\n",
-					wall_now, fill_duration, s->audio_time, real_dynamic, passthrough_playhead_proven,
-					video_handoff_lead, min_video_handoff_lead);
-
-				// SEAMLESS HANDOFF: Force the video scheduler to refresh its anchor
-				// using the newly rebased timeline to avoid a discontinuity jump.
-				sfdec2_refresh_sched_anchor( s );
-
-				// Initialize Interpolator Reference for a perfect handoff
-				s->mode2_last_anchor_audio = s->audio_time;
-				s->mode2_last_anchor_wall_ms = wall_now;
-			} else {
-				if (real_dynamic && !audible_start_reached) {
-					DBG serprintf("mode2_fill_hold: real_dynamic=1 but heard_ts=%d audio=%d latency=%d dur=%d\n",
-						heard_ts, s->audio_time, effective_latency, fill_duration);
-				} else if (real_dynamic && audible_start_reached && !video_handoff_ready) {
-					DBG serprintf("mode2_fill_hold: waiting video lead=%d min=%d (video=%d sync_v=%d dur=%d)\n",
-						video_handoff_lead, min_video_handoff_lead, s->video_time, s->sync_v_time, fill_duration);
-				}
-				// ACTIVE: Follow the synthetic wall-clock Pace
-				return heard_ts;
-			}
-		}
-	}
-
-	if (!delay_valid) {
+	if (!delay_valid && !is_mode2_sync) {
 #ifdef CONFIG_ANDROID
 		// When atempo is active, include filter delay in heard-time even if timing is invalid.
 		if( audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() ) {
@@ -632,6 +592,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	int heard_ts = s->audio_time - heard_delay;
 
+	if( use_mode2_wall_clock && (s->audio_start_pending || s->audio_resume_pending) ) {
+		_stream_reset_mode2_clock( s );
+	} else if( use_mode2_wall_clock ) {
+		heard_ts = _stream_mode2_wall_heard_ts( s, wall_now, heard_delay );
+	}
+
 	// PCM AudioTrack timing is sampled in chunks: audio_time advances when we write,
 	// while the physical playhead advances continuously between writes. Interpolate
 	// heard time during steady put_time playback, but cap it to the latest submitted
@@ -652,17 +618,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		heard_ts = clamped;
 	}
 
-	// 4. STEADY-STATE INTERPOLATOR (Mode 2 only)
-	// elapsed_cap=1500: must exceed the passthrough burst interval (EAC3 ~576ms,
-	// TrueHD ~300ms) so heard_ts rises continuously between bursts at the same
-	// 1ms/ms rate as video, keeping diff constant.  500ms was shorter than EAC3
-	// burst interval, causing heard_ts to plateau 76ms before each burst and
-	// then jump at burst time, creating a visible sawtooth in the A/V diff.
-	if (is_mode2_sync && !s->mode2_fill_active) {
-		heard_ts = _stream_interpolate_heard_ts( s, wall_now, heard_delay,
-			1500, 0, 1, 50, 0 );
-	}
-
 	// Preserves full physical delay offset for passthrough startup.
 	// For PCM in put_time mode, allow negative heard_ts during the buffer-fill phase
 	// (sink_ref_time <= 0) so sfdec2 can schedule frames relative to when audio is heard.
@@ -677,12 +632,28 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	static int last_diag_wall = 0;
 	if (wall_now > last_diag_wall + 2000) {
 		last_diag_wall = wall_now;
-		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d delay_valid=%d source=%s tag=%s fill=%d\n",
+		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d delay_valid=%d source=%s tag=%s\n",
 			wall_now, s->audio_time, heard_ts, heard_delay, s->smoothed_av_delay, 
 			delay_status.effective_delay_ms, delay_status.is_delay_valid,
 			_stream_delay_source_name(delay_status.source),
-			delay_status.source_tag ? delay_status.source_tag : "none",
-			s->mode2_fill_active);
+			delay_status.source_tag ? delay_status.source_tag : "none");
+		if( use_mode2_wall_clock ) {
+			int user_av_delay = s->av_delay + stream_dbg_delay;
+			int diff = STREAM_NO_PTS_VALUE;
+			int raw_heard_ts = s->audio_time - heard_delay;
+			int clock_elapsed = s->mode2_clock_anchor_wall_ms ?
+				wall_now - s->mode2_clock_anchor_wall_ms : 0;
+			if( s->sync_v_time != STREAM_NO_PTS_VALUE ) {
+				diff = (s->sync_v_time - heard_ts) + RST_TO_TS_DELTA( user_av_delay, int );
+			}
+			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d audio=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d anchor_heard=%d anchor_audio=%d anchor_wall=%d anchor_elapsed=%d source=%s tag=%s\n",
+				wall_now, s->audio ? s->audio->format : 0, passthrough_mode,
+				s->audio_time, heard_ts, raw_heard_ts, s->video_time, s->sync_v_time,
+				diff, heard_delay, s->mode2_clock_anchor_heard_ts,
+				s->mode2_clock_anchor_audio, s->mode2_clock_anchor_wall_ms,
+				clock_elapsed, _stream_delay_source_name(delay_status.source),
+				delay_status.source_tag ? delay_status.source_tag : "none");
+		}
 	}
 
 	return heard_ts;
@@ -691,29 +662,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 {
 	return _stream_get_heard_audio_ts_internal( s, fallback_ts );
-}
-
-static int _stream_get_video_handoff_lead_ms( STREAM *s )
-{
-	int frame_ms = 40;
-	if( s && s->video ) {
-		if( s->video->msPerFrame > 0 ) {
-			frame_ms = s->video->msPerFrame;
-		} else if( s->video->frame_rate_num > 0 && s->video->frame_rate_den > 0 ) {
-			frame_ms = (int)((1000LL * s->video->frame_rate_den + s->video->frame_rate_num - 1) /
-				s->video->frame_rate_num);
-		} else if( s->video->framesPerSec > 0 ) {
-			frame_ms = (1000 + s->video->framesPerSec - 1) / s->video->framesPerSec;
-		}
-	}
-
-	int lead_ms = frame_ms * 2;
-	if( lead_ms < 32 ) {
-		lead_ms = 32;
-	} else if( lead_ms > 100 ) {
-		lead_ms = 100;
-	}
-	return lead_ms;
 }
 
 // ************************************************************
@@ -739,14 +687,10 @@ int stream_sync_init( STREAM *s, int time )
 	s->last_good_delay_valid = 0;
 	s->last_good_atempo_delay_ms = 0;
 	s->warmup_video_frames = 0;
-	s->mode2_fill_active = 0;
-	s->mode2_fill_start_wall_ms = 0;
-	s->mode2_fill_start_pts = STREAM_NO_PTS_VALUE;
-	s->mode2_fill_vel_start_wall_ms = 0;
-	s->mode2_fill_vel_start_audio = 0;
-	s->mode2_last_anchor_audio = -1;
-	s->mode2_last_anchor_wall_ms = 0;
-	s->interpolated_last_heard_ts = -1;
+	s->heard_interp_anchor_audio = -1;
+	s->heard_interp_anchor_wall_ms = 0;
+	s->heard_interp_last_ts = -1;
+	_stream_reset_mode2_clock( s );
 
 	if( time != -1 ) {
 		s->video_time = time;
@@ -1092,7 +1036,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 
 	if( anchor_valid && _stream_is_sink_driven(s) && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
-			// Centralized heard_ts calculation (includes Mode 2 Fill and Startup Clamps)
+			// Centralized heard_ts calculation.
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
 
 			int force_passthrough_reanchor =
@@ -1102,11 +1046,11 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				(s->sink_ref_time == -1 || s->sync_a_time == -1);
 
 			if (diag_log) {
-				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d source=%s tag=%s av_delay=%d anchor=%d mode2_fill=%d\n",
+				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d source=%s tag=%s av_delay=%d anchor=%d\n",
 					audio_time, s->smoothed_av_delay, current_av_delay,
 					_stream_delay_source_name(delay_status.source),
 					delay_status.source_tag ? delay_status.source_tag : "none",
-					s->av_delay, anchor_ts, s->mode2_fill_active);
+					s->av_delay, anchor_ts);
 			}
 			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
@@ -1158,16 +1102,18 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	// both audio and video need to have a valid timestamp before we can start
 	int audio_time_for_diff = s->sync_a_time;
 	if( s->put_time_mode && s->audio_time != -1 ) {
-		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
-		// CRITICAL: For Mode 2, use the raw logical heard-time for flow control.
-		// Decouple from synthetic wall-clock pacing (fill window) to prevent the audio
-		// thread from blocking itself.
 		int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-		int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
-		if (is_mode2_sync) {
-			int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
-			audio_time_for_diff = s->audio_time - static_latency;
+		if( passthrough_mode >= 2 ) {
+			if( s->audio_start_pending || s->audio_resume_pending ) {
+				return 0;
+			}
+			// Mode 2 video scheduling uses the wall-clock playout estimate to
+			// smooth compressed burst cadence. Gate audio writes against that
+			// same heard timeline so the producer does not run from a competing
+			// raw packet frontier.
+			audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
 		} else {
+			// PCM and mode 1 compare against the same heard time used for sink anchoring.
 			audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
 		}
 	}
@@ -1364,44 +1310,17 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		}
 		if( !s->seek_converge_done && atime() >= s->seek_converge_until_ms ) {
 			if( _stream_is_sink_driven(s) ) {
-				int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-				int frame_ms = (s->video && s->video->msPerFrame > 0) ? s->video->msPerFrame : 33;
-				int catchup_threshold = MAX( stream_get_anchor_delay_ms( s, 1 ), frame_ms * 8 );
-				int converge_threshold = MAX( frame_ms * 2, 60 );
-				if( passthrough_mode == 2 && s->mode2_fill_active ) {
-					// Do not complete post-seek convergence while mode-2 is still
-					// running the synthetic fill clock.  The fill-exit rebase is the
-					// first authoritative handoff to steady-state timing.
-DBGY					serprintf("post-seek converge pending: fill active diff=%d threshold=%d passthrough=%d\n",
-						diff, converge_threshold, passthrough_mode);
-					s->seek_converge_until_ms = atime() + 100;
-				} else if( passthrough_mode == 2 &&
-					(diff < -converge_threshold || diff > converge_threshold) ) {
-					// Mode-2 encapsulation can briefly expose decoded video far from
-					// the heard timeline after the synthetic fill window exits.  Do
-					// not turn a multi-second mismatch into a fresh scheduler truth:
-					// negative gaps should keep using the existing mapping so the
-					// sink can drop toward the heard frontier, while positive gaps
-					// must keep the video gate active until audio catches up.
-DBGY					serprintf("post-seek converge pending: skip anchor diff=%d threshold=%d catchup=%d passthrough=%d\n",
-						diff, converge_threshold, catchup_threshold, passthrough_mode);
-					s->seek_converge_until_ms = atime() + 100;
-				} else {
-					int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+				int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
 DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
-						diff, anchor_ts);
-					anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
-					// The audio path may have already called put_time() with the same
-					// heard timestamp, making this call a no-op in codec_sfdec2
-					// (disc=0, allow_reanchor=0 → sched anchors unchanged).  Force a
-					// scheduler reset so the wall-clock anchor is always refreshed at
-					// the converge point regardless of whether the value changed.
-					sfdec2_refresh_sched_anchor( s );
-					s->video_sink->put_time( s->video_sink, anchor_ts );
-					s->sink_ref_time = anchor_ts;
-					s->vid_ref_time = s->video_time;
-					s->seek_converge_done = 1;
-				}
+					diff, anchor_ts);
+				anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
+				// Seek convergence is an explicit discontinuity; refresh once here,
+				// not from steady-state mode-2 timing heuristics.
+				sfdec2_refresh_sched_anchor( s );
+				s->video_sink->put_time( s->video_sink, anchor_ts );
+				s->sink_ref_time = anchor_ts;
+				s->vid_ref_time = s->video_time;
+				s->seek_converge_done = 1;
 			} else {
 				s->seek_converge_done = 1;
 			}

@@ -484,7 +484,23 @@ DBGS serprintf( "spdif_init\n");
 	stream->codecpar->codec_id = wave2libav_codecid( codecid );
 	stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
 	stream->codecpar->sample_rate = a->samplesPerSec;
-	if ( avformat_write_header( fctxt, NULL ) < 0 )
+
+	const char *dtshd_rate = NULL;
+	if (a->format == WAVE_FORMAT_DTS_HD_MA || a->format == WAVE_FORMAT_DTS_HD) {
+		if (get_hdmi_supports_iec_8ch192khz()) {
+			dtshd_rate = "768000";
+		} else {
+			dtshd_rate = "0";
+		}
+	}
+	AVDictionary *opts = NULL;
+	if (dtshd_rate) {
+		av_dict_set( &opts, "dtshd_rate", dtshd_rate, 0 );
+	}
+
+	int header_ret = avformat_write_header( fctxt, opts ? &opts : NULL );
+	av_dict_free( &opts );
+	if ( header_ret < 0 )
 		return 0;
 
 	// try to get a parser for this codec
@@ -502,17 +518,6 @@ serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
 		aparser = NULL;
 		DBGS serprintf("spdif_init: skipping parser for AC3 recoding (encoder produces complete frames)\n");
 	}
-
-	const char *dtsrate = NULL;
-    if (a->codec_id == WAVE_FORMAT_DTS_HD_MA || a->codec_id == WAVE_FORMAT_DTS_HD) {
-        if (get_hdmi_supports_iec_8ch192khz()) {
-            dtsrate = "dtshd_rate=768000";
-        } else {
-            dtsrate = "dtshd_rate=0";
-        }
-    }
-	if (dtsrate && av_set_options_string( &fctxt->av_class, dtsrate, "=", ":" ) < 0 )
-		serprintf( "Failed2 setting dtshd rate to %s\n", dtsrate );
 
 	return 1;
 }

@@ -43,9 +43,10 @@ because `render_ts_ns > 0` is always supplied.
   unreliable; this provides a consistent A/V alignment at startup.
 - Subsequent corrections are event‑driven (seek/resume/speed) and applied via
   slow slew to avoid visible acceleration or stutter.
-- For `passthrough=2` seek/resume windows, startup hold compensation is kept
-  across an immediate `put_time`-triggered `render_offset_ns` reset. This
-  prevents a second init pass from snapping to full static latency while the
-  post-flush audio path is still warming up.
+- For `passthrough=2` seek/resume windows, anchors are reset and rebuilt from
+  the first committed compressed audio output using the centralized
+  `heard_audio_ts` calculation. Mode 2 uses static passthrough latency as the
+  baseline, with only a bounded positive residual when stable AudioTrack
+  evidence is enabled and available.
 - Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
   incorrect snapping after a speed change, causing jitter in scheduled timestamps.

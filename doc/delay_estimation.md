@@ -150,15 +150,18 @@ Rules:
      up. At normal speed, if that rebase fired, the later measured-delay rebase
      is disarmed because it has caused visible snaps when sync is already near
      zero. Non-1x PCM keeps the measured-delay rebase armed.
-   - android_sync=1 passthrough / AC3 recoding: static passthrough delay is
-     considered valid immediately, but video resume hold is released only after
-     the first resumed audio write commits. This avoids anchoring before
-     post-resume compressed output has actually restarted.
+   - Passthrough / AC3 recoding: static passthrough delay is considered valid
+     immediately for mode 1 and as the mode 2 baseline. Video resume hold is
+     released only after the first resumed audio write commits, avoiding anchors
+     before post-resume compressed output has actually restarted.
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
-  - Passthrough mode 2 (raw): playhead/timestamp are unreliable for delay
-    estimation; the scheduler uses platform static latency plus the fill-window
-    and interpolation guards described in `sync_anchoring_rules.md`.
+  - Passthrough mode 2 (raw): playhead/timestamp evidence is treated
+    conservatively. The scheduler uses platform static latency as baseline.
+    When `enable_dynamic_audio_delay` and `stream_mode2_dynamic_delay` are
+    enabled, stable AudioTrack evidence may add a capped, slewed, positive-only
+    residual above static latency. Stream-level last-good fallback is not
+    considered fresh sink evidence for this residual.
 - Cached/throttled AudioTrack delay reads preserve validity when the last
   trusted source was playhead-based (`last_good_dynamic_valid`), so
   `cached(throttle)` does not immediately invalidate a newly trusted delay.

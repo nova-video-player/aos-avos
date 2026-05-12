@@ -1558,6 +1558,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								static int mode2_write_diag_last_wall = 0;
 								int now_ms = atime();
 								if( now_ms > mode2_write_diag_last_wall + 2000 ) {
+									AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );
+									int duration_bpf = spdif_props ? spdif_props->bytesPerFrame : 0;
+									int duration_rate = spdif_props ? spdif_props->samplesPerSec : 0;
 									int latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
 									int heard_latency = latency;
 									int raw_heard = s->audio_time - heard_latency;
@@ -1567,10 +1570,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										diff = s->sync_v_time - heard;
 									}
 									mode2_write_diag_last_wall = now_ms;
-									DBG serprintf("mode2_write_timeline: wall=%d fmt=%04X pt=%d recode=%d req=%d wrote=%d fake=%d effective=%lld chunk_us=%lld add_ms=%d before=%d after=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d\n",
+									DBG serprintf("mode2_write_timeline: wall=%d fmt=%04X pt=%d recode=%d req=%d wrote=%d fake=%d effective=%lld chunk_us=%lld dur_bpf=%d dur_rate=%d add_ms=%d before=%d after=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d\n",
 										now_ms, audio_frame.format, passthrough, ac3_recoding,
 										audio_frame.size, size_written, audio_frame.fakeSize,
 										(long long)effective_chunk_size, (long long)chunk_time_us,
+										duration_bpf, duration_rate,
 										add_ms, audio_time_before_step, s->audio_time,
 										heard, raw_heard, s->video_time, s->sync_v_time, diff, heard_latency);
 								}

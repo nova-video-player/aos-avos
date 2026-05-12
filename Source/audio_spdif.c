@@ -135,11 +135,14 @@ static int _spdif_frame_samples(const AUDIO_PROPERTIES *a, int passthrough_mode)
 }
 
 // Detailed version that captures decision path for debug logging
-static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough_mode, int *avctx_size, int *parser_duration, int *fallback_samples)
+static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough_mode, int *avctx_size, int *parser_duration, int *fallback_samples, const char **source)
 {
 	*avctx_size = 0;
 	*parser_duration = 0;
 	*fallback_samples = 0;
+	if (source) {
+		*source = "none";
+	}
 
 	// Mode 2 DTS uses raw parser output as the AudioTrack write unit, so its
 	// logical duration must follow the parser. DTS commonly uses 512-sample
@@ -149,25 +152,40 @@ static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough
 		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
 		if (aparser && aparser->duration > 0) {
 			*parser_duration = aparser->duration;
+			if (source) {
+				*source = "parser";
+			}
 			return aparser->duration;
 		}
 		if (avctx && avctx->frame_size > 0) {
 			*avctx_size = avctx->frame_size;
+			if (source) {
+				*source = "avctx";
+			}
 			return avctx->frame_size;
 		}
 		*fallback_samples = 512;
+		if (source) {
+			*source = "fallback-dts";
+		}
 		return 512;
 	}
 
 	// 1. Primary: codec-specific context metadata (avctx.frame_size).
 	if (avctx && avctx->frame_size > 0) {
 		*avctx_size = avctx->frame_size;
+		if (source) {
+			*source = "avctx";
+		}
 		return avctx->frame_size;
 	}
 
 	// 2. Secondary: parser-derived logical duration.
 	if (aparser && aparser->duration > 0) {
 		*parser_duration = aparser->duration;
+		if (source) {
+			*source = "parser";
+		}
 		return aparser->duration;
 	}
 
@@ -177,10 +195,16 @@ static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough
 		    a->format == WAVE_FORMAT_EAC3 ||
 		    a->format == WAVE_FORMAT_E_AC3_JOC) {
 			*fallback_samples = 1536;
+			if (source) {
+				*source = "fallback-ac3";
+			}
 			return 1536;
 		}
 		if (a->format == WAVE_FORMAT_TRUEHD) {
 			*fallback_samples = 1280;
+			if (source) {
+				*source = "fallback-truehd";
+			}
 			return 1280;
 		}
 	}
@@ -253,6 +277,9 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		{
 			int samples = _spdif_frame_samples(a, passthrough_on);
 			frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : size;
+			DBGCA2 serprintf("Mode 2 duration: format=%04X source=%s samples=%d fakeSize=%d raw=%d bpf=%d rate=%d recode=1\n",
+				a->format, samples > 0 ? "fallback-ac3" : "physical", samples,
+				frame->fakeSize, size, a->bytesPerFrame, a->samplesPerSec);
 		}
 		*decoded = size;
 		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d, bpf=%d, rate=%d, recode=1\n",
@@ -297,15 +324,19 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			// and TrueHD keep their codec base-unit fallbacks when parser metadata is absent.
 			{
 				int avctx_size, parser_duration, fallback_samples;
-				int samples = _spdif_frame_samples_debug(a, passthrough_on, &avctx_size, &parser_duration, &fallback_samples);
+				const char *duration_source = "none";
+				int samples = _spdif_frame_samples_debug(a, passthrough_on, &avctx_size, &parser_duration, &fallback_samples, &duration_source);
 				if (samples > 0) {
-					DBGCA2 serprintf("Mode 2 timing: format=%04X samples=%d fakeSize=%d avctx_size=%d parser_dur=%d fallback=%d\n",
-						a->format, samples, samples * a->bytesPerFrame, avctx_size, parser_duration, fallback_samples);
+					DBGCA2 serprintf("Mode 2 timing: format=%04X samples=%d fakeSize=%d source=%s avctx_size=%d parser_dur=%d fallback=%d\n",
+						a->format, samples, samples * a->bytesPerFrame, duration_source, avctx_size, parser_duration, fallback_samples);
 					frame->fakeSize = samples * a->bytesPerFrame;
 				} else {
 					// Fallback to physical size if parser is blind
 					frame->fakeSize = out_size;
+					duration_source = "physical";
 				}
+				DBGCA2 serprintf("Mode 2 duration: format=%04X source=%s samples=%d fakeSize=%d raw=%d bpf=%d rate=%d\n",
+					a->format, duration_source, samples, frame->fakeSize, out_size, a->bytesPerFrame, a->samplesPerSec);
 			}
 			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d, rate=%d, parser=1\n",
 			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);

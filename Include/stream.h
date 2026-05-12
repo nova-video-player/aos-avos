@@ -777,6 +777,10 @@ typedef struct STREAM {
 	int		mode2_clock_anchor_latency_ms;
 	int		mode2_clock_last_heard_ts;
 	int		mode2_clock_last_audio_time;
+	int		mode2_dynamic_correction_ms;
+	int		mode2_dynamic_correction_target_ms;
+	int		mode2_dynamic_last_update_wall_ms;
+	int		mode2_dynamic_last_log_wall_ms;
 } STREAM;
 #define STREAM_POS_MAX 1000
 

@@ -63,6 +63,10 @@ static int sync_diag_last_state = -1;
 static int sync_diag_last_reanchor_pending = -1;
 
 static int stream_use_xbmc_smoothing = 1;
+int stream_mode2_dynamic_delay = 1;
+static int stream_mode2_dynamic_max_ms = 150;
+static int stream_mode2_dynamic_slew_ms = 5;
+static int stream_mode2_dynamic_streak = 10;
 
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -140,6 +144,20 @@ static stream_delay_source_t _classify_audio_delay_source(const char *tag, int d
 		return STREAM_DELAY_SOURCE_NONE;
 	}
 	return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
+}
+
+static int _stream_is_mode2_audio_interface_delay(const stream_delay_status_t *status)
+{
+	if( !status || !status->source_tag ) {
+		return 0;
+	}
+	if( status->source == STREAM_DELAY_SOURCE_DYNAMIC ) {
+		return 1;
+	}
+	if( status->source != STREAM_DELAY_SOURCE_LAST_GOOD ) {
+		return 0;
+	}
+	return strncmp( status->source_tag, "last_good(stream)", 17 ) != 0;
 }
 
 static int _sync_diag_should_log(STREAM *s)
@@ -350,6 +368,23 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 
 	status.streak = s && s->audio_ctx ? audio_interface_get_delay_valid_streak(s->audio_ctx) : 0;
 
+	if( s && s->audio_ctx && s->audio_sink && stream_mode2_dynamic_delay &&
+		s->audio_sink->get_passthrough( s ) >= 2 ) {
+		int measured_delay = audio_interface_get_delay( s->audio_ctx );
+		delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+		status.source_tag = audio_interface_get_delay_source( s->audio_ctx );
+		status.source = _classify_audio_delay_source( status.source_tag, delay_valid );
+		status.streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
+		if( delay_valid ) {
+			status.effective_delay_ms = measured_delay;
+			status.is_anchorable = 1;
+			status.is_delay_valid = 1;
+			return status;
+		}
+		status.is_delay_valid = 0;
+		status.is_anchorable = 0;
+	}
+
 	if (delay_valid) {
 		status.effective_delay_ms = s ? stream_sync_av_delay(s) : 0;
 		if( s && s->audio_ctx ) {
@@ -477,6 +512,72 @@ static void _stream_reset_mode2_clock( STREAM *s )
 	s->mode2_clock_anchor_latency_ms = 0;
 	s->mode2_clock_last_heard_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_clock_last_audio_time = STREAM_NO_PTS_VALUE;
+	s->mode2_dynamic_correction_ms = 0;
+	s->mode2_dynamic_correction_target_ms = 0;
+	s->mode2_dynamic_last_update_wall_ms = 0;
+	s->mode2_dynamic_last_log_wall_ms = 0;
+}
+
+static int _stream_clamp_ms( int value, int min_value, int max_value )
+{
+	if( value < min_value ) {
+		return min_value;
+	}
+	if( value > max_value ) {
+		return max_value;
+	}
+	return value;
+}
+
+static int _stream_mode2_dynamic_correction( STREAM *s, int wall_now,
+	int static_latency, const stream_delay_status_t *delay_status )
+{
+	int target = 0;
+	int active = 0;
+
+	if( !s || !stream_mode2_dynamic_delay || static_latency <= 0 ||
+		s->audio_start_pending || s->audio_resume_pending ||
+		(s->seek_epoch > 0 && !s->seek_converge_done) ||
+		!delay_status ) {
+		target = 0;
+	} else if( _stream_is_mode2_audio_interface_delay( delay_status ) &&
+		delay_status->streak >= stream_mode2_dynamic_streak &&
+		delay_status->effective_delay_ms > 0 ) {
+		target = delay_status->effective_delay_ms - static_latency;
+		target = _stream_clamp_ms( target, 0, stream_mode2_dynamic_max_ms );
+		active = 1;
+	}
+
+	s->mode2_dynamic_correction_target_ms = target;
+
+	if( s->mode2_dynamic_last_update_wall_ms == 0 ) {
+		s->mode2_dynamic_last_update_wall_ms = wall_now;
+	}
+	if( wall_now - s->mode2_dynamic_last_update_wall_ms >= 200 ) {
+		int delta = target - s->mode2_dynamic_correction_ms;
+		int max_slew = stream_mode2_dynamic_slew_ms;
+		if( max_slew < 1 ) {
+			max_slew = 1;
+		}
+		delta = _stream_clamp_ms( delta, -max_slew, max_slew );
+		s->mode2_dynamic_correction_ms += delta;
+		s->mode2_dynamic_last_update_wall_ms = wall_now;
+	}
+
+	if( wall_now > s->mode2_dynamic_last_log_wall_ms + 2000 ||
+		(active && s->mode2_dynamic_correction_ms != target) ) {
+		s->mode2_dynamic_last_log_wall_ms = wall_now;
+		DBG serprintf("mode2_dynamic_delay: enabled=%d active=%d source=%s tag=%s streak=%d static=%d measured=%d target=%d applied=%d max=%d slew=%d\n",
+			stream_mode2_dynamic_delay, active,
+			delay_status ? _stream_delay_source_name(delay_status->source) : "none",
+			delay_status && delay_status->source_tag ? delay_status->source_tag : "none",
+			delay_status ? delay_status->streak : 0, static_latency,
+			delay_status ? delay_status->effective_delay_ms : 0,
+			target, s->mode2_dynamic_correction_ms,
+			stream_mode2_dynamic_max_ms, stream_mode2_dynamic_slew_ms);
+	}
+
+	return s->mode2_dynamic_correction_ms;
 }
 
 static int _stream_mode2_wall_heard_ts( STREAM *s, int wall_now, int heard_delay )
@@ -556,7 +657,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	
 	if( is_mode2_sync ) {
 		// Mode 2 tracks submitted compressed time. Use configured sink latency as
-		// the single offset; dynamic timestamps remain diagnostics only here.
+		// the baseline offset, then optionally apply a small measured residual.
 		heard_delay = _stream_mode2_heard_delay( s, static_latency, delay_status.effective_delay_ms );
 	} else if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
 		// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
@@ -588,6 +689,10 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			}
 		}
 #endif
+	}
+
+	if( use_mode2_wall_clock ) {
+		heard_delay += _stream_mode2_dynamic_correction( s, wall_now, static_latency, &delay_status );
 	}
 
 	int heard_ts = s->audio_time - heard_delay;
@@ -646,11 +751,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			if( s->sync_v_time != STREAM_NO_PTS_VALUE ) {
 				diff = (s->sync_v_time - heard_ts) + RST_TO_TS_DELTA( user_av_delay, int );
 			}
-			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d audio=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d anchor_heard=%d anchor_audio=%d anchor_wall=%d anchor_elapsed=%d source=%s tag=%s\n",
+			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d audio=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d dyn_corr=%d dyn_target=%d anchor_heard=%d anchor_audio=%d anchor_wall=%d anchor_elapsed=%d source=%s tag=%s\n",
 				wall_now, s->audio ? s->audio->format : 0, passthrough_mode,
 				s->audio_time, heard_ts, raw_heard_ts, s->video_time, s->sync_v_time,
-				diff, heard_delay, s->mode2_clock_anchor_heard_ts,
-				s->mode2_clock_anchor_audio, s->mode2_clock_anchor_wall_ms,
+				diff, heard_delay, s->mode2_dynamic_correction_ms,
+				s->mode2_dynamic_correction_target_ms,
+				s->mode2_clock_anchor_heard_ts, s->mode2_clock_anchor_audio, s->mode2_clock_anchor_wall_ms,
 				clock_elapsed, _stream_delay_source_name(delay_status.source),
 				delay_status.source_tag ? delay_status.source_tag : "none");
 		}
@@ -1514,6 +1620,10 @@ serprintf("dbg_delay %5d\n", stream_dbg_delay );
 DECLARE_DEBUG_COMMAND("sep", 	_stream_delay_plus   );
 DECLARE_DEBUG_COMMAND("sem", 	_stream_delay_minus  );
 DECLARE_DEBUG_COMMAND("ses", 	_stream_delay_set    );
+DECLARE_DEBUG_PARAM("mode2_dyn_delay", stream_mode2_dynamic_delay);
+DECLARE_DEBUG_PARAM("mode2_dyn_max", stream_mode2_dynamic_max_ms);
+DECLARE_DEBUG_PARAM("mode2_dyn_slew", stream_mode2_dynamic_slew_ms);
+DECLARE_DEBUG_PARAM("mode2_dyn_streak", stream_mode2_dynamic_streak);
 
 static void _stream_toggle_xbmc( int argc, char *argv[] )
 {

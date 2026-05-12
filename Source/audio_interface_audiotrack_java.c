@@ -157,6 +157,7 @@ struct audio_ctx {
 
 static int audiotrack_log_underruns = 0;
 static int audiotrack_disable_recovery = 1;
+extern int stream_mode2_dynamic_delay;
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
@@ -1610,10 +1611,11 @@ ERR		LOG("track not valid, error");
 	}
 
 
-	// Use static latency for passthrough mode
-	// Dynamic latency doesn't work because we can't accurately track written vs presented frames
-	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
-	if (at->passthrough) {
+	// Keep static latency for mode 1 IEC wrapping and by default for passthrough.
+	// Mode 2 may opt into the same guarded timestamp/playhead path as PCM; stream
+	// sync only applies a small residual over the static baseline when that timing
+	// source has proven stable.
+	if (at->passthrough && !(at->passthrough == 2 && enable_dynamic_audio_delay && stream_mode2_dynamic_delay)) {
 DBG3		LOG("Using static latency for passthrough: %d ms", at->latency);
 		// Treat static passthrough delay as stable/valid for sync gating.
 		if (at->ts_success_streak < stable_streak_required) {

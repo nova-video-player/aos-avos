@@ -72,8 +72,12 @@ static int stream_mode2_dynamic_streak = 10;
 #define STREAM_SEEK_CONVERGE_WINDOW_MS       500
 #define STREAM_SEEK_CONVERGE_MAX_WAIT_MS     1500
 #define STREAM_SEEK_CONVERGE_APPLY_DIFF_MS   80
-#define STREAM_PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS 250
-#define STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 50
+#define STREAM_PCM_AUDIO_LEAD_ENTER_MS       220
+#define STREAM_PCM_AUDIO_LEAD_FORCE_MS       250
+#define STREAM_PCM_AUDIO_LEAD_RELEASE_MS     120
+#define STREAM_PCM_AUDIO_LEAD_MIN_SAMPLES    3
+#define STREAM_PCM_AUDIO_LEAD_MAX_HOLDS      30
+#define STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 25
 
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -354,6 +358,8 @@ int stream_sync_restart( STREAM *s )
 	s->vid_ref_time = -1;
 	s->seek_converge_state = STREAM_SEEK_CONVERGE_INACTIVE;
 	s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
+	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_INACTIVE;
+	s->pcm_audio_lead_candidate_count = 0;
 	s->pcm_audio_lead_hold_count = 0;
 	s->pcm_audio_lead_last_diff = 0;
 
@@ -1251,6 +1257,17 @@ DBGY		serprintf("seek_converge: audio_gate diff=%d limit=%d epoch=%d audio=%d vi
 	return 0;
 }
 
+static void _stream_pcm_audio_lead_reset( STREAM *s )
+{
+	if( !s ) {
+		return;
+	}
+	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_INACTIVE;
+	s->pcm_audio_lead_candidate_count = 0;
+	s->pcm_audio_lead_hold_count = 0;
+	s->pcm_audio_lead_last_diff = 0;
+}
+
 int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 {
 	int passthrough_mode;
@@ -1259,45 +1276,77 @@ int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 
 	if( !s || !s->put_time_mode || !s->audio_sink || ac3_recoding ||
 		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ) {
-		if( s ) {
-			s->pcm_audio_lead_hold_count = 0;
-			s->pcm_audio_lead_last_diff = 0;
-		}
+		_stream_pcm_audio_lead_reset( s );
 		return 0;
 	}
 	passthrough_mode = s->audio_sink->get_passthrough ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	if( passthrough_mode ) {
-		s->pcm_audio_lead_hold_count = 0;
-		s->pcm_audio_lead_last_diff = 0;
+		_stream_pcm_audio_lead_reset( s );
 		return 0;
 	}
 	heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
 	if( heard_ts == STREAM_NO_PTS_VALUE ) {
-		s->pcm_audio_lead_hold_count = 0;
-		s->pcm_audio_lead_last_diff = 0;
+		_stream_pcm_audio_lead_reset( s );
 		return 0;
 	}
 
 	diff = s->sync_v_time - heard_ts;
 	s->pcm_audio_lead_last_diff = diff;
-	if( diff >= -STREAM_PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS ) {
-		if( s->pcm_audio_lead_hold_count > 0 ) {
-DBGY			serprintf("pcm_audio_lead_hold: release sync_v=%d audio=%d heard=%d diff=%d held=%d\n",
+
+	if( s->pcm_audio_lead_state == STREAM_PCM_AUDIO_LEAD_EXPIRED ) {
+		if( diff >= -STREAM_PCM_AUDIO_LEAD_RELEASE_MS ) {
+DBGY			serprintf("pcm_audio_lead_hold: release state=expired sync_v=%d audio=%d heard=%d diff=%d held=%d release=%d\n",
 				s->sync_v_time, s->audio_time, heard_ts, diff,
-				s->pcm_audio_lead_hold_count);
+				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
+			_stream_pcm_audio_lead_reset( s );
 		}
-		s->pcm_audio_lead_hold_count = 0;
 		return 0;
 	}
 
-	s->pcm_audio_lead_hold_count++;
-	if( (s->pcm_audio_lead_hold_count % STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL) == 1 ) {
-		DBG serprintf("pcm_audio_lead_hold: sync_v=%d audio=%d heard=%d diff=%d count=%d threshold=%d\n",
-			s->sync_v_time, s->audio_time, heard_ts, diff,
-			s->pcm_audio_lead_hold_count,
-			STREAM_PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS);
+	if( s->pcm_audio_lead_state == STREAM_PCM_AUDIO_LEAD_HOLDING ) {
+		if( diff >= -STREAM_PCM_AUDIO_LEAD_RELEASE_MS ) {
+DBGY			serprintf("pcm_audio_lead_hold: release state=holding sync_v=%d audio=%d heard=%d diff=%d held=%d release=%d\n",
+				s->sync_v_time, s->audio_time, heard_ts, diff,
+				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
+			_stream_pcm_audio_lead_reset( s );
+			return 0;
+		}
+		if( s->pcm_audio_lead_hold_count >= STREAM_PCM_AUDIO_LEAD_MAX_HOLDS ) {
+DBGY			serprintf("pcm_audio_lead_hold: expire sync_v=%d audio=%d heard=%d diff=%d held=%d release=%d\n",
+				s->sync_v_time, s->audio_time, heard_ts, diff,
+				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
+			s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_EXPIRED;
+			return 0;
+		}
+		s->pcm_audio_lead_hold_count++;
+		if( (s->pcm_audio_lead_hold_count % STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL) == 1 ) {
+			DBG serprintf("pcm_audio_lead_hold: hold sync_v=%d audio=%d heard=%d diff=%d count=%d enter=%d release=%d\n",
+				s->sync_v_time, s->audio_time, heard_ts, diff,
+				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_ENTER_MS,
+				STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
+		}
+		return 1;
 	}
+
+	if( diff > -STREAM_PCM_AUDIO_LEAD_ENTER_MS ) {
+		s->pcm_audio_lead_candidate_count = 0;
+		return 0;
+	}
+
+	s->pcm_audio_lead_candidate_count++;
+	if( diff > -STREAM_PCM_AUDIO_LEAD_FORCE_MS &&
+		s->pcm_audio_lead_candidate_count < STREAM_PCM_AUDIO_LEAD_MIN_SAMPLES ) {
+		return 0;
+	}
+
+	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_HOLDING;
+	s->pcm_audio_lead_hold_count = 1;
+	DBG serprintf("pcm_audio_lead_hold: enter sync_v=%d audio=%d heard=%d diff=%d count=%d samples=%d enter=%d force=%d release=%d\n",
+		s->sync_v_time, s->audio_time, heard_ts, diff,
+		s->pcm_audio_lead_hold_count, s->pcm_audio_lead_candidate_count,
+		STREAM_PCM_AUDIO_LEAD_ENTER_MS, STREAM_PCM_AUDIO_LEAD_FORCE_MS,
+		STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
 	return 1;
 }
 

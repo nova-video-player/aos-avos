@@ -84,6 +84,13 @@ typedef enum
 
 typedef enum
 {
+	STREAM_PCM_AUDIO_LEAD_INACTIVE = 0,
+	STREAM_PCM_AUDIO_LEAD_HOLDING,
+	STREAM_PCM_AUDIO_LEAD_EXPIRED,
+} STREAM_PCM_AUDIO_LEAD_STATE;
+
+typedef enum
+{
 	STREAM_MEM_NRM = 0,
 	STREAM_MEM_DMA,
 	STREAM_MEM_DMA_CACHED,
@@ -760,6 +767,8 @@ typedef struct STREAM {
 	int		seek_converge_done;
 	int		seek_converge_state;
 	int		seek_converge_anchor_ts;
+	int		pcm_audio_lead_state;
+	int		pcm_audio_lead_candidate_count;
 	int		pcm_audio_lead_hold_count;
 	int		pcm_audio_lead_last_diff;
 	int		slideshow;	// this stream is a slideshow (fps < 1)

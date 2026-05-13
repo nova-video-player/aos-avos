@@ -372,52 +372,174 @@ DBGA serprintf(" <+%d> ", time);
 	}
 }
 
-static int _stream_audio_resume_rebase_invalid_delay( STREAM *s, int passthrough_active )
-{
-	if( !s || !s->audio_ctx || passthrough_active ||
-		s->video_time < 0 || s->audio_time < 0 ||
-		audio_interface_is_delay_valid( s->audio_ctx ) ) {
-		return 0;
-	}
+enum {
+	PCM_REANCHOR_SOURCE_NONE = 0,
+	PCM_REANCHOR_SOURCE_DYNAMIC,
+	PCM_REANCHOR_SOURCE_LAST_GOOD,
+	PCM_REANCHOR_SOURCE_STATIC,
+};
 
-	int static_latency = audio_interface_get_latency( s->audio_ctx );
-	int old_audio_time = s->audio_time;
-	int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
-	int new_audio_time = rebase_video_time;
-	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
-	if( static_latency > 0 ) {
-		new_audio_time += static_latency;
+static const char *_stream_audio_pcm_reanchor_state_name( int state )
+{
+	switch( state ) {
+	case STREAM_PCM_REANCHOR_ARMED:
+		return "armed";
+	case STREAM_PCM_REANCHOR_WAITING_STABLE:
+		return "waiting_stable";
+	case STREAM_PCM_REANCHOR_APPLIED:
+		return "applied";
+	case STREAM_PCM_REANCHOR_EXPIRED:
+		return "expired";
+	case STREAM_PCM_REANCHOR_INACTIVE:
+	default:
+		return "inactive";
 	}
-	_set_audio_time( s, new_audio_time );
-	DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d sync_v=%d latency=%d source=%s)\n",
-		old_audio_time, s->audio_time, s->video_time, s->sync_v_time,
-		static_latency, delay_source ? delay_source : "none");
-	return 1;
 }
 
-static int _stream_audio_resume_rebase_valid_delay( STREAM *s, int passthrough_active )
+static const char *_stream_audio_pcm_reanchor_source_name( int source )
 {
-	if( !s || !s->audio_resume_valid_pending || !s->audio_ctx || passthrough_active ||
-		s->video_time < 0 || s->audio_time < 0 ||
-		!audio_interface_is_delay_valid( s->audio_ctx ) ||
-		audio_interface_get_delay_valid_streak( s->audio_ctx ) < 3 ) {
+	switch( source ) {
+	case PCM_REANCHOR_SOURCE_DYNAMIC:
+		return "dynamic";
+	case PCM_REANCHOR_SOURCE_LAST_GOOD:
+		return "last_good";
+	case PCM_REANCHOR_SOURCE_STATIC:
+		return "static";
+	case PCM_REANCHOR_SOURCE_NONE:
+	default:
+		return "none";
+	}
+}
+
+static void _stream_audio_pcm_reanchor_disarm( STREAM *s, const char *reason )
+{
+	if( !s ) {
+		return;
+	}
+	if( s->pcm_reanchor_state != STREAM_PCM_REANCHOR_INACTIVE ||
+		s->audio_resume_valid_pending ) {
+		DBG serprintf("pcm_reanchor: state=%s -> inactive reason=%s source=%s delay=%d seek_epoch=%d\n",
+			_stream_audio_pcm_reanchor_state_name( s->pcm_reanchor_state ),
+			reason ? reason : "none",
+			_stream_audio_pcm_reanchor_source_name( s->pcm_reanchor_source ),
+			s->pcm_reanchor_delay_ms, s->seek_epoch);
+	}
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_INACTIVE;
+	s->pcm_reanchor_seek_epoch = -1;
+	s->pcm_reanchor_source = PCM_REANCHOR_SOURCE_NONE;
+	s->pcm_reanchor_delay_ms = 0;
+	s->audio_resume_valid_pending = 0;
+}
+
+static void _stream_audio_pcm_reanchor_arm( STREAM *s, int passthrough_active )
+{
+	if( !s ) {
+		return;
+	}
+	if( passthrough_active ) {
+		_stream_audio_pcm_reanchor_disarm( s, "passthrough" );
+		return;
+	}
+	if( s->audio_start_pending ) {
+		_stream_audio_pcm_reanchor_disarm( s, "startup" );
+		return;
+	}
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_ARMED;
+	s->pcm_reanchor_seek_epoch = s->seek_epoch;
+	s->pcm_reanchor_source = PCM_REANCHOR_SOURCE_NONE;
+	s->pcm_reanchor_delay_ms = 0;
+	s->audio_resume_valid_pending = 1;
+	DBG serprintf("pcm_reanchor: state=armed video=%d sync_v=%d audio=%d seek_epoch=%d\n",
+		s->video_time, s->sync_v_time, s->audio_time, s->seek_epoch);
+}
+
+static int _stream_audio_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
+	int *source, const char **tag )
+{
+	int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+	int streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
+	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
+
+	if( tag ) {
+		*tag = delay_source;
+	}
+	if( delay_valid ) {
+		if( streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
+			*delay_ms = audio_interface_get_delay( s->audio_ctx );
+			*source = PCM_REANCHOR_SOURCE_DYNAMIC;
+			return 1;
+		}
+		return 0;
+	}
+	if( s->last_good_delay_valid ) {
+		*delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
+		*source = PCM_REANCHOR_SOURCE_LAST_GOOD;
+		return 1;
+	}
+	*delay_ms = audio_interface_get_latency( s->audio_ctx );
+	if( *delay_ms > 0 ) {
+		*source = PCM_REANCHOR_SOURCE_STATIC;
+		return 1;
+	}
+	return 0;
+}
+
+static int _stream_audio_pcm_reanchor_update( STREAM *s, int passthrough_active )
+{
+	if( !s || s->pcm_reanchor_state == STREAM_PCM_REANCHOR_INACTIVE ||
+		s->pcm_reanchor_state == STREAM_PCM_REANCHOR_APPLIED ||
+		s->pcm_reanchor_state == STREAM_PCM_REANCHOR_EXPIRED ) {
+		return 0;
+	}
+	if( passthrough_active ) {
+		_stream_audio_pcm_reanchor_disarm( s, "passthrough" );
+		return 0;
+	}
+	if( s->audio_start_pending ) {
+		_stream_audio_pcm_reanchor_disarm( s, "startup" );
+		return 0;
+	}
+	if( !s->audio_ctx || s->video_time < 0 || s->audio_time < 0 ) {
+		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_WAITING_STABLE;
+		DBG serprintf("pcm_reanchor: state=waiting_stable reason=missing_timing video=%d audio=%d seek_epoch=%d\n",
+			s->video_time, s->audio_time, s->seek_epoch);
+		return 0;
+	}
+	if( s->pcm_reanchor_seek_epoch != s->seek_epoch ) {
+		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_EXPIRED;
+		DBG serprintf("pcm_reanchor: state=expired reason=seek_epoch_changed armed=%d current=%d\n",
+			s->pcm_reanchor_seek_epoch, s->seek_epoch);
+		_stream_audio_pcm_reanchor_disarm( s, "expired" );
 		return 0;
 	}
 
-	int delay = audio_interface_get_delay( s->audio_ctx );
-	int streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
-	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
+	int delay = 0;
+	int source = PCM_REANCHOR_SOURCE_NONE;
+	const char *tag = NULL;
+	if( !_stream_audio_pcm_reanchor_select_delay( s, &delay, &source, &tag ) ) {
+		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_WAITING_STABLE;
+		DBG serprintf("pcm_reanchor: state=waiting_stable source_tag=%s streak=%d delay_valid=%d seek_epoch=%d\n",
+			tag ? tag : "none",
+			audio_interface_get_delay_valid_streak( s->audio_ctx ),
+			audio_interface_is_delay_valid( s->audio_ctx ),
+			s->seek_epoch);
+		return 0;
+	}
+
 	int old_audio_time = s->audio_time;
 	int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
-	int new_audio_time = rebase_video_time;
-	if( delay > 0 ) {
-		new_audio_time += delay;
-	}
-	_set_audio_time( s, new_audio_time );
+	int new_audio_time = rebase_video_time + delay;
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_APPLIED;
+	s->pcm_reanchor_source = source;
+	s->pcm_reanchor_delay_ms = delay;
 	s->audio_resume_valid_pending = 0;
-	DBG serprintf("resume_rebase_delay_valid: audio_time %d -> %d (video=%d sync_v=%d delay=%d streak=%d source=%s)\n",
-		old_audio_time, s->audio_time, s->video_time, s->sync_v_time, delay,
-		streak, delay_source ? delay_source : "none");
+	_set_audio_time( s, new_audio_time );
+	DBG serprintf("pcm_reanchor: state=applied audio_time %d -> %d video=%d sync_v=%d delay=%d source=%s tag=%s streak=%d seek_epoch=%d\n",
+		old_audio_time, s->audio_time, s->video_time, s->sync_v_time,
+		delay, _stream_audio_pcm_reanchor_source_name( source ),
+		tag ? tag : "none",
+		audio_interface_get_delay_valid_streak( s->audio_ctx ),
+		s->seek_epoch);
 	return 1;
 }
 
@@ -1444,24 +1566,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( s->audio_resume_pending ) {
 						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
 							s->audio_time, s->video_time, s->seek_epoch, atime());
-						// Sabrina (Chromecast 4K) often reports invalid AudioTrack delay at resume.
-						// Rebase once here using static latency to avoid a large AV offset while
-						// we wait for a stable timestamp.
-						int invalid_delay_rebase_fired =
-							_stream_audio_resume_rebase_invalid_delay( s, passthrough_active );
-						// Do not arm delay-valid rebase for passthrough/system-encapsulation:
-						// AudioTrack delay validity does not represent true encoded pipeline latency.
-						s->audio_resume_valid_pending = passthrough_active ? 0 : 1;
-						// The invalid-delay rebase already places the anchor close enough for
-						// atempo to converge at 1x speed. The delay-valid rebase at streak=3
-						// consistently fires when sync is already near zero and causes a
-						// 167-305 ms snap (confirmed across multiple seek+resume cycles).
-						// Disarm for normal-speed PCM; passthrough and non-1x are not yet validated.
-						if( s->audio_resume_valid_pending && invalid_delay_rebase_fired &&
-							s->speed == STREAM_SPEED_NORMAL ) {
-							s->audio_resume_valid_pending = 0;
-							DBG serprintf("resume_rebase_valid: disarmed (PCM 1x, invalid-delay rebase applied)\n");
-						}
+						_stream_audio_pcm_reanchor_arm( s, passthrough_active );
+						_stream_audio_pcm_reanchor_update( s, passthrough_active );
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
@@ -1614,10 +1720,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 
-					// If delay becomes valid after resume, rebase once using measured delay.
-					// On Sabrina, the first "valid" timestamp can be unstable; wait for a small
-					// success streak before snapping to avoid visible jitter.
-					_stream_audio_resume_rebase_valid_delay( s, passthrough_active );
+					_stream_audio_pcm_reanchor_update( s, passthrough_active );
 
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time

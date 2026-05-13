@@ -53,7 +53,7 @@ extern int stream_pdrop_threshold;
 
 static volatile int	stream_dbg_delay = 0;
 static int atempo_delay_log_count = 0;
-static int _stream_get_atempo_delay( STREAM *s );
+int stream_get_atempo_delay( STREAM *s );
 static void _stream_reset_mode2_clock( STREAM *s );
 static int sync_diag_count = 0;
 static int sync_diag_last_seek_epoch = -1;
@@ -68,7 +68,6 @@ static int stream_mode2_dynamic_max_ms = 150;
 static int stream_mode2_dynamic_slew_ms = 5;
 static int stream_mode2_dynamic_streak = 10;
 
-#define STREAM_PCM_DELAY_STABLE_STREAK       3
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
 
 typedef enum {
@@ -336,6 +335,10 @@ int stream_sync_restart( STREAM *s )
 	s->last_good_delay_ms = 0;
 	s->last_good_delay_valid = 0;
 	s->last_good_atempo_delay_ms = 0;
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_INACTIVE;
+	s->pcm_reanchor_seek_epoch = -1;
+	s->pcm_reanchor_source = 0;
+	s->pcm_reanchor_delay_ms = 0;
 	s->drop          = 0;
 	s->drop_P        = 0;
 	s->drop_B        = 0;
@@ -402,7 +405,7 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 #ifdef CONFIG_ANDROID
 	if (s) {
 		if (s->last_good_delay_valid) {
-			status.effective_delay_ms = s->last_good_delay_ms + _stream_get_atempo_delay( s );
+			status.effective_delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
 			// Keep last-good delay as a usable anchor when timing drops invalid
 			// during steady playback. This avoids sudden loss of latency compensation.
 			status.is_anchorable = 1;
@@ -654,7 +657,7 @@ static int _stream_current_heard_delay( STREAM *s,
 		return delay_status->effective_delay_ms;
 	}
 	return (s->smoothed_av_delay >= 0) ?
-		s->smoothed_av_delay + _stream_get_atempo_delay( s ) :
+		s->smoothed_av_delay + stream_get_atempo_delay( s ) :
 		delay_status->effective_delay_ms;
 }
 
@@ -1012,7 +1015,7 @@ DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d
 //	stream_sync_audio
 //
 // ************************************************************
-static int _stream_get_atempo_delay( STREAM *s )
+int stream_get_atempo_delay( STREAM *s )
 {
 	int use_atempo = (s && s->audio_filter_atempo != NULL);
 	int ac3_recoding = 0;
@@ -1067,7 +1070,7 @@ static void _stream_pcm_update_delay_cache( STREAM *s, int current_av_delay,
 {
 	int old_last_good_delay = s->last_good_delay_ms;
 	int old_last_good_atempo = s->last_good_atempo_delay_ms;
-	int new_last_good_atempo = _stream_get_atempo_delay( s );
+	int new_last_good_atempo = stream_get_atempo_delay( s );
 	s->last_good_delay_ms = current_av_delay - new_last_good_atempo;
 	s->last_good_delay_valid = 1;
 	s->last_good_atempo_delay_ms = new_last_good_atempo;
@@ -1099,7 +1102,7 @@ static void _stream_pcm_update_smoothed_hw_delay( STREAM *s, int current_av_dela
 	}
 	DBG serprintf( "stream_sync_audio: smoothed_av_delay %d->%d raw=%d speed=%.3f atempo=%d streak=%d hist=%d\n",
 		old_smoothed, s->smoothed_av_delay, current_av_delay,
-		audio_interface_get_audio_speed(), _stream_get_atempo_delay( s ),
+		audio_interface_get_audio_speed(), stream_get_atempo_delay( s ),
 		delay_streak, s->av_delay_history_count );
 }
 
@@ -1137,7 +1140,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	}
 	if( delay_valid ) {
 		int delay_streak = delay_status.streak;
-		int current_atempo_delay = _stream_get_atempo_delay( s );
+		int current_atempo_delay = stream_get_atempo_delay( s );
 		int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
 		int allow_update = _stream_pcm_should_update_delay_cache( sensitive_phase, delay_streak );
 

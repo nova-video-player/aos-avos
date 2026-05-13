@@ -41,6 +41,7 @@ struct STREAM;
 #define STREAM_DEFAULT_BUFFER_SIZE 64
 #define STREAM_LARGE_BUFFER_SIZE   128
 #define STREAM_MAX_FRAMES 64
+#define STREAM_PCM_DELAY_STABLE_STREAK 3
 
 // in sync with android/vendor/archos/frameworks/ArchosFrameworks/java/com/archos/frameworks/media/AvosPlayer.java
 typedef enum
@@ -61,6 +62,15 @@ typedef enum
 	// ...
 	STREAM_ERROR_FATAL = 99, 
 } STREAM_ERROR_TYPE;
+
+typedef enum
+{
+	STREAM_PCM_REANCHOR_INACTIVE = 0,
+	STREAM_PCM_REANCHOR_ARMED,
+	STREAM_PCM_REANCHOR_WAITING_STABLE,
+	STREAM_PCM_REANCHOR_APPLIED,
+	STREAM_PCM_REANCHOR_EXPIRED,
+} STREAM_PCM_REANCHOR_STATE;
 
 typedef enum
 {
@@ -741,6 +751,10 @@ typedef struct STREAM {
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;
+	int		pcm_reanchor_state;
+	int		pcm_reanchor_seek_epoch;
+	int		pcm_reanchor_source;
+	int		pcm_reanchor_delay_ms;
 	int		video_hold_for_delay;
 	int		video_hold_for_resume_audio;
 	int		audio_speed_diag_epoch;

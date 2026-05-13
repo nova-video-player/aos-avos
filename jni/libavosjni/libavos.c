@@ -458,6 +458,12 @@ Java_com_archos_medialib_LibAvos_nativeSetAudioSpeed(JNIEnv *env, jobject thiz, 
     pthread_mutex_unlock(&libavos.mtx);
 }
 
+jfloat
+Java_com_archos_medialib_LibAvos_nativeGetAudioSpeed(JNIEnv *env, jobject thiz)
+{
+    return (jfloat)libavos_get_audio_speed();
+}
+
 void
 Java_com_archos_medialib_LibAvos_nativeSetAndroidFrameTiming(JNIEnv *env, jobject thiz, jboolean enable)
 {

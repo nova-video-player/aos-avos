@@ -69,6 +69,7 @@ static int stream_mode2_dynamic_slew_ms = 5;
 static int stream_mode2_dynamic_streak = 10;
 
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
+#define STREAM_SEEK_CONVERGE_WINDOW_MS       500
 
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -347,6 +348,8 @@ int stream_sync_restart( STREAM *s )
 	s->av_delay_history_count = 0;
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
+	s->seek_converge_state = STREAM_SEEK_CONVERGE_INACTIVE;
+	s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
 
 	s->heard_interp_anchor_audio = -1;
 	s->heard_interp_anchor_wall_ms = 0;
@@ -1106,6 +1109,84 @@ static void _stream_pcm_update_smoothed_hw_delay( STREAM *s, int current_av_dela
 		delay_streak, s->av_delay_history_count );
 }
 
+static const char *_stream_seek_converge_state_name( int state )
+{
+	switch( state ) {
+	case STREAM_SEEK_CONVERGE_ARMED:
+		return "armed";
+	case STREAM_SEEK_CONVERGE_WAITING_AUDIO:
+		return "waiting_audio";
+	case STREAM_SEEK_CONVERGE_WAITING_WINDOW:
+		return "waiting_window";
+	case STREAM_SEEK_CONVERGE_APPLIED:
+		return "applied";
+	case STREAM_SEEK_CONVERGE_EXPIRED:
+		return "expired";
+	case STREAM_SEEK_CONVERGE_INACTIVE:
+	default:
+		return "inactive";
+	}
+}
+
+static void _stream_seek_converge_set_state( STREAM *s, int state, const char *reason )
+{
+	if( !s || s->seek_converge_state == state ) {
+		return;
+	}
+	DBG serprintf("seek_converge: state=%s -> %s reason=%s epoch=%d until=%d done=%d anchor=%d audio=%d video=%d\n",
+		_stream_seek_converge_state_name( s->seek_converge_state ),
+		_stream_seek_converge_state_name( state ),
+		reason ? reason : "none",
+		s->seek_epoch, s->seek_converge_until_ms, s->seek_converge_done,
+		s->seek_converge_anchor_ts, s->audio_time, s->video_time);
+	s->seek_converge_state = state;
+}
+
+static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mode )
+{
+	if( !s || s->seek_epoch <= 0 || !s->put_time_mode || s->audio_time == -1 ) {
+		return 0;
+	}
+	if( passthrough_mode ) {
+		return 0;
+	}
+	if( s->seek_converge_epoch != s->seek_epoch ) {
+		s->seek_converge_epoch = s->seek_epoch;
+		s->seek_converge_until_ms = atime() + STREAM_SEEK_CONVERGE_WINDOW_MS;
+		s->seek_converge_done = 0;
+		s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_ARMED, "new_epoch" );
+	}
+	if( s->audio_start_pending || s->audio_resume_pending ) {
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_AUDIO, "audio_pending" );
+		return 0;
+	}
+	if( s->seek_converge_done ) {
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "already_done" );
+		return 1;
+	}
+	if( atime() < s->seek_converge_until_ms ) {
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "settle_window" );
+		return 0;
+	}
+	if( _stream_is_sink_driven(s) ) {
+		int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+DBGY		serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
+			diff, anchor_ts);
+		anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
+		// Seek convergence is an explicit discontinuity; refresh once here,
+		// not from steady-state mode-2 timing heuristics.
+		sfdec2_refresh_sched_anchor( s );
+		s->video_sink->put_time( s->video_sink, anchor_ts );
+		s->sink_ref_time = anchor_ts;
+		s->vid_ref_time = s->video_time;
+		s->seek_converge_anchor_ts = anchor_ts;
+	}
+	s->seek_converge_done = 1;
+	_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "applied" );
+	return 1;
+}
+
 int stream_sync_audio( STREAM *s, int audio_time )
 {
 	// Defensive check: validate stream pointer to prevent JNI abort crashes
@@ -1445,33 +1526,9 @@ DBGY serprintf("{SSV %d}} ", video_time );
 
 	// Post-seek convergence: allow a short window to align to heard audio,
 	// then re-anchor once and stop gating to avoid stutter.
-	if( s->seek_epoch > 0 && s->put_time_mode && s->audio_time != -1 ) {
-		if( s->seek_converge_epoch != s->seek_epoch ) {
-			s->seek_converge_epoch = s->seek_epoch;
-			s->seek_converge_until_ms = atime() + 500;
-			s->seek_converge_done = 0;
-		}
-		if( !s->seek_converge_done && atime() >= s->seek_converge_until_ms ) {
-			if( _stream_is_sink_driven(s) ) {
-				int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
-DBGY				serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
-					diff, anchor_ts);
-				anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
-				// Seek convergence is an explicit discontinuity; refresh once here,
-				// not from steady-state mode-2 timing heuristics.
-				sfdec2_refresh_sched_anchor( s );
-				s->video_sink->put_time( s->video_sink, anchor_ts );
-				s->sink_ref_time = anchor_ts;
-				s->vid_ref_time = s->video_time;
-				s->seek_converge_done = 1;
-			} else {
-				s->seek_converge_done = 1;
-			}
-		}
-		if( s->seek_converge_done ) {
-			// After convergence, stop gating to avoid stutter.
-			return 0;
-		}
+	if( _stream_seek_converge_update( s, diff, passthrough_mode ) ) {
+		// After convergence, stop gating to avoid stutter.
+		return 0;
 	}
 	// Wait if video is LATE by more than the threshold.
 	int max_wait = RST_TO_TS_DELTA( max_rst, int );

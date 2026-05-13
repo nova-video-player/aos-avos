@@ -74,6 +74,16 @@ typedef enum
 
 typedef enum
 {
+	STREAM_SEEK_CONVERGE_INACTIVE = 0,
+	STREAM_SEEK_CONVERGE_ARMED,
+	STREAM_SEEK_CONVERGE_WAITING_AUDIO,
+	STREAM_SEEK_CONVERGE_WAITING_WINDOW,
+	STREAM_SEEK_CONVERGE_APPLIED,
+	STREAM_SEEK_CONVERGE_EXPIRED,
+} STREAM_SEEK_CONVERGE_STATE;
+
+typedef enum
+{
 	STREAM_MEM_NRM = 0,
 	STREAM_MEM_DMA,
 	STREAM_MEM_DMA_CACHED,
@@ -748,6 +758,8 @@ typedef struct STREAM {
 	int		seek_converge_epoch;
 	int		seek_converge_until_ms;
 	int		seek_converge_done;
+	int		seek_converge_state;
+	int		seek_converge_anchor_ts;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;

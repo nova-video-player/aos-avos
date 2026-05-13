@@ -1177,9 +1177,14 @@ static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mo
 		}
 		return 1;
 	}
-	if( now < s->seek_converge_until_ms ) {
+	if( now < s->seek_converge_until_ms && ABS(diff) > STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
 		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "settle_window" );
 		return 0;
+	}
+	if( now < s->seek_converge_until_ms ) {
+DBGY		serprintf("seek_converge: early_apply diff=%d limit=%d epoch=%d audio=%d video=%d\n",
+			diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS,
+			s->seek_epoch, s->audio_time, s->video_time);
 	}
 	if( ABS(diff) > STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
 		if( now < s->seek_converge_until_ms + STREAM_SEEK_CONVERGE_MAX_WAIT_MS - STREAM_SEEK_CONVERGE_WINDOW_MS ) {

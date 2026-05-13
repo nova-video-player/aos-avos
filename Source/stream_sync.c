@@ -41,6 +41,7 @@ static inline int libavos_get_ac3_recoding_enabled(void) { return 0; }
 #define DBGV1  	DBG_IF(Debug[DBG_VID] == 1)
 #define DBGV2  	DBG_IF(Debug[DBG_VID] > 1)
 #define DBGV3 	DBG_IF(Debug[DBG_VID] > 2)
+#define DBGA	DBG_IF(Debug[DBG_AUD])
 
 #define DBG DBG_IF(Debug[DBG_SYNC])
 
@@ -86,6 +87,13 @@ typedef enum {
 	STREAM_DELAY_SOURCE_STATIC,
 	STREAM_DELAY_SOURCE_UNKNOWN,
 } stream_delay_source_t;
+
+typedef enum {
+	PCM_REANCHOR_SOURCE_NONE = 0,
+	PCM_REANCHOR_SOURCE_DYNAMIC,
+	PCM_REANCHOR_SOURCE_LAST_GOOD,
+	PCM_REANCHOR_SOURCE_STATIC,
+} stream_pcm_reanchor_source_t;
 
 typedef struct {
 	int effective_delay_ms; // effective delay currently used by sync math
@@ -167,6 +175,38 @@ static void _stream_pcm_audio_lead_reset( STREAM *s )
 	s->pcm_audio_lead_candidate_count = 0;
 	s->pcm_audio_lead_hold_count = 0;
 	s->pcm_audio_lead_last_diff = 0;
+}
+
+static const char *_stream_pcm_reanchor_state_name( int state )
+{
+	switch( state ) {
+	case STREAM_PCM_REANCHOR_ARMED:
+		return "armed";
+	case STREAM_PCM_REANCHOR_WAITING_STABLE:
+		return "waiting_stable";
+	case STREAM_PCM_REANCHOR_APPLIED:
+		return "applied";
+	case STREAM_PCM_REANCHOR_EXPIRED:
+		return "expired";
+	case STREAM_PCM_REANCHOR_INACTIVE:
+	default:
+		return "inactive";
+	}
+}
+
+static const char *_stream_pcm_reanchor_source_name( int source )
+{
+	switch( source ) {
+	case PCM_REANCHOR_SOURCE_DYNAMIC:
+		return "dynamic";
+	case PCM_REANCHOR_SOURCE_LAST_GOOD:
+		return "last_good";
+	case PCM_REANCHOR_SOURCE_STATIC:
+		return "static";
+	case PCM_REANCHOR_SOURCE_NONE:
+	default:
+		return "none";
+	}
 }
 
 static const char *_stream_delay_source_name(stream_delay_source_t source)
@@ -1155,6 +1195,136 @@ static void _stream_pcm_update_smoothed_hw_delay( STREAM *s, int current_av_dela
 		old_smoothed, s->smoothed_av_delay, current_av_delay,
 		audio_interface_get_audio_speed(), stream_get_atempo_delay( s ),
 		delay_streak, s->av_delay_history_count );
+}
+
+static void _stream_pcm_reanchor_disarm( STREAM *s, const char *reason )
+{
+	if( !s ) {
+		return;
+	}
+	if( s->pcm_reanchor_state != STREAM_PCM_REANCHOR_INACTIVE ||
+		s->audio_resume_valid_pending ) {
+		DBG serprintf("pcm_reanchor: state=%s -> inactive reason=%s source=%s delay=%d seek_epoch=%d\n",
+			_stream_pcm_reanchor_state_name( s->pcm_reanchor_state ),
+			reason ? reason : "none",
+			_stream_pcm_reanchor_source_name( s->pcm_reanchor_source ),
+			s->pcm_reanchor_delay_ms, s->seek_epoch);
+	}
+	_stream_pcm_reanchor_reset( s );
+}
+
+void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active )
+{
+	if( !s ) {
+		return;
+	}
+	if( passthrough_active ) {
+		_stream_pcm_reanchor_disarm( s, "passthrough" );
+		return;
+	}
+	if( s->audio_start_pending ) {
+		_stream_pcm_reanchor_disarm( s, "startup" );
+		return;
+	}
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_ARMED;
+	s->pcm_reanchor_seek_epoch = s->seek_epoch;
+	s->pcm_reanchor_source = PCM_REANCHOR_SOURCE_NONE;
+	s->pcm_reanchor_delay_ms = 0;
+	s->audio_resume_valid_pending = 1;
+	DBG serprintf("pcm_reanchor: state=armed video=%d sync_v=%d audio=%d seek_epoch=%d\n",
+		s->video_time, s->sync_v_time, s->audio_time, s->seek_epoch);
+}
+
+static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
+	int *source, const char **tag )
+{
+	int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
+	int streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
+	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
+
+	if( tag ) {
+		*tag = delay_source;
+	}
+	if( delay_valid ) {
+		if( streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
+			*delay_ms = audio_interface_get_delay( s->audio_ctx );
+			*source = PCM_REANCHOR_SOURCE_DYNAMIC;
+			return 1;
+		}
+		return 0;
+	}
+	if( s->last_good_delay_valid ) {
+		*delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
+		*source = PCM_REANCHOR_SOURCE_LAST_GOOD;
+		return 1;
+	}
+	*delay_ms = audio_interface_get_latency( s->audio_ctx );
+	if( *delay_ms > 0 ) {
+		*source = PCM_REANCHOR_SOURCE_STATIC;
+		return 1;
+	}
+	return 0;
+}
+
+int stream_sync_pcm_reanchor_update( STREAM *s, int passthrough_active )
+{
+	if( !s || s->pcm_reanchor_state == STREAM_PCM_REANCHOR_INACTIVE ||
+		s->pcm_reanchor_state == STREAM_PCM_REANCHOR_APPLIED ||
+		s->pcm_reanchor_state == STREAM_PCM_REANCHOR_EXPIRED ) {
+		return 0;
+	}
+	if( passthrough_active ) {
+		_stream_pcm_reanchor_disarm( s, "passthrough" );
+		return 0;
+	}
+	if( s->audio_start_pending ) {
+		_stream_pcm_reanchor_disarm( s, "startup" );
+		return 0;
+	}
+	if( !s->audio_ctx || s->video_time < 0 || s->audio_time < 0 ) {
+		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_WAITING_STABLE;
+		DBG serprintf("pcm_reanchor: state=waiting_stable reason=missing_timing video=%d audio=%d seek_epoch=%d\n",
+			s->video_time, s->audio_time, s->seek_epoch);
+		return 0;
+	}
+	if( s->pcm_reanchor_seek_epoch != s->seek_epoch ) {
+		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_EXPIRED;
+		DBG serprintf("pcm_reanchor: state=expired reason=seek_epoch_changed armed=%d current=%d\n",
+			s->pcm_reanchor_seek_epoch, s->seek_epoch);
+		_stream_pcm_reanchor_disarm( s, "expired" );
+		return 0;
+	}
+
+	int delay = 0;
+	int source = PCM_REANCHOR_SOURCE_NONE;
+	const char *tag = NULL;
+	if( !_stream_pcm_reanchor_select_delay( s, &delay, &source, &tag ) ) {
+		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_WAITING_STABLE;
+		DBG serprintf("pcm_reanchor: state=waiting_stable source_tag=%s streak=%d delay_valid=%d seek_epoch=%d\n",
+			tag ? tag : "none",
+			audio_interface_get_delay_valid_streak( s->audio_ctx ),
+			audio_interface_is_delay_valid( s->audio_ctx ),
+			s->seek_epoch);
+		return 0;
+	}
+
+	int old_audio_time = s->audio_time;
+	int rebase_video_time = (s->sync_v_time >= 0) ? s->sync_v_time : s->video_time;
+	int new_audio_time = rebase_video_time + delay;
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_APPLIED;
+	s->pcm_reanchor_source = source;
+	s->pcm_reanchor_delay_ms = delay;
+	s->audio_resume_valid_pending = 0;
+	s->audio_time = new_audio_time;
+DBGA	serprintf(" <<%d>> ", s->audio_time);
+	stream_sync_audio( s, s->audio_time );
+	DBG serprintf("pcm_reanchor: state=applied audio_time %d -> %d video=%d sync_v=%d delay=%d source=%s tag=%s streak=%d seek_epoch=%d\n",
+		old_audio_time, s->audio_time, s->video_time, s->sync_v_time,
+		delay, _stream_pcm_reanchor_source_name( source ),
+		tag ? tag : "none",
+		audio_interface_get_delay_valid_streak( s->audio_ctx ),
+		s->seek_epoch);
+	return 1;
 }
 
 static const char *_stream_seek_converge_state_name( int state )

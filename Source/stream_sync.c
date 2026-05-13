@@ -70,6 +70,8 @@ static int stream_mode2_dynamic_streak = 10;
 
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
 #define STREAM_SEEK_CONVERGE_WINDOW_MS       500
+#define STREAM_SEEK_CONVERGE_MAX_WAIT_MS     1500
+#define STREAM_SEEK_CONVERGE_APPLY_DIFF_MS   80
 
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -1144,6 +1146,8 @@ static void _stream_seek_converge_set_state( STREAM *s, int state, const char *r
 
 static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mode )
 {
+	int now;
+
 	if( !s || s->seek_epoch <= 0 || !s->put_time_mode || s->audio_time == -1 ) {
 		return 0;
 	}
@@ -1161,13 +1165,36 @@ static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mo
 		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_AUDIO, "audio_pending" );
 		return 0;
 	}
+	now = atime();
+	if( s->seek_converge_state == STREAM_SEEK_CONVERGE_WAITING_AUDIO ) {
+		s->seek_converge_until_ms = now + STREAM_SEEK_CONVERGE_WINDOW_MS;
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "audio_ready" );
+		return 0;
+	}
 	if( s->seek_converge_done ) {
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "already_done" );
+		if( s->seek_converge_state != STREAM_SEEK_CONVERGE_EXPIRED ) {
+			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "already_done" );
+		}
 		return 1;
 	}
-	if( atime() < s->seek_converge_until_ms ) {
+	if( now < s->seek_converge_until_ms ) {
 		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "settle_window" );
 		return 0;
+	}
+	if( ABS(diff) > STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
+		if( now < s->seek_converge_until_ms + STREAM_SEEK_CONVERGE_MAX_WAIT_MS - STREAM_SEEK_CONVERGE_WINDOW_MS ) {
+DBGY			serprintf("seek_converge: wait diff=%d limit=%d epoch=%d audio=%d video=%d\n",
+				diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS,
+				s->seek_epoch, s->audio_time, s->video_time);
+			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "diff_unstable" );
+			return 0;
+		}
+DBGY		serprintf("seek_converge: expire diff=%d limit=%d epoch=%d audio=%d video=%d\n",
+			diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS,
+			s->seek_epoch, s->audio_time, s->video_time);
+		s->seek_converge_done = 1;
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_EXPIRED, "diff_unstable" );
+		return 1;
 	}
 	if( _stream_is_sink_driven(s) ) {
 		int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
@@ -1185,6 +1212,34 @@ DBGY		serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
 	s->seek_converge_done = 1;
 	_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "applied" );
 	return 1;
+}
+
+int stream_sync_pcm_seek_converge_audio_gate( STREAM *s )
+{
+	int passthrough_mode;
+	int heard_ts;
+	int diff;
+
+	if( !s || !s->put_time_mode || s->seek_epoch <= 0 || s->seek_converge_done ||
+		s->audio_time == -1 || s->sync_v_time == -1 ) {
+		return 0;
+	}
+	passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	if( passthrough_mode ) {
+		return 0;
+	}
+	heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	if( heard_ts == -1 ) {
+		return 0;
+	}
+	diff = _stream_av_diff( s, s->sync_v_time, heard_ts );
+	if( diff < -STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
+DBGY		serprintf("seek_converge: audio_gate diff=%d limit=%d epoch=%d audio=%d video=%d sync_v=%d heard=%d\n",
+			diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS, s->seek_epoch,
+			s->audio_time, s->video_time, s->sync_v_time, heard_ts);
+		return 1;
+	}
+	return 0;
 }
 
 int stream_sync_audio( STREAM *s, int audio_time )

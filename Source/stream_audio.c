@@ -1720,6 +1720,20 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 
+					// During PCM seek convergence, large decoded batches can advance
+					// audio_time several writes before the next outer sync check. Re-run
+					// an explicit convergence gate after each written chunk so audio
+					// cannot run materially ahead after the normal sync_audio flag has
+					// already been released for the current epoch.
+					if( !passthrough_active && !ac3_recoding && s->put_time_mode &&
+						s->seek_epoch > 0 && !s->seek_converge_done ) {
+						while( !_abort( s ) && stream_sync_pcm_seek_converge_audio_gate( s ) ) {
+DBGS							serprintf("~");
+							msec_sleep( 10 );
+							stream_yield_RT();
+						}
+					}
+
 					_stream_audio_pcm_reanchor_update( s, passthrough_active );
 
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {

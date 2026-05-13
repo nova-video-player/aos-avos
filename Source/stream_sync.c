@@ -118,6 +118,57 @@ static void _sync_diag_reset(void)
 	sync_diag_last_reanchor_pending = -1;
 }
 
+static void _stream_pcm_delay_memory_reset( STREAM *s, int reset_smoothed )
+{
+	if( !s ) {
+		return;
+	}
+	s->delay_valid = 0;
+	s->last_good_delay_ms = 0;
+	s->last_good_delay_valid = 0;
+	s->last_good_atempo_delay_ms = 0;
+	s->delay_history_count = 0;
+	s->av_delay_history_count = 0;
+	if( reset_smoothed ) {
+		s->smoothed_av_delay = -1;
+	}
+}
+
+static void _stream_pcm_reanchor_reset( STREAM *s )
+{
+	if( !s ) {
+		return;
+	}
+	s->audio_resume_valid_pending = 0;
+	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_INACTIVE;
+	s->pcm_reanchor_seek_epoch = -1;
+	s->pcm_reanchor_source = 0;
+	s->pcm_reanchor_delay_ms = 0;
+}
+
+static void _stream_pcm_seek_converge_reset( STREAM *s )
+{
+	if( !s ) {
+		return;
+	}
+	s->seek_converge_epoch = -1;
+	s->seek_converge_until_ms = 0;
+	s->seek_converge_done = 0;
+	s->seek_converge_state = STREAM_SEEK_CONVERGE_INACTIVE;
+	s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
+}
+
+static void _stream_pcm_audio_lead_reset( STREAM *s )
+{
+	if( !s ) {
+		return;
+	}
+	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_INACTIVE;
+	s->pcm_audio_lead_candidate_count = 0;
+	s->pcm_audio_lead_hold_count = 0;
+	s->pcm_audio_lead_last_diff = 0;
+}
+
 static const char *_stream_delay_source_name(stream_delay_source_t source)
 {
 	switch (source) {
@@ -340,28 +391,16 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 int stream_sync_restart( STREAM *s )
 {
 	s->delay         = 0;
-	s->delay_valid   = 0;
-	s->last_good_delay_ms = 0;
-	s->last_good_delay_valid = 0;
-	s->last_good_atempo_delay_ms = 0;
-	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_INACTIVE;
-	s->pcm_reanchor_seek_epoch = -1;
-	s->pcm_reanchor_source = 0;
-	s->pcm_reanchor_delay_ms = 0;
+	_stream_pcm_delay_memory_reset( s, 0 );
+	_stream_pcm_reanchor_reset( s );
 	s->drop          = 0;
 	s->drop_P        = 0;
 	s->drop_B        = 0;
 	
-	s->delay_history_count = 0;
-	s->av_delay_history_count = 0;
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
-	s->seek_converge_state = STREAM_SEEK_CONVERGE_INACTIVE;
-	s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
-	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_INACTIVE;
-	s->pcm_audio_lead_candidate_count = 0;
-	s->pcm_audio_lead_hold_count = 0;
-	s->pcm_audio_lead_last_diff = 0;
+	_stream_pcm_seek_converge_reset( s );
+	_stream_pcm_audio_lead_reset( s );
 
 	s->heard_interp_anchor_audio = -1;
 	s->heard_interp_anchor_wall_ms = 0;
@@ -815,10 +854,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pending = 0;
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
-	s->smoothed_av_delay = -1;
-	s->last_good_delay_ms = 0;
-	s->last_good_delay_valid = 0;
-	s->last_good_atempo_delay_ms = 0;
+	_stream_pcm_delay_memory_reset( s, 1 );
 	s->warmup_video_frames = 0;
 	s->heard_interp_anchor_audio = -1;
 	s->heard_interp_anchor_wall_ms = 0;
@@ -1169,6 +1205,7 @@ static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mo
 		s->seek_converge_until_ms = atime() + STREAM_SEEK_CONVERGE_WINDOW_MS;
 		s->seek_converge_done = 0;
 		s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
+		_stream_pcm_audio_lead_reset( s );
 		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_ARMED, "new_epoch" );
 	}
 	if( s->audio_start_pending || s->audio_resume_pending ) {
@@ -1255,17 +1292,6 @@ DBGY		serprintf("seek_converge: audio_gate diff=%d limit=%d epoch=%d audio=%d vi
 		return 1;
 	}
 	return 0;
-}
-
-static void _stream_pcm_audio_lead_reset( STREAM *s )
-{
-	if( !s ) {
-		return;
-	}
-	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_INACTIVE;
-	s->pcm_audio_lead_candidate_count = 0;
-	s->pcm_audio_lead_hold_count = 0;
-	s->pcm_audio_lead_last_diff = 0;
 }
 
 int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )

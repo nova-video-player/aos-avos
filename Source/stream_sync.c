@@ -1368,7 +1368,34 @@ static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mo
 		return 0;
 	}
 	if( passthrough_mode ) {
-		return 0;
+		if( s->seek_converge_epoch != s->seek_epoch ) {
+			s->seek_converge_epoch = s->seek_epoch;
+			s->seek_converge_until_ms = atime() + STREAM_SEEK_CONVERGE_WINDOW_MS;
+			s->seek_converge_done = 0;
+			s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
+			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_ARMED, "passthrough_new_epoch" );
+		}
+		if( s->seek_converge_done ) {
+			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "passthrough_already_done" );
+			return 1;
+		}
+		if( atime() < s->seek_converge_until_ms ) {
+			return 0;
+		}
+		if( _stream_is_sink_driven(s) ) {
+			int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+DBGY			serprintf("post-seek converge anchor: passthrough=%d diff=%d anchor_ts=%d\n",
+				passthrough_mode, diff, anchor_ts);
+			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
+			sfdec2_refresh_sched_anchor( s );
+			s->video_sink->put_time( s->video_sink, anchor_ts );
+			s->sink_ref_time = anchor_ts;
+			s->vid_ref_time = s->video_time;
+			s->seek_converge_anchor_ts = anchor_ts;
+		}
+		s->seek_converge_done = 1;
+		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "passthrough_applied" );
+		return 1;
 	}
 	if( s->seek_converge_epoch != s->seek_epoch ) {
 		s->seek_converge_epoch = s->seek_epoch;

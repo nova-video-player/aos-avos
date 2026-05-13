@@ -1267,8 +1267,13 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		return audiotrack_set_output_params(at, retry_rate, retry_channels, retry_bits, retry_format);
 	}
 
-	if(failed)
+	if(failed) {
+		if (is_audio_speed_enabled && !using_atempo && at->passthrough == 0 && fabsf(as - 1.0f) > 1e-6f) {
+			ERR LOG("audiotrack_set_output_params: AudioTrack creation failed with speed request %.3f, reverting to 1x", as);
+			audio_interface_set_audio_speed(1.0f);
+		}
 		return -1;
+	}
 
 	audiotrack_reset_timing(at);
 	audiotrack_update_latency(at, at->env);

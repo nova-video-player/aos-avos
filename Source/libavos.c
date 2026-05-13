@@ -331,6 +331,11 @@ void libavos_set_audio_speed(float speed)
 	audio_interface_set_audio_speed(speed);
 }
 
+float libavos_get_audio_speed(void)
+{
+	return audio_interface_get_audio_speed();
+}
+
 void libavos_enable_audio_speed(int enable)
 {
 	audio_interface_enable_audio_speed(enable);

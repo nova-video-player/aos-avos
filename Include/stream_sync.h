@@ -22,6 +22,7 @@ int  stream_sync_restart( STREAM *s );
 int  stream_sync_av_delay( STREAM *s );
 int  stream_get_atempo_delay( STREAM *s );
 int  stream_sync_pcm_seek_converge_audio_gate( STREAM *s );
+int  stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding );
 int  stream_sync_audio( STREAM *s, int audio_time );
 int  stream_sync_video( STREAM *s, int video_time );
 void stream_sync( STREAM *s );

@@ -760,6 +760,8 @@ typedef struct STREAM {
 	int		seek_converge_done;
 	int		seek_converge_state;
 	int		seek_converge_anchor_ts;
+	int		pcm_audio_lead_hold_count;
+	int		pcm_audio_lead_last_diff;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;

@@ -72,6 +72,8 @@ static int stream_mode2_dynamic_streak = 10;
 #define STREAM_SEEK_CONVERGE_WINDOW_MS       500
 #define STREAM_SEEK_CONVERGE_MAX_WAIT_MS     1500
 #define STREAM_SEEK_CONVERGE_APPLY_DIFF_MS   80
+#define STREAM_PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS 250
+#define STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 50
 
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -352,6 +354,8 @@ int stream_sync_restart( STREAM *s )
 	s->vid_ref_time = -1;
 	s->seek_converge_state = STREAM_SEEK_CONVERGE_INACTIVE;
 	s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
+	s->pcm_audio_lead_hold_count = 0;
+	s->pcm_audio_lead_last_diff = 0;
 
 	s->heard_interp_anchor_audio = -1;
 	s->heard_interp_anchor_wall_ms = 0;
@@ -1245,6 +1249,56 @@ DBGY		serprintf("seek_converge: audio_gate diff=%d limit=%d epoch=%d audio=%d vi
 		return 1;
 	}
 	return 0;
+}
+
+int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
+{
+	int passthrough_mode;
+	int heard_ts;
+	int diff;
+
+	if( !s || !s->put_time_mode || !s->audio_sink || ac3_recoding ||
+		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ) {
+		if( s ) {
+			s->pcm_audio_lead_hold_count = 0;
+			s->pcm_audio_lead_last_diff = 0;
+		}
+		return 0;
+	}
+	passthrough_mode = s->audio_sink->get_passthrough ?
+		s->audio_sink->get_passthrough( s ) : 0;
+	if( passthrough_mode ) {
+		s->pcm_audio_lead_hold_count = 0;
+		s->pcm_audio_lead_last_diff = 0;
+		return 0;
+	}
+	heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	if( heard_ts == STREAM_NO_PTS_VALUE ) {
+		s->pcm_audio_lead_hold_count = 0;
+		s->pcm_audio_lead_last_diff = 0;
+		return 0;
+	}
+
+	diff = s->sync_v_time - heard_ts;
+	s->pcm_audio_lead_last_diff = diff;
+	if( diff >= -STREAM_PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS ) {
+		if( s->pcm_audio_lead_hold_count > 0 ) {
+DBGY			serprintf("pcm_audio_lead_hold: release sync_v=%d audio=%d heard=%d diff=%d held=%d\n",
+				s->sync_v_time, s->audio_time, heard_ts, diff,
+				s->pcm_audio_lead_hold_count);
+		}
+		s->pcm_audio_lead_hold_count = 0;
+		return 0;
+	}
+
+	s->pcm_audio_lead_hold_count++;
+	if( (s->pcm_audio_lead_hold_count % STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL) == 1 ) {
+		DBG serprintf("pcm_audio_lead_hold: sync_v=%d audio=%d heard=%d diff=%d count=%d threshold=%d\n",
+			s->sync_v_time, s->audio_time, heard_ts, diff,
+			s->pcm_audio_lead_hold_count,
+			STREAM_PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS);
+	}
+	return 1;
 }
 
 int stream_sync_audio( STREAM *s, int audio_time )

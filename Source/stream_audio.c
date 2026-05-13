@@ -56,6 +56,8 @@ static int audio_format_configured = -1;  // Track audio format to avoid redunda
 static int startup_anchor_log_count = 0;  // Cap startup anchor diagnostics per playback
 static int startup_write_log_count = 0;   // Cap first-write diagnostics per playback
 static int atempo_gate_log_count = 0;     // Cap atempo runtime gating diagnostics per playback
+#define PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS 250
+#define PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 50
 extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
@@ -1387,6 +1389,36 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 						} else {
 							s->manual_audio_delay_applied_ms = 0;
+						}
+					}
+
+					// PCM put_time backpressure: after seek/resume, video can temporarily
+					// stop advancing while AudioTrack continues accepting PCM writes.  If
+					// we keep feeding audio, audio_time can run seconds ahead and the
+					// next video anchor inherits a huge negative A/V diff.  Hold the
+					// producer only when heard audio is already materially ahead; this is
+					// not latency compensation and does not apply to passthrough bursts.
+					if( s->put_time_mode && s->audio_sink && !passthrough_active && !ac3_recoding ) {
+						int audio_lead_hold_count = 0;
+						while( !_abort( s ) && s->sync_v_time != STREAM_NO_PTS_VALUE && s->audio_time != -1 ) {
+							int heard = stream_get_heard_audio_ts( s, s->audio_time );
+							if( heard == STREAM_NO_PTS_VALUE ) {
+								break;
+							}
+							int diff = s->sync_v_time - heard;
+							if( diff >= -PCM_AUDIO_LEAD_HOLD_THRESHOLD_MS ) {
+								break;
+							}
+							audio_lead_hold_count++;
+							if( (audio_lead_hold_count % PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL) == 1 ) {
+								DBG serprintf("pcm_audio_lead_hold: sync_v=%d audio=%d heard=%d diff=%d count=%d\n",
+									s->sync_v_time, s->audio_time, heard, diff, audio_lead_hold_count);
+							}
+							msec_sleep( 10 );
+							stream_yield_RT();
+						}
+						if( _abort( s ) ) {
+							return;
 						}
 					}
 

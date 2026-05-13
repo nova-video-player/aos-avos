@@ -68,6 +68,9 @@ static int stream_mode2_dynamic_max_ms = 150;
 static int stream_mode2_dynamic_slew_ms = 5;
 static int stream_mode2_dynamic_streak = 10;
 
+#define STREAM_PCM_DELAY_STABLE_STREAK       3
+#define STREAM_MODE1_STARTUP_CLAMP_MS        50
+
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
 	STREAM_DELAY_SOURCE_DYNAMIC,
@@ -636,6 +639,25 @@ static int _stream_mode2_heard_delay( STREAM *s, int static_latency, int fallbac
 	return static_latency > 0 ? static_latency : fallback_delay;
 }
 
+static int _stream_current_heard_delay( STREAM *s,
+	const stream_delay_status_t *delay_status, int is_mode2_sync )
+{
+	if( !s || !delay_status ) {
+		return 0;
+	}
+	if( is_mode2_sync ) {
+		int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+		return _stream_mode2_heard_delay( s, static_latency, delay_status->effective_delay_ms );
+	}
+	if( s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx) ) {
+		// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
+		return delay_status->effective_delay_ms;
+	}
+	return (s->smoothed_av_delay >= 0) ?
+		s->smoothed_av_delay + _stream_get_atempo_delay( s ) :
+		delay_status->effective_delay_ms;
+}
+
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
@@ -653,20 +675,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
 	int use_mode2_wall_clock = passthrough_mode >= 2;
 	int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
-	int heard_delay;
-	
-	if( is_mode2_sync ) {
-		// Mode 2 tracks submitted compressed time. Use configured sink latency as
-		// the baseline offset, then optionally apply a small measured residual.
-		heard_delay = _stream_mode2_heard_delay( s, static_latency, delay_status.effective_delay_ms );
-	} else if (s->audio_ctx && audio_interface_is_startup_hold_active(s->audio_ctx)) {
-		// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
-		heard_delay = delay_status.effective_delay_ms;
-	} else {
-		heard_delay = (s->smoothed_av_delay >= 0) ?
-			s->smoothed_av_delay + _stream_get_atempo_delay( s ) :
-			delay_status.effective_delay_ms;
-	}
+	int heard_delay = _stream_current_heard_delay( s, &delay_status, is_mode2_sync );
 
 	int wall_now = atime();
 
@@ -716,8 +725,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	// 3. STARTUP CLAMP (Non-Mode 2 only)
 	if( !is_mode2_sync && passthrough_mode && s->sink_ref_time == -1 &&
-		heard_ts < s->audio_time - 50 && s->audio_time > s->video_time ) {
-		int clamped = s->audio_time - 50;
+		heard_ts < s->audio_time - STREAM_MODE1_STARTUP_CLAMP_MS && s->audio_time > s->video_time ) {
+		int clamped = s->audio_time - STREAM_MODE1_STARTUP_CLAMP_MS;
 		DBG serprintf( "stream_get_heard_audio_ts: mode1 startup hold clamp: %d->%d (audio=%d video=%d)\n",
 			heard_ts, clamped, s->audio_time, s->video_time );
 		heard_ts = clamped;
@@ -1035,6 +1044,65 @@ static int _apply_user_av_delay_ts( STREAM *s, int ts )
 	return ts;
 }
 
+static int _stream_pcm_delay_sensitive_phase( STREAM *s, int delay_valid )
+{
+	if( !s ) {
+		return 0;
+	}
+	int startup_hold_active = s->audio_ctx ?
+		audio_interface_is_startup_hold_active( s->audio_ctx ) : 0;
+	return (startup_hold_active && !delay_valid) ||
+		s->audio_start_pending ||
+		s->audio_resume_pending ||
+		(s->seek_epoch > 0 && !s->seek_converge_done);
+}
+
+static int _stream_pcm_should_update_delay_cache( int sensitive_phase, int delay_streak )
+{
+	return !sensitive_phase || delay_streak >= STREAM_PCM_DELAY_STABLE_STREAK;
+}
+
+static void _stream_pcm_update_delay_cache( STREAM *s, int current_av_delay,
+	int delay_streak, int sensitive_phase )
+{
+	int old_last_good_delay = s->last_good_delay_ms;
+	int old_last_good_atempo = s->last_good_atempo_delay_ms;
+	int new_last_good_atempo = _stream_get_atempo_delay( s );
+	s->last_good_delay_ms = current_av_delay - new_last_good_atempo;
+	s->last_good_delay_valid = 1;
+	s->last_good_atempo_delay_ms = new_last_good_atempo;
+	DBG serprintf( "stream_sync_audio: last_good_delay %d->%d last_good_atempo %d->%d speed=%.3f raw=%d streak=%d sensitive=%d hist=%d\n",
+		old_last_good_delay, s->last_good_delay_ms,
+		old_last_good_atempo, s->last_good_atempo_delay_ms,
+		audio_interface_get_audio_speed(), current_av_delay, delay_streak,
+		sensitive_phase, s->av_delay_history_count );
+}
+
+static void _stream_pcm_update_smoothed_hw_delay( STREAM *s, int current_av_delay,
+	int current_atempo_delay, int delay_streak )
+{
+	int old_smoothed = s->smoothed_av_delay;
+	int hw_delay = current_av_delay - current_atempo_delay;
+	if( s->smoothed_av_delay == -1 ) {
+		s->smoothed_av_delay = hw_delay;
+	} else {
+		// Check if passthrough mode is active (constant latency, no smoothing needed)
+		int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+		if( !passthrough ) {
+			// Normal mode: smooth hw-only delay (atempo FIFO added live at consumption)
+			if (stream_use_xbmc_smoothing) {
+				s->smoothed_av_delay = stream_calc_lwma(hw_delay, s->av_delay_history, &s->av_delay_history_count);
+			} else {
+				s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + hw_delay * (1000 - s->delay_fb)) / 1000;
+			}
+		}
+	}
+	DBG serprintf( "stream_sync_audio: smoothed_av_delay %d->%d raw=%d speed=%.3f atempo=%d streak=%d hist=%d\n",
+		old_smoothed, s->smoothed_av_delay, current_av_delay,
+		audio_interface_get_audio_speed(), _stream_get_atempo_delay( s ),
+		delay_streak, s->av_delay_history_count );
+}
+
 int stream_sync_audio( STREAM *s, int audio_time )
 {
 	// Defensive check: validate stream pointer to prevent JNI abort crashes
@@ -1070,50 +1138,16 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	if( delay_valid ) {
 		int delay_streak = delay_status.streak;
 		int current_atempo_delay = _stream_get_atempo_delay( s );
-		int startup_hold_active = s->audio_ctx ? audio_interface_is_startup_hold_active( s->audio_ctx ) : 0;
-		int sensitive_phase =
-			(startup_hold_active && !delay_valid) ||
-			s->audio_start_pending ||
-			s->audio_resume_pending ||
-			(s->seek_epoch > 0 && !s->seek_converge_done);
-		int allow_update = !sensitive_phase || delay_streak >= 3;
+		int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
+		int allow_update = _stream_pcm_should_update_delay_cache( sensitive_phase, delay_streak );
 
 		if( !allow_update ) {
 			DBG serprintf( "stream_sync_audio: defer last_good update (delay_streak=%d current=%d sensitive=%d)\n",
 				delay_streak, current_av_delay, sensitive_phase );
 		} else {
-			int old_last_good_delay = s->last_good_delay_ms;
-			int old_last_good_atempo = s->last_good_atempo_delay_ms;
-			int new_last_good_atempo = _stream_get_atempo_delay( s );
-			s->last_good_delay_ms = current_av_delay - new_last_good_atempo;
-			s->last_good_delay_valid = 1;
-			s->last_good_atempo_delay_ms = new_last_good_atempo;
-			DBG serprintf( "stream_sync_audio: last_good_delay %d->%d last_good_atempo %d->%d speed=%.3f raw=%d streak=%d sensitive=%d hist=%d\n",
-				old_last_good_delay, s->last_good_delay_ms,
-				old_last_good_atempo, s->last_good_atempo_delay_ms,
-				audio_interface_get_audio_speed(), current_av_delay, delay_streak,
-				sensitive_phase, s->av_delay_history_count );
+			_stream_pcm_update_delay_cache( s, current_av_delay, delay_streak, sensitive_phase );
 		}
-		int old_smoothed = s->smoothed_av_delay;
-		int hw_delay = current_av_delay - current_atempo_delay;
-		if( s->smoothed_av_delay == -1 ) {
-			s->smoothed_av_delay = hw_delay;
-		} else {
-			// Check if passthrough mode is active (constant latency, no smoothing needed)
-			int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-			if( !passthrough ) {
-				// Normal mode: smooth hw-only delay (atempo FIFO added live at consumption)
-				if (stream_use_xbmc_smoothing) {
-					s->smoothed_av_delay = stream_calc_lwma(hw_delay, s->av_delay_history, &s->av_delay_history_count);
-				} else {
-					s->smoothed_av_delay = (s->smoothed_av_delay * s->delay_fb + hw_delay * (1000 - s->delay_fb)) / 1000;
-				}
-			}
-		}
-		DBG serprintf( "stream_sync_audio: smoothed_av_delay %d->%d raw=%d speed=%.3f atempo=%d streak=%d hist=%d\n",
-			old_smoothed, s->smoothed_av_delay, current_av_delay,
-			audio_interface_get_audio_speed(), _stream_get_atempo_delay( s ),
-			delay_streak, s->av_delay_history_count );
+		_stream_pcm_update_smoothed_hw_delay( s, current_av_delay, current_atempo_delay, delay_streak );
 	}
 	// Check if passthrough mode is active - static delay is immediately valid
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;

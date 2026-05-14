@@ -215,7 +215,7 @@ static int mediacodec_audio_codec_close( AUDIO_PROPERTIES *audio )
 	if( !p || !p->dec_audio ) {
 		return 0;
 	}
-	dec_audio_stop_input( p->dec_audio );
+	dec_audio_stop( p->dec_audio );
 
 	return 0;
 }

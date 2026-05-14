@@ -197,7 +197,7 @@ static ssize_t dec_audio_send_input2(sfdec_priv_t *sfdec, void *data, size_t siz
 
     sfdec->flush = 0;
 
-    index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, wait ? -1ll : 0);
+    index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, wait ? 5000ll : 0);
     if (index < 0)
         return 0;
     buf = AMediaCodec_getInputBuffer(sfdec->mCodec, index, &bufsize);

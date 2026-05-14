@@ -1675,10 +1675,18 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			// In put_time mode, steady-state anchoring is now driven by the video thread.
 			// EXCEPTION: Always allow the audio thread to provide the VERY FIRST anchor
 			// (sink_ref_time == -1) to seed the scheduler immediately.
+			// For passthrough, skip a pre-commit negative anchor: heard_ts is negative
+			// because the static latency exceeds the first audio PTS.  Anchoring the
+			// scheduler there creates a stale reference that the video thread cannot
+			// override (the 842ms jump is below the mode-2 hard-discontinuity threshold).
+			// Leave sink_ref_time=-1 so startup_anchor_commit's sfdec2_refresh_sched_anchor()
+			// call is followed by the correct put_time(heard_ts>=0) on the next audio write.
 			if (!s->put_time_mode || s->sink_ref_time == -1) {
-				s->video_sink->put_time( s->video_sink, anchor_ts );
-				s->sink_ref_time = anchor_ts;
-				s->vid_ref_time = s->video_time;
+				if( !passthrough_mode || anchor_ts >= 0 ) {
+					s->video_sink->put_time( s->video_sink, anchor_ts );
+					s->sink_ref_time = anchor_ts;
+					s->vid_ref_time = s->video_time;
+				}
 			}
 		}
 	}

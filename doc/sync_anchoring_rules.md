@@ -40,12 +40,122 @@
   - **passthrough=2 delay source**: the scheduler uses static passthrough latency from the platform as baseline. If mode-2 dynamic delay is enabled, stable AudioTrack evidence can add a bounded positive residual, but stream-level last-good fallback is not treated as fresh sink evidence.
 - **Manual A/V delay policy**: keep anchors physical; apply user delay at final presentation scheduling.
 
+## PCM Mode 0 — Startup and Seek Sync
+
+### Startup audio hold
+
+Before the first audio write is committed, PCM audio is held until video
+reaches `audio_start_pts - anchor_delay`. Hold threshold:
+- **PCM (all except TrueHD)**: `-32ms` — audio released as soon as heard
+  time is within 32ms of video. Tighter than the old `-150ms` to allow
+  earlier delivery; `pcm_reanchor` corrects remaining drift.
+- **TrueHD**: `-300ms` — relaxed to accommodate the extremely high packet
+  cadence (~1200 bursts/sec) that would cause a freeze on a tight threshold.
+
+`startup_audio_hold` runs as long as needed (not only for `video_time < 1000`),
+so seeks late in a file are also covered.
+
+### PCM resume reanchor state machine
+
+On the first write after resume, `stream_sync_pcm_reanchor_arm()` arms a
+state machine that selects delay in priority order:
+
+1. Dynamic delay (streak ≥ 3) — most accurate
+2. `last_good_delay_ms + live_atempo_delay` — warm fallback
+3. Static latency — cold fallback
+
+The reanchor sets `audio_time = sync_v_time + delay` (using the video
+thread's last reported position, not the potentially stale `video_time`).
+It expires if `seek_epoch` changes mid-resume to prevent stale rebases.
+
+### Post-seek convergence
+
+`_stream_seek_converge_update()` runs a three-part strategy:
+
+- **Part A**: Every `stream_sync_video()` call in put_time mode immediately
+  calls `put_time(heard_ts)` — continuous scheduler updates during the
+  convergence window instead of one shot at T+500ms.
+- **Part B**: If `heard_ts` leads `sync_v_time` by more than
+  `STREAM_SEEK_CONVERGE_APPLY_DIFF_MS` (80ms), audio writes are gated so
+  audio cannot run away while video catches up.
+- **Part C**: After `STREAM_SEEK_CONVERGE_WINDOW_MS` (500ms), a dedicated
+  `sfdec2_refresh_sched_anchor() + put_time()` fires and marks convergence
+  done. Max wait: `STREAM_SEEK_CONVERGE_MAX_WAIT_MS` (1500ms).
+
+### PCM audio lead gate
+
+`stream_sync_pcm_audio_lead_gate()` holds audio writes when heard_ts
+leads `sync_v_time` by too much — a failure mode where AudioTrack accepts
+PCM fast after seek while video is still catching up.
+
+- Enter HOLDING: heard_ts leads by ≥ 220ms for 3 consecutive calls, or
+  immediately at 250ms.
+- Release HOLDING: lead drops below 120ms (100ms hysteresis).
+- Maximum 30 holds (~300ms) before forced expiry.
+
+Applies only to PCM (not passthrough), and not during passthrough bursts.
+
+### PCM delay memory
+
+`_stream_pcm_delay_memory_reset()` is called on seek with
+`reset_smoothed=0`: `last_good_delay` is wiped (stale after seek),
+LWMA history cleared, but `smoothed_av_delay` is kept as a warm starting
+point. On full init `reset_smoothed=1` wipes everything.
+
+### Late-audio-start guard
+
+When delay source is static and audio starts significantly ahead of early
+video (`video_time < 1000`), `anchor_valid` is suppressed in
+`stream_sync_video()` only — not inside `stream_get_heard_audio_ts()`.
+This prevents a premature scheduler anchor without affecting `heard_ts`
+used elsewhere (e.g. `pcm_audio_lead_gate`).
+
 ## Pause/Resume and Seek
 
 - **Pause**: On resume the sink is re‑anchored to `heard_audio_ts`.
 - **Seek**: After seek, synchronization state is reset (`sink_ref_time = -1`). The video clock is immediately updated to the target. The first committed audio output establishes the latency-compensated anchor for the new epoch.
-  - **EAC3/AC3**: Uses a tight 32ms startup hold threshold.
-  - **TrueHD**: Uses a relaxed 300ms hold threshold to accommodate extremely high packet cadence (1200/sec) and prevent video freezes while filling the HAL pipeline.
+  - **PCM**: `startup_audio_hold` gates writes; `pcm_reanchor` then sets the anchor from dynamic/last-good/static delay.
+  - **EAC3/AC3 passthrough**: `startup_anchor_commit` sets `audio_time = video_time + latency`; pre-commit negative anchors are suppressed (see below).
+  - **TrueHD passthrough**: Uses a relaxed 300ms hold threshold to accommodate extremely high packet cadence (1200/sec) and prevent video freezes while filling the HAL pipeline.
+
+## Passthrough Startup Anchor
+
+### `startup_anchor_commit` (mode 1 and mode 2)
+
+On the first audio write after seek/resume, passthrough sets
+`audio_time = video_time + anchor_delay` and calls
+`sfdec2_refresh_sched_anchor()`. This restores the pre-refactoring
+`android_sync=0` startup alignment that was lost during PCM sync
+restructuring. PCM is excluded: it uses `startup_audio_hold` to achieve
+the same alignment by holding writes rather than adjusting `audio_time`.
+
+`sfdec2_refresh_sched_anchor()` is required alongside the `audio_time`
+change: on seek a `no_sched=1` reanchor fires before the commit,
+anchoring the scheduler at the wrong `heard_ts`. Zeroing the anchors
+ensures the post-commit `put_time` gets `no_sched_anchor=1` and
+reanchors at the correct value regardless of grace period.
+
+### Pre-commit negative anchor guard
+
+Before `startup_anchor_commit` runs, `heard_ts` for passthrough is
+deeply negative: `first_audio_pts - static_latency` (e.g. 64 - 871 =
+-807ms). Calling `put_time(-807)` with `no_sched_anchor=1` locks the
+sfdec2 scheduler at a phantom reference. The subsequent correct
+`put_time` cannot override it because the jump (842ms) is below the
+mode-2 hard-discontinuity threshold (1500ms) so `reanchor_disc=0`.
+
+**Fix**: in `stream_sync_audio`, skip `put_time` when
+`passthrough_mode && anchor_ts < 0`. `sink_ref_time` remains `-1` so
+after `startup_anchor_commit` sets `audio_time = video_time + latency`,
+the next `stream_sync_audio` call sees `no_sched_anchor=1` and seeds the
+scheduler correctly.
+
+PCM is unaffected: `!passthrough_mode` is always true for PCM so the
+guard short-circuits and `put_time` is always called as before.
+
+This fix eliminates a systematic ~46ms pre-convergence audio lead on
+EAC3 2.0 passthrough (and any other passthrough format where
+`static_latency >> first_audio_pts`).
 
 ## Delay Jitter and Stability
 

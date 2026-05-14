@@ -194,6 +194,49 @@ Native determines IEC support by inspecting codec flags set by Java:
                  +----------------+      +--------------------+
 ```
 
+## Passthrough A/V Startup Anchoring
+
+### `startup_anchor_commit`
+
+On the first write after seek/resume, passthrough (mode 1 and mode 2)
+sets `audio_time = video_time + anchor_delay` and calls
+`sfdec2_refresh_sched_anchor()` in `stream_audio.c`:
+
+```c
+if( s->put_time_mode && passthrough_active && s->video_time >= 0 && anchor_delay > 0 ) {
+    start_time = s->video_time + anchor_delay;
+    sfdec2_refresh_sched_anchor( s );
+}
+```
+
+This restores the pre-refactoring startup alignment. Without it,
+`audio_time` was set to `audio_start_pts` (~24ms), making `heard_ts`
+deeply negative and causing the sfdec2 scheduler to stall video for
+hundreds of milliseconds before releasing in a burst.
+
+PCM is excluded: it uses `startup_audio_hold` to achieve alignment by
+holding writes, not by adjusting `audio_time`.
+
+### Pre-commit negative anchor guard
+
+Before `startup_anchor_commit` fires, `heard_ts` for passthrough equals
+`first_audio_pts - static_latency` — e.g. 64 - 871 = -807ms for EAC3
+on Streamer 4K. Previously, `stream_sync_audio` would call
+`put_time(-807)` with `no_sched_anchor=1`, locking the sfdec2 scheduler
+at a phantom reference. The subsequent correct `put_time` could not
+override it: the jump (842ms) fell below the mode-2
+hard-discontinuity threshold (1500ms) so `reanchor_disc=0`. This caused
+a systematic ~46ms pre-convergence audio lead on every startup and seek.
+
+Fix: `stream_sync_audio` skips `put_time` when
+`passthrough_mode && anchor_ts < 0`. `sink_ref_time` stays `-1`, so
+after `startup_anchor_commit` the next `stream_sync_audio` call has
+`no_sched_anchor=1` and seeds the scheduler at the correct value.
+
+Expected residual error after fix: ~16ms pre-convergence (sub-frame at
+30fps, imperceptible), and ~15ms post-convergence from
+`_snap_timestamp_ns` half-frame rounding — also imperceptible.
+
 ## Edge Cases
 
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.

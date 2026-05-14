@@ -64,6 +64,44 @@ State Machine Summary
    - While audio_start_pending is true, sync decisions avoid using
      non-audible audio PTS and defer smoothing until audio advances.
 
+PCM Delay Memory
+----------------
+- `last_good_delay_ms` stores **HW-only delay** (atempo delay stripped).
+  Atempo delay is re-added live at consumption sites
+  (`_stream_pcm_reanchor_select_delay`, `_get_anchor_delay_ms`,
+  `_stream_get_delay_status`). This prevents stale pipeline bias when
+  speed is restored after the cache was written.
+- `smoothed_av_delay` tracks HW-only delay (same reason). Atempo is
+  added live inside `stream_sync_av_delay()`.
+- `last_good_delay_ms` update gate: guarded by `sensitive_phase`
+  (true when `startup_hold_active`, `audio_start_pending`,
+  `audio_resume_pending`, or seek in progress). During sensitive phases,
+  `last_good` only updates when the delay streak reaches
+  `STREAM_PCM_DELAY_STABLE_STREAK` (3). This prevents a transient
+  startup/fallback value from polluting the cache before it is stable.
+- On seek, `_stream_pcm_delay_memory_reset(reset_smoothed=0)` wipes
+  `last_good` and LWMA history but preserves `smoothed_av_delay` as a
+  warm start for the new position.
+
+PCM heard_ts Interpolation
+--------------------------
+In `put_time` mode with valid delay, `heard_ts` is wall-clock
+interpolated between audio writes:
+  `heard_ts = _stream_interpolate_heard_ts(...)`
+This eliminates the staircase artifact where `heard_ts` stayed flat
+for 10-20ms between write chunks then jumped. The interpolation is
+capped at the latest `audio_time - heard_delay` frontier (not an
+unbounded predictor). Video scheduling in sfdec2 receives a
+continuously-advancing value instead of steps.
+
+heard_ts < 0 clamp
+------------------
+For PCM in `put_time` mode, `heard_ts < 0` is only clamped to 0 when
+`sink_ref_time > 0` (an anchor has already been established). When
+`sink_ref_time <= 0` (buffer-fill phase), negative `heard_ts` is
+propagated to the sfdec2 scheduler so early frames are paced relative
+to when audio will actually be heard, producing smoother startup.
+
 Notes
 -----
 - Outlier delays are rejected in favor of cached/last-good values.

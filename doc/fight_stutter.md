@@ -63,6 +63,21 @@ Changes Implemented
    - If delay validity drops mid-playback, keep last-good delay for anchoring to
      avoid losing latency compensation.
 
+8) MediaCodec audio decoder shutdown deadlock (ANR fix)
+   - Files: `Source/codec_mediacodec_audio.c`,
+     `external/android/libsfdec/codec_audio_mediacodec.cpp`
+   - `mediacodec_audio_codec_close` called `dec_audio_stop_input` which
+     was a no-op stub. The audio thread was blocked indefinitely in
+     `AMediaCodec_dequeueInputBuffer(-1)`. `stream_close` waited for the
+     thread to exit via `pthread_cond_wait`, blocking the main thread and
+     triggering an ANR (confirmed on Pixel Android 16).
+   - Fix layer 1: call `dec_audio_stop()` on close, which calls
+     `AMediaCodec_stop()` and immediately unblocks any in-flight dequeue.
+   - Fix layer 2: replace the infinite `-1` timeout in
+     `dec_audio_send_input2` with a 5ms bounded timeout (matching
+     Kodi/xbmc), so the audio thread remains interruptible even if the
+     shutdown call ordering is imperfect.
+
 Notes / Potential Follow-ups
 ----------------------------
 - If stutter persists, log render_ts deltas and the dynamic-delay ramp.

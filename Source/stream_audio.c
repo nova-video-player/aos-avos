@@ -1450,6 +1450,17 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// The sync machinery (heard_ts) will subtract latency to find 'heard time'.
 						int start_time = s->audio_start_pts;
 						if( start_time < 0 ) start_time = 0;
+						// For passthrough in put_time mode: set audio_time = video_time + latency
+						// so heard_ts aligns to video_time immediately. Also reset sched anchors so
+						// the next put_time sees no_sched=1 and reanchors correctly regardless of
+						// any earlier no_sched reanchor that fired before this commit.
+						// Passthrough frames are atomic bursts and cannot be held like PCM; alignment
+						// must be done via audio_time here (PCM uses startup_audio_hold instead).
+						// Restores android_sync=0 behavior removed during refactoring.
+						if( s->put_time_mode && passthrough_active && s->video_time >= 0 && anchor_delay > 0 ) {
+							start_time = s->video_time + anchor_delay;
+							sfdec2_refresh_sched_anchor( s );
+						}
 
 						DBG serprintf("startup_anchor_commit: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d\n",
 							s->audio_start_pts, s->video_time, anchor_delay, static_latency, start_time, s->put_time_mode);

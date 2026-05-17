@@ -39,6 +39,8 @@
 // Forward declaration for AC3 recoding check
 extern int libavos_get_ac3_recoding_enabled(void);
 
+int spdif_format_passthrough_supported(int format);
+
 // check if bit at position in value is 1
 #define CHECK_BIT(value,position) (((value)>>(position)) & 1)
 
@@ -453,7 +455,7 @@ static int wave2libav_codecid( int codecid )
 static int spdif_check( int codecid )
 {
 DBGS serprintf( "spdif_check, check codecid %d, force %d\n", codecid, passthrough_on);
-	if ( !wave2libav_codecid( codecid ) ) {
+	if ( !spdif_format_passthrough_supported( codecid ) ) {
 		serprintf("codec not supported for passthrough...\n" );
 		return 0;
 	}
@@ -721,11 +723,9 @@ int spdif_format_passthrough_supported(int format)
 		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
 	case WAVE_FORMAT_DTS_HD_MA:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA) ||
-		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
-		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
 	case WAVE_FORMAT_DTS_HD:
-		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
-		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
 	case WAVE_FORMAT_DTS:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
 	case WAVE_FORMAT_TRUEHD:

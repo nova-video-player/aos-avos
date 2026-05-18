@@ -683,17 +683,12 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	if( speed_changed ) {
 		s->audio_speed_diag_epoch++;
 		s->audio_speed_diag_writes_left = 20;
-		s->audio_speed_last_atempo_delay_ms = -1;
-		s->audio_speed_atempo_stable_count = 0;
-		s->audio_speed_last_atempo_state = -1;
-		s->audio_speed_stabilized_atempo_delay_ms = -1;
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
 		int atempo_delay = 0;
 		if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
 			atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
 		}
-		s->audio_speed_stabilized_atempo_delay_ms = atempo_delay;
 		DBG serprintf( "stream:stream_set_av_speed delay_valid=%d streak=%d v=%d a=%d heard_ts=%d av_delay=%d\n",
 			delay_valid, delay_streak, s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ) );
 		DBG serprintf( "stream:stream_set_av_speed speed_change prev=%.3f target=%.3f using_atempo=%d atempo_delay=%d use_current_ts=%d cur_ts=%d anchor_ts=%d speed_anchor_ts=%d\n",
@@ -726,6 +721,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		} else if( clamped_speed > 2.0f ) {
 			clamped_speed = 2.0f;
 		}
+		// Set the global speed — the atempo filter reads it on its next filter() call.
 		audio_interface_set_audio_speed( clamped_speed );
 		DBG serprintf( "stream:stream_set_av_speed apply atempo speed=%.3f (audio_time=%d video_time=%d)\n",
 			clamped_speed, s->audio_time, s->video_time );

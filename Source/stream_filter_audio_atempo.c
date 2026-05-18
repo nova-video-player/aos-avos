@@ -818,13 +818,14 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 	int fifo_ms = 0;
 	int atempo_internal_ms = 0;
 
-	// 1. FIFO output buffer delay (samples already processed by atempo)
+	// 1. FIFO output buffer depth (diagnostic only - not included in sync delay)
+	// The FIFO holds post-filter samples upstream of audio_time.  audio_time already
+	// advances from bytes read OUT of this FIFO, so including fifo_ms in heard_delay
+	// would double-count it and cause spurious heard_ts jumps on every FIFO depth change.
 	if (ctx->fifo) {
 		int fifo_samples = av_audio_fifo_size(ctx->fifo);
-		// FIFO contains output samples (after speed change)
-		// These represent real-world delay regardless of speed
 		fifo_ms = (fifo_samples * 1000) / ctx->sample_rate;
-		delay_ms += fifo_ms;
+		// fifo_ms intentionally excluded from delay_ms
 	}
 
 	// 2. atempo filter internal delay (active even at 1.0x while filter is enabled)
@@ -848,13 +849,12 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 	}
 
 	// Limit downward delay jumps after a speed change (WSOLA needs time to stabilize).
+	// Use only algo_ms for the stabilization window -- fifo_ms is diagnostic-only and
+	// must not influence smoothing.
 	if (ctx->last_speed_change_ms > 0 && ctx->last_delay_ms >= 0) {
 		int now_ms = atime();
 		int elapsed_ms = now_ms - ctx->last_speed_change_ms;
 		int min_stable_ms = atempo_internal_ms;
-		if (fifo_ms > min_stable_ms) {
-			min_stable_ms = fifo_ms;
-		}
 		if (min_stable_ms < 1) {
 			min_stable_ms = 1;
 		}

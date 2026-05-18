@@ -91,6 +91,35 @@ static AVCodecContext *avctx;
 
 static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
+static int spdif_is_dts_hd_format(int format)
+{
+	return format == WAVE_FORMAT_DTS_HD || format == WAVE_FORMAT_DTS_HD_MA;
+}
+
+static int spdif_route_supports_dts_core(void)
+{
+	return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
+}
+
+static int spdif_route_supports_dts_hd(void)
+{
+	return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
+	       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA);
+}
+
+static int spdif_mode1_dts_core_fallback(int format)
+{
+#ifdef CONFIG_ANDROID
+	return passthrough_on == 1 &&
+	       spdif_is_dts_hd_format(format) &&
+	       !spdif_route_supports_dts_hd() &&
+	       spdif_route_supports_dts_core();
+#else
+	(void)format;
+	return 0;
+#endif
+}
+
 static int _spdif_frame_samples(const AUDIO_PROPERTIES *a, int passthrough_mode)
 {
 	// DTS frame duration is not fixed at 1536 samples. In mode 2 the raw
@@ -455,6 +484,10 @@ static int wave2libav_codecid( int codecid )
 static int spdif_check( int codecid )
 {
 DBGS serprintf( "spdif_check, check codecid %d, force %d\n", codecid, passthrough_on);
+	if ( spdif_mode1_dts_core_fallback( codecid ) ) {
+		serprintf("DTS-HD mode 1 passthrough using DTS core IEC fallback\n");
+		return passthrough_on;
+	}
 	if ( !spdif_format_passthrough_supported( codecid ) ) {
 		serprintf("codec not supported for passthrough...\n" );
 		return 0;
@@ -520,7 +553,12 @@ DBGS serprintf( "spdif_init\n");
 
 	const char *dtshd_rate = NULL;
 	if (a->format == WAVE_FORMAT_DTS_HD_MA || a->format == WAVE_FORMAT_DTS_HD) {
-		if (get_hdmi_supports_iec_8ch192khz()) {
+		if (spdif_mode1_dts_core_fallback(a->format)) {
+			// Keep FFmpeg's SPDIF muxer in regular DTS mode; it strips the
+			// embedded core instead of producing high-bitrate DTS-HD bursts.
+			dtshd_rate = "0";
+			serprintf("spdif_init: DTS-HD mode 1 core fallback, dtshd_rate=0\n");
+		} else if (get_hdmi_supports_iec_8ch192khz()) {
 			dtshd_rate = "768000";
 		} else {
 			dtshd_rate = "0";
@@ -598,6 +636,7 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 	// Mode 2 (raw data to Android): Must match AudioTrack configuration for timing sync
 	if (passthrough_on == 1) {
 		int orig_rate = audio->samplesPerSec;
+		int dts_core_iec_fallback = spdif_mode1_dts_core_fallback(codecid);
 		// IEC61937 container is always 16-bit, 2-channel stereo (or 8ch for high-bitrate)
 		audio->bitsPerSample = 16;
 		audio->channels = 2;
@@ -611,6 +650,19 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 			break;
 		case WAVE_FORMAT_DTS_HD:
 		case WAVE_FORMAT_DTS_HD_MA:
+			if (dts_core_iec_fallback) {
+				serprintf("spdif_open: DTS-HD mode 1 core fallback, using DTS IEC container\n");
+				if (orig_rate == 32000 || orig_rate == 44100) {
+					audio->samplesPerSec = orig_rate;
+				} else {
+					audio->samplesPerSec = 48000;
+				}
+				break;
+			}
+			// High-bitrate DTS-HD needs higher IEC rate.
+			audio->channels      = 8;
+			audio->samplesPerSec = 192000;
+			break;
 		case WAVE_FORMAT_TRUEHD:
 			// High-bitrate formats need higher IEC rate
 			audio->channels      = 8;

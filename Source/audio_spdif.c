@@ -764,6 +764,9 @@ int spdif_is_passthrough_on()
 int spdif_format_passthrough_supported(int format)
 {
 #ifdef CONFIG_ANDROID
+	// Mode 1 IEC: DTS-HD MA/HD can extract DTS core into IEC 61937 if route supports DTS
+	if (spdif_mode1_dts_core_fallback(format))
+		return 1;
 	switch( format ) {
 	case WAVE_FORMAT_AC3:
 		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_AC3) ||

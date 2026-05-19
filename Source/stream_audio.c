@@ -1372,6 +1372,12 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( _abort( s ) ) {
 						return;
 					}
+					if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+						DBG serprintf("stream_audio: pause raced before write, dropping pending audio frame (%d bytes)\n",
+							audio_frame.size);
+						size = 0;
+						break;
+					}
 					DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
 					if( s->audio_resume_pending ) {

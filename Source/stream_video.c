@@ -2823,8 +2823,16 @@ DBGS serprintf("stream_un_pause\r\n");
 		float audio_speed = audio_interface_get_audio_speed();
 		int using_atempo = audio_interface_is_using_atempo();
 		if ( using_atempo || fabsf(audio_speed - 1.0f) > 1e-6f ) {
+			int last_good_delay_ms = s->last_good_delay_ms;
+			int last_good_delay_valid = s->last_good_delay_valid;
+			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
 			s->sink_ref_time = -1;
 			stream_sync_restart( s );
+			// Pause/resume restarts the scheduler, not the audio device. Keep the
+			// last measured HW delay so a rapid resume can avoid static latency.
+			s->last_good_delay_ms = last_good_delay_ms;
+			s->last_good_delay_valid = last_good_delay_valid;
+			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
 			if ( s->video_sink && s->audio && s->audio->valid && s->audio_time != -1 ) {
 				stream_sync_audio( s, s->audio_time );
 			}
@@ -2968,6 +2976,11 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 			DBG serprintf(
 				"SINK_REF_CANDIDATE: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d anchor_ts=%d seek_epoch=%d put_mode=1\n",
 				frame->time, s->video_time, s->audio_time, s->sync_a_time, anchor_ts, s->seek_epoch );
+			if( anchor_ts < 0 ) {
+				DBG serprintf("SINK_REF_DEFERRED: negative put_time anchor frame_time=%d anchor_ts=%d start=%d resume=%d\n",
+					frame->time, anchor_ts, s->audio_start_pending, s->audio_resume_pending);
+				return;
+			}
 			s->sink_ref_time = anchor_ts;
 			s->vid_ref_time  = frame->time;
 			s->video_sink->put_time( s->video_sink, anchor_ts );

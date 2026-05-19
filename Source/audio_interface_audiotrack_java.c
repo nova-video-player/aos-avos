@@ -1351,8 +1351,10 @@ ERR		LOG("audiotrack_start: track not valid, error");
 		return -1;
 	}
 
-	// New playback run: keep startup delay clamp until timing is valid.
-	at->startup_hold_active = 1;
+	// Cold start needs the static clamp. On pause/resume, a preserved dynamic
+	// delay is better evidence than static latency and avoids storm-induced
+	// startup_hold loops.
+	at->startup_hold_active = at->last_good_dynamic_valid ? 0 : 1;
 	at->startup_hold_start_ms = atime();
 	at->frozen_ts_streak = 0;
 
@@ -1961,6 +1963,12 @@ DBG2		LOG("delay: latency=%d startup=%d fallback=%d", at->latency, at->startup_h
 		}
 
 		if (at->startup_hold_active) {
+			if (at->last_good_dynamic_valid && at->last_good_dynamic_delay_ms > 0) {
+				at->delay_valid = 1;
+				src = "last_good(startup_hold)";
+				ret = at->last_good_dynamic_delay_ms;
+				goto done;
+			}
 			// Fix A: getTimestamp() is returning a frozen framePosition after seek (observed on
 			// Google Streamer 4K).  The two normal exit conditions (delay_ms >= latency-20 and
 			// ts_success_streak >= 30) can never be met because the frozen framePosition prevents

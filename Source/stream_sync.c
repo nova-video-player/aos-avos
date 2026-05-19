@@ -1151,8 +1151,14 @@ static int _stream_pcm_delay_sensitive_phase( STREAM *s, int delay_valid )
 		(s->seek_epoch > 0 && !s->seek_converge_done);
 }
 
-static int _stream_pcm_should_update_delay_cache( int sensitive_phase, int delay_streak )
+static int _stream_pcm_should_update_delay_cache( int sensitive_phase, int delay_streak,
+	stream_delay_source_t source )
 {
+	// Keep last_good HW-only and based on real timing evidence; static/startup
+	// fallbacks are safe to use transiently but must not poison the cache.
+	if( source != STREAM_DELAY_SOURCE_DYNAMIC && source != STREAM_DELAY_SOURCE_LAST_GOOD ) {
+		return 0;
+	}
 	return !sensitive_phase || delay_streak >= STREAM_PCM_DELAY_STABLE_STREAK;
 }
 
@@ -1247,7 +1253,9 @@ static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	}
 	if( delay_valid ) {
 		if( streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
-			*delay_ms = audio_interface_get_delay( s->audio_ctx );
+			// pcm_reanchor sets audio_time directly, so use the full audible
+			// chain delay here. stream_sync_audio strips atempo before caching.
+			*delay_ms = audio_interface_get_delay( s->audio_ctx ) + stream_get_atempo_delay( s );
 			*source = PCM_REANCHOR_SOURCE_DYNAMIC;
 			return 1;
 		}
@@ -1260,6 +1268,9 @@ static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	}
 	*delay_ms = audio_interface_get_latency( s->audio_ctx );
 	if( *delay_ms > 0 ) {
+		// Static is only a cold resume fallback, but it still needs the filter
+		// delay so heard_ts lands on sync_v_time after the reanchor.
+		*delay_ms += stream_get_atempo_delay( s );
 		*source = PCM_REANCHOR_SOURCE_STATIC;
 		return 1;
 	}
@@ -1609,11 +1620,14 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		int delay_streak = delay_status.streak;
 		int current_atempo_delay = stream_get_atempo_delay( s );
 		int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
-		int allow_update = _stream_pcm_should_update_delay_cache( sensitive_phase, delay_streak );
+		int allow_update = _stream_pcm_should_update_delay_cache( sensitive_phase,
+			delay_streak, delay_status.source );
 
 		if( !allow_update ) {
-			DBG serprintf( "stream_sync_audio: defer last_good update (delay_streak=%d current=%d sensitive=%d)\n",
-				delay_streak, current_av_delay, sensitive_phase );
+			DBG serprintf( "stream_sync_audio: defer last_good update (delay_streak=%d current=%d sensitive=%d source=%s tag=%s)\n",
+				delay_streak, current_av_delay, sensitive_phase,
+				_stream_delay_source_name( delay_status.source ),
+				delay_status.source_tag ? delay_status.source_tag : "none" );
 		} else {
 			_stream_pcm_update_delay_cache( s, current_av_delay, delay_streak, sensitive_phase );
 		}

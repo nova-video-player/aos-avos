@@ -2169,8 +2169,26 @@ static void audiotrack_invalidate_delay_cache(audio_ctx_t *at)
 	if (!at) {
 		return;
 	}
+	int using_atempo = audio_interface_is_audio_speed_enabled() &&
+		audio_interface_is_using_atempo();
+	DBG LOG("audiotrack_invalidate_delay_cache: using_atempo=%d ts_use=%d startup=%d cached=%d last_good_valid=%d last_good=%d",
+		using_atempo, at->ts_use_timestamp, at->startup_hold_active,
+		at->ts_cached_valid, at->last_good_dynamic_valid,
+		at->last_good_dynamic_delay_ms);
 	at->ts_last_query_ms = 0;
 	at->ts_cached_valid = 0;
+	if (using_atempo) {
+		// Atempo changes can quickly fill/drain the AudioTrack queue while the
+		// sink still plays at 1x. A pre-change last-good delay is stale evidence.
+		at->last_good_dynamic_delay_ms = 0;
+		at->last_good_dynamic_ms = 0;
+		at->last_good_dynamic_valid = 0;
+		at->delay_valid = 0;
+		if (at->ts_use_timestamp) {
+			at->startup_hold_active = 0;
+		}
+		at->startup_hold_start_ms = atime();
+	}
 }
 
 static int audiotrack_is_startup_hold_active(audio_ctx_t *at)

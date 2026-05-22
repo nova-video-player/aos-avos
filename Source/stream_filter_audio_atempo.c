@@ -647,10 +647,10 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 				serprintf("atempo: failed to rebuild filter graph\n");
 				return -1;
 			}
-				ctx->last_speed_change_ms = 0;
-				ctx->last_delay_ms = -1;
-				ctx->delay_log_count = 0;
-			} else {
+			ctx->last_speed_change_ms = 0;
+			ctx->last_delay_ms = -1;
+			ctx->delay_log_count = 0;
+		} else {
 			DBGA serprintf("atempo: speed changed %.3f -> %.3f (fifo=%d)\n",
 				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
 			if (atempo_update_speed(ctx, speed) < 0) {
@@ -659,10 +659,10 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 					return -1;
 				}
 			}
-				ctx->last_speed_change_ms = atime();
-				ctx->delay_log_count = 0;
-			}
+			ctx->last_speed_change_ms = atime();
+			ctx->delay_log_count = 0;
 		}
+	}
 
 	int ret;
 	int bytes_per_sample = av_get_bytes_per_sample(ctx->format) * ctx->channels;

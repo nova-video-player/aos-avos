@@ -79,7 +79,6 @@ static int stream_mode2_dynamic_streak = 10;
 #define STREAM_PCM_AUDIO_LEAD_MIN_SAMPLES    3
 #define STREAM_PCM_AUDIO_LEAD_MAX_HOLDS      30
 #define STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 25
-
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
 	STREAM_DELAY_SOURCE_DYNAMIC,
@@ -177,6 +176,45 @@ static void _stream_pcm_audio_lead_reset( STREAM *s )
 	s->pcm_audio_lead_last_diff = 0;
 }
 
+static stream_delay_source_t _classify_audio_delay_source(const char *tag, int delay_valid)
+{
+	if( !tag || !tag[0] ) {
+		return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
+	}
+	if( !strncmp( tag, "static", 6 ) ) {
+		return STREAM_DELAY_SOURCE_STATIC;
+	}
+	if( !strncmp( tag, "last_good", 9 ) || !strncmp( tag, "cached", 6 ) ) {
+		return STREAM_DELAY_SOURCE_LAST_GOOD;
+	}
+	if( !strncmp( tag, "playhead", 8 ) || !strncmp( tag, "dynamic", 7 ) ) {
+		return STREAM_DELAY_SOURCE_DYNAMIC;
+	}
+	if( !strncmp( tag, "fallback", 8 ) || !strncmp( tag, "throttle_none", 13 ) ||
+		!strncmp( tag, "outlier", 7 ) || !strncmp( tag, "exception", 9 ) ||
+		!strncmp( tag, "track_null", 10 ) ) {
+		return STREAM_DELAY_SOURCE_NONE;
+	}
+	return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
+}
+
+static const char *_stream_delay_source_name(stream_delay_source_t source)
+{
+	switch (source) {
+	case STREAM_DELAY_SOURCE_DYNAMIC:
+		return "dynamic";
+	case STREAM_DELAY_SOURCE_LAST_GOOD:
+		return "last_good";
+	case STREAM_DELAY_SOURCE_STATIC:
+		return "static";
+	case STREAM_DELAY_SOURCE_NONE:
+		return "none";
+	case STREAM_DELAY_SOURCE_UNKNOWN:
+	default:
+		return "unknown";
+	}
+}
+
 static const char *_stream_pcm_reanchor_state_name( int state )
 {
 	switch( state ) {
@@ -207,45 +245,6 @@ static const char *_stream_pcm_reanchor_source_name( int source )
 	default:
 		return "none";
 	}
-}
-
-static const char *_stream_delay_source_name(stream_delay_source_t source)
-{
-	switch (source) {
-	case STREAM_DELAY_SOURCE_DYNAMIC:
-		return "dynamic";
-	case STREAM_DELAY_SOURCE_LAST_GOOD:
-		return "last_good";
-	case STREAM_DELAY_SOURCE_STATIC:
-		return "static";
-	case STREAM_DELAY_SOURCE_NONE:
-		return "none";
-	case STREAM_DELAY_SOURCE_UNKNOWN:
-	default:
-		return "unknown";
-	}
-}
-
-static stream_delay_source_t _classify_audio_delay_source(const char *tag, int delay_valid)
-{
-	if( !tag || !tag[0] ) {
-		return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
-	}
-	if( !strncmp( tag, "static", 6 ) ) {
-		return STREAM_DELAY_SOURCE_STATIC;
-	}
-	if( !strncmp( tag, "last_good", 9 ) || !strncmp( tag, "cached", 6 ) ) {
-		return STREAM_DELAY_SOURCE_LAST_GOOD;
-	}
-	if( !strncmp( tag, "playhead", 8 ) || !strncmp( tag, "dynamic", 7 ) ) {
-		return STREAM_DELAY_SOURCE_DYNAMIC;
-	}
-	if( !strncmp( tag, "fallback", 8 ) || !strncmp( tag, "throttle_none", 13 ) ||
-		!strncmp( tag, "outlier", 7 ) || !strncmp( tag, "exception", 9 ) ||
-		!strncmp( tag, "track_null", 10 ) ) {
-		return STREAM_DELAY_SOURCE_NONE;
-	}
-	return delay_valid ? STREAM_DELAY_SOURCE_UNKNOWN : STREAM_DELAY_SOURCE_NONE;
 }
 
 static int _stream_is_mode2_audio_interface_delay(const stream_delay_status_t *status)
@@ -1156,7 +1155,8 @@ static int _stream_pcm_should_update_delay_cache( int sensitive_phase, int delay
 {
 	// Keep last_good HW-only and based on real timing evidence; static/startup
 	// fallbacks are safe to use transiently but must not poison the cache.
-	if( source != STREAM_DELAY_SOURCE_DYNAMIC && source != STREAM_DELAY_SOURCE_LAST_GOOD ) {
+	if( source != STREAM_DELAY_SOURCE_DYNAMIC &&
+		source != STREAM_DELAY_SOURCE_LAST_GOOD ) {
 		return 0;
 	}
 	return !sensitive_phase || delay_streak >= STREAM_PCM_DELAY_STABLE_STREAK;
@@ -1911,15 +1911,15 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
 
 	if ( s->put_time_mode && _stream_is_sink_driven(s) ) {
-		// ANCHOR: Continuously update the sink anchor from the smooth 
-		// wall-clock interpolated timeline. This must happen before 
+		// ANCHOR: Continuously update the sink anchor from the smooth
+		// wall-clock interpolated timeline. This must happen before
 		// any early-returns to ensure the scheduler stays stable.
-		int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
-		anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
-		anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
-		
-		s->video_sink->put_time( s->video_sink, anchor_ts );
-		s->sink_ref_time = anchor_ts;
+		int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
+		heard_ts = _apply_user_av_delay_ts( s, heard_ts );
+		heard_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
+
+		s->video_sink->put_time( s->video_sink, heard_ts );
+		s->sink_ref_time = heard_ts;
 		s->vid_ref_time = s->video_time;
 	}
 

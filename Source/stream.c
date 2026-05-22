@@ -34,8 +34,6 @@
 #include <signal.h>
 #include <math.h>
 
-#ifdef CONFIG_ANDROID
-#endif
 extern int libavos_get_ac3_recoding_enabled(void);
 
 #ifdef CONFIG_STREAM

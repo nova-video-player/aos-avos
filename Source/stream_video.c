@@ -3091,6 +3091,33 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 	}
 }
 
+static int _frame_stale_after_seek( STREAM *s, VIDEO_FRAME *frame )
+{
+	if( !s || !frame || !s->put_time_mode || s->audio_time < 0 ||
+	    frame->epoch == s->seek_epoch ) {
+		return 0;
+	}
+
+	int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	if( heard_ts <= 0 ) {
+		return 0;
+	}
+
+	int threshold = RST_TO_TS_DELTA( 50, int );
+	if( s->video && s->video->msPerFrame > 0 ) {
+		threshold = RST_TO_TS_DELTA( s->video->msPerFrame, int );
+	}
+
+	if( frame->time <= heard_ts + threshold ) {
+		return 0;
+	}
+
+	DBG serprintf("STALE_SEEK_FRAME_DROP: frame=%d frame_epoch=%d seek_epoch=%d heard=%d threshold=%d video=%d audio=%d\n",
+		frame->time, frame->epoch, s->seek_epoch, heard_ts, threshold,
+		s->video_time, s->audio_time);
+	return 1;
+}
+
 // ************************************************************
 //
 //	_output_frame_no_resize - kilroy was here
@@ -3154,7 +3181,14 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	int sync_wait_ms = 0;
 	const int sync_wait_timeout_ms = 5000; // Avoid indefinite freeze if audio never starts
 
+	if( _frame_stale_after_seek( s, frame ) ) {
+		goto Discard;
+	}
+
 	while( qframe && !_engine_abort( s ) && stream_sync_video( s, frame->time ) ) {
+		if( _frame_stale_after_seek( s, frame ) ) {
+			goto Discard;
+		}
 		if( (sync_wait_ms % 1000) == 0 ) { // every 1s
 DBG			serprintf("video waiting for audio sync (%d ms)\n", sync_wait_ms);
 		}

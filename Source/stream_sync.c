@@ -70,12 +70,9 @@ static int stream_mode2_dynamic_slew_ms = 5;
 static int stream_mode2_dynamic_streak = 10;
 
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
-#define STREAM_PCM_AUDIO_LEAD_ENTER_MS       220
-#define STREAM_PCM_AUDIO_LEAD_FORCE_MS       250
-#define STREAM_PCM_AUDIO_LEAD_RELEASE_MS     120
-#define STREAM_PCM_AUDIO_LEAD_MIN_SAMPLES    3
-#define STREAM_PCM_AUDIO_LEAD_MAX_HOLDS      30
-#define STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 25
+// Simple audio-lead gate threshold (Phase 1B baseline).
+// Phase 4 hysteresis constants removed in Commit C.
+#define STREAM_PCM_AUDIO_LEAD_GATE_MS        200
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -151,16 +148,6 @@ static void _stream_pcm_reanchor_reset( STREAM *s )
 	s->pcm_reanchor_delay_ms = 0;
 }
 
-static void _stream_pcm_audio_lead_reset( STREAM *s )
-{
-	if( !s ) {
-		return;
-	}
-	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_INACTIVE;
-	s->pcm_audio_lead_candidate_count = 0;
-	s->pcm_audio_lead_hold_count = 0;
-	s->pcm_audio_lead_last_diff = 0;
-}
 
 static stream_delay_source_t _classify_audio_delay_source(const char *tag, int delay_valid)
 {
@@ -423,7 +410,6 @@ int stream_sync_restart( STREAM *s )
 	
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
-	_stream_pcm_audio_lead_reset( s );
 
 	s->heard_interp_anchor_audio = -1;
 	s->heard_interp_anchor_wall_ms = 0;
@@ -1118,15 +1104,15 @@ static int _apply_user_av_delay_ts( STREAM *s, int ts )
 
 static int _stream_pcm_delay_sensitive_phase( STREAM *s, int delay_valid )
 {
-	int post_seek_pending;
 	if( !s ) {
 		return 0;
 	}
 	int startup_hold_active = s->audio_ctx ?
 		audio_interface_is_startup_hold_active( s->audio_ctx ) : 0;
-	post_seek_pending = s->seek_epoch > 0 &&
-		(s->sync_a_time == -1 ||
-		 s->pcm_audio_lead_state == STREAM_PCM_AUDIO_LEAD_HOLDING);
+	// Post-seek sensitive until the first audio frame is committed (sync_a_time set).
+	// The stateful lead-gate contribution (pcm_audio_lead_state == HOLDING) was removed
+	// in Commit C; the seek window naturally expires on first committed audio output.
+	int post_seek_pending = s->seek_epoch > 0 && s->sync_a_time == -1;
 	return (startup_hold_active && !delay_valid) ||
 		s->audio_start_pending ||
 		s->audio_resume_pending ||
@@ -1282,84 +1268,29 @@ DBGA	serprintf(" <<%d>> ", s->audio_time);
 
 int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 {
-	int passthrough_mode;
-	int heard_ts;
-	int diff;
-
+	// Phase 1B simple gate: hold the audio producer only when heard audio
+	// is materially ahead of video. No persistent state, no hysteresis.
+	// Phase 4 re-introduces hysteresis only if logs prove this insufficient.
 	if( !s || !s->put_time_mode || !s->audio_sink || ac3_recoding ||
 		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ) {
-		_stream_pcm_audio_lead_reset( s );
 		return 0;
 	}
-	passthrough_mode = s->audio_sink->get_passthrough ?
+	int passthrough_mode = s->audio_sink->get_passthrough ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	if( passthrough_mode ) {
-		_stream_pcm_audio_lead_reset( s );
 		return 0;
 	}
-	heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
 	if( heard_ts == STREAM_NO_PTS_VALUE ) {
-		_stream_pcm_audio_lead_reset( s );
 		return 0;
 	}
-
-	diff = s->sync_v_time - heard_ts;
-	s->pcm_audio_lead_last_diff = diff;
-
-	if( s->pcm_audio_lead_state == STREAM_PCM_AUDIO_LEAD_EXPIRED ) {
-		if( diff >= -STREAM_PCM_AUDIO_LEAD_RELEASE_MS ) {
-DBGY			serprintf("pcm_audio_lead_hold: release state=expired sync_v=%d audio=%d heard=%d diff=%d held=%d release=%d\n",
-				s->sync_v_time, s->audio_time, heard_ts, diff,
-				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
-			_stream_pcm_audio_lead_reset( s );
-		}
-		return 0;
-	}
-
-	if( s->pcm_audio_lead_state == STREAM_PCM_AUDIO_LEAD_HOLDING ) {
-		if( diff >= -STREAM_PCM_AUDIO_LEAD_RELEASE_MS ) {
-DBGY			serprintf("pcm_audio_lead_hold: release state=holding sync_v=%d audio=%d heard=%d diff=%d held=%d release=%d\n",
-				s->sync_v_time, s->audio_time, heard_ts, diff,
-				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
-			_stream_pcm_audio_lead_reset( s );
-			return 0;
-		}
-		if( s->pcm_audio_lead_hold_count >= STREAM_PCM_AUDIO_LEAD_MAX_HOLDS ) {
-DBGY			serprintf("pcm_audio_lead_hold: expire sync_v=%d audio=%d heard=%d diff=%d held=%d release=%d\n",
-				s->sync_v_time, s->audio_time, heard_ts, diff,
-				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
-			s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_EXPIRED;
-			return 0;
-		}
-		s->pcm_audio_lead_hold_count++;
-		if( (s->pcm_audio_lead_hold_count % STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL) == 1 ) {
-			DBG serprintf("pcm_audio_lead_hold: hold sync_v=%d audio=%d heard=%d diff=%d count=%d enter=%d release=%d\n",
-				s->sync_v_time, s->audio_time, heard_ts, diff,
-				s->pcm_audio_lead_hold_count, STREAM_PCM_AUDIO_LEAD_ENTER_MS,
-				STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
-		}
+	int diff = s->sync_v_time - heard_ts;
+	if( diff < -STREAM_PCM_AUDIO_LEAD_GATE_MS ) {
+		DBG serprintf("pcm_audio_lead_gate: hold sync_v=%d heard=%d diff=%d gate=%d\n",
+			s->sync_v_time, heard_ts, diff, STREAM_PCM_AUDIO_LEAD_GATE_MS);
 		return 1;
 	}
-
-	if( diff > -STREAM_PCM_AUDIO_LEAD_ENTER_MS ) {
-		s->pcm_audio_lead_candidate_count = 0;
-		return 0;
-	}
-
-	s->pcm_audio_lead_candidate_count++;
-	if( diff > -STREAM_PCM_AUDIO_LEAD_FORCE_MS &&
-		s->pcm_audio_lead_candidate_count < STREAM_PCM_AUDIO_LEAD_MIN_SAMPLES ) {
-		return 0;
-	}
-
-	s->pcm_audio_lead_state = STREAM_PCM_AUDIO_LEAD_HOLDING;
-	s->pcm_audio_lead_hold_count = 1;
-	DBG serprintf("pcm_audio_lead_hold: enter sync_v=%d audio=%d heard=%d diff=%d count=%d samples=%d enter=%d force=%d release=%d\n",
-		s->sync_v_time, s->audio_time, heard_ts, diff,
-		s->pcm_audio_lead_hold_count, s->pcm_audio_lead_candidate_count,
-		STREAM_PCM_AUDIO_LEAD_ENTER_MS, STREAM_PCM_AUDIO_LEAD_FORCE_MS,
-		STREAM_PCM_AUDIO_LEAD_RELEASE_MS);
-	return 1;
+	return 0;
 }
 
 int stream_sync_audio( STREAM *s, int audio_time )

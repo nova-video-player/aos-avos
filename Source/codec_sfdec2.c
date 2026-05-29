@@ -740,18 +740,13 @@ DBGSI serprintf(" grace\n");
 				goto render_now;
 			}
 			int audio_delay = 0;
-			int smoothed_delay = 0;
 			if( s ) {
-				smoothed_delay = s->smoothed_av_delay;
 				audio_delay = stream_get_anchor_delay_ms( s, 1 );
 			}
 			if( audio_delay < 0 ) {
 				audio_delay = 0;
 			}
-			if( smoothed_delay < 0 ) {
-				smoothed_delay = 0;
-			}
-			int latency_ms = MAX( audio_delay, smoothed_delay );
+			int latency_ms = audio_delay;
 			int late_threshold = -40;
 			if( latency_ms > 200 ) {
 				late_threshold = -MAX( 40, latency_ms );
@@ -784,8 +779,8 @@ DBGSI serprintf(" grace\n");
 				audio_time = s->audio_time;
 				video_time = s->video_time;
 			}
-DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d smoothed=%d audio_delay=%d latency=%d threshold=%d speed=%.3f dropped=%d max_drops=%d\n",
-	blit_duration, f->index, f->time, venc_time, audio_time, video_time, smoothed_delay, audio_delay, latency_ms, late_threshold, speed, p->dropped, max_consecutive_drops);
+DBGSI serprintf(" DROP blit=%d f=%d time=%d venc=%d audio_time=%d video_time=%d audio_delay=%d latency=%d threshold=%d speed=%.3f dropped=%d max_drops=%d\n",
+	blit_duration, f->index, f->time, venc_time, audio_time, video_time, audio_delay, latency_ms, late_threshold, speed, p->dropped, max_consecutive_drops);
 //CLOG("dropping frame(%d): %d ms late, blit_time: %d, venc_time: %d, f->time: %d", f->index, (venc_time - f->blit_time), f->blit_time, venc_time, f->time);
 			}
 		}

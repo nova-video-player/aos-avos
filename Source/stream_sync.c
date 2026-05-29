@@ -843,8 +843,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	static int last_diag_wall = 0;
 	if (wall_now > last_diag_wall + 2000) {
 		last_diag_wall = wall_now;
-		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d smoothed=%d eff=%d delay_valid=%d source=%s tag=%s\n",
-			wall_now, s->audio_time, heard_ts, heard_delay, s->smoothed_av_delay, 
+		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d eff=%d delay_valid=%d source=%s tag=%s\n",
+			wall_now, s->audio_time, heard_ts, heard_delay,
 			delay_status.effective_delay_ms, delay_status.is_delay_valid,
 			_stream_delay_source_name(delay_status.source),
 			delay_status.source_tag ? delay_status.source_tag : "none");
@@ -1070,20 +1070,10 @@ DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 		use_heard_time = 1;
 	}
 #ifdef CONFIG_ANDROID
-	// In put_time_mode, heard-time is already in the audio-presented domain.
-	// Do not re-add smoothed delay here or we double-count latency.
-	if( !use_heard_time && s->put_time_mode && s->smoothed_av_delay > 0 ) {
-		// Keep diff aligned with the smoothed anchor when not using heard-time.
-		sync_delay = s->smoothed_av_delay;
-	}
-#endif
-#ifdef CONFIG_ANDROID
 
 	if( !use_heard_time && sync_delay <= 0 ) {
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
-		if( delay_valid && s->smoothed_av_delay > 0 ) {
-			sync_delay = s->smoothed_av_delay;
-		} else if( delay_valid && s->audio_ctx ) {
+		if( delay_valid && s->audio_ctx ) {
 			int static_latency = audio_interface_get_latency( s->audio_ctx );
 			if( static_latency > 0 ) {
 				sync_delay = static_latency;
@@ -1484,8 +1474,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				(s->sink_ref_time == -1 || s->sync_a_time == -1);
 
 			if (diag_log) {
-				DBGY2 serprintf("anchor_ts: audio_time=%d smoothed=%d current=%d source=%s tag=%s av_delay=%d anchor=%d\n",
-					audio_time, s->smoothed_av_delay, current_av_delay,
+				DBGY2 serprintf("anchor_ts: audio_time=%d current=%d source=%s tag=%s av_delay=%d anchor=%d\n",
+					audio_time, current_av_delay,
 					_stream_delay_source_name(delay_status.source),
 					delay_status.source_tag ? delay_status.source_tag : "none",
 					s->av_delay, anchor_ts);
@@ -1667,8 +1657,8 @@ int stream_sync_video( STREAM *s, int video_time )
 			if( passthrough_mode && s->put_time_mode ) {
 				return 1;
 			}
-DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d source=%s tag=%s)\n",
-				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
+DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 audio_time=%d sync_a=%d vtime=%d put_time=%d delay_valid=%d source=%s tag=%s)\n",
+				s->audio_time, s->sync_a_time, s->sync_v_time,
 				s->put_time_mode, delay_valid,
 				_stream_delay_source_name(delay_status.source),
 				delay_status.source_tag ? delay_status.source_tag : "none");
@@ -1681,8 +1671,8 @@ DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0
 		int anchor_valid = delay_status.is_anchorable;
 		_sync_diag_log_state(s, "video", &delay_status);
 		if( !anchor_valid ) {
-DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 smoothed=%d audio_time=%d sync_a=%d vtime=%d put_time=%d)\n",
-				s->smoothed_av_delay, s->audio_time, s->sync_a_time, s->sync_v_time,
+DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0 audio_time=%d sync_a=%d vtime=%d put_time=%d)\n",
+				s->audio_time, s->sync_a_time, s->sync_v_time,
 				s->put_time_mode);
 			return 0;
 		}

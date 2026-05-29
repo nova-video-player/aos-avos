@@ -1498,13 +1498,15 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	if (frames_presented > 0) {
 		at->passthrough_playhead_ever_advanced = 1;
 	}
-	if (at->passthrough_playhead_ever_advanced) {
-		passthrough_stall_fallback_ms = at->latency + passthrough_stall_fallback_margin_ms;
-		if (passthrough_stall_fallback_ms < passthrough_stall_fallback_min_ms) {
-			passthrough_stall_fallback_ms = passthrough_stall_fallback_min_ms;
-		} else if (passthrough_stall_fallback_ms > passthrough_stall_fallback_max_ms) {
-			passthrough_stall_fallback_ms = passthrough_stall_fallback_max_ms;
-		}
+	// Use pipeline_latency (HAL-aware) for write-gate timeouts, not scheduler latency.
+	// On eARC/HDMI routes, track_latency can be 700ms+ while app_latency is ~170ms;
+	// using only app_latency causes premature blind fallback before the playhead advances.
+	int stall_base_ms = (int)(at->pipeline_latency > 0 ? at->pipeline_latency : at->latency);
+	passthrough_stall_fallback_ms = stall_base_ms + passthrough_stall_fallback_margin_ms;
+	if (passthrough_stall_fallback_ms < passthrough_stall_fallback_min_ms) {
+		passthrough_stall_fallback_ms = passthrough_stall_fallback_min_ms;
+	} else if (passthrough_stall_fallback_ms > passthrough_stall_fallback_max_ms) {
+		passthrough_stall_fallback_ms = passthrough_stall_fallback_max_ms;
 	}
 
 	if (frames_presented != at->can_write_last_playback_frames) {
@@ -1515,9 +1517,9 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 			at->can_write_stall_start_ms = now_ms;
 		} else if (now_ms - at->can_write_stall_start_ms >= passthrough_stall_fallback_ms) {
 			at->passthrough_can_write_blind = 1;
-			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled for %dms (threshold=%d latency=%d pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
+			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled for %dms (threshold=%d scheduler=%d pipeline=%d pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
 				at->format, at->passthrough, len,
-				now_ms - at->can_write_stall_start_ms, passthrough_stall_fallback_ms, at->latency,
+				now_ms - at->can_write_stall_start_ms, passthrough_stall_fallback_ms, at->latency, at->pipeline_latency,
 				(long long)frames_pending, (long long)frames_available, (long long)frames_requested);
 			return 1;
 		}

@@ -93,6 +93,7 @@ struct audio_ctx {
 	uint32_t track_latency;     // diagnostic: AudioTrack.getLatency() (may include HAL/platform)
 	uint32_t system_latency;    // diagnostic: AudioSystem.getOutputLatency()
 	uint32_t app_latency;       // local buffer geometry: buf_size / (frame_size * rate * speed)
+	uint32_t pipeline_latency;  // max(track, system+app): selected static delay for mode2; write-gate timeout for mode1
 	int passthrough;
 	int applied_passthrough;
 	int applied_spatialization_behavior;
@@ -155,7 +156,7 @@ struct audio_ctx {
 	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
-	int passthrough_playhead_ever_advanced;  // use fast fallback until passthrough playhead proves alive
+	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 };
 
 static int audiotrack_log_underruns = 0;
@@ -598,10 +599,12 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	float speed = get_effective_audio_speed();
 
 	// AudioTrack.getLatency() available on API 29+ (returns 0 if method doesn't exist)
-	uint32_t track_latency = call_int_method_with_env(at, env, "getLatency", "()I");
+	int track_latency_raw = call_int_method_with_env(at, env, "getLatency", "()I");
+	uint32_t track_latency = (track_latency_raw > 0) ? (uint32_t)track_latency_raw : 0;
 
 	// Fallback: AudioSystem.getOutputLatency() + manual buffer calculation
-	uint32_t system_latency = call_int_method_current_vm( env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType );
+	int system_latency_raw = call_int_method_current_vm( env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType );
+	uint32_t system_latency = (system_latency_raw > 0) ? (uint32_t)system_latency_raw : 0;
 	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
 
 	// Scheduler-safe latency: local buffer geometry only.
@@ -609,16 +612,25 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	// that nova cannot reason about. Keep them as diagnostics only.
 	uint32_t scheduler_latency = app_latency;
 
+	// Pipeline latency: platform-aware ceiling. Used as the selected static heard-delay
+	// for mode2 passthrough (audiotrack_get_latency returns this for mode2) and as the
+	// write-gate stall timeout for mode1 passthrough.
+	uint32_t pipeline_latency = system_latency + app_latency;
+	if (track_latency > pipeline_latency) {
+		pipeline_latency = track_latency;
+	}
+
 	at->track_latency = track_latency;
 	at->system_latency = system_latency;
 	at->app_latency = app_latency;
+	at->pipeline_latency = pipeline_latency;
 
-	DBG LOG("audiotrack_update_latency: scheduler=%u app=%u system=%u track=%u",
-		scheduler_latency, app_latency, system_latency, track_latency);
+	DBG LOG("audiotrack_update_latency: scheduler=%u app=%u system=%u track=%u pipeline=%u",
+		scheduler_latency, app_latency, system_latency, track_latency, pipeline_latency);
 	if (at->startup_latency_log_count < 5) {
-		DBG2 LOG("startup_latency[%d]: format=%04X rate=%d ch=%d frame_size=%zu buf=%zu track=%u system=%u app=%u scheduler=%u",
+		DBG2 LOG("startup_latency[%d]: format=%04X rate=%d ch=%d frame_size=%zu buf=%zu track=%u system=%u app=%u scheduler=%u pipeline=%u",
 			at->startup_latency_log_count, at->format, at->rate, at->channel_count,
-			at->frame_size, at->buf_size, track_latency, system_latency, app_latency, scheduler_latency);
+			at->frame_size, at->buf_size, track_latency, system_latency, app_latency, scheduler_latency, pipeline_latency);
 		at->startup_latency_log_count++;
 	}
 

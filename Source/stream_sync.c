@@ -76,6 +76,7 @@ static int stream_mode2_dynamic_streak = 10;
 #define STREAM_PCM_AUDIO_LEAD_MIN_SAMPLES    3
 #define STREAM_PCM_AUDIO_LEAD_MAX_HOLDS      30
 #define STREAM_PCM_AUDIO_LEAD_HOLD_LOG_INTERVAL 25
+#define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
 	STREAM_DELAY_SOURCE_DYNAMIC,
@@ -468,10 +469,34 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 		if( !passthrough_mode && !ac3_recoding && delay_valid &&
 			status.source == STREAM_DELAY_SOURCE_DYNAMIC &&
 			measured_delay > 0 ) {
-			status.effective_delay_ms = stream_sync_av_delay( s );
-			status.is_anchorable = 1;
-			status.is_delay_valid = 1;
-			return status;
+			int dynamic_delay = stream_sync_av_delay( s );
+			if( status.streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
+				if( !s->last_good_delay_valid ) {
+					status.effective_delay_ms = dynamic_delay;
+					status.is_anchorable = 1;
+					status.is_delay_valid = 1;
+					return status;
+				}
+
+				int last_good_delay = s->last_good_delay_ms + stream_get_atempo_delay( s );
+				int drift = dynamic_delay - last_good_delay;
+				if( ABS( drift ) >= STREAM_PCM_DELAY_DRIFT_CORRECT_MS ) {
+					DBG serprintf("pcm_delay_select: large stable drift dynamic=%d last_good=%d drift=%d streak=%d threshold=%d\n",
+						dynamic_delay, last_good_delay, drift, status.streak,
+						STREAM_PCM_DELAY_DRIFT_CORRECT_MS);
+					status.effective_delay_ms = dynamic_delay;
+					status.is_anchorable = 1;
+					status.is_delay_valid = 1;
+					return status;
+				}
+
+				status.effective_delay_ms = last_good_delay;
+				status.is_anchorable = 1;
+				status.is_fallback = 1;
+				status.source = STREAM_DELAY_SOURCE_LAST_GOOD;
+				status.source_tag = "last_good(stable)";
+				return status;
+			}
 		}
 
 		if( !passthrough_mode && !ac3_recoding && s->last_good_delay_valid ) {

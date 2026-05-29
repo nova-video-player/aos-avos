@@ -70,9 +70,6 @@ static int stream_mode2_dynamic_slew_ms = 5;
 static int stream_mode2_dynamic_streak = 10;
 
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
-#define STREAM_SEEK_CONVERGE_WINDOW_MS       500
-#define STREAM_SEEK_CONVERGE_MAX_WAIT_MS     1500
-#define STREAM_SEEK_CONVERGE_APPLY_DIFF_MS   80
 #define STREAM_PCM_AUDIO_LEAD_ENTER_MS       220
 #define STREAM_PCM_AUDIO_LEAD_FORCE_MS       250
 #define STREAM_PCM_AUDIO_LEAD_RELEASE_MS     120
@@ -151,18 +148,6 @@ static void _stream_pcm_reanchor_reset( STREAM *s )
 	s->pcm_reanchor_seek_epoch = -1;
 	s->pcm_reanchor_source = 0;
 	s->pcm_reanchor_delay_ms = 0;
-}
-
-static void _stream_pcm_seek_converge_reset( STREAM *s )
-{
-	if( !s ) {
-		return;
-	}
-	s->seek_converge_epoch = -1;
-	s->seek_converge_until_ms = 0;
-	s->seek_converge_done = 0;
-	s->seek_converge_state = STREAM_SEEK_CONVERGE_INACTIVE;
-	s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
 }
 
 static void _stream_pcm_audio_lead_reset( STREAM *s )
@@ -398,7 +383,7 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 		DBGY2 serprintf(
 			"sync_state[%s]: %s reanchor_pending=%d delay_valid=%d fallback=%d anchor=%d delay=%d source=%s tag=%s streak=%d "
 			"start_pending=%d resume_pending=%d hold=%d hold_resume=%d "
-			"sync_a=%d sync_v=%d seek_epoch=%d seek_done=%d\n",
+			"sync_a=%d sync_v=%d seek_epoch=%d\n",
 			origin,
 			_stream_get_sync_diag_state_name(state),
 			reanchor_pending,
@@ -415,8 +400,7 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 			s->video_hold_for_resume_audio,
 			s->sync_a_time,
 			s->sync_v_time,
-			s->seek_epoch,
-			s->seek_converge_done);
+			s->seek_epoch);
 	}
 	sync_diag_last_state = state;
 	sync_diag_last_reanchor_pending = reanchor_pending;
@@ -438,7 +422,6 @@ int stream_sync_restart( STREAM *s )
 	
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
-	_stream_pcm_seek_converge_reset( s );
 	_stream_pcm_audio_lead_reset( s );
 
 	s->heard_interp_anchor_audio = -1;
@@ -592,7 +575,6 @@ static int _stream_mode2_dynamic_correction( STREAM *s, int wall_now,
 
 	if( !s || !stream_mode2_dynamic_delay || static_latency <= 0 ||
 		s->audio_start_pending || s->audio_resume_pending ||
-		(s->seek_epoch > 0 && !s->seek_converge_done) ||
 		!delay_status ) {
 		target = 0;
 	} else if( _stream_is_mode2_audio_interface_delay( delay_status ) &&
@@ -1101,7 +1083,7 @@ static int _stream_pcm_delay_sensitive_phase( STREAM *s, int delay_valid )
 	return (startup_hold_active && !delay_valid) ||
 		s->audio_start_pending ||
 		s->audio_resume_pending ||
-		(s->seek_epoch > 0 && !s->seek_converge_done);
+		(s->seek_epoch > 0);
 }
 
 static int _stream_pcm_should_update_delay_cache( int sensitive_phase, int delay_streak,
@@ -1495,10 +1477,6 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		}
 	}
 
-	if (diag_log) {
-		DBGY2 serprintf("smoothed_av_delay: %d (raw: %d)\n", s->smoothed_av_delay, current_av_delay);
-	}
-
 	s->sync_a_time = audio_time;
 	
 	if( !s->sync_audio || s->play_n_audio_frames || stream_no_sync ) {
@@ -1704,11 +1682,6 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	// forward lets video render materially ahead of heard audio during atempo
 	// speed states. Keep the grace only for non-put_time sinks.
 	int max_rst = (s->vtime_post_sink && !s->put_time_mode) ? 500 : 0;
-	if( s->seek_epoch > 0 && s->put_time_mode && !s->seek_converge_done ) {
-		// During post-seek convergence, don't allow early start.
-		max_rst = 0;
-	}
-
 	// Wait if video is LATE by more than the threshold.
 	int max_wait = RST_TO_TS_DELTA( max_rst, int );
 	if( diff > max_wait ) {

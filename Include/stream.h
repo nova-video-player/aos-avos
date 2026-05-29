@@ -74,16 +74,6 @@ typedef enum
 
 typedef enum
 {
-	STREAM_SEEK_CONVERGE_INACTIVE = 0,
-	STREAM_SEEK_CONVERGE_ARMED,
-	STREAM_SEEK_CONVERGE_WAITING_AUDIO,
-	STREAM_SEEK_CONVERGE_WAITING_WINDOW,
-	STREAM_SEEK_CONVERGE_APPLIED,
-	STREAM_SEEK_CONVERGE_EXPIRED,
-} STREAM_SEEK_CONVERGE_STATE;
-
-typedef enum
-{
 	STREAM_PCM_AUDIO_LEAD_INACTIVE = 0,
 	STREAM_PCM_AUDIO_LEAD_HOLDING,
 	STREAM_PCM_AUDIO_LEAD_EXPIRED,
@@ -762,11 +752,6 @@ typedef struct STREAM {
 	int		seek_target_sync_time;
 	int		seek_frame;
 	int		warmup_video_frames;
-	int		seek_converge_epoch;
-	int		seek_converge_until_ms;
-	int		seek_converge_done;
-	int		seek_converge_state;
-	int		seek_converge_anchor_ts;
 	int		pcm_audio_lead_state;
 	int		pcm_audio_lead_candidate_count;
 	int		pcm_audio_lead_hold_count;

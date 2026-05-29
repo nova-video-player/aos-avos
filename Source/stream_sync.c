@@ -1202,23 +1202,15 @@ void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active )
 static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	int *source, const char **tag )
 {
-	int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
-	int streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
 	const char *delay_source = audio_interface_get_delay_source( s->audio_ctx );
 
 	if( tag ) {
 		*tag = delay_source;
 	}
-	if( delay_valid ) {
-		if( streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
-			// pcm_reanchor sets audio_time directly, so use the full audible
-			// chain delay here. stream_sync_audio strips atempo before caching.
-			*delay_ms = audio_interface_get_delay( s->audio_ctx ) + stream_get_atempo_delay( s );
-			*source = PCM_REANCHOR_SOURCE_DYNAMIC;
-			return 1;
-		}
-		return 0;
-	}
+	// Priority: last_good → static latency → skip.
+	// Do not wait for dynamic delay stability here. Dynamic delay is a
+	// selected-delay provider during normal playback; the Phase 2 drift gate
+	// handles later correction if last_good is stale.
 	if( s->last_good_delay_valid ) {
 		*delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
 		*source = PCM_REANCHOR_SOURCE_LAST_GOOD;
@@ -1250,30 +1242,23 @@ int stream_sync_pcm_reanchor_update( STREAM *s, int passthrough_active )
 		_stream_pcm_reanchor_disarm( s, "startup" );
 		return 0;
 	}
-	if( !s->audio_ctx || s->video_time < 0 || s->audio_time < 0 ) {
-		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_WAITING_STABLE;
-		DBG serprintf("pcm_reanchor: state=waiting_stable reason=missing_timing video=%d audio=%d seek_epoch=%d\n",
-			s->video_time, s->audio_time, s->seek_epoch);
-		return 0;
-	}
 	if( s->pcm_reanchor_seek_epoch != s->seek_epoch ) {
-		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_EXPIRED;
 		DBG serprintf("pcm_reanchor: state=expired reason=seek_epoch_changed armed=%d current=%d\n",
 			s->pcm_reanchor_seek_epoch, s->seek_epoch);
 		_stream_pcm_reanchor_disarm( s, "expired" );
 		return 0;
 	}
 
+	// One-shot apply: attempt to select a delay and apply immediately.
+	// Clear the latch whether the reanchor applies or is skipped — no WAITING_STABLE retry.
 	int delay = 0;
 	int source = PCM_REANCHOR_SOURCE_NONE;
 	const char *tag = NULL;
-	if( !_stream_pcm_reanchor_select_delay( s, &delay, &source, &tag ) ) {
-		s->pcm_reanchor_state = STREAM_PCM_REANCHOR_WAITING_STABLE;
-		DBG serprintf("pcm_reanchor: state=waiting_stable source_tag=%s streak=%d delay_valid=%d seek_epoch=%d\n",
-			tag ? tag : "none",
-			audio_interface_get_delay_valid_streak( s->audio_ctx ),
-			audio_interface_is_delay_valid( s->audio_ctx ),
-			s->seek_epoch);
+	if( !s->audio_ctx || s->video_time < 0 || s->audio_time < 0 ||
+		!_stream_pcm_reanchor_select_delay( s, &delay, &source, &tag ) ) {
+		DBG serprintf("pcm_reanchor: skipped reason=no_delay video=%d audio=%d ctx=%d seek_epoch=%d\n",
+			s->video_time, s->audio_time, s->audio_ctx != NULL, s->seek_epoch);
+		_stream_pcm_reanchor_disarm( s, "skip" );
 		return 0;
 	}
 
@@ -1287,11 +1272,10 @@ int stream_sync_pcm_reanchor_update( STREAM *s, int passthrough_active )
 	s->audio_time = new_audio_time;
 DBGA	serprintf(" <<%d>> ", s->audio_time);
 	stream_sync_audio( s, s->audio_time );
-	DBG serprintf("pcm_reanchor: state=applied audio_time %d -> %d video=%d sync_v=%d delay=%d source=%s tag=%s streak=%d seek_epoch=%d\n",
+	DBG serprintf("pcm_reanchor: state=applied audio_time %d -> %d video=%d sync_v=%d delay=%d source=%s tag=%s seek_epoch=%d\n",
 		old_audio_time, s->audio_time, s->video_time, s->sync_v_time,
 		delay, _stream_pcm_reanchor_source_name( source ),
 		tag ? tag : "none",
-		audio_interface_get_delay_valid_streak( s->audio_ctx ),
 		s->seek_epoch);
 	return 1;
 }

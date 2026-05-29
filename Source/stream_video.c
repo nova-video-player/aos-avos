@@ -2795,12 +2795,11 @@ DBGS serprintf("stream_pause\r\n");
 			s->parser->pause( s, 1 );
 		}
 
+		s->paused = 1;
 		stream_audio_mute( s );
 		if ( s->audio_ctx && s->audio_sink_open ) {
 			audio_interface_pause( s->audio_ctx );
 		}
-
-		s->paused = 1;
 	}
 
 	_stream_wait_for_idle( s, 1000 );
@@ -2838,7 +2837,16 @@ DBGS serprintf("stream_un_pause\r\n");
 				stream_sync_audio( s, s->audio_time );
 			}
 		} else {
+			// Normal 1x resume: _stream_resync clears last_good via _stream_pcm_delay_memory_reset.
+			// Snapshot and restore so the one-shot reanchor in Commit B can prefer last_good
+			// over static latency on the first audio write after resume.
+			int last_good_delay_ms = s->last_good_delay_ms;
+			int last_good_delay_valid = s->last_good_delay_valid;
+			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
 			_stream_resync( s );
+			s->last_good_delay_ms = last_good_delay_ms;
+			s->last_good_delay_valid = last_good_delay_valid;
+			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
 		}
 
 		// when we unpause, we re-fill the audio sink with 0 samples

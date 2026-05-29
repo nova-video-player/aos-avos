@@ -1380,11 +1380,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
+					// Arm the one-shot reanchor before the write so the latch is ready,
+					// but do not apply yet: audio_time must only be rebased after bytes
+					// are confirmed committed (size_written > 0).
 					if( s->audio_resume_pending ) {
 						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
 							s->audio_time, s->video_time, s->seek_epoch, atime());
 						stream_sync_pcm_reanchor_arm( s, passthrough_active );
-						stream_sync_pcm_reanchor_update( s, passthrough_active );
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
@@ -1435,6 +1437,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						size = 0;
 						break;
 					}
+					// Apply one-shot reanchor now that bytes are confirmed committed.
+					stream_sync_pcm_reanchor_update( s, passthrough_active );
 					if( s->video_hold_for_resume_audio ) {
 						DBG serprintf("stream_audio: first resumed audio write committed (%d bytes, pt=%d recode=%d)\n",
 							size_written, passthrough_active, ac3_recoding);
@@ -1547,8 +1551,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 						}
 					}
-
-					stream_sync_pcm_reanchor_update( s, passthrough_active );
 
 					if( size_written > 0 && s->sync_mode == STREAM_SYNC_SAMPLES && audio_frame.size && s->audio_ref_time != -1 ) {
 						// add the samples and calc new time

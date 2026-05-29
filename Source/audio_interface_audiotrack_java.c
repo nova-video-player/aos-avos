@@ -1444,11 +1444,19 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 		return 1;
 	}
 
-	// Keep PCM behavior unchanged for now. The passthrough case is the one where
-	// partial writes are structurally unsafe because compressed bursts must be
-	// accepted atomically.
+	// PCM: always ready to accept writes.
 	if (!at->passthrough) {
 		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (pcm fast-path=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	// Mode2 passthrough: byte/playhead gate is unreliable because compressed
+	// packet duration is logical (fakeSize), not proportional to raw byte count,
+	// and the playhead often does not advance during startup on eARC/HDMI routes.
+	// Pacing is handled by the stream-level logical lead gate instead.
+	if (at->passthrough >= 2) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (mode2 bypass=true)",
 			at->format, at->passthrough, len);
 		return 1;
 	}
@@ -1630,14 +1638,17 @@ ERR		LOG("track not valid, error");
 
 	// Keep static latency for all passthrough modes (mode 1 IEC wrapping and mode 2).
 	// Mode 2 dynamic delay correction was removed in Commit A/D.
+	// For mode2, audiotrack_get_latency() returns pipeline_latency which is the
+	// physically correct selected delay on HAL-heavy routes (e.g. eARC).
 	if (at->passthrough) {
-DBG3		LOG("Using static latency for passthrough: %d ms", at->latency);
+		int static_delay = audiotrack_get_latency(at);
+DBG3		LOG("Using static latency for passthrough: %d ms", static_delay);
 		// Treat static passthrough delay as stable/valid for sync gating.
 		if (at->ts_success_streak < stable_streak_required) {
 			at->ts_success_streak = stable_streak_required;
 		}
 		at->delay_valid = 1;
-		AUD_RETURN("static(passthrough)", at->latency);
+		AUD_RETURN("static(passthrough)", static_delay);
 	}
 
 	// Use AudioTrack.getTimestamp() for dynamic latency calculation (API 19+)
@@ -2152,6 +2163,14 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 {
 	if (!at || !at->init) {
 		return -1;
+	}
+	// For mode2 passthrough, the app-geometry scheduler_latency underestimates
+	// the actual HAL pipeline delay on routes such as eARC where getLatency() >>
+	// app_latency.  pipeline_latency = max(track, system+app) is a better static
+	// estimate and is used for heard_ts and the startup anchor.
+	// Mode1 and PCM continue to use scheduler_latency (= app_latency).
+	if (at->passthrough >= 2 && at->pipeline_latency > at->latency) {
+		return (int)at->pipeline_latency;
 	}
 	return (int)at->latency;
 }

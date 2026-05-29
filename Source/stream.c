@@ -660,24 +660,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		stream_current_time_rst = 0;
 	}
 
-	int target_num = (int)( av_speed * 100 + 0.5f );
-	int target_den = 100;
-	target_num = MAX( 1, target_num );
-
 	// Check if video is actively playing.
 	int video_active = (s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid);
-
-	if( video_active ) {
-		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d (v=%d a=%d anchor_delay=%d)\n",
-			target_den, target_num, s->video_time, s->audio_time,
-			stream_get_anchor_delay_ms( s, 1 ) );
-		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
-		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d)\n",
-			av_speed, video_active );
-	}
-
-	s->video_speed_num = target_num;
-	s->video_speed_den = target_den;
 
 	if( speed_changed ) {
 		s->audio_speed_diag_epoch++;
@@ -715,8 +699,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	float applied_speed = av_speed;
 	if( using_atempo ) {
 		float clamped_speed = av_speed;
-		if( clamped_speed < 0.25f ) {
-			clamped_speed = 0.25f;
+		if( clamped_speed < 0.5f ) {
+			clamped_speed = 0.5f;
 		} else if( clamped_speed > 2.0f ) {
 			clamped_speed = 2.0f;
 		}
@@ -743,6 +727,19 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
 		timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, applied_speed );
+	}
+
+	int applied_num = (int)( applied_speed * 100 + 0.5f );
+	int applied_den = 100;
+	applied_num = MAX( 1, applied_num );
+	s->video_speed_num = applied_num;
+	s->video_speed_den = applied_den;
+
+	if( video_active ) {
+		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d requested=%.3f applied=%.3f (v=%d a=%d anchor_delay=%d)\n",
+			applied_den, applied_num, av_speed, applied_speed,
+			s->video_time, s->audio_time, stream_get_anchor_delay_ms( s, 1 ) );
+		s->video_dec->set_playback_speed( s->video_dec, applied_den, applied_num );
 	}
 
 	int seek_time_ts = anchor_ts;

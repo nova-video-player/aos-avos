@@ -30,8 +30,8 @@
  * - Runtime tempo updates (no graph rebuild on speed changes)
  *
  * Architecture:
- * - When atempo is active, timeline mapping is DISABLED
- * - Parser leaves timestamps in RST (real stream time) domain
+ * - When atempo is active, timeline mapping converts parser RST to TS
+ * - The sync layer keeps video, audio, and sfdec playback speed in the same TS domain
  * - atempo physically changes audio duration to match playback speed
  * - AudioTrack plays at normal 1.0x rate
  *

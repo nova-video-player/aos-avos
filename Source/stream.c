@@ -668,8 +668,9 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	int video_active = (s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid);
 
 	if( video_active ) {
-		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d (v=%d a=%d delay=%d)\n",
-			target_den, target_num, s->video_time, s->audio_time, s->smoothed_av_delay );
+		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d (v=%d a=%d anchor_delay=%d)\n",
+			target_den, target_num, s->video_time, s->audio_time,
+			stream_get_anchor_delay_ms( s, 1 ) );
 		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
 		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d)\n",
 			av_speed, video_active );
@@ -694,8 +695,8 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			current_time_ts, anchor_ts, speed_anchor_ts );
 		DBG serprintf( "stream:stream_set_av_speed epoch=%d writes_budget=%d\n",
 			s->audio_speed_diag_epoch, s->audio_speed_diag_writes_left );
-		DBG serprintf( "stream:stream_set_av_speed snapshot smoothed=%d last_good=%d last_good_valid=%d last_good_atempo=%d hist=%d sink_driven=%d\n",
-			s->smoothed_av_delay, s->last_good_delay_ms, s->last_good_delay_valid,
+		DBG serprintf( "stream:stream_set_av_speed snapshot last_good=%d last_good_valid=%d last_good_atempo=%d hist=%d sink_driven=%d\n",
+			s->last_good_delay_ms, s->last_good_delay_valid,
 			s->last_good_atempo_delay_ms, s->av_delay_history_count,
 			(s->video_sink && s->video_sink->put_time) ? 1 : 0 );
 		if( use_last_good_for_speed ) {
@@ -767,7 +768,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	if( speed_changed ) {
-		s->smoothed_av_delay = -1;
 		s->av_delay_history_count = 0;
 		if( s->audio_ctx ) {
 			audio_interface_invalidate_delay_cache( s->audio_ctx );

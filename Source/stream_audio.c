@@ -1407,11 +1407,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						int sink_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : -1;
 						int atempo_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
 							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
-						DBG serprintf("audio_write_diag: epoch=%d speed=%.3f atempo=%d req=%d wrote=%d total=%d effective=%lld bps=%lld audio_time=%d video_time=%d sink_delay=%d smoothed=%d last_good=%d\n",
+						DBG serprintf("audio_write_diag: epoch=%d speed=%.3f atempo=%d req=%d wrote=%d total=%d effective=%lld bps=%lld audio_time=%d video_time=%d sink_delay=%d last_good=%d\n",
 							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
 							atempo_delay, audio_frame.size, size_written, total_size,
 							(long long)effective_chunk_size, (long long)bytes_per_sec, s->audio_time,
-							s->video_time, sink_delay, s->smoothed_av_delay, s->last_good_delay_ms);
+							s->video_time, sink_delay, s->last_good_delay_ms);
 						s->audio_speed_diag_writes_left--;
 					}
 					if (startup_write_log_count < 5) {

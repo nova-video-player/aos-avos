@@ -847,8 +847,9 @@ DBGS serprintf("stream_open_video_dec: %s/%d/%d done!\r\n", s->video_dec->name, 
 		if( audio_interface_is_audio_speed_enabled() && s->video_dec->set_playback_speed ) {
 			int speed_num = s->video_speed_num ? s->video_speed_num : 100;
 			int speed_den = s->video_speed_den ? s->video_speed_den : 100;
-			DBG serprintf( "stream_open_video_dec: apply cached video speed %d/%d (v=%d a=%d delay=%d)\n",
-				speed_num, speed_den, s->video_time, s->audio_time, s->smoothed_av_delay );
+			DBG serprintf( "stream_open_video_dec: apply cached video speed %d/%d (v=%d a=%d anchor_delay=%d)\n",
+				speed_num, speed_den, s->video_time, s->audio_time,
+				stream_get_anchor_delay_ms( s, 1 ) );
 			s->video_dec->set_playback_speed( s->video_dec, speed_den, speed_num );
 		}
 

@@ -1341,12 +1341,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 
-					// PCM put_time backpressure: after seek/resume, video can temporarily
-					// stop advancing while AudioTrack continues accepting PCM writes.  If
-					// we keep feeding audio, audio_time can run seconds ahead and the
-					// next video anchor inherits a huge negative A/V diff.  Hold the
-					// producer only when heard audio is already materially ahead; this is
-					// not latency compensation and does not apply to passthrough bursts.
+					// Audio lead gate: hold the producer when heard audio is materially
+					// ahead of video. Applies to PCM and mode2 passthrough: audio_time
+					// advances by logical (fakeSize-equivalent) duration, so the gate
+					// correctly reflects queued logical audio, not raw byte capacity.
+					// Mode1 passthrough and ac3_recoding are exempt (see gate function).
 					while( !_abort( s ) && stream_sync_pcm_audio_lead_gate( s, ac3_recoding ) ) {
 							msec_sleep( 10 );
 							stream_yield_RT();

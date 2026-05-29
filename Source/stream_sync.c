@@ -1033,16 +1033,21 @@ DBGA	serprintf(" <<%d>> ", s->audio_time);
 
 int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 {
-	// Phase 1B simple gate: hold the audio producer only when heard audio
-	// is materially ahead of video. No persistent state, no hysteresis.
-	// Phase 4 re-introduces hysteresis only if logs prove this insufficient.
+	// Hold the audio producer when heard audio is materially ahead of video.
+	// Applies to PCM and mode2 passthrough: audio_time advances by logical
+	// duration (fakeSize-equivalent), so heard_ts = audio_time - selected_delay
+	// correctly reflects logically queued audio, not raw byte capacity.
+	// Mode1 passthrough is exempt: IEC61937 byte accounting is accurate and
+	// the mode1 startup clamp would make the gate trigger too aggressively.
+	// ac3_recoding is exempt: its timing is managed separately.
+	// No persistent state, no hysteresis.
 	if( !s || !s->put_time_mode || !s->audio_sink || ac3_recoding ||
 		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ) {
 		return 0;
 	}
 	int passthrough_mode = s->audio_sink->get_passthrough ?
 		s->audio_sink->get_passthrough( s ) : 0;
-	if( passthrough_mode ) {
+	if( passthrough_mode == 1 ) {
 		return 0;
 	}
 	int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );

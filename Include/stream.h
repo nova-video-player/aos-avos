@@ -67,17 +67,9 @@ typedef enum
 {
 	STREAM_PCM_REANCHOR_INACTIVE = 0,
 	STREAM_PCM_REANCHOR_ARMED,
-	STREAM_PCM_REANCHOR_WAITING_STABLE,
 	STREAM_PCM_REANCHOR_APPLIED,
 	STREAM_PCM_REANCHOR_EXPIRED,
 } STREAM_PCM_REANCHOR_STATE;
-
-typedef enum
-{
-	STREAM_PCM_AUDIO_LEAD_INACTIVE = 0,
-	STREAM_PCM_AUDIO_LEAD_HOLDING,
-	STREAM_PCM_AUDIO_LEAD_EXPIRED,
-} STREAM_PCM_AUDIO_LEAD_STATE;
 
 typedef enum
 {
@@ -511,7 +503,6 @@ typedef struct STREAM {
 	int 		delay;
 	int 		delay_valid;
 	int 		delay_fb;
-	int		smoothed_av_delay;
 	int		last_good_delay_ms;
 	int		last_good_delay_valid;
 	int		last_good_atempo_delay_ms;
@@ -752,10 +743,6 @@ typedef struct STREAM {
 	int		seek_target_sync_time;
 	int		seek_frame;
 	int		warmup_video_frames;
-	int		pcm_audio_lead_state;
-	int		pcm_audio_lead_candidate_count;
-	int		pcm_audio_lead_hold_count;
-	int		pcm_audio_lead_last_diff;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;
@@ -789,20 +776,6 @@ typedef struct STREAM {
 	int		fps_count;
 	void		*surface_handle;
 
-	int		heard_interp_anchor_audio;
-	int		heard_interp_anchor_wall_ms;
-	int		heard_interp_last_ts;
-	int		mode2_clock_anchor_heard_ts;
-	int		mode2_clock_anchor_audio;
-	int		mode2_clock_anchor_wall_ms;
-	int		mode2_clock_anchor_seek_epoch;
-	int		mode2_clock_anchor_latency_ms;
-	int		mode2_clock_last_heard_ts;
-	int		mode2_clock_last_audio_time;
-	int		mode2_dynamic_correction_ms;
-	int		mode2_dynamic_correction_target_ms;
-	int		mode2_dynamic_last_update_wall_ms;
-	int		mode2_dynamic_last_log_wall_ms;
 } STREAM;
 #define STREAM_POS_MAX 1000
 

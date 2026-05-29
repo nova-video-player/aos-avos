@@ -212,8 +212,6 @@ static void _stream_reset( STREAM *s )
 	s->audio_time = -1;
 	s->video_time = -1;
 	s->audio_ref_time = -1;
-	// Ensure we don't carry a stale delay across new streams.
-	s->smoothed_av_delay = -1;
 }
 
 static int stream_buffer_sec  = 64;
@@ -638,17 +636,6 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	int current_time_ts = s->video->valid ? s->video_time : s->audio_time;
 	if( current_time_ts < 0 ) {
 		current_time_ts = 0;
-	}
-	// Reset the heard_ts interpolator before computing the speed-change anchor so that
-	// stream_get_heard_audio_ts() returns audio_time - heard_delay directly rather than
-	// extrapolating from a stale anchor latched at the previous speed's heard_delay value.
-	// heard_delay changes discontinuously at speed transitions (AudioTrack buffer fill
-	// shifts during atempo ramps) so the stale anchor would bias anchor_ts and all
-	// subsequent heard_ts calls including the video sink reanchor.
-	if( speed_changed ) {
-		s->heard_interp_anchor_audio   = -1;
-		s->heard_interp_anchor_wall_ms = 0;
-		s->heard_interp_last_ts        = -1;
 	}
 	int anchor_ts = stream_get_heard_audio_ts( s, current_time_ts );
 	int use_current_ts_for_speed = 0;

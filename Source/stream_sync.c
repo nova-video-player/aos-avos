@@ -55,7 +55,6 @@ extern int stream_pdrop_threshold;
 static volatile int	stream_dbg_delay = 0;
 static int atempo_delay_log_count = 0;
 int stream_get_atempo_delay( STREAM *s );
-static void _stream_reset_mode2_clock( STREAM *s );
 static int sync_diag_count = 0;
 static int sync_diag_last_seek_epoch = -1;
 static int sync_diag_last_speed_x100 = -1;
@@ -64,10 +63,6 @@ static int sync_diag_last_state = -1;
 static int sync_diag_last_reanchor_pending = -1;
 
 static int stream_use_xbmc_smoothing = 1;
-int stream_mode2_dynamic_delay = 0;
-static int stream_mode2_dynamic_max_ms = 150;
-static int stream_mode2_dynamic_slew_ms = 5;
-static int stream_mode2_dynamic_streak = 10;
 
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
 // Simple audio-lead gate threshold (Phase 1B baseline).
@@ -120,7 +115,7 @@ static void _sync_diag_reset(void)
 	sync_diag_last_reanchor_pending = -1;
 }
 
-static void _stream_pcm_delay_memory_reset( STREAM *s, int reset_smoothed )
+static void _stream_pcm_delay_memory_reset( STREAM *s )
 {
 	if( !s ) {
 		return;
@@ -131,9 +126,6 @@ static void _stream_pcm_delay_memory_reset( STREAM *s, int reset_smoothed )
 	s->last_good_atempo_delay_ms = 0;
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
-	if( reset_smoothed ) {
-		s->smoothed_av_delay = -1;
-	}
 }
 
 static void _stream_pcm_reanchor_reset( STREAM *s )
@@ -193,8 +185,6 @@ static const char *_stream_pcm_reanchor_state_name( int state )
 	switch( state ) {
 	case STREAM_PCM_REANCHOR_ARMED:
 		return "armed";
-	case STREAM_PCM_REANCHOR_WAITING_STABLE:
-		return "waiting_stable";
 	case STREAM_PCM_REANCHOR_APPLIED:
 		return "applied";
 	case STREAM_PCM_REANCHOR_EXPIRED:
@@ -220,19 +210,6 @@ static const char *_stream_pcm_reanchor_source_name( int source )
 	}
 }
 
-static int _stream_is_mode2_audio_interface_delay(const stream_delay_status_t *status)
-{
-	if( !status || !status->source_tag ) {
-		return 0;
-	}
-	if( status->source == STREAM_DELAY_SOURCE_DYNAMIC ) {
-		return 1;
-	}
-	if( status->source != STREAM_DELAY_SOURCE_LAST_GOOD ) {
-		return 0;
-	}
-	return strncmp( status->source_tag, "last_good(stream)", 17 ) != 0;
-}
 
 static int _sync_diag_should_log(STREAM *s)
 {
@@ -402,7 +379,7 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 int stream_sync_restart( STREAM *s )
 {
 	s->delay         = 0;
-	_stream_pcm_delay_memory_reset( s, 0 );
+	_stream_pcm_delay_memory_reset( s );
 	_stream_pcm_reanchor_reset( s );
 	s->drop          = 0;
 	s->drop_P        = 0;
@@ -410,11 +387,6 @@ int stream_sync_restart( STREAM *s )
 	
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
-
-	s->heard_interp_anchor_audio = -1;
-	s->heard_interp_anchor_wall_ms = 0;
-	s->heard_interp_last_ts = -1;
-	_stream_reset_mode2_clock( s );
 
 	_sync_diag_reset();
 
@@ -527,204 +499,6 @@ int stream_get_anchor_delay_ms( STREAM *s, int allow_static )
 	return _get_anchor_delay_ms( s, NULL, allow_static );
 }
 
-static int _stream_interpolate_heard_ts( STREAM *s, int wall_now, int heard_delay,
-	int elapsed_cap_ms, int relatch_wall_on_regression, int accept_audio_regression,
-	int max_forward_lead_ms, int cap_to_candidate )
-{
-	int elapsed = 0;
-	int current_heard_ts = -1;
-	int candidate_heard_ts = s->audio_time - heard_delay;
-	int heard_ts;
-	if( s->heard_interp_anchor_audio != -1 ) {
-		elapsed = wall_now - s->heard_interp_anchor_wall_ms;
-		if( elapsed < 0 ) {
-			elapsed = 0;
-		}
-		if( elapsed_cap_ms > 0 && elapsed > elapsed_cap_ms ) {
-			elapsed = elapsed_cap_ms;
-		}
-		current_heard_ts = s->heard_interp_anchor_audio - heard_delay + elapsed;
-	}
-
-	if( cap_to_candidate && current_heard_ts != -1 ) {
-		heard_ts = current_heard_ts;
-		if( heard_ts > candidate_heard_ts ) {
-			heard_ts = candidate_heard_ts;
-		} else if( accept_audio_regression ) {
-			heard_ts = candidate_heard_ts;
-		}
-		s->heard_interp_anchor_audio = heard_ts + heard_delay;
-		s->heard_interp_anchor_wall_ms = wall_now;
-		s->heard_interp_last_ts = heard_ts;
-		return heard_ts;
-	}
-
-	if( s->audio_time > s->heard_interp_anchor_audio ) {
-		int accept_forward = 1;
-		if( max_forward_lead_ms > 0 && current_heard_ts != -1 ) {
-			accept_forward = candidate_heard_ts <= current_heard_ts + max_forward_lead_ms;
-		}
-		if( accept_forward ) {
-			s->heard_interp_anchor_audio = s->audio_time;
-			s->heard_interp_anchor_wall_ms = wall_now;
-		}
-	} else if( s->audio_time < s->heard_interp_anchor_audio && accept_audio_regression ) {
-		s->heard_interp_anchor_audio = s->audio_time;
-		if( relatch_wall_on_regression ) {
-			s->heard_interp_anchor_wall_ms = wall_now;
-		}
-	}
-	if( s->heard_interp_anchor_audio == -1 ) {
-		return s->audio_time - heard_delay;
-	}
-	elapsed = wall_now - s->heard_interp_anchor_wall_ms;
-	if( elapsed < 0 ) {
-		elapsed = 0;
-	}
-	if( elapsed_cap_ms > 0 && elapsed > elapsed_cap_ms ) {
-		elapsed = elapsed_cap_ms;
-	}
-	heard_ts = s->heard_interp_anchor_audio - heard_delay + elapsed;
-	s->heard_interp_last_ts = heard_ts;
-	return heard_ts;
-}
-
-static void _stream_reset_mode2_clock( STREAM *s )
-{
-	if( !s ) {
-		return;
-	}
-	s->mode2_clock_anchor_heard_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_clock_anchor_audio = STREAM_NO_PTS_VALUE;
-	s->mode2_clock_anchor_wall_ms = 0;
-	s->mode2_clock_anchor_seek_epoch = -1;
-	s->mode2_clock_anchor_latency_ms = 0;
-	s->mode2_clock_last_heard_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_clock_last_audio_time = STREAM_NO_PTS_VALUE;
-	s->mode2_dynamic_correction_ms = 0;
-	s->mode2_dynamic_correction_target_ms = 0;
-	s->mode2_dynamic_last_update_wall_ms = 0;
-	s->mode2_dynamic_last_log_wall_ms = 0;
-}
-
-static int _stream_clamp_ms( int value, int min_value, int max_value )
-{
-	if( value < min_value ) {
-		return min_value;
-	}
-	if( value > max_value ) {
-		return max_value;
-	}
-	return value;
-}
-
-static int _stream_mode2_dynamic_correction( STREAM *s, int wall_now,
-	int static_latency, const stream_delay_status_t *delay_status )
-{
-	int target = 0;
-	int active = 0;
-
-	if( !s ) {
-		return 0;
-	}
-	if( !stream_mode2_dynamic_delay ) {
-		return 0;
-	}
-
-	if( static_latency <= 0 ||
-		s->audio_start_pending || s->audio_resume_pending ||
-		!delay_status ) {
-		target = 0;
-	} else if( _stream_is_mode2_audio_interface_delay( delay_status ) &&
-		delay_status->streak >= stream_mode2_dynamic_streak &&
-		delay_status->effective_delay_ms > 0 ) {
-		target = delay_status->effective_delay_ms - static_latency;
-		target = _stream_clamp_ms( target, 0, stream_mode2_dynamic_max_ms );
-		active = 1;
-	}
-
-	s->mode2_dynamic_correction_target_ms = target;
-
-	if( s->mode2_dynamic_last_update_wall_ms == 0 ) {
-		s->mode2_dynamic_last_update_wall_ms = wall_now;
-	}
-	if( wall_now - s->mode2_dynamic_last_update_wall_ms >= 200 ) {
-		int delta = target - s->mode2_dynamic_correction_ms;
-		int max_slew = stream_mode2_dynamic_slew_ms;
-		if( max_slew < 1 ) {
-			max_slew = 1;
-		}
-		delta = _stream_clamp_ms( delta, -max_slew, max_slew );
-		s->mode2_dynamic_correction_ms += delta;
-		s->mode2_dynamic_last_update_wall_ms = wall_now;
-	}
-
-	if( wall_now > s->mode2_dynamic_last_log_wall_ms + 2000 ||
-		(active && s->mode2_dynamic_correction_ms != target) ) {
-		s->mode2_dynamic_last_log_wall_ms = wall_now;
-		DBG serprintf("mode2_dynamic_delay: enabled=%d active=%d source=%s tag=%s streak=%d static=%d measured=%d target=%d applied=%d max=%d slew=%d\n",
-			stream_mode2_dynamic_delay, active,
-			delay_status ? _stream_delay_source_name(delay_status->source) : "none",
-			delay_status && delay_status->source_tag ? delay_status->source_tag : "none",
-			delay_status ? delay_status->streak : 0, static_latency,
-			delay_status ? delay_status->effective_delay_ms : 0,
-			target, s->mode2_dynamic_correction_ms,
-			stream_mode2_dynamic_max_ms, stream_mode2_dynamic_slew_ms);
-	}
-
-	return s->mode2_dynamic_correction_ms;
-}
-
-static int _stream_mode2_wall_heard_ts( STREAM *s, int wall_now, int heard_delay )
-{
-	int raw_heard_ts = s->audio_time - heard_delay;
-	int reason = 0;
-	const char *reason_name = "keep";
-
-	if( s->mode2_clock_anchor_heard_ts == STREAM_NO_PTS_VALUE ||
-		s->mode2_clock_anchor_audio == STREAM_NO_PTS_VALUE ) {
-		reason = 1;
-		reason_name = "init";
-	} else if( s->mode2_clock_anchor_seek_epoch != s->seek_epoch ) {
-		reason = 1;
-		reason_name = "seek";
-	} else if( s->audio_time < s->mode2_clock_anchor_audio ) {
-		reason = 1;
-		reason_name = "audio_regress";
-	} else if( wall_now < s->mode2_clock_anchor_wall_ms ) {
-		reason = 1;
-		reason_name = "wall_regress";
-	}
-
-	if( reason ) {
-		s->mode2_clock_anchor_heard_ts = raw_heard_ts;
-		s->mode2_clock_anchor_audio = s->audio_time;
-		s->mode2_clock_anchor_wall_ms = wall_now;
-		s->mode2_clock_anchor_seek_epoch = s->seek_epoch;
-		s->mode2_clock_anchor_latency_ms = heard_delay;
-		s->mode2_clock_last_heard_ts = raw_heard_ts;
-		s->mode2_clock_last_audio_time = s->audio_time;
-		DBG serprintf("mode2_clock_anchor: reason=%s wall=%d audio=%d raw_heard=%d latency=%d seek_epoch=%d\n",
-			reason_name, wall_now, s->audio_time, raw_heard_ts, heard_delay, s->seek_epoch);
-		return raw_heard_ts;
-	}
-
-	int elapsed = wall_now - s->mode2_clock_anchor_wall_ms;
-	if( elapsed < 0 ) {
-		elapsed = 0;
-	}
-
-	int heard_ts = s->mode2_clock_anchor_heard_ts + elapsed;
-	if( s->mode2_clock_last_heard_ts != STREAM_NO_PTS_VALUE &&
-		heard_ts < s->mode2_clock_last_heard_ts ) {
-		heard_ts = s->mode2_clock_last_heard_ts;
-	}
-
-	s->mode2_clock_last_heard_ts = heard_ts;
-	s->mode2_clock_last_audio_time = s->audio_time;
-	return heard_ts;
-}
-
 static int _stream_mode2_heard_delay( STREAM *s, int static_latency, int fallback_delay )
 {
 	(void)s;
@@ -763,7 +537,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int delay_valid = delay_status.is_delay_valid;
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
-	int use_mode2_wall_clock = passthrough_mode >= 2;
 	int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
 	int heard_delay = _stream_current_heard_delay( s, &delay_status, is_mode2_sync );
 
@@ -788,10 +561,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			}
 		}
 #endif
-	}
-
-	if( use_mode2_wall_clock ) {
-		heard_delay += _stream_mode2_dynamic_correction( s, wall_now, static_latency, &delay_status );
 	}
 
 	int heard_ts = s->audio_time - heard_delay;
@@ -827,7 +596,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			delay_status.effective_delay_ms, delay_status.is_delay_valid,
 			_stream_delay_source_name(delay_status.source),
 			delay_status.source_tag ? delay_status.source_tag : "none");
-		if( use_mode2_wall_clock ) {
+		if( passthrough_mode >= 2 ) {
 			int user_av_delay = s->av_delay + stream_dbg_delay;
 			int diff = STREAM_NO_PTS_VALUE;
 			int raw_heard_ts = s->audio_time - heard_delay;
@@ -868,12 +637,8 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pending = 0;
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
-	_stream_pcm_delay_memory_reset( s, 1 );
+	_stream_pcm_delay_memory_reset( s );
 	s->warmup_video_frames = 0;
-	s->heard_interp_anchor_audio = -1;
-	s->heard_interp_anchor_wall_ms = 0;
-	s->heard_interp_last_ts = -1;
-	_stream_reset_mode2_clock( s );
 
 	if( time != -1 ) {
 		s->video_time = time;
@@ -1801,10 +1566,6 @@ serprintf("dbg_delay %5d\n", stream_dbg_delay );
 DECLARE_DEBUG_COMMAND("sep", 	_stream_delay_plus   );
 DECLARE_DEBUG_COMMAND("sem", 	_stream_delay_minus  );
 DECLARE_DEBUG_COMMAND("ses", 	_stream_delay_set    );
-DECLARE_DEBUG_PARAM("mode2_dyn_delay", stream_mode2_dynamic_delay);
-DECLARE_DEBUG_PARAM("mode2_dyn_max", stream_mode2_dynamic_max_ms);
-DECLARE_DEBUG_PARAM("mode2_dyn_slew", stream_mode2_dynamic_slew_ms);
-DECLARE_DEBUG_PARAM("mode2_dyn_streak", stream_mode2_dynamic_streak);
 
 static void _stream_toggle_xbmc( int argc, char *argv[] )
 {

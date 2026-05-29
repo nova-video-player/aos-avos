@@ -89,7 +89,10 @@ struct audio_ctx {
 	int frame_count;
 	size_t frame_size;
 	int channel_count;
-	uint32_t latency;
+	uint32_t latency;           // scheduler-safe latency (= app buffer geometry)
+	uint32_t track_latency;     // diagnostic: AudioTrack.getLatency() (may include HAL/platform)
+	uint32_t system_latency;    // diagnostic: AudioSystem.getOutputLatency()
+	uint32_t app_latency;       // local buffer geometry: buf_size / (frame_size * rate * speed)
 	int passthrough;
 	int applied_passthrough;
 	int applied_spatialization_behavior;
@@ -601,31 +604,25 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	uint32_t system_latency = call_int_method_current_vm( env, at->audiosystemClass, "getOutputLatency", "(I)I", streamType );
 	uint32_t app_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / ( (double)at->frame_size * (double)at->rate * speed ) );
 
-	// AudioTrack.getLatency() returns 0 on error or if unsupported/not ready
-	int use_track_latency = (track_latency > 0);
-	uint32_t calculated_latency = 0;
+	// Scheduler-safe latency: local buffer geometry only.
+	// getLatency() / getOutputLatency() can include large HAL/HDMI/eARC pipeline delays
+	// that nova cannot reason about. Keep them as diagnostics only.
+	uint32_t scheduler_latency = app_latency;
 
-	if (use_track_latency) {
-		// Safety floor: AudioTrack.getLatency() should not be less than the known system+app latency.
-		// If it is, it's likely under-reporting (e.g. ignoring internal buffers or HDMI delays).
-		if (track_latency < (system_latency + app_latency)) {
-			calculated_latency = system_latency + app_latency;
-		} else {
-			calculated_latency = track_latency;
-		}
-	} else {
-		calculated_latency = system_latency + app_latency;
-	}
+	at->track_latency = track_latency;
+	at->system_latency = system_latency;
+	at->app_latency = app_latency;
 
-	DBG LOG("audiotrack_update_latency latency: %d ms (track=%d, system=%d, app=%d)", calculated_latency, track_latency, system_latency, app_latency);
+	DBG LOG("audiotrack_update_latency: scheduler=%u app=%u system=%u track=%u",
+		scheduler_latency, app_latency, system_latency, track_latency);
 	if (at->startup_latency_log_count < 5) {
-		DBG2 LOG("startup_latency[%d]: format=%04X rate=%d ch=%d frame_size=%zu buf=%zu track=%u system=%u app=%u final=%u",
+		DBG2 LOG("startup_latency[%d]: format=%04X rate=%d ch=%d frame_size=%zu buf=%zu track=%u system=%u app=%u scheduler=%u",
 			at->startup_latency_log_count, at->format, at->rate, at->channel_count,
-			at->frame_size, at->buf_size, track_latency, system_latency, app_latency, calculated_latency);
+			at->frame_size, at->buf_size, track_latency, system_latency, app_latency, scheduler_latency);
 		at->startup_latency_log_count++;
 	}
 
-	at->latency = calculated_latency;
+	at->latency = scheduler_latency;
 }
 
 static uint32_t audiotrack_default_channel_mask(int channels)

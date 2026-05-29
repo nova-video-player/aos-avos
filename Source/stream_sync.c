@@ -64,7 +64,7 @@ static int sync_diag_last_state = -1;
 static int sync_diag_last_reanchor_pending = -1;
 
 static int stream_use_xbmc_smoothing = 1;
-int stream_mode2_dynamic_delay = 1;
+int stream_mode2_dynamic_delay = 0;
 static int stream_mode2_dynamic_max_ms = 150;
 static int stream_mode2_dynamic_slew_ms = 5;
 static int stream_mode2_dynamic_streak = 10;
@@ -638,7 +638,14 @@ static int _stream_mode2_dynamic_correction( STREAM *s, int wall_now,
 	int target = 0;
 	int active = 0;
 
-	if( !s || !stream_mode2_dynamic_delay || static_latency <= 0 ||
+	if( !s ) {
+		return 0;
+	}
+	if( !stream_mode2_dynamic_delay ) {
+		return 0;
+	}
+
+	if( static_latency <= 0 ||
 		s->audio_start_pending || s->audio_resume_pending ||
 		!delay_status ) {
 		target = 0;
@@ -803,22 +810,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	int heard_ts = s->audio_time - heard_delay;
 
-	if( use_mode2_wall_clock && (s->audio_start_pending || s->audio_resume_pending) ) {
-		_stream_reset_mode2_clock( s );
-	} else if( use_mode2_wall_clock ) {
-		heard_ts = _stream_mode2_wall_heard_ts( s, wall_now, heard_delay );
-	}
-
-	// PCM AudioTrack timing is sampled in chunks: audio_time advances when we write,
-	// while the physical playhead advances continuously between writes. Interpolate
-	// heard time during steady put_time playback, but cap it to the latest submitted
-	// audio_time - delay frontier so this cannot become an unbounded predictor. This
-	// scales with wall time and write cadence instead of a fixed per-call or per-frame
-	// slew.
-	if( !is_mode2_sync && !passthrough_mode && s->put_time_mode && delay_valid ) {
-		heard_ts = _stream_interpolate_heard_ts( s, wall_now, heard_delay,
-			0, 1, 0, 0, 1 );
-	}
+	// Mode2 wall-clock heard path and PCM interpolation are deferred to Phase 4.
+	// heard_ts = audio_time - selected_delay is the baseline for all paths.
 
 	// 3. STARTUP CLAMP (Non-Mode 2 only)
 	if( !is_mode2_sync && passthrough_mode && s->sink_ref_time == -1 &&
@@ -852,18 +845,13 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			int user_av_delay = s->av_delay + stream_dbg_delay;
 			int diff = STREAM_NO_PTS_VALUE;
 			int raw_heard_ts = s->audio_time - heard_delay;
-			int clock_elapsed = s->mode2_clock_anchor_wall_ms ?
-				wall_now - s->mode2_clock_anchor_wall_ms : 0;
 			if( s->sync_v_time != STREAM_NO_PTS_VALUE ) {
 				diff = (s->sync_v_time - heard_ts) + RST_TO_TS_DELTA( user_av_delay, int );
 			}
-			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d audio=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d dyn_corr=%d dyn_target=%d anchor_heard=%d anchor_audio=%d anchor_wall=%d anchor_elapsed=%d source=%s tag=%s\n",
+			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d audio=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d source=%s tag=%s\n",
 				wall_now, s->audio ? s->audio->format : 0, passthrough_mode,
 				s->audio_time, heard_ts, raw_heard_ts, s->video_time, s->sync_v_time,
-				diff, heard_delay, s->mode2_dynamic_correction_ms,
-				s->mode2_dynamic_correction_target_ms,
-				s->mode2_clock_anchor_heard_ts, s->mode2_clock_anchor_audio, s->mode2_clock_anchor_wall_ms,
-				clock_elapsed, _stream_delay_source_name(delay_status.source),
+				diff, heard_delay, _stream_delay_source_name(delay_status.source),
 				delay_status.source_tag ? delay_status.source_tag : "none");
 		}
 	}

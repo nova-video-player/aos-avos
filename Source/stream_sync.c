@@ -459,61 +459,17 @@ int stream_sync_restart( STREAM *s )
 static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_static)
 {
 	stream_delay_status_t status = { 0 };
-	int delay_valid = s && s->audio_ctx ? audio_interface_is_delay_valid(s->audio_ctx) : 1;
-	const char *source_tag = s && s->audio_ctx ? audio_interface_get_delay_source(s->audio_ctx) : "no_ctx";
-
-	status.source_tag = source_tag;
-	status.source = _classify_audio_delay_source(source_tag, delay_valid);
-
-	status.streak = s && s->audio_ctx ? audio_interface_get_delay_valid_streak(s->audio_ctx) : 0;
-
-	if( s && s->audio_ctx && s->audio_sink && stream_mode2_dynamic_delay &&
-		s->audio_sink->get_passthrough( s ) >= 2 ) {
-		int measured_delay = audio_interface_get_delay( s->audio_ctx );
-		delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
-		status.source_tag = audio_interface_get_delay_source( s->audio_ctx );
-		status.source = _classify_audio_delay_source( status.source_tag, delay_valid );
-		status.streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
-		if( delay_valid ) {
-			status.effective_delay_ms = measured_delay;
-			status.is_anchorable = 1;
-			status.is_delay_valid = 1;
-			return status;
-		}
-		status.is_delay_valid = 0;
-		status.is_anchorable = 0;
-	}
-
-	if (delay_valid) {
-		status.effective_delay_ms = s ? stream_sync_av_delay(s) : 0;
-		if( s && s->audio_ctx ) {
-			status.source_tag = audio_interface_get_delay_source(s->audio_ctx);
-			status.source = _classify_audio_delay_source(status.source_tag, delay_valid);
-		}
-		status.is_anchorable = 1;
-		status.is_delay_valid = 1;
-		return status;
-	}
 
 #ifdef CONFIG_ANDROID
-	if (s) {
-		if (s->last_good_delay_valid) {
-			status.effective_delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
-			// Keep last-good delay as a usable anchor when timing drops invalid
-			// during steady playback. This avoids sudden loss of latency compensation.
+	if( s && allow_static && s->audio_ctx ) {
+		int static_latency = audio_interface_get_latency(s->audio_ctx);
+		if( static_latency > 0 ) {
+			status.effective_delay_ms = static_latency;
 			status.is_anchorable = 1;
+			status.is_delay_valid = 1;
 			status.is_fallback = 1;
-			status.source = STREAM_DELAY_SOURCE_LAST_GOOD;
-			status.source_tag = "last_good(stream)";
-		} else if (allow_static && s->audio_ctx) {
-			int static_latency = audio_interface_get_latency(s->audio_ctx);
-			if (static_latency > 0) {
-				status.effective_delay_ms = static_latency;
-				status.is_anchorable = 1;
-				status.is_fallback = 1;
-				status.source = STREAM_DELAY_SOURCE_STATIC;
-				status.source_tag = "static(stream)";
-			}
+			status.source = STREAM_DELAY_SOURCE_STATIC;
+			status.source_tag = "static(phase1)";
 		}
 	}
 #else
@@ -749,9 +705,7 @@ static int _stream_current_heard_delay( STREAM *s,
 		// During startup hold, prioritize fresh static latency over potentially stale smoothed values.
 		return delay_status->effective_delay_ms;
 	}
-	return (s->smoothed_av_delay >= 0) ?
-		s->smoothed_av_delay + stream_get_atempo_delay( s ) :
-		delay_status->effective_delay_ms;
+	return delay_status->effective_delay_ms;
 }
 
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
@@ -1338,170 +1292,6 @@ DBGA	serprintf(" <<%d>> ", s->audio_time);
 	return 1;
 }
 
-static const char *_stream_seek_converge_state_name( int state )
-{
-	switch( state ) {
-	case STREAM_SEEK_CONVERGE_ARMED:
-		return "armed";
-	case STREAM_SEEK_CONVERGE_WAITING_AUDIO:
-		return "waiting_audio";
-	case STREAM_SEEK_CONVERGE_WAITING_WINDOW:
-		return "waiting_window";
-	case STREAM_SEEK_CONVERGE_APPLIED:
-		return "applied";
-	case STREAM_SEEK_CONVERGE_EXPIRED:
-		return "expired";
-	case STREAM_SEEK_CONVERGE_INACTIVE:
-	default:
-		return "inactive";
-	}
-}
-
-static void _stream_seek_converge_set_state( STREAM *s, int state, const char *reason )
-{
-	if( !s || s->seek_converge_state == state ) {
-		return;
-	}
-	DBG serprintf("seek_converge: state=%s -> %s reason=%s epoch=%d until=%d done=%d anchor=%d audio=%d video=%d\n",
-		_stream_seek_converge_state_name( s->seek_converge_state ),
-		_stream_seek_converge_state_name( state ),
-		reason ? reason : "none",
-		s->seek_epoch, s->seek_converge_until_ms, s->seek_converge_done,
-		s->seek_converge_anchor_ts, s->audio_time, s->video_time);
-	s->seek_converge_state = state;
-}
-
-static int _stream_seek_converge_update( STREAM *s, int diff, int passthrough_mode )
-{
-	int now;
-
-	if( !s || s->seek_epoch <= 0 || !s->put_time_mode || s->audio_time == -1 ) {
-		return 0;
-	}
-	if( passthrough_mode ) {
-		if( s->seek_converge_epoch != s->seek_epoch ) {
-			s->seek_converge_epoch = s->seek_epoch;
-			s->seek_converge_until_ms = atime() + STREAM_SEEK_CONVERGE_WINDOW_MS;
-			s->seek_converge_done = 0;
-			s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
-			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_ARMED, "passthrough_new_epoch" );
-		}
-		if( s->seek_converge_done ) {
-			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "passthrough_already_done" );
-			return 1;
-		}
-		if( atime() < s->seek_converge_until_ms ) {
-			return 0;
-		}
-		if( _stream_is_sink_driven(s) ) {
-			int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
-DBGY			serprintf("post-seek converge anchor: passthrough=%d diff=%d anchor_ts=%d\n",
-				passthrough_mode, diff, anchor_ts);
-			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
-			sfdec2_refresh_sched_anchor( s );
-			s->video_sink->put_time( s->video_sink, anchor_ts );
-			s->sink_ref_time = anchor_ts;
-			s->vid_ref_time = s->video_time;
-			s->seek_converge_anchor_ts = anchor_ts;
-		}
-		s->seek_converge_done = 1;
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "passthrough_applied" );
-		return 1;
-	}
-	if( s->seek_converge_epoch != s->seek_epoch ) {
-		s->seek_converge_epoch = s->seek_epoch;
-		s->seek_converge_until_ms = atime() + STREAM_SEEK_CONVERGE_WINDOW_MS;
-		s->seek_converge_done = 0;
-		s->seek_converge_anchor_ts = STREAM_NO_PTS_VALUE;
-		_stream_pcm_audio_lead_reset( s );
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_ARMED, "new_epoch" );
-	}
-	if( s->audio_start_pending || s->audio_resume_pending ) {
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_AUDIO, "audio_pending" );
-		return 0;
-	}
-	now = atime();
-	if( s->seek_converge_state == STREAM_SEEK_CONVERGE_WAITING_AUDIO ) {
-		s->seek_converge_until_ms = now + STREAM_SEEK_CONVERGE_WINDOW_MS;
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "audio_ready" );
-		return 0;
-	}
-	if( s->seek_converge_done ) {
-		if( s->seek_converge_state != STREAM_SEEK_CONVERGE_EXPIRED ) {
-			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "already_done" );
-		}
-		return 1;
-	}
-	if( now < s->seek_converge_until_ms && ABS(diff) > STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "settle_window" );
-		return 0;
-	}
-	if( now < s->seek_converge_until_ms ) {
-DBGY		serprintf("seek_converge: early_apply diff=%d limit=%d epoch=%d audio=%d video=%d\n",
-			diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS,
-			s->seek_epoch, s->audio_time, s->video_time);
-	}
-	if( ABS(diff) > STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
-		if( now < s->seek_converge_until_ms + STREAM_SEEK_CONVERGE_MAX_WAIT_MS - STREAM_SEEK_CONVERGE_WINDOW_MS ) {
-DBGY			serprintf("seek_converge: wait diff=%d limit=%d epoch=%d audio=%d video=%d\n",
-				diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS,
-				s->seek_epoch, s->audio_time, s->video_time);
-			_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_WAITING_WINDOW, "diff_unstable" );
-			return 0;
-		}
-DBGY		serprintf("seek_converge: expire diff=%d limit=%d epoch=%d audio=%d video=%d\n",
-			diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS,
-			s->seek_epoch, s->audio_time, s->video_time);
-		s->seek_converge_done = 1;
-		_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_EXPIRED, "diff_unstable" );
-		return 1;
-	}
-	if( _stream_is_sink_driven(s) ) {
-		int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
-DBGY		serprintf("post-seek converge anchor: diff=%d anchor_ts=%d\n",
-			diff, anchor_ts);
-		anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
-		// Seek convergence is an explicit discontinuity; refresh once here,
-		// not from steady-state mode-2 timing heuristics.
-		sfdec2_refresh_sched_anchor( s );
-		s->video_sink->put_time( s->video_sink, anchor_ts );
-		s->sink_ref_time = anchor_ts;
-		s->vid_ref_time = s->video_time;
-		s->seek_converge_anchor_ts = anchor_ts;
-	}
-	s->seek_converge_done = 1;
-	_stream_seek_converge_set_state( s, STREAM_SEEK_CONVERGE_APPLIED, "applied" );
-	return 1;
-}
-
-int stream_sync_pcm_seek_converge_audio_gate( STREAM *s )
-{
-	int passthrough_mode;
-	int heard_ts;
-	int diff;
-
-	if( !s || !s->put_time_mode || s->seek_epoch <= 0 || s->seek_converge_done ||
-		s->audio_time == -1 || s->sync_v_time == -1 ) {
-		return 0;
-	}
-	passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-	if( passthrough_mode ) {
-		return 0;
-	}
-	heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
-	if( heard_ts == -1 ) {
-		return 0;
-	}
-	diff = _stream_av_diff( s, s->sync_v_time, heard_ts );
-	if( diff < -STREAM_SEEK_CONVERGE_APPLY_DIFF_MS ) {
-DBGY		serprintf("seek_converge: audio_gate diff=%d limit=%d epoch=%d audio=%d video=%d sync_v=%d heard=%d\n",
-			diff, STREAM_SEEK_CONVERGE_APPLY_DIFF_MS, s->seek_epoch,
-			s->audio_time, s->video_time, s->sync_v_time, heard_ts);
-		return 1;
-	}
-	return 0;
-}
-
 int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 {
 	int passthrough_mode;
@@ -1616,7 +1406,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 		current_av_delay = 0;
 		anchor_delay = 0;
 	}
-	if( delay_valid ) {
+	if( delay_valid && delay_status.source == STREAM_DELAY_SOURCE_DYNAMIC ) {
 		int delay_streak = delay_status.streak;
 		int current_atempo_delay = stream_get_atempo_delay( s );
 		int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
@@ -1686,23 +1476,21 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				sfdec2_refresh_sched_anchor( s );
 			}
 			
-			// In put_time mode, steady-state anchoring is now driven by the video thread.
-			// EXCEPTION: Always allow the audio thread to provide the VERY FIRST anchor
-			// (sink_ref_time == -1) to seed the scheduler immediately.
+			// In put_time mode, audio writes own heard-time anchoring.  Keep
+			// this on the audio path; the video path must not continuously
+			// rewrite the scheduler anchor from its sync loop.
 			// Skip pre-commit negative anchors: heard_ts is negative because
 			// static/fallback latency exceeds the first audio PTS. Anchoring the
 			// scheduler there creates a stale reference that normal mode-2
 			// reanchor heuristics may not replace. Leave sink_ref_time=-1 until
 			// audible time reaches zero.
-			if (!s->put_time_mode || s->sink_ref_time == -1) {
-				if( anchor_ts >= 0 ) {
-					s->video_sink->put_time( s->video_sink, anchor_ts );
-					s->sink_ref_time = anchor_ts;
-					s->vid_ref_time = s->video_time;
-				} else {
-					DBG serprintf("stream_sync_audio: defer negative first anchor audio=%d anchor=%d video=%d seek_epoch=%d pt=%d\n",
-						audio_time, anchor_ts, s->video_time, s->seek_epoch, passthrough_mode);
-				}
+			if( anchor_ts >= 0 ) {
+				s->video_sink->put_time( s->video_sink, anchor_ts );
+				s->sink_ref_time = anchor_ts;
+				s->vid_ref_time = s->video_time;
+			} else {
+				DBG serprintf("stream_sync_audio: defer negative anchor audio=%d anchor=%d video=%d seek_epoch=%d pt=%d\n",
+					audio_time, anchor_ts, s->video_time, s->seek_epoch, passthrough_mode);
 			}
 		}
 	}
@@ -1910,19 +1698,6 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	// if video is in the future, delay it
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
 
-	if ( s->put_time_mode && _stream_is_sink_driven(s) ) {
-		// ANCHOR: Continuously update the sink anchor from the smooth
-		// wall-clock interpolated timeline. This must happen before
-		// any early-returns to ensure the scheduler stays stable.
-		int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
-		heard_ts = _apply_user_av_delay_ts( s, heard_ts );
-		heard_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
-
-		s->video_sink->put_time( s->video_sink, heard_ts );
-		s->sink_ref_time = heard_ts;
-		s->vid_ref_time = s->video_time;
-	}
-
 	// Legacy post-sink pipelines needed a large early-start allowance because
 	// video_time was sampled after the sink. In put_time mode the sink is
 	// already paced from audio-driven anchors, so carrying that 500 ms grace
@@ -1934,12 +1709,6 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		max_rst = 0;
 	}
 
-	// Post-seek convergence: allow a short window to align to heard audio,
-	// then re-anchor once and stop gating to avoid stutter.
-	if( _stream_seek_converge_update( s, diff, passthrough_mode ) ) {
-		// After convergence, stop gating to avoid stutter.
-		return 0;
-	}
 	// Wait if video is LATE by more than the threshold.
 	int max_wait = RST_TO_TS_DELTA( max_rst, int );
 	if( diff > max_wait ) {

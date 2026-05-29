@@ -529,10 +529,13 @@ static void _audio_decode( STREAM *s )
 			s->play_n_audio_frames --;
 		}
 		
+		// Capture the sanitized PTS of the most recently fetched chunk so it remains
+		// accessible after the inner cdata loop exits (cdata is scoped to that loop).
+		int chunk_pts = STREAM_NO_PTS_VALUE;
 decode_next_chunk:
 		// no more audio in this chunk, then look for next
 		while( s->audio_buffer_size <= 0 && !_abort( s ) ){
-			
+
 			STREAM_CDATA cdata = { 0 };
 
 			// and try to get a new one
@@ -628,10 +631,13 @@ DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 				s->audio_buffer_size = cdata.size;
 
 				if( cdata.audio_skip ) {
-serprintf("audio_skip(%d)!\r\n", cdata.time);	
+serprintf("audio_skip(%d)!\r\n", cdata.time);
 					_stream_resync( s );
-					s->audio_ref_time = -1; 
+					s->audio_ref_time = -1;
 				}
+
+				// Save sanitized PTS for use after the inner loop exits.
+				chunk_pts = cdata.time;
 
 				if( s->sync_mode == STREAM_SYNC_SAMPLES && s->speed == STREAM_SPEED_NORMAL ) {
 					if( s->audio_ref_time == -1 && cdata.time != STREAM_NO_PTS_VALUE ) {
@@ -698,6 +704,38 @@ DBGS serprintf("~");
 				s->audio_sink->set_passthrough( s, 0 );
 			}
 			passthrough_active = 0;
+			passthrough = 0;
+		}
+
+		// Mode2 passthrough: force STREAM_SYNC_SAMPLES once the sink resolves to mode2.
+		// CDATA/PTS mode enters a synthetic startup anchor (video_time + pipeline_latency)
+		// and advances from byte-ratio duration; mode2 compressed packets are better served
+		// by sample counting from the first valid demuxer PTS (same as FLAC).
+		// ac3_recoding is excluded here; it may also resolve to mode2 on some routes but
+		// its fakeSize trustworthiness depends on the filter chain - handle separately.
+		if( passthrough_active && passthrough == 2 && !ac3_recoding &&
+			s->sync_mode != STREAM_SYNC_SAMPLES ) {
+			serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d)\n", s->sync_mode);
+			s->sync_mode = STREAM_SYNC_SAMPLES;
+			// Clear the CDATA startup anchor that may have been set by the current chunk's
+			// PTS processing above; startup_anchor_commit would otherwise reintroduce the
+			// synthetic video_time + pipeline_latency anchor we are avoiding.
+			s->audio_start_pending    = 0;
+			s->audio_start_pts        = STREAM_NO_PTS_VALUE;
+			s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
+			s->audio_time_remainder_us = 0;
+			// Seed sample clock from the current chunk PTS if available so the first write
+			// can immediately accumulate fakeSize duration without waiting for the next chunk.
+			if( chunk_pts != STREAM_NO_PTS_VALUE ) {
+				s->audio_ref_time = chunk_pts;
+				s->audio_samples  = 0;
+				_set_audio_time( s, chunk_pts );
+				serprintf("mode2_sync_mode: ref=%d\n", s->audio_ref_time);
+			} else {
+				s->audio_ref_time = -1;
+				s->audio_samples  = 0;
+				s->audio_time     = -1;
+			}
 		}
 
 		AUDIO_FRAME audio_frame = { 0 };

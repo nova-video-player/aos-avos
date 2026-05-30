@@ -1642,7 +1642,12 @@ ERR		LOG("track not valid, error");
 	// physically correct selected delay on HAL-heavy routes (e.g. eARC).
 	if (at->passthrough) {
 		int static_delay = audiotrack_get_latency(at);
-DBG3		LOG("Using static latency for passthrough: %d ms", static_delay);
+		if (at->passthrough >= 2 && at->startup_delay_log_count < 5) {
+			LOG("passthrough_selected_delay[%d]: fmt=%04X passthrough=%d selected=%d pipeline=%u app=%u",
+				at->startup_delay_log_count, at->format, at->passthrough,
+				static_delay, at->pipeline_latency, at->app_latency);
+			at->startup_delay_log_count++;
+		}
 		// Treat static passthrough delay as stable/valid for sync gating.
 		if (at->ts_success_streak < stable_streak_required) {
 			at->ts_success_streak = stable_streak_required;
@@ -2169,8 +2174,21 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 	// app_latency.  pipeline_latency = max(track, system+app) is a better static
 	// estimate and is used for heard_ts and the startup anchor.
 	// Mode1 and PCM continue to use scheduler_latency (= app_latency).
-	if (at->passthrough >= 2 && at->pipeline_latency > at->latency) {
-		return (int)at->pipeline_latency;
+	//
+	// TrueHD mode2 exception: on tested routes, pipeline_latency overestimates
+	// the actual audible delay for TrueHD passthrough. Using it as the selected
+	// delay causes heard_ts to underestimate real audible position, letting too
+	// much audio write during startup and producing audio that plays >1s early.
+	// Use app/scheduler latency (local buffer geometry only) as the selected delay.
+	if (at->passthrough >= 2) {
+		if (at->format == WAVE_FORMAT_TRUEHD) {
+DBG3		LOG("audiotrack_get_latency: TrueHD mode2 using app_latency=%u (pipeline=%u format=%04X)",
+				at->latency, at->pipeline_latency, at->format);
+			return (int)at->latency;
+		}
+		if (at->pipeline_latency > at->latency) {
+			return (int)at->pipeline_latency;
+		}
 	}
 	return (int)at->latency;
 }

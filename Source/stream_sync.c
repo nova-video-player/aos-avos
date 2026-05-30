@@ -68,6 +68,12 @@ static int stream_use_xbmc_smoothing = 1;
 // Simple audio-lead gate threshold (Phase 1B baseline).
 // Phase 4 hysteresis constants removed in Commit C.
 #define STREAM_PCM_AUDIO_LEAD_GATE_MS        200
+// Mode2 passthrough lead gate: floor for the one-packet-duration gate.
+// Actual gate_ms = max(STREAM_MODE2_AUDIO_LEAD_GATE_MS, s->mode2_last_chunk_ms).
+// Startup: gate is skipped while heard_ts <= 0 (audio not yet audible) so the
+// first writes can unblock video without the gate firing on every write.
+// Once audio is hearable the gate engages immediately at one-chunk granularity.
+#define STREAM_MODE2_AUDIO_LEAD_GATE_MS  32
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
@@ -637,6 +643,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pending = 0;
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_last_chunk_ms = 0;
 	_stream_pcm_delay_memory_reset( s );
 	s->warmup_video_frames = 0;
 
@@ -1054,10 +1061,27 @@ int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 	if( heard_ts == STREAM_NO_PTS_VALUE ) {
 		return 0;
 	}
+	int gate_ms;
+	if( passthrough_mode == 2 ) {
+		// Startup: skip gate until audio is hearable (heard_ts > 0).
+		// Before this point audio must write freely so heard_ts goes positive
+		// and unblocks video. Engaging the gate while heard_ts <= 0 causes the
+		// gate to fire on every write and permanently stall the startup sequence.
+		if( heard_ts <= 0 ) {
+			return 0;
+		}
+		// Steady-state: gate >= one logical packet so a single write can never
+		// trip the gate. Use the measured chunk duration when available; fall
+		// back to STREAM_MODE2_AUDIO_LEAD_GATE_MS (32ms) as the floor.
+		gate_ms = s->mode2_last_chunk_ms > STREAM_MODE2_AUDIO_LEAD_GATE_MS
+			? s->mode2_last_chunk_ms : STREAM_MODE2_AUDIO_LEAD_GATE_MS;
+	} else {
+		gate_ms = STREAM_PCM_AUDIO_LEAD_GATE_MS;
+	}
 	int diff = s->sync_v_time - heard_ts;
-	if( diff < -STREAM_PCM_AUDIO_LEAD_GATE_MS ) {
+	if( diff < -gate_ms ) {
 		DBG serprintf("pcm_audio_lead_gate: hold sync_v=%d heard=%d diff=%d gate=%d\n",
-			s->sync_v_time, heard_ts, diff, STREAM_PCM_AUDIO_LEAD_GATE_MS);
+			s->sync_v_time, heard_ts, diff, gate_ms);
 		return 1;
 	}
 	return 0;

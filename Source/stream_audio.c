@@ -306,7 +306,8 @@ void stream_audio_flush( STREAM *s )
 	s->audio_end = 0;
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
-	
+	s->mode2_last_chunk_ms = 0;
+
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
 	}
@@ -724,6 +725,7 @@ DBGS serprintf("~");
 			s->audio_start_pts        = STREAM_NO_PTS_VALUE;
 			s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
 			s->audio_time_remainder_us = 0;
+			s->mode2_last_chunk_ms    = 0;
 			// Seed sample clock from the current chunk PTS if available so the first write
 			// can immediately accumulate fakeSize duration without waiting for the next chunk.
 			if( chunk_pts != STREAM_NO_PTS_VALUE ) {
@@ -1627,6 +1629,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// For IEC mode 1, samples are counted at container rate (e.g. 192 kHz)
 							// so we must also divide by the container rate, not the content rate.
 							int sync_rate = s->audio->samplesPerSec;
+							// Track logical chunk duration for mode2 lead gate lower bound.
+							// Ceiling division: gate_ms >= chunk_ms ensures a single write never trips the gate.
+							if (passthrough_active && passthrough == 2 && bpf > 0 && sync_rate > 0) {
+								int64_t denom = (int64_t)bpf * sync_rate;
+								int ckt_ms = (int)(((int64_t)pt_bytes * 1000 + denom - 1) / denom);
+								if (ckt_ms > 0 && ckt_ms < 1000) {
+									s->mode2_last_chunk_ms = ckt_ms;
+								}
+							}
 							if (!passthrough_active && audio_frame.samplesPerSec > 0) {
 								sync_rate = audio_frame.samplesPerSec;
 							} else if (passthrough_active && passthrough == 1 && !ac3_recoding &&

@@ -729,7 +729,8 @@ typedef struct STREAM {
 	int		audio_start_pending;
 	int		audio_start_pts;
 	int		audio_start_target_ts;
-		
+	int		mode2_last_chunk_ms;	// logical duration of last mode2 write; lower bound for lead gate
+
 	int		play_n_video_frames;
 	int		play_n_video_one;
 	int		play_n_audio_frames;

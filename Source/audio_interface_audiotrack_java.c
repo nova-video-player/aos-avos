@@ -2175,15 +2175,18 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 	// estimate and is used for heard_ts and the startup anchor.
 	// Mode1 and PCM continue to use scheduler_latency (= app_latency).
 	//
-	// TrueHD mode2 exception: on tested routes, pipeline_latency overestimates
-	// the actual audible delay for TrueHD passthrough. Using it as the selected
-	// delay causes heard_ts to underestimate real audible position, letting too
-	// much audio write during startup and producing audio that plays >1s early.
+	// HD passthrough formats (TrueHD, DTS-HD, DTS-HD MA) mode2: on tested routes,
+	// pipeline_latency overestimates the actual audible delay. Using it as the
+	// selected delay causes heard_ts to underestimate real audible position,
+	// letting too much audio write during startup and producing early audio.
 	// Use app/scheduler latency (local buffer geometry only) as the selected delay.
+	// EAC3/Atmos mode2 keeps pipeline_latency; that route is calibrated correctly.
 	if (at->passthrough >= 2) {
-		if (at->format == WAVE_FORMAT_TRUEHD) {
-DBG3		LOG("audiotrack_get_latency: TrueHD mode2 using app_latency=%u (pipeline=%u format=%04X)",
-				at->latency, at->pipeline_latency, at->format);
+		if (at->format == WAVE_FORMAT_TRUEHD ||
+		    at->format == WAVE_FORMAT_DTS_HD ||
+		    at->format == WAVE_FORMAT_DTS_HD_MA) {
+DBG3		LOG("audiotrack_get_latency: mode2 format=%04X using app_latency=%u (pipeline=%u)",
+				at->format, at->latency, at->pipeline_latency);
 			return (int)at->latency;
 		}
 		if (at->pipeline_latency > at->latency) {

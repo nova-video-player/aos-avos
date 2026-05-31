@@ -11,6 +11,11 @@
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
 - **`smoothed_av_delay`**: A low‑pass filtered estimate of audio‑video offset (TS) used as a stable proxy for the audible delay. When it is invalid, fall back to `stream_sync_av_delay()`.
 - **Best delay provider**: Audio delay is chosen by a single provider: use stable `AudioTrack.getTimestamp()` when available; otherwise fall back to playback‑head latency, then static latency.
+- **Latency terminology**: geometry/app latency is local AudioTrack buffer
+  geometry. Pipeline latency is the conservative platform estimate
+  `max(track_latency, system_latency + app_latency)`. Static latency means the
+  selected fallback delay for the current path; it is not necessarily raw
+  `AudioTrack.getLatency()`. See `doc/delay_estimation.md`.
 - **`put_time_mode`**: Enabled when a sink exposes `put_time()`. In this mode the sync layer keeps audio as the master (via `heard_audio_ts`) but does not disable sync on early frames; the sink owns TS↔WC pacing.
 
 ## Time Domain Anchors (Single per Sink)
@@ -22,9 +27,41 @@
 ## Heard-Audio Anchor Definition
 
 - `heard_audio_ts` is computed centrally via `stream_get_heard_audio_ts()` and is the **single source of truth** for all synchronization and anchoring.
-- **Mode 2 passthrough**: For passthrough mode 2 and mode-2 AC3 recoding, `audio_time` is advanced from the submitted compressed packet duration (`fakeSize`). Heard time is then derived from that logical clock by subtracting platform static latency. If mode-2 dynamic delay is enabled, a capped, slewed, positive-only residual may be added above the static baseline.
+- **Mode 2 passthrough**: For passthrough mode 2 and mode-2 AC3 recoding, `audio_time` is advanced from the submitted compressed packet duration (`fakeSize`). Heard time is then derived from that logical clock by subtracting the selected static latency baseline. Current validated mode-2 policy is codec-aware: plain AC3/EAC3 uses the larger pipeline latency, while DTS/DTS-HD, TrueHD, and DDP/JOC use app-buffer geometry latency. If mode-2 dynamic delay is enabled, a capped, slewed, positive-only residual may be added above the static baseline.
 - **Mode 2 startup**: startup still anchors on the first committed audio output and uses the same centralized heard-time calculation. The older synthetic fill-window/rebase handoff experiments are not part of the current code path.
-- **Mode 2 diagnostics**: logs expose packet-duration source and write-timeline geometry (`fakeSize`, `chunk_us`, `dur_bpf`, `dur_rate`) so packet timing can be audited without changing the scheduler.
+- **Mode 2 diagnostics**: logs expose packet-duration source, selected latency source, and write-timeline geometry (`fakeSize`, `chunk_us`, `dur_bpf`, `dur_rate`) so packet timing and codec latency policy can be audited without changing the scheduler.
+
+## Sync-Mode Selection Principle
+
+Do not treat `STREAM_SYNC_SAMPLES` as a global replacement for PTS-based
+sync. Select the sync mode by audio path and codec evidence:
+
+- **PCM decode**: keep PTS anchoring at stream start/seek/discontinuity, then
+  advance `audio_time` from committed decoded duration. PCM is already in
+  decoded sample units, so forcing global sample sync would lose useful packet
+  PTS discontinuity and seek information.
+- **FLAC / codecs with unreliable packet PTS but reliable decoded duration**:
+  `STREAM_SYNC_SAMPLES` is appropriate because the decoded sample count is the
+  most stable clock.
+- **Mode 2 compressed passthrough**: `STREAM_SYNC_SAMPLES` is appropriate
+  because demuxed packet PTS can be a poor scheduler clock while the submitted
+  logical duration (`fakeSize`) is the value that represents the audio clock.
+  This applies to AC3, EAC3/DDP, EAC3-JOC/Atmos, DTS/DTS-HD, and TrueHD only
+  after validating that `fakeSize` reflects the codec's real logical duration.
+- **Mode 1 IEC passthrough and AC3 recoding**: do not inherit mode-2 policy
+  automatically. Treat them as separate paths because their packetization,
+  buffering, and AudioTrack reporting differ from codec-specific mode 2.
+
+The design rule is: use sample sync only when submitted/decoded logical
+duration is more trustworthy than per-packet PTS for that path. The scheduler
+still uses the same heard-time model:
+
+```
+heard_ts = audio_time - selected_delay
+```
+
+Measured delay evidence may update `selected_delay`, but it must not become a
+second clock or continuously chase the AudioTrack playhead.
 
 ## Mapping Rules
 
@@ -37,7 +74,7 @@
 - **android_sync=1**: The sink bypasses wait/drop and delegates scheduling to MediaCodec via `render_ts_ns`.
   - **passthrough=2 post-seek re-init rule**: synchronization anchors (`sink_ref_time`) are strictly reset on every seek so the next committed compressed write establishes a fresh latency-compensated epoch.
   - **passthrough=2 timing source**: audio TS progression uses compressed-frame `fakeSize` as logical PCM-duration. DTS/DTS-HD follows parser duration first because raw mode 2 writes can be 512-sample DTS frames; otherwise the clock can run 3x too fast. Other formats use codec metadata when available, then logical base units (1536 for EAC3/AC3, 1280 for TrueHD).
-  - **passthrough=2 delay source**: the scheduler uses static passthrough latency from the platform as baseline. If mode-2 dynamic delay is enabled, stable AudioTrack evidence can add a bounded positive residual, but stream-level last-good fallback is not treated as fresh sink evidence.
+  - **passthrough=2 delay source**: the scheduler uses a selected static baseline, not a second clock. Current testing on Nvidia Shield and Google Streamer 4K supports a codec-aware split: AC3/EAC3 use pipeline latency; DTS/DTS-HD, TrueHD, and DDP/JOC use app-buffer geometry latency. This is a tested policy, not a claim that Android exposes reliable per-codec latency. If mode-2 dynamic delay is enabled later, stable AudioTrack evidence may add a bounded correction, but stream-level last-good fallback is not treated as fresh sink evidence.
 - **Manual A/V delay policy**: keep anchors physical; apply user delay at final presentation scheduling.
 
 ## PCM Mode 0 — Startup and Seek Sync

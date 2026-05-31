@@ -26,6 +26,43 @@ Audio pipeline delay (ms):
 Heard time (estimated):
   heard_ts = audio_time - sync_delay
 
+Latency Terms
+-------------
+The code and logs distinguish several latency values. They must not be
+treated as interchangeable:
+
+- `app_latency` / geometry latency: the local AudioTrack buffer geometry,
+  computed from the buffer size, frame size, sample rate, and playback speed.
+  This is scheduler-local queue depth. It does not attempt to include Android
+  HAL, HDMI, AVR, soundbar, or codec decode latency.
+- Track/platform latency: the raw value reported by AudioTrack `getLatency()`.
+  On some passthrough routes this can include large platform or HDMI pipeline
+  estimates; on other routes it may be stale, rounded, or codec-insensitive.
+- System/output latency: the value reported by the output-latency path when
+  available.
+- `pipeline_latency`: the conservative platform estimate used for diagnostics
+  and selected passthrough policies. It is the maximum of track/platform
+  latency and `system_latency + app_latency`.
+- Static latency: a fallback selected delay used when stable dynamic evidence
+  is unavailable. Static latency is not always the raw AudioTrack
+  `getLatency()` value. For mode2 passthrough it is currently selected by
+  codec policy: plain AC3/EAC3 uses `pipeline_latency`, while DTS/DTS-HD,
+  TrueHD, and DDP/JOC use geometry/app latency based on Nvidia Shield and
+  Google Streamer 4K testing.
+- `selected_delay`: the delay actually subtracted from `audio_time` to derive
+  heard time. It may come from dynamic AudioTrack evidence, last-good cache,
+  geometry latency, or pipeline latency depending on path and stability.
+- `mode2_playhead_audit`: diagnostic comparison between mode2 `fakeSize`
+  logical writes and AudioTrack playhead/timestamp counters. The result is
+  evidence only, not a live delay provider.
+
+The core scheduler rule remains:
+
+  heard_ts = audio_time - selected_delay
+
+Measured evidence may update `selected_delay`, but must not become a separate
+clock that continuously redefines `audio_time`.
+
 Notes:
 - playhead_ms is the output position derived from getPlaybackHeadPosition and is used only
   to compute delay in AudioTrack, not as a global A/V metric.

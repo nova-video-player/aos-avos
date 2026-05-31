@@ -246,7 +246,15 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
 - **Forced passthrough**: force mode can expose codecs beyond route-reported support for devices with incomplete capability reporting. In that case `AudioTrack` construction is the final guard; if it rejects a codec-specific configuration, format-specific fallbacks may be attempted before giving up.
 - **Codec-specific fallback vs IEC fallback**: stereo in mode 1 describes the IEC transport container. Stereo in mode 2 is only valid for codec families that Android expects as stereo compressed transport, or as a compatibility retry after a route has advertised support but rejected a multichannel codec-specific mask.
 - **Mode 2 A/V timing**: timing is based on logical PCM-equivalent duration via `fakeSize`. For DTS/DTS-HD, raw mode 2 writes follow the parser's frame duration because DTS may use 512-sample frames; treating every DTS write as 1536 samples advances the AVOS audio clock too quickly. Other formats use codec metadata when available, then logical base units (1536 for EAC3/AC3, 1280 for TrueHD). Current diagnostics log the selected duration source (`parser`, `avctx`, codec fallback, or physical fallback) and the sink duration geometry (`dur_bpf`, `dur_rate`) used for analysis.
-- **Mode 2 heard-time baseline**: mode 2 currently uses submitted compressed packet duration to advance `audio_time`, then subtracts static route latency to estimate heard time. The old synthetic fill-window and sawtooth interpolation experiments are not part of the current code path.
+- **Mode 2 sync mode**: mode 2 should use `STREAM_SYNC_SAMPLES`, not
+  `STREAM_SYNC_CDATA`, when the compressed packet PTS cadence is less reliable
+  than the logical submitted duration. This is a path-specific rule, not a
+  general rule for all audio. PCM keeps PTS anchoring plus committed-duration
+  advancement; FLAC can use sample sync because decoded sample count is the
+  stable clock. Mode 1 IEC passthrough and AC3 recoding must be validated
+  independently before inheriting the mode-2 policy.
+- **Mode 2 heard-time baseline**: mode 2 currently uses submitted compressed packet duration to advance `audio_time`, then subtracts a selected static latency baseline to estimate heard time. The current tested policy is codec-aware: plain AC3/EAC3 uses pipeline latency, while DTS/DTS-HD, TrueHD, and DDP/JOC use app-buffer geometry latency. This split has been validated by repeated playback testing on Nvidia Shield and Google Streamer 4K, but should still be treated as an empirical policy until a reliable measured-delay path replaces it. The old synthetic fill-window and sawtooth interpolation experiments are not part of the current code path.
+- **Latency terminology**: geometry/app latency is the local AudioTrack buffer geometry (`buf_size / frame_size / sample_rate`, speed-adjusted). Pipeline latency is the platform maximum of AudioTrack-reported track latency and output/system latency plus app geometry. The selected static baseline may choose either value depending on codec policy.
 - **Mode 2 dynamic residual**: when dynamic delay is enabled, mode 2 can add a small measured residual above the static baseline. The residual is capped by `stream_mode2_dynamic_max_ms`, slewed by `stream_mode2_dynamic_slew_ms`, requires a stability streak, and is positive-only so it cannot pull playback earlier than the static latency baseline.
 - **Physical Route Latency Limit**: AudioTrack latency APIs stop at the Android output boundary. Unreported downstream latency added by a soundbar or AVR after HDMI/ARC still requires a route/user offset outside the scheduler model.
 
@@ -254,6 +262,12 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
 
 - `adb shell dumpsys media.audio_policy` shows available devices and supported formats.
 - `adb shell dumpsys media.audio_flinger` shows active output device (SPDIF vs HDMI ARC).
+- `at_mode2_audit`: runtime debug parameter for mode2 passthrough. When
+  enabled, logs `mode2_playhead_audit` every ~2s with logical samples written
+  from `fakeSize`, AudioTrack playhead/timestamp frames, derived
+  playhead/timestamp delays, selected delay, pipeline latency, and app
+  latency. This is diagnostic-only: it must not update `selected_delay` or
+  reanchor audio/video clocks.
 - Nova logs:
   - `refreshAudioOutputCapabilities(...)`
   - `updateIecEncapsulationCapability`

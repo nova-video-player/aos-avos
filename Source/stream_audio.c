@@ -842,15 +842,20 @@ serprintf(" ae! ");
 			resume_seen_pending = 0;
 		}
 
-		// Pre-filter PCM accumulation: only when atempo is active.
+		// Pre-filter PCM accumulation: only when atempo is active AND speed != 1.0x.
 		// Coalesces tiny decoder output so atempo WSOLA runs on larger batches.
-		// Without atempo, frames pass straight through to avoid unnecessary
-		// latency and the risk of dropping accumulated PCM on empty frames.
-		int atempo_will_run = (s->audio_filter_atempo != NULL &&
+		// At exactly 1.0x atempo is a passthrough; accumulating a larger batch
+		// only increases the write quantum and the A/V diff oscillation amplitude.
+		// atempo_filter_enabled: whether the filter will actually run this frame.
+		// atempo_accum_enabled:  whether pre-accumulation should coalesce frames
+		//                        (disabled at 1.0x to halve the write burst size).
+		int atempo_filter_enabled = (s->audio_filter_atempo != NULL &&
 			audio_interface_is_audio_speed_enabled() &&
 			audio_interface_is_using_atempo() &&
 			passthrough != 1 && passthrough != 2);
-		int pcm_eligible = (atempo_will_run &&
+		int atempo_accum_enabled = atempo_filter_enabled &&
+			fabsf(audio_interface_get_audio_speed() - 1.0f) > 1e-6f;
+		int pcm_eligible = (atempo_accum_enabled &&
 			!passthrough_active &&
 			!ac3_recoding &&
 			!audio_frame.error &&

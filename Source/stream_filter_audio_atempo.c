@@ -813,7 +813,9 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 		return 0;
 	}
 
-	// Total delay in milliseconds (in real-world time, not scaled by speed)
+	// Sync-visible downstream delay in milliseconds (real-world time, not
+	// scaled by speed).  Values below that are upstream of audio_time stay
+	// diagnostic-only.
 	int delay_ms = 0;
 	int fifo_ms = 0;
 	int atempo_internal_ms = 0;
@@ -828,7 +830,13 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 		// fifo_ms intentionally excluded from delay_ms
 	}
 
-	// 2. atempo filter internal delay (active even at 1.0x while filter is enabled)
+	// 2. atempo algorithm window (diagnostic only).
+	//
+	// FFmpeg atempo uses a WSOLA window and can report a theoretical group
+	// delay, but AVOS advances audio_time from samples that leave this wrapper.
+	// Treating the window as downstream latency makes heard_ts jump by about
+	// 100ms on speed changes even though no corresponding FIFO/audio sink queue
+	// exists. Keep the value visible in logs, but do not charge it to sync.
 	if (ctx->filter_initialized) {
 		// atempo uses fragment size = sample_rate / 24 (rounded to power of 2)
 		// Typical delay is 2-3 fragments due to WSOLA overlap-add algorithm
@@ -845,12 +853,10 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 
 		// Scale by speed: at 1.5x, input delay is compressed to 2/3 real time
 		atempo_internal_ms = (int)((float)atempo_delay_ms / ctx->current_speed);
-		delay_ms += atempo_internal_ms;
 	}
 
-	// Limit downward delay jumps after a speed change (WSOLA needs time to stabilize).
-	// Use only algo_ms for the stabilization window -- fifo_ms is diagnostic-only and
-	// must not influence smoothing.
+	// Preserve the old stabilization guard for any future real downstream delay
+	// source.  With FIFO and WSOLA window excluded, this is normally a no-op.
 	if (ctx->last_speed_change_ms > 0 && ctx->last_delay_ms >= 0) {
 		int now_ms = atime();
 		int elapsed_ms = now_ms - ctx->last_speed_change_ms;

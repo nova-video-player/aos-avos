@@ -56,6 +56,8 @@ static int audio_format_configured = -1;  // Track audio format to avoid redunda
 static int startup_anchor_log_count = 0;  // Cap startup anchor diagnostics per playback
 static int startup_write_log_count = 0;   // Cap first-write diagnostics per playback
 static int atempo_gate_log_count = 0;     // Cap atempo runtime gating diagnostics per playback
+static int resume_write_log_count = 0;    // Cap post-resume write diagnostics; reset on each resume
+static int resume_seen_pending = 0;       // Tracks audio_resume_pending transition to fire reset exactly once per resume
 extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
@@ -825,6 +827,20 @@ serprintf(" ae! ");
 	int frame_channels = 0;
 	int use_atempo = 0;
 	int using_pcm_accum = 0;
+	int dbg_atempo_in = 0, dbg_atempo_out = 0, dbg_atempo_fifo = 0;
+
+		// Reset resume_write diagnostic counter before atempo runs so the
+		// first post-resume filter call is captured at index [0].
+		// Key on the actual pending flag transition: fire once when pending
+		// goes true, disarm when it goes false. This is robust regardless of
+		// how many outer-loop iterations audio_resume_pending stays set.
+		if (s->audio_resume_pending && !resume_seen_pending) {
+			resume_write_log_count = 0;
+			resume_seen_pending = 1;
+		}
+		if (!s->audio_resume_pending) {
+			resume_seen_pending = 0;
+		}
 
 		// Pre-filter PCM accumulation: only when atempo is active.
 		// Coalesces tiny decoder output so atempo WSOLA runs on larger batches.
@@ -952,16 +968,25 @@ serprintf(" ae! ");
 				}
 
 				if (use_atempo && audio_frame.size > 0) {
+					int _atempo_before_fifo = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
+						s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
 					if( _stream_audio_speed_diag_active( s ) ) {
-						int before_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
-							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
 						DBG serprintf("atempo_diag: epoch=%d speed=%.3f in_size=%d in_rate=%d in_ch=%d in_fake=%d fifo_before=%d audio_time=%d video_time=%d\n",
 							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
 							audio_frame.size, audio_frame.samplesPerSec, audio_frame.channels,
-							audio_frame.fakeSize, before_delay, s->audio_time, s->video_time);
+							audio_frame.fakeSize, _atempo_before_fifo, s->audio_time, s->video_time);
+					}
+					if (resume_write_log_count < 3) {
+						dbg_atempo_in = audio_frame.size;
+						dbg_atempo_fifo = _atempo_before_fifo;
 					}
 					DBG serprintf("stream_audio: applying atempo filter\n");
 					s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame);
+					if (resume_write_log_count < 3) {
+						dbg_atempo_out = audio_frame.size;
+						dbg_atempo_fifo = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
+							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+					}
 					if( _stream_audio_speed_diag_active( s ) ) {
 						int after_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
 							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
@@ -1477,7 +1502,22 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						break;
 					}
 					// Apply one-shot reanchor now that bytes are confirmed committed.
+					int rw_audio_time_before = s->audio_time;
 					stream_sync_pcm_reanchor_update( s, passthrough_active );
+					if (resume_write_log_count < 3) {
+						int rw_dyn_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : -1;
+						int rw_dyn_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 0;
+						int rw_static_lat = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
+						DBG serprintf("resume_write[%d]: audio_before=%d audio_after=%d video=%d reanchor_src=%d reanchor_delay=%d last_good=%d last_good_valid=%d static_lat=%d dyn_valid=%d dyn_delay=%d atempo_in=%d atempo_out=%d atempo_fifo=%d wrote=%d zero_time_ms=%d\n",
+							resume_write_log_count,
+							rw_audio_time_before, s->audio_time, s->video_time,
+							s->pcm_reanchor_source, s->pcm_reanchor_delay_ms,
+							s->last_good_delay_ms, s->last_good_delay_valid,
+							rw_static_lat, rw_dyn_valid, rw_dyn_delay,
+							dbg_atempo_in, dbg_atempo_out, dbg_atempo_fifo,
+							size_written, zero_time);
+						resume_write_log_count++;
+					}
 					if( s->video_hold_for_resume_audio ) {
 						DBG serprintf("stream_audio: first resumed audio write committed (%d bytes, pt=%d recode=%d)\n",
 							size_written, passthrough_active, ac3_recoding);
@@ -1652,6 +1692,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
 								use_atempo = 0;
 							}
+							if (passthrough_active || ac3_recoding) {
+								use_atempo = 0;
+							}
 							if( use_atempo ) {
 								// atempo output = physical samples @ 1.0x = TS domain, no scaling needed
 								_set_audio_time( s, s->audio_ref_time + delta );
@@ -1720,6 +1763,8 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 	startup_anchor_log_count = 0;
 	startup_write_log_count = 0;
 	atempo_gate_log_count = 0;
+	resume_write_log_count = 0;
+	resume_seen_pending = 0;
 	s->pcm_accum_size = 0;
 	// Initialize with current format to prevent redundant reconfiguration on first audio thread loop iteration.
 	// The sink was already configured by start() before the audio thread began, so we use the current format

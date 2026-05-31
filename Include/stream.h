@@ -506,6 +506,8 @@ typedef struct STREAM {
 	int		last_good_delay_ms;
 	int		last_good_delay_valid;
 	int		last_good_atempo_delay_ms;
+	int		last_good_candidate_ms;    // evidence candidate running average
+	int		last_good_candidate_count; // consecutive samples in current candidate band
 	
 	int		delay_history[3];
 	int		delay_history_count;

@@ -4,6 +4,11 @@
 
 This document describes the audio speed control implementation using FFmpeg's `atempo` filter. The architecture maintains timeline mapping for timestamp synchronization while using software-based audio resampling instead of AudioTrack PlaybackParams API.
 
+When the audio-speed feature is enabled and the selected speed backend is not
+AudioTrack PlaybackParams, the atempo filter is part of the steady PCM audio
+pipeline even at exactly 1.0x. Keeping the neutral filter hot avoids a pipeline
+discontinuity when the user changes speed while playback is running.
+
 ## Design Principles
 
 ### Core Philosophy
@@ -14,6 +19,24 @@ The implementation replaces AudioTrack PlaybackParams with FFmpeg atempo filter 
 2. **Software audio resampling:** atempo physically changes audio duration to match playback speed
 3. **AudioTrack plays at 1.0x:** No PlaybackParams, no buffer scaling
 4. **Domain equivalence:** atempo output duration equals TS domain time
+
+### Hot atempo at 1.0x
+
+There are two separate questions:
+
+- **Filter topology:** if software speed is active, keep atempo in the PCM
+  chain at 1.0x so speed changes up or down can be applied without rebuilding
+  the audio path or creating an audible discontinuity.
+- **Delay accounting:** exact 1.0x may still be treated as neutral for
+  synthetic atempo-delay compensation. A hot neutral filter is not the same as
+  an active speed transform, and the sync model must not invent extra heard
+  latency when the physical output clock is already represented by committed
+  samples.
+
+AudioTrack PlaybackParams is the exception. If the device path is explicitly
+using AudioTrack-based speed, atempo is not the active speed backend. Passthrough
+and AC3 recoding are also excluded from atempo sample filtering because they do
+not send ordinary PCM samples through the software tempo chain.
 
 ### Why atempo with Timeline Mapping (Option B)
 
@@ -331,7 +354,7 @@ abuffer → atempo → abuffersink
 - Automatic chaining: for speeds < 0.5x (e.g., 0.25x = two 0.5x filters)
 - Covers typical use cases with high quality
 
-### Bypass at 1.0x
+### Hot Filter at 1.0x
 
 ```c
 // In stream_filter_audio_atempo.c:_filter()
@@ -344,9 +367,17 @@ if (!speed_enabled || !ctx->filter_initialized) {
 ```
 
 At 1.0x speed:
-- If audio-speed is enabled, the filter remains active (neutral tempo) to keep
-  consistent latency accounting.
-- If audio-speed is disabled, the filter is bypassed entirely.
+- If audio-speed is enabled and software atempo is the selected backend, the
+  filter remains active at neutral tempo. This keeps the PCM filter topology
+  stable for seamless runtime speed changes.
+- If audio-speed is disabled, or AudioTrack PlaybackParams is the selected
+  backend, the filter is bypassed.
+- Passthrough and AC3-recoding routes do not use atempo filtering.
+
+Important: keeping atempo hot at 1.0x is a topology rule, not a requirement to
+count the full synthetic WSOLA delay in every 1.0x heard-time calculation. Delay
+selection may ignore atempo's neutral-speed internal delay while still counting
+atempo delay when `speed != 1.0x`.
 
 ## Video Synchronization
 

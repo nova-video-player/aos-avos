@@ -2820,7 +2820,8 @@ serprintf("UNP: not_open\r\n");
 	if ( !was_paused ) {
 DBGS serprintf("stream_un_pause\r\n");
 		float audio_speed = audio_interface_get_audio_speed();
-		int using_atempo = audio_interface_is_using_atempo();
+		int using_atempo = audio_interface_is_using_atempo() &&
+			fabsf(audio_speed - 1.0f) > 1e-6f;
 		if ( using_atempo || fabsf(audio_speed - 1.0f) > 1e-6f ) {
 			int last_good_delay_ms = s->last_good_delay_ms;
 			int last_good_delay_valid = s->last_good_delay_valid;

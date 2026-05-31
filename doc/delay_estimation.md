@@ -157,8 +157,11 @@ Notes
     The sync diff includes `s->av_delay`; negative delay (video earlier)
     is implemented as audio-side hold (silence insertion) in
     `stream_audio.c`.
-- When timing is invalid and atempo is active, heard_ts uses the atempo
-  chain delay to keep speed-change anchoring latency-aware.
+- When timing is invalid and atempo is actively changing speed, heard_ts uses
+  the atempo chain delay to keep speed-change anchoring latency-aware. This is
+  separate from the hot-filter topology rule: atempo may remain in the PCM path
+  at neutral 1.0x for seamless speed changes without forcing its synthetic
+  neutral-speed delay into every heard-time estimate.
 - For android_sync=0, if timing becomes invalid during steady playback,
   last-good delay is held for anchoring to avoid dropping latency
   compensation. For android_sync=1, stale delay is not used for anchoring

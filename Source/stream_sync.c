@@ -75,6 +75,13 @@ static int stream_use_xbmc_smoothing = 1;
 // Once audio is hearable the gate engages immediately at one-chunk granularity.
 #define STREAM_MODE2_AUDIO_LEAD_GATE_MS  32
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
+// Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
+// delta <= COMMIT_DELTA: direct commit (normal slow drift).
+// delta 12..60ms (medium zone): ignored — EAC3 burst/drain amplitude; not a valid new baseline.
+// delta >= DRIFT_CORRECT_MS: candidate path — require CANDIDATE_COUNT samples within CANDIDATE_BAND.
+#define STREAM_PCM_EVIDENCE_COMMIT_DELTA_MS   12
+#define STREAM_PCM_EVIDENCE_CANDIDATE_BAND_MS  6
+#define STREAM_PCM_EVIDENCE_CANDIDATE_COUNT    3
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
 	STREAM_DELAY_SOURCE_DYNAMIC,
@@ -102,6 +109,13 @@ typedef struct {
 	int streak;             // current dynamic-valid streak
 	stream_delay_source_t source;
 	const char *source_tag;
+	// Dynamic timing evidence preserved when last_good is selected for stability.
+	// _stream_get_delay_status() may override source to LAST_GOOD while a valid
+	// dynamic reading exists; these fields carry that reading to stream_sync_audio()
+	// so it can keep last_good current without changing the selected effective delay.
+	int has_dynamic_evidence;
+	int dynamic_evidence_ms;
+	int dynamic_evidence_streak;
 } stream_delay_status_t;
 
 typedef enum {
@@ -130,6 +144,8 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->last_good_delay_ms = 0;
 	s->last_good_delay_valid = 0;
 	s->last_good_atempo_delay_ms = 0;
+	s->last_good_candidate_ms = 0;
+	s->last_good_candidate_count = 0;
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
 }
@@ -399,6 +415,23 @@ int stream_sync_restart( STREAM *s )
 	return 0;
 }
 
+// Returns 1 if a tag from audio_interface_get_delay_source() represents a
+// dynamic-derived measurement that can be used to refresh last_good.
+// Only "dynamic*" (direct HW measurement) and exactly "cached(throttle)"
+// (throttle-stabilised form of dynamic) qualify.  "playhead*" captures
+// instantaneous AT queue troughs during burst/drain cycles and must NOT be
+// used; "last_good(throttle)" is circular (last_good refreshing last_good).
+static int _stream_is_dynamic_evidence_tag(const char *tag)
+{
+	if( !tag || !tag[0] )
+		return 0;
+	if( !strncmp( tag, "dynamic", 7 ) )
+		return 1;
+	if( !strcmp( tag, "cached(throttle)" ) )
+		return 1;
+	return 0;
+}
+
 // ************************************************************
 //
 //	stream_get_heard_audio_ts
@@ -430,6 +463,20 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 		status.source = _classify_audio_delay_source( source_tag, delay_valid );
 		status.streak = audio_interface_get_delay_valid_streak( s->audio_ctx );
 
+		// Capture dynamic timing evidence before any stability-based override.
+		// Covers "dynamic*" (direct HW) and exactly "cached(throttle)" (throttle-
+		// stabilised form of dynamic). Both map to LAST_GOOD after classification,
+		// so the DYNAMIC-only path below never sees them. Evidence is the full AV
+		// delay so atempo/filter/sink accounting stays consistent with the normal
+		// last_good update path.
+		if( !passthrough_mode && !ac3_recoding && delay_valid && measured_delay > 0 &&
+			_stream_is_dynamic_evidence_tag( source_tag ) &&
+			status.streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
+			status.has_dynamic_evidence = 1;
+			status.dynamic_evidence_ms = stream_sync_av_delay( s );
+			status.dynamic_evidence_streak = status.streak;
+		}
+
 		if( !passthrough_mode && !ac3_recoding && delay_valid &&
 			status.source == STREAM_DELAY_SOURCE_DYNAMIC &&
 			measured_delay > 0 ) {
@@ -459,6 +506,8 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 				status.is_fallback = 1;
 				status.source = STREAM_DELAY_SOURCE_LAST_GOOD;
 				status.source_tag = "last_good(stable)";
+				// has_dynamic_evidence was already populated by the up-front
+				// capture above; no need to repeat it here.
 				return status;
 			}
 		}
@@ -714,6 +763,9 @@ int stream_sync_av_delay( STREAM *s )
 	if (!audio_speed_enabled || !using_atempo_pref) {
 		use_atempo = 0;
 	}
+	if (fabsf(audio_interface_get_audio_speed() - 1.0f) <= 1e-6f) {
+		use_atempo = 0;
+	}
 	// Keep delay accounting aligned with the actual runtime filter path:
 	// passthrough and AC3 recoding do not run atempo on samples.
 	if (passthrough || ac3_recoding) {
@@ -856,6 +908,9 @@ int stream_get_atempo_delay( STREAM *s )
 	if( !use_atempo || !audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo() ) {
 		return 0;
 	}
+	if( fabsf(audio_interface_get_audio_speed() - 1.0f) <= 1e-6f ) {
+		return 0;
+	}
 	if( passthrough || ac3_recoding ) {
 		return 0;
 	}
@@ -970,7 +1025,21 @@ static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	// selected-delay provider during normal playback; the Phase 2 drift gate
 	// handles later correction if last_good is stale.
 	if( s->last_good_delay_valid ) {
-		*delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
+		int atempo_delay   = stream_get_atempo_delay( s );
+		int lg_total       = s->last_good_delay_ms + atempo_delay;
+		int static_lat     = audio_interface_get_latency( s->audio_ctx );
+		int static_total   = (static_lat > 0) ? (static_lat + atempo_delay) : 0;
+		// Clamp last_good up to static latency: after AudioTrack flush+preload the
+		// queue starts at at least static_lat, so anchoring on a low drain-state
+		// last_good value (e.g. 15ms) would place audio_time too early and cause
+		// audio-leads-video desync visible immediately after resume.
+		if( static_total > 0 && lg_total < static_total ) {
+			DBG serprintf("pcm_reanchor_delay: last_good_clamped lg=%d static=%d selected=%d\n",
+				lg_total, static_total, static_total);
+			*delay_ms = static_total;
+		} else {
+			*delay_ms = lg_total;
+		}
 		*source = PCM_REANCHOR_SOURCE_LAST_GOOD;
 		return 1;
 	}
@@ -1126,12 +1195,110 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			delay_streak, delay_status.source );
 
 		if( !allow_update ) {
-			DBG serprintf( "stream_sync_audio: defer last_good update (delay_streak=%d current=%d sensitive=%d source=%s tag=%s)\n",
-				delay_streak, current_av_delay, sensitive_phase,
-				_stream_delay_source_name( delay_status.source ),
-				delay_status.source_tag ? delay_status.source_tag : "none" );
+			static int last_good_skip_count = 0;
+			if( last_good_skip_count < 5 ) {
+				DBG serprintf( "last_good_skip_gate[%d]: source=%s tag=%s streak=%d delay=%d sensitive=%d\n",
+					last_good_skip_count,
+					_stream_delay_source_name( delay_status.source ),
+					delay_status.source_tag ? delay_status.source_tag : "none",
+					delay_streak, current_av_delay, sensitive_phase );
+				last_good_skip_count++;
+			}
 		} else {
 			_stream_pcm_update_delay_cache( s, current_av_delay, delay_streak, sensitive_phase );
+		}
+	}
+	// Log when delay is valid but source is not DYNAMIC and no evidence carried —
+	// these are true non-dynamic sources (static, fallback) that cannot refresh last_good.
+	if( delay_valid && delay_status.source != STREAM_DELAY_SOURCE_DYNAMIC &&
+		!delay_status.has_dynamic_evidence ) {
+		static int last_good_skip_nd_count = 0;
+		if( last_good_skip_nd_count < 5 ) {
+			int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
+			DBG serprintf( "last_good_skip_nd[%d]: source=%s tag=%s streak=%d delay=%d sensitive=%d\n",
+				last_good_skip_nd_count,
+				_stream_delay_source_name( delay_status.source ),
+				delay_status.source_tag ? delay_status.source_tag : "none",
+				delay_status.streak, current_av_delay, sensitive_phase );
+			last_good_skip_nd_count++;
+		}
+	}
+	// Refresh last_good from dynamic evidence using a candidate stability filter.
+	// last_good is a one-time snapshot unless we do this: _stream_get_delay_status()
+	// converts valid dynamic timing to LAST_GOOD source for stability, so the DYNAMIC
+	// block above never fires again after the first write.
+	//
+	// Filter rules (prevents AT burst/drain oscillation poisoning last_good):
+	//   !sensitive_phase required — no bypass; warmup/resume spikes must not leak in.
+	//   delta ≤ COMMIT_DELTA (12ms):    commit directly (normal slow drift).
+	//   delta 12–60ms (medium zone):    ignore + reset candidate; this is the EAC3
+	//                                   burst/drain amplitude; neither extreme is a
+	//                                   valid new baseline for resume anchoring.
+	//   delta ≥ DRIFT_CORRECT (60ms):   candidate accumulation — route-change / HW
+	//                                   reset scale; requires CANDIDATE_COUNT stable
+	//                                   samples within CANDIDATE_BAND before commit.
+	//   sensitive_phase active:         reset candidate accumulator, do nothing.
+	if( delay_status.has_dynamic_evidence && delay_status.dynamic_evidence_ms > 0 ) {
+		int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
+		if( sensitive_phase ) {
+			// Discard any candidate in progress — don't accumulate during warmup/seek/resume.
+			s->last_good_candidate_ms    = 0;
+			s->last_good_candidate_count = 0;
+		} else {
+			int evidence_ms = delay_status.dynamic_evidence_ms;
+			int evidence_streak = delay_status.dynamic_evidence_streak;
+			if( !s->last_good_delay_valid ) {
+				// No baseline yet — commit immediately.
+				_stream_pcm_update_delay_cache( s, evidence_ms, evidence_streak, sensitive_phase );
+				s->last_good_candidate_ms    = 0;
+				s->last_good_candidate_count = 0;
+			} else {
+				int last_good_total = s->last_good_delay_ms + stream_get_atempo_delay( s );
+				int delta = evidence_ms - last_good_total;
+				if( delta < 0 ) delta = -delta;
+				if( delta <= STREAM_PCM_EVIDENCE_COMMIT_DELTA_MS ) {
+					// Close enough — commit directly, discard any stale candidate.
+					_stream_pcm_update_delay_cache( s, evidence_ms, evidence_streak, sensitive_phase );
+					s->last_good_candidate_ms    = 0;
+					s->last_good_candidate_count = 0;
+				} else if( delta >= STREAM_PCM_DELAY_DRIFT_CORRECT_MS ) {
+					// Very large drift (≥60ms): route-change or major HW reset —
+					// allow candidate accumulation to commit.
+					if( s->last_good_candidate_count == 0 ) {
+						// Start fresh candidate.
+						s->last_good_candidate_ms    = evidence_ms;
+						s->last_good_candidate_count = 1;
+					} else {
+						int cand_delta = evidence_ms - s->last_good_candidate_ms;
+						if( cand_delta < 0 ) cand_delta = -cand_delta;
+						if( cand_delta <= STREAM_PCM_EVIDENCE_CANDIDATE_BAND_MS ) {
+							// Still within band — accumulate running average.
+							s->last_good_candidate_ms = ( s->last_good_candidate_ms *
+								s->last_good_candidate_count + evidence_ms ) /
+								( s->last_good_candidate_count + 1 );
+							s->last_good_candidate_count++;
+							if( s->last_good_candidate_count >= STREAM_PCM_EVIDENCE_CANDIDATE_COUNT ) {
+								DBG serprintf( "evidence_candidate_commit: candidate=%d count=%d last_good=%d delta=%d streak=%d\n",
+									s->last_good_candidate_ms, s->last_good_candidate_count,
+									last_good_total, delta, evidence_streak );
+								_stream_pcm_update_delay_cache( s, s->last_good_candidate_ms,
+									evidence_streak, sensitive_phase );
+								s->last_good_candidate_ms    = 0;
+								s->last_good_candidate_count = 0;
+							}
+						} else {
+							// Jumped outside band — restart candidate.
+							s->last_good_candidate_ms    = evidence_ms;
+							s->last_good_candidate_count = 1;
+						}
+					}
+				} else {
+					// Medium drift (12–60ms): EAC3 burst/drain oscillation zone —
+					// ignore and discard any candidate to prevent phase-locked flipping.
+					s->last_good_candidate_ms    = 0;
+					s->last_good_candidate_count = 0;
+				}
+			}
 		}
 	}
 	// Check if passthrough mode is active - static delay is immediately valid

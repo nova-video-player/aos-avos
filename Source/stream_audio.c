@@ -1602,7 +1602,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										(long long)s->audio_time_remainder_us, add_ms, size_written, total_size,
 										atempo_delay, s->audio_time, s->video_time, loop_write_count);
 								}
-								if( use_atempo ) {
+								if( use_atempo ||
+									(audio_interface_is_audio_speed_enabled() && !passthrough_active && !ac3_recoding) ) {
 									_add_audio_time( s, add_ms );
 								} else {
 									_add_audio_time( s, RST_TO_TS_DELTA(add_ms, int) );
@@ -1700,13 +1701,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							if (passthrough_active || ac3_recoding) {
 								use_atempo = 0;
 							}
-							if( use_atempo ) {
-								// atempo output = physical samples @ 1.0x = TS domain, no scaling needed
+							if( use_atempo ||
+								(audio_interface_is_audio_speed_enabled() && !passthrough_active && !ac3_recoding) ) {
+								// Speed-processed PCM output still represents media samples in TS domain.
+								// Atempo rewrites those samples before AudioTrack; PlaybackParams drains
+								// the same media samples faster/slower in hardware.
 								_set_audio_time( s, s->audio_ref_time + delta );
-								DBG serprintf("stream_audio SAMPLES: atempo active, audio_time = %d + %d (no scaling)\n",
+								DBG serprintf("stream_audio SAMPLES: speed-processed PCM, audio_time = %d + %d (no scaling)\n",
 									s->audio_ref_time, delta);
 							} else {
-								// Normal path: samples in RST domain need RST→TS conversion
+								// Non-speed paths keep the historical RST→TS conversion.
 								_set_audio_time( s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int) );
 								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
 									s->audio_ref_time, delta);

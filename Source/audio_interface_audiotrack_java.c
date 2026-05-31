@@ -15,6 +15,7 @@
  */
 
 #include <dlfcn.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -157,10 +158,13 @@ struct audio_ctx {
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
+	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
+	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
 };
 
 static int audiotrack_log_underruns = 0;
 static int audiotrack_disable_recovery = 1;
+static int audiotrack_mode2_audit = 0;
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
@@ -1543,6 +1547,79 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	return can_write;
 }
 
+// Periodic diagnostic: log playhead, timestamp, and derived delay for mode2.
+// Logs once every 2s after logical samples are updated. No behavior change.
+// Called from audiotrack_add_logical_samples() while the thread is attached.
+static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
+{
+	if (!audiotrack_mode2_audit) return;
+	int now_ms = atime();
+	if (now_ms - at->mode2_audit_last_ms < 2000) return;
+	at->mode2_audit_last_ms = now_ms;
+
+	jint playhead = call_int_method(at, "getPlaybackHeadPosition", "()I");
+
+	int64_t ts_frames = 0;
+	int64_t ts_ns = 0;
+	if (at->getTimestampMethodID && at->audioTimestamp && at->env) {
+		jboolean ok = (*at->env)->CallBooleanMethod(at->env, at->obj,
+			at->getTimestampMethodID, at->audioTimestamp);
+		if (ok) {
+			ts_frames = (int64_t)(*at->env)->GetLongField(at->env, at->audioTimestamp,
+				at->framePositionFieldID);
+			ts_ns = (int64_t)(*at->env)->GetLongField(at->env, at->audioTimestamp,
+				at->nanoTimeFieldID);
+		}
+	}
+
+	int selected = audiotrack_get_latency(at);
+
+	// derived_logical: fakeSize-based logical samples vs getTimestamp frames.
+	// derived_playhead: fakeSize-based logical samples vs getPlaybackHeadPosition.
+	// Both compare the same logical written duration against two playhead sources.
+	// Negative values are valid evidence: reset, unit mismatch, wrap, or bad timestamp.
+	// i_samples_written (compressed bytes / frame_size) is logged but not used
+	// for derivation — it is not logical audio duration for compressed mode2.
+	int derived_logical_ms = INT_MIN;
+	int derived_playhead_ms = INT_MIN;
+	if (at->rate > 0) {
+		if (ts_frames > 0) {
+			int64_t delta_ts = (int64_t)at->mode2_logical_samples - ts_frames;
+			derived_logical_ms = (int)(delta_ts * 1000 / at->rate);
+		}
+		if (playhead > 0) {
+			int64_t delta_playhead = (int64_t)at->mode2_logical_samples - (int64_t)playhead;
+			derived_playhead_ms = (int)(delta_playhead * 1000 / at->rate);
+		}
+	}
+
+	LOG("mode2_playhead_audit: fmt=%04X logical=%llu i_written=%llu playhead=%d "
+		"ts_frames=%lld ts_ns=%lld derived_logical=%d derived_playhead=%d "
+		"selected=%d pipeline=%u app=%u",
+		at->format,
+		(unsigned long long)at->mode2_logical_samples,
+		(unsigned long long)at->i_samples_written,
+		(int)playhead,
+		(long long)ts_frames,
+		(long long)ts_ns,
+		derived_logical_ms,
+		derived_playhead_ms,
+		selected,
+		at->pipeline_latency,
+		at->app_latency);
+}
+
+// Accumulate fakeSize-derived logical samples for mode2 playhead audit.
+// Called from stream_sink_audio after each successful mode2 write.
+// samples = fakeSize * ret / frame->size / bpf (scaled for partial writes).
+// Triggers the periodic audit after updating so each log reflects current state.
+static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples)
+{
+	if (!audiotrack_mode2_audit || !at || samples <= 0) return;
+	at->mode2_logical_samples += (uint64_t)samples;
+	audiotrack_mode2_playhead_audit(at);
+}
+
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
 {
 DBG	LOG("audiotrack_write: format=%04X, passthrough=%d, len=%d", at->format, at->passthrough, len);
@@ -2376,6 +2453,8 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->passthrough_can_write_blind = 0;
 	at->passthrough_restart_after_flush = 0;
 	at->passthrough_playhead_ever_advanced = 0;
+	at->mode2_logical_samples = 0;
+	at->mode2_audit_last_ms = 0;
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
@@ -2534,9 +2613,11 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.is_startup_hold_active = audiotrack_is_startup_hold_active,
 	.passthrough_playhead_advanced = audiotrack_passthrough_playhead_advanced,
 	.invalidate_delay_cache = audiotrack_invalidate_delay_cache,
+	.add_logical_samples = audiotrack_add_logical_samples,
 };
 
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_PARAM("at_underrun", audiotrack_log_underruns );
 DECLARE_DEBUG_PARAM("at_disable_recovery", audiotrack_disable_recovery );
+DECLARE_DEBUG_PARAM("at_mode2_audit", audiotrack_mode2_audit );
 #endif

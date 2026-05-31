@@ -101,7 +101,16 @@ static int _write( STREAM *s, AUDIO_FRAME *frame )
 {
 DBGA2 serprintf("\r\n[%8d] size %5d  ", atime(), frame->size );
 
-	return audio_interface_write( s->audio_ctx, frame->data, frame->size );
+	int ret = audio_interface_write( s->audio_ctx, frame->data, frame->size );
+	// For mode2 passthrough, track logical fakeSize-derived samples for playhead audit.
+	// Scale fakeSize by the accepted fraction (partial writes are possible).
+	// fakeSize is in PCM-equivalent bytes (2ch 16bit sink = 4 bytes/frame).
+	if (ret > 0 && frame->fakeSize > 0 && frame->size > 0 &&
+	    audio_interface_get_passthrough(s->audio_ctx) >= 2) {
+		int logical_bytes = (int)(((int64_t)frame->fakeSize * ret) / frame->size);
+		audio_interface_add_logical_samples(s->audio_ctx, logical_bytes / 4);
+	}
+	return ret;
 }
 
 static int preload( STREAM *s )

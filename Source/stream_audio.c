@@ -1602,8 +1602,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										(long long)s->audio_time_remainder_us, add_ms, size_written, total_size,
 										atempo_delay, s->audio_time, s->video_time, loop_write_count);
 								}
-								if( use_atempo ||
-									(audio_interface_is_audio_speed_enabled() && !passthrough_active && !ac3_recoding) ) {
+								if( use_atempo ) {
 									_add_audio_time( s, add_ms );
 								} else {
 									_add_audio_time( s, RST_TO_TS_DELTA(add_ms, int) );

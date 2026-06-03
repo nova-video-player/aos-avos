@@ -2569,8 +2569,9 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			audio_interface_set_audio_speed(speed);
 		}
 
-		// AudioTrack timing can jump after speed changes; force a fresh timestamp streak.
-		audiotrack_reset_timing(at);
+		// PlaybackParams does not flush the AudioTrack. Keep playhead/timestamp
+		// continuity across speed changes; resetting here makes rapid ramps run
+		// permanently with invalid delay evidence and unstable video pacing.
 		audiotrack_update_latency(at, myEnv);
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed skipped speed=%f speed_enabled=%d using_atempo=%d passthrough=%d api=%d init=%d obj=%p",

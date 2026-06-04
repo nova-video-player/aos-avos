@@ -46,6 +46,55 @@ Speed changes no longer flush the pipeline. Instead, the player maintains an anc
 Whenever `stream_set_av_speed` succeeds (or the audio hardware reports a quantised ratio), the current playback position is captured and used as the new anchor so in-flight buffers keep their ordering.
 This AudioTrack path intentionally avoids seek-based realignment; the optional frame‑accurate seek is restricted to the atempo path when explicitly enabled.
 
+### AudioTrack PlaybackParams Speed-Epoch Clock
+
+Plain PCM AudioTrack PlaybackParams speed changes have one extra clock rule.
+During an in-flight speed ramp, the normal PCM heard clock:
+
+```text
+heard_ts = audio_time - last_good_delay_ms
+```
+
+is not authoritative enough. `audio_time` advances in write quanta, while
+`last_good_delay_ms` is a stability cache that can lag the hardware state
+across speed epochs. Updating `last_good_delay_ms` after a write has already
+advanced `audio_time` can introduce a discontinuity instead of removing one.
+
+For the AudioTrack PlaybackParams path, AVOS therefore arms a speed-epoch
+checkpoint at every speed change, including a return to 1.0x:
+
+1. Compute `anchor_ts`, the same continuity anchor used for the video sink.
+2. Before calling `audio_interface_change_audio_speed()`, read a fresh
+   `getPlaybackHeadPosition()` sample.
+3. Store:
+   - `at_speed_epoch_heard_ts = anchor_ts`
+   - `at_speed_epoch_presented_frames = playback_head`
+   - `at_speed_epoch_rate = AudioTrack sample rate`
+   - `at_speed_epoch_speed = requested speed`, then patch it to the hardware
+     read-back speed after the PlaybackParams call returns.
+4. While the epoch is active, derive heard time from the presented-frame delta:
+
+```text
+frames_delta = current_playback_head - at_speed_epoch_presented_frames
+delta_media_ms = frames_delta * 1000 / at_speed_epoch_rate
+heard_ts = at_speed_epoch_heard_ts + RST_TO_TS_DELTA(delta_media_ms)
+```
+
+This is the same checkpoint idea used by players that derive the audible media
+position from the hardware playhead. It makes speed changes continuous in the
+clock that matters to the video sink, instead of relying on write timing or a
+cached delay value.
+
+The epoch is cleared on seek, flush, or stop. It is not cleared merely because
+the requested speed returns to 1.0x; the return to 1.0x is itself a speed epoch
+and must preserve continuity from the previous hardware-rate segment.
+
+The current implementation reads `getPlaybackHeadPosition()` fresh on every
+epoch heard-clock query. A stale 10ms cache was observed to reintroduce
+perceptible stair-step jitter during speed ramps. A future optimization may
+interpolate between less frequent playhead samples, but that should be a
+separate correctness-neutral change.
+
 ### A/V Synchronization and Video Pacing
 
 Audio is the master clock. Video synchronization is achieved through a clever pacing mechanism inside the video sink (`stream_sink_video_android.c`).
@@ -93,11 +142,20 @@ Container-level metadata like `duration` and `start_time` are read in their orig
 | `s->duration` | `rst` | The total duration of the media, stored in `rst`. |
 | `_get_audio_time` | `ts` | Stream function performs `rst` to `ts` domain conversion. |
 | `_get_video_time` | `ts` | Stream function performs `rst` to `ts` domain conversion. |
+| `at_speed_epoch_heard_ts` | `ts` | Heard-audio checkpoint used during AudioTrack PlaybackParams speed epochs. |
+| `at_speed_epoch_presented_frames` | sample frames | AudioTrack playback-head position at the speed-epoch checkpoint. |
+| `at_speed_epoch_rate` | Hz | AudioTrack sample rate used to convert presented-frame deltas to media milliseconds. |
 
 **Notes:**
 *   Functions that run once at startup, like metadata parsing (`_parse_format`), operate in the `rst` domain before any speed scaling is applied.
 *   `stream_parser_guess_msPerFrame` is a fallback called during initialization when speed is 1.0, so it calculates `msPerFrame` in the `rst` domain.
-*   Sync delays like `codec_delay` or audiotrack `system_delay` are constant hardware chain delays (`rst`) that are invariant with audio speed.
+*   Dynamic AudioTrack delay must be expressed as wall/output milliseconds. When
+    PlaybackParams speed is active, a pending frame count converted as
+    `frames_pending * 1000 / rate` is media duration, not wall time; the
+    wall-delay form is `frames_pending * 1000 / (rate * speed)`.
+*   During AudioTrack PlaybackParams speed epochs, the playhead checkpoint
+    replaces delay-cache-derived heard time. Outside those epochs, delay
+    evidence remains a delay provider, not a second audio clock.
 
 ## Design Philosophy
 

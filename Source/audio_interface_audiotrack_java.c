@@ -2611,6 +2611,43 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 	return 0;
 }
 
+// Returns the current AudioTrack presented frame position and sample rate.
+// Prefers getTimestamp if it was queried within 500ms (well within the 2000ms throttle window).
+// Falls back to a fresh getPlaybackHeadPosition() JNI call otherwise.
+// Frame position is in the RST/media-sample domain — do not divide by speed;
+// use RST_TO_TS_DELTA() in the stream layer to convert a delta to TS domain.
+static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh)
+{
+	if (!at || !frames || !rate || at->rate <= 0) return 0;
+
+	// Prefer getTimestamp cache only when caller does not need a fresh sample and
+	// the cache was updated within 500ms (well within the 2000ms getTimestamp throttle window).
+	if (!prefer_fresh && at->ts_use_timestamp && at->last_timestamp_frames > 0 && at->ts_last_query_ms > 0) {
+		int ts_age = atime() - at->ts_last_query_ms;
+		if (ts_age < 500) {
+			*frames = at->last_timestamp_frames;
+			*rate = at->rate;
+			if (source) *source = AT_PRESENTED_FRAMES_SRC_TIMESTAMP;
+			if (age_ms) *age_ms = ts_age;
+			return 1;
+		}
+	}
+
+	// prefer_fresh=1, or timestamp cache is stale — call getPlaybackHeadPosition() directly.
+	// This bypasses the delay throttle for this lightweight 32-bit position query only.
+	JNIEnv *env = attach_thread_current_vm();
+	if (!env || !at->obj) return 0;
+
+	jint ph_frames = call_int_method_with_env(at, env, "getPlaybackHeadPosition", "()I");
+	if (ph_frames <= 0) return 0;
+
+	*frames = (uint64_t)(uint32_t)ph_frames;  // 32-bit position; wraps at ~27h at 44100Hz
+	*rate = at->rate;
+	if (source) *source = AT_PRESENTED_FRAMES_SRC_PLAYHEAD;
+	if (age_ms) *age_ms = 0;
+	return 1;
+}
+
 void libavos_set_dynamic_audio_delay(int enable)
 {
 	DBG serprintf("audio_interface_audiotrack_java:libavos_set_dynamic_audio_delay enable=%d\n", enable);
@@ -2645,6 +2682,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.passthrough_playhead_advanced = audiotrack_passthrough_playhead_advanced,
 	.invalidate_delay_cache = audiotrack_invalidate_delay_cache,
 	.add_logical_samples = audiotrack_add_logical_samples,
+	.get_presented_frames = audiotrack_get_presented_frames,
 };
 
 #ifdef DEBUG_MSG

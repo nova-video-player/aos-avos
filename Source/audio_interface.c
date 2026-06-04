@@ -259,6 +259,12 @@ void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples)
 	}
 }
 
+int audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh)
+{
+	if (!impl || !impl->get_presented_frames) return 0;
+	return impl->get_presented_frames(ctx, frames, rate, source, age_ms, prefer_fresh);
+}
+
 void audio_interface_flush_output(audio_ctx_t *ctx)
 {
 	impl->flush_output(ctx);

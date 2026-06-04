@@ -26,6 +26,7 @@
 #include "stream_sync.h"
 
 #include "athread.h"
+#include "atime.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -701,8 +702,41 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		applied_speed = clamped_speed;
 	} else {
 		if( speed_changed ) {
+			// Arm the epoch before changing speed so any heard_ts calls during
+			// audio_interface_change_audio_speed() see the new anchor immediately.
+			// Speed field is updated to applied_speed once the call returns.
+			if( !passthrough && !ac3_recoding && s->audio_ctx && s->audio_time >= 0 ) {
+				UINT64 ep_frames = 0;
+				int ep_rate = 0, ep_src = 0, ep_age = 0;
+				int ep_frames_valid = audio_interface_get_presented_frames( s->audio_ctx, &ep_frames, &ep_rate, &ep_src, &ep_age, 1 );
+				if( !ep_frames_valid ) {
+					s->at_speed_epoch_active = 0;
+					DBG serprintf( "at_speed_epoch_arm: skipped no_playhead audio=%d anchor_ts=%d speed=%.3f\n",
+						s->audio_time, anchor_ts, av_speed );
+				} else {
+					int epoch_wall_ms = atime();
+					s->at_speed_epoch_active            = 1;
+					s->at_speed_epoch_audio_time_ts     = s->audio_time;
+					s->at_speed_epoch_heard_ts          = anchor_ts;
+					s->at_speed_epoch_speed             = av_speed;
+					s->at_speed_epoch_presented_frames  = ep_frames;
+					s->at_speed_epoch_rate              = ep_rate;
+					s->at_speed_epoch_wall_ms           = epoch_wall_ms;
+					s->at_speed_epoch_frames_cached     = ep_frames;
+					s->at_speed_epoch_cache_wall_ms     = epoch_wall_ms;
+					DBG {
+						int live_delay_ms = stream_sync_av_delay( s );
+						serprintf( "at_speed_epoch_arm: audio=%d anchor_ts=%d live_delay=%d speed=%.3f frames=%llu rate=%d src=%d age=%d\n",
+							s->audio_time, anchor_ts, live_delay_ms, av_speed,
+							(unsigned long long)ep_frames, ep_rate, ep_src, ep_age );
+					}
+				}
+			}
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();
+			if( s->at_speed_epoch_active ) {
+				s->at_speed_epoch_speed = applied_speed;
+			}
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
 					   stream_current_time_rst, speed_anchor_ts, applied_speed, rc );
 			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {

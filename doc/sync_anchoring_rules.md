@@ -6,6 +6,7 @@
 - **`venc_ref_time` (WC)**: The monotonic clock sample taken when `venc_put_time` was set. Together, the sink estimates current TS as `venc_put_time + (now_wc - venc_ref_time)` (android_sync=0).
 - **`heard_audio_ts` (TS)**: The audio time that is estimated to be audible at the speakers. Derivation is **centralized** in `stream_get_heard_audio_ts()`.
   - **Steady State**: `heard_audio_ts = audio_time - chain_delay_ts`, where `chain_delay_ts` is `smoothed_av_delay` if valid.
+  - **AudioTrack PlaybackParams speed epoch**: for plain PCM hardware speed changes, `heard_audio_ts` is temporarily derived from a playhead checkpoint: `epoch_heard_ts + RST_TO_TS_DELTA(frames_delta * 1000 / rate)`.
   - **Mode 2 passthrough**: `audio_time` advances from submitted compressed packet duration; heard time subtracts the static passthrough latency baseline plus an optional bounded positive residual.
 - **Monotonic clock variables (WC)**: `CLOCK_MONOTONIC` timestamps are used for wall‑clock pacing because they never jump due to system time changes. They provide stable elapsed‑time deltas for TS↔WC anchoring.
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
@@ -61,12 +62,21 @@ heard_ts = audio_time - selected_delay
 ```
 
 Measured delay evidence may update `selected_delay`, but it must not become a
-second clock or continuously chase the AudioTrack playhead.
+second clock or continuously chase the AudioTrack playhead, except for the
+explicit AudioTrack PlaybackParams speed-epoch checkpoint described below.
 
 ## Mapping Rules
 
 - Only one RST↔TS mapping exists (`timeline_map_apply`). Absolute timestamps are always in TS.
 - Heard‑audio anchoring is compatible with both atempo (software) and hardware speed paths.
+- For plain PCM AudioTrack PlaybackParams speed changes, arm the playhead
+  checkpoint before applying PlaybackParams. The same `anchor_ts` passed to the
+  video sink becomes `at_speed_epoch_heard_ts`, and subsequent heard time comes
+  from AudioTrack presented-frame deltas converted through `RST_TO_TS_DELTA`.
+  This keeps video anchored to the audio actually presented by hardware instead
+  of to write bursts or stale delay-cache state.
+- The speed epoch is re-armed on every hardware speed change, including return
+  to 1.0x, and is cleared on seek, flush, or stop.
 
 ## Android Path (sfdec2)
 

@@ -148,6 +148,7 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->last_good_candidate_count = 0;
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
+	s->at_speed_epoch_active = 0;
 }
 
 static void _stream_pcm_reanchor_reset( STREAM *s )
@@ -641,6 +642,49 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	if (_sync_diag_should_log(s)) {
 		DBGY2 serprintf("heard_ts_calc: audio_time=%d heard_ts=%d\n", s->audio_time, heard_ts);
+	}
+
+	// AudioTrack speed-epoch: use a playhead-derived heard clock after any AT speed change.
+	// Replaces the write-burst clock (audio_time - last_good) with a presentation-
+	// position clock anchored at the speed-change moment.
+	// Active until cleared by _stream_pcm_delay_memory_reset (seek/flush/stop).
+	if( s->at_speed_epoch_active && !passthrough_mode && !is_mode2_sync ) {
+		UINT64 ep_frames = s->at_speed_epoch_presented_frames;
+		int ep_rate = s->at_speed_epoch_rate;
+
+		// Refresh the playhead on every epoch query.
+		// A stale cached playhead introduces stair-step jitter perceptible at speed.
+		// Optimization (linear interpolation between samples) deferred to a
+		// separate commit after correctness is established.
+		{
+			UINT64 frames_fresh = 0;
+			int rate_fresh = 0, src_fresh = 0, age_fresh = 0;
+			if( audio_interface_get_presented_frames( s->audio_ctx, &frames_fresh, &rate_fresh, &src_fresh, &age_fresh, 1 )
+				&& frames_fresh >= ep_frames ) {
+				s->at_speed_epoch_frames_cached = frames_fresh;
+				s->at_speed_epoch_cache_wall_ms = wall_now;
+			}
+		}
+
+		UINT64 frames_now = s->at_speed_epoch_frames_cached;
+		if( ep_frames > 0 && ep_rate > 0 && frames_now >= ep_frames ) {
+			// frames_delta is in RST/media-sample domain; convert to TS via RST_TO_TS_DELTA.
+			UINT64 frames_delta = frames_now - ep_frames;
+			int delta_media_ms = (int)((frames_delta * 1000) / (UINT64)ep_rate);
+			int delta_ts = RST_TO_TS_DELTA( delta_media_ms, int );
+			int checkpoint_heard = s->at_speed_epoch_heard_ts + delta_ts;
+			DBG {
+				static int last_epoch_log_ms = 0;
+				if( wall_now - last_epoch_log_ms >= 500 ) {
+					last_epoch_log_ms = wall_now;
+					serprintf( "at_epoch_clock: checkpoint=%d old=%d diff=%d audio=%d delta_media=%d speed=%.3f epoch_age=%d\n",
+						checkpoint_heard, heard_ts, checkpoint_heard - heard_ts,
+						s->audio_time, delta_media_ms, s->at_speed_epoch_speed,
+						wall_now - s->at_speed_epoch_wall_ms );
+				}
+			}
+			heard_ts = checkpoint_heard;
+		}
 	}
 
 	static int last_diag_wall = 0;

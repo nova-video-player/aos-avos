@@ -63,9 +63,21 @@ The core scheduler rule remains:
 Measured evidence may update `selected_delay`, but must not become a separate
 clock that continuously redefines `audio_time`.
 
+Exception: during plain PCM AudioTrack PlaybackParams speed epochs, the
+AudioTrack playhead is used as a temporary checkpoint clock. At the speed
+change, AVOS stores the current heard anchor and a fresh
+`getPlaybackHeadPosition()` sample. While the epoch is active:
+
+  heard_ts = epoch_heard_ts + RST_TO_TS_DELTA(frames_delta * 1000 / rate)
+
+This avoids discontinuities caused by combining write-quantized `audio_time`
+with stale `last_good_delay_ms` across hardware speed changes. The epoch is
+cleared on seek, flush, or stop, not simply when speed returns to 1.0x.
+
 Notes:
 - playhead_ms is the output position derived from getPlaybackHeadPosition and is used only
-  to compute delay in AudioTrack, not as a global A/V metric.
+  to compute delay in AudioTrack during normal playback. The PlaybackParams
+  speed-epoch checkpoint above is the explicit exception.
 - video_delay is only included when timestamps are sampled before the video sink.
 
 State Machine Summary
@@ -130,6 +142,47 @@ for 10-20ms between write chunks then jumped. The interpolation is
 capped at the latest `audio_time - heard_delay` frontier (not an
 unbounded predictor). Video scheduling in sfdec2 receives a
 continuously-advancing value instead of steps.
+
+AudioTrack PlaybackParams Speed Epochs
+--------------------------------------
+For plain PCM speed changes driven by AudioTrack PlaybackParams, `last_good`
+is not used as the authoritative heard clock during the speed epoch.
+
+Why:
+- `audio_time` advances from committed writes and therefore moves in write
+  quanta.
+- `last_good_delay_ms` is intentionally conservative and can be stale across a
+  speed change.
+- Switching `last_good_delay_ms` after a write has already advanced
+  `audio_time` can create a put_time discontinuity.
+
+The speed-epoch clock is armed before `audio_interface_change_audio_speed()`:
+
+  epoch_heard_ts = anchor_ts
+  epoch_frames = fresh getPlaybackHeadPosition()
+  epoch_rate = AudioTrack sample rate
+
+Then heard time is derived from presented-frame progression:
+
+  frames_delta = getPlaybackHeadPosition() - epoch_frames
+  delta_media_ms = frames_delta * 1000 / epoch_rate
+  heard_ts = epoch_heard_ts + RST_TO_TS_DELTA(delta_media_ms)
+
+Current production policy reads playback head fresh on every epoch query.
+Caching without interpolation was tested and caused perceptible stair-step
+jitter during speed ramps. If this is optimized later, use linear interpolation
+between real playhead samples and keep the unthrottled implementation as the
+correctness baseline.
+
+The dynamic AudioTrack delay estimator still matters outside this epoch and as
+diagnostic/fallback evidence. It must report wall/output milliseconds when
+PlaybackParams speed is active:
+
+  delay_wall_ms = frames_pending * 1000 / (rate * speed)
+
+not nominal media-frame duration:
+
+  delay_media_ms = frames_pending * 1000 / rate
 
 heard_ts < 0 clamp
 ------------------

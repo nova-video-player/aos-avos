@@ -1985,11 +1985,26 @@ DBG2		LOG("Timestamp reset detected, offset=%llu", (unsigned long long)at->times
 		frames_pending = 0;
 	}
 
-	// Convert frames to milliseconds: frames / (rate / 1000) = frames * 1000 / rate
-	delay_ms = (int)((frames_pending * 1000) / at->rate);
-DBG2	LOG("delay_clock: fp=%lld ns=%lld pending=%lld delay=%dms rate=%d",
+	// Convert frames to wall/output ms.
+	// With AudioTrack PlaybackParams(speed S), the hardware consumes frames at rate*S per
+	// wall-clock second, so wall_delay = frames_pending * 1000 / (rate * S).
+	// For atempo the filter already resampled before AudioTrack, so AT drains at 1x;
+	// the frame backlog is already wall time and must NOT be divided by speed.
+	int delay_media_ms = (int)((frames_pending * 1000) / at->rate);
+	float at_speed = 1.0f;
+	int using_atempo_now = audio_interface_is_audio_speed_enabled() &&
+		audio_interface_is_using_atempo();
+	if (!using_atempo_now) {
+		at_speed = get_effective_audio_speed();
+	}
+	if (at_speed > 1e-3f && fabsf(at_speed - 1.0f) > 1e-6f) {
+		delay_ms = (int)(delay_media_ms / at_speed);
+	} else {
+		delay_ms = delay_media_ms;
+	}
+DBG2	LOG("delay_clock: fp=%lld ns=%lld pending=%lld delay_media=%dms delay_wall=%dms speed=%.3f rate=%d using_atempo=%d",
 		(long long)frames_presented, (long long)nanoTime,
-		(long long)frames_pending, delay_ms, at->rate);
+		(long long)frames_pending, delay_media_ms, delay_ms, at_speed, at->rate, using_atempo_now);
 
 	// Guard against unrealistic estimates (e.g., during startup) and fallback to static latency
 	if (delay_ms < 0 || delay_ms > delay_max_ms) {
@@ -2371,11 +2386,26 @@ DBG2		LOG("Playback head reset detected, offset=%llu", (unsigned long long)at->t
 	if (frames_pending < 0)
 		frames_pending = 0;
 
-	int delay_ms = (int)((frames_pending * 1000) / at->rate);
+	// Same domain correction as audiotrack_get_delay: convert frame backlog to wall/output ms.
+	// With PlaybackParams(speed S), frames drain at rate*S per wall-clock second.
+	// Atempo is excluded: AT drains at 1x when atempo pre-resamples.
+	int delay_media_ms = (int)((frames_pending * 1000) / at->rate);
+	int delay_ms;
+	float ph_speed = 1.0f;
+	int using_atempo_now = audio_interface_is_audio_speed_enabled() &&
+		audio_interface_is_using_atempo();
+	if (!using_atempo_now) {
+		ph_speed = get_effective_audio_speed();
+	}
+	if (ph_speed > 1e-3f && fabsf(ph_speed - 1.0f) > 1e-6f) {
+		delay_ms = (int)(delay_media_ms / ph_speed);
+	} else {
+		delay_ms = delay_media_ms;
+	}
 	at->last_playhead_delay_ms = delay_ms;
-DBG2	LOG("playhead_delay: presented=%llu written=%llu pending=%lld delay=%dms rate=%d smooth_valid=%d",
+DBG2	LOG("playhead_delay: presented=%llu written=%llu pending=%lld delay_media=%dms delay_wall=%dms speed=%.3f rate=%d smooth_valid=%d",
 		(unsigned long long)frames_presented, (unsigned long long)frames_written_adjusted,
-		(long long)frames_pending, delay_ms, at->rate, at->headpos_smooth_valid);
+		(long long)frames_pending, delay_media_ms, delay_ms, ph_speed, at->rate, at->headpos_smooth_valid);
 	if (delay_ms < 0 || delay_ms > 2000) {
 DBG2		LOG("Playback-head latency %d ms out of range, timing unavailable", delay_ms);
 		at->last_playhead_delay_ms = -1;

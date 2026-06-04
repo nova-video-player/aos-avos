@@ -309,6 +309,9 @@ void stream_audio_flush( STREAM *s )
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
 	s->mode2_last_chunk_ms = 0;
+	// AudioTrack playhead epoch is anchored to the pre-flush frame position;
+	// clear it so the epoch clock does not run against a stale base.
+	s->at_speed_epoch_active = 0;
 
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
@@ -516,6 +519,7 @@ static void _audio_decode( STREAM *s )
 			// restuff the audio pipe! - unless this is a passthrough sink
 			int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 			if( s->audio_sink->syncable( s ) && !passthrough ) {
+				s->at_speed_epoch_active = 0;
 				s->audio_sink->flush( s );
 				s->manual_audio_delay_applied_ms = 0;
 				s->audio_sink->preload( s );
@@ -1158,6 +1162,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( s->audio_sink_open ) {
 							int passthrough_mode = stream_audio_requested_passthrough_for_format( s->audio->format );
 							if( passthrough_mode == 0 ) {
+								s->at_speed_epoch_active = 0;
 								s->audio_sink->flush( s );
 							}
 							s->audio_sink->stop( s );

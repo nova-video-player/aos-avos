@@ -153,6 +153,7 @@ struct audio_ctx {
 	int delay_diag_last_valid;       // last reported delay_valid
 	int delay_diag_last_fallback;    // last reported fallback value
 	int delay_diag_last_ts_use;      // last reported ts_use_timestamp
+	int playbackparams_speed_rejected;       // set when HW silently ignores setPlaybackParams speed
 	uint64_t can_write_last_playback_frames; // last playhead seen by passthrough can_write gate
 	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
@@ -2591,12 +2592,51 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 
 	 	DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed getstate %d",status );
 
+		// Read back the speed that was actually accepted by the hardware.
+		// On some routes (e.g., multichannel PCM via HDMI/AVR) Android silently
+		// accepts setPlaybackParams() but the driver clamps the speed to 1.0.
+		float applied_speed = failed ? 1.0f : speed;
+		int readback_ok = 0;
+		if( !failed ) {
+			jobject readback_params = ( *myEnv )->CallObjectMethod( myEnv, audioTrack,
+				( *myEnv )->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
+					"()Landroid/media/PlaybackParams;" ) );
+			jthrowable rb_ex = ( *myEnv )->ExceptionOccurred( myEnv );
+			if( rb_ex ) { ( *myEnv )->ExceptionClear( myEnv ); }
+			if( readback_params && !rb_ex ) {
+				jfloat hw_speed = ( *myEnv )->CallFloatMethod( myEnv, readback_params,
+					( *myEnv )->GetMethodID( myEnv, at->playbackParamsClass, "getSpeed", "()F" ) );
+				jthrowable gs_ex = ( *myEnv )->ExceptionOccurred( myEnv );
+				if( !gs_ex ) {
+					applied_speed = (float)hw_speed;
+					readback_ok = 1;
+				} else {
+					( *myEnv )->ExceptionClear( myEnv );
+				}
+				( *myEnv )->DeleteLocalRef( myEnv, readback_params );
+			}
+		}
+
+		int mismatch     = readback_ok && fabsf( applied_speed - speed ) >= 0.01f;
+		int rejected_to_1x = readback_ok && fabsf( applied_speed - 1.0f ) < 0.01f
+			&& fabsf( speed - 1.0f ) >= 0.01f;
+		at->playbackparams_speed_rejected = rejected_to_1x;
+
+		if( mismatch || rejected_to_1x || !readback_ok ) {
+			LOG( "at_speed_hw: req=%.3f applied=%.3f failed=%d readback_ok=%d mismatch=%d rejected_to_1x=%d channels=%d rate=%d passthrough=%d using_atempo=%d",
+				speed, applied_speed, failed, readback_ok, mismatch, rejected_to_1x,
+				at->channel_count, at->rate, at->passthrough, using_atempo );
+		} else {
+			DBG LOG( "at_speed_hw: req=%.3f applied=%.3f readback_ok=%d channels=%d rate=%d",
+				speed, applied_speed, readback_ok, at->channel_count, at->rate );
+		}
+
 		if( failed ) {
 			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed: reverting to 1x" );
 			audio_interface_set_audio_speed(1.0f);
 		} else {
 			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
-			audio_interface_set_audio_speed(speed);
+			audio_interface_set_audio_speed(applied_speed);
 		}
 
 		// PlaybackParams does not flush the AudioTrack. Keep playhead/timestamp

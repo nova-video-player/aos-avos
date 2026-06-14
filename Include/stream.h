@@ -83,6 +83,10 @@ typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
 	// at block start; block_rst_span is the media ms this block spans.
 	int	block_rst_start;
 	int	block_rst_span;
+	// Live Option-A media-frame delta (ns_in - ring) advanced into media_cursor for
+	// this block, tracked separately from block_rst_span because the span may be
+	// sourced from the Option-B production map while media_cursor stays the A pointer.
+	INT64	block_media_frames;
 } STREAM_ATEMPO_LEDGER_ENTRY;
 
 // Deferred atempo video-commit checkpoint (one per speed step).
@@ -923,6 +927,7 @@ void	stream_set_audio_downmix( int downmix );
 void	stream_disable_atempo_filter( int disable );
 int	stream_filter_audio_atempo_get_ledger_stats( STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate );
 int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate );
+int	stream_filter_audio_atempo_lookup_output_media( STREAM_FILTER_AUDIO *f, UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate );
 int	stream_check_subtitles( STREAM *s );
 int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
 void	stream_audio_mute    ( STREAM *s );

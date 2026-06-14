@@ -164,12 +164,22 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 	entry->block_ts_start = (int)(s->atempo_ledger_next_ts_us / 1000);
 	entry->block_nframes = nframes;
 	entry->rate = sample_rate;
-	// Advance the media/RST span of this output block from the af_atempo
-	// media-consumed delta (ns_in - ring) sampled now.  When the filter has no
-	// readable state, fall back to a 1:1 (TS-slope) span so the ledger never stalls.
+	// Advance the media/RST span of this output block.  Option B (primary): the
+	// wrapper production output->media map records, at PRODUCTION time, the media
+	// (ns_in - ring) consumed for each output-sample burst; look this block's span
+	// up by its output-frame index.  This avoids the Option-A bias where sampling
+	// ns_in-ring at this (write) time over-attributes media to output still queued
+	// in the wrapper FIFO.  Option A (live ns_in-ring delta) is kept as the fallback
+	// on map miss, and its media_cursor is advanced every block so it stays current.
+	// 1:1 (TS-slope) is the final fallback so the ledger never stalls.
 	entry->block_rst_start = (int)(s->atempo_ledger_next_rst_us / 1000);
+	entry->block_media_frames = 0;
 	{
 		int64_t block_rst_span_us = _stream_atempo_ledger_frames_to_us(nframes, sample_rate);
+		int span_source = 0;       // 0=1:1, 1=A(live), 2=B(map)
+		int64_t a_span_us = -1;    // Option A span (diagnostic comparison)
+		// Option A: live ns_in-ring delta; always advance media_cursor so the A
+		// pointer remains valid for any later block where the map misses.
 		if( s->atempo_ledger_media_valid ) {
 			INT64 ns_in_now = 0, ns_out_now = 0;
 			int ring_now = 0, af_rate_now = 0;
@@ -179,10 +189,45 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 				if( span_frames < 0 ) {
 					span_frames = 0;
 				}
-				block_rst_span_us = ((int64_t)span_frames * 1000000) / af_rate_now;
+				a_span_us = ((int64_t)span_frames * 1000000) / af_rate_now;
 				s->atempo_ledger_media_cursor = media_now;
+				entry->block_media_frames = span_frames;
+				block_rst_span_us = a_span_us;
+				span_source = 1;
 			}
 		}
+		// Option B: production-map lookup by output-frame index.  This reserve runs
+		// immediately AFTER _filter() produced and read exactly `nframes` output
+		// samples from the wrapper FIFO (1:1, verified at the call site), so the
+		// wrapper's cumulative output cursor now sits at the END of this block; the
+		// block occupies wrapper range [out_cursor - nframes, out_cursor).  Reading
+		// the cursor fresh each reserve needs no base bridge and is robust to partial
+		// AudioTrack writes: wrapper output space is independent of how many frames
+		// the sink accepted, so it never diverges from written-frame space.
+		{
+			UINT64 wrap_out_now = 0;
+			int wrap_fifo_now = 0, wrap_rate_now = 0;
+			INT64 b_span_frames = 0;
+			int b_rate = 0;
+			if( stream_filter_audio_atempo_get_ledger_stats( s->audio_filter_atempo, &wrap_out_now, &wrap_fifo_now, &wrap_rate_now )
+				&& wrap_out_now >= (UINT64)nframes
+				&& stream_filter_audio_atempo_lookup_output_media( s->audio_filter_atempo,
+					wrap_out_now - (UINT64)nframes, nframes, &b_span_frames, &b_rate ) && b_rate > 0 ) {
+				UINT64 w_start = wrap_out_now - (UINT64)nframes;
+				if( b_span_frames < 0 ) {
+					b_span_frames = 0;
+				}
+				block_rst_span_us = ((int64_t)b_span_frames * 1000000) / b_rate;
+				span_source = 2;
+				if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+					DBG serprintf("at_ledger_omap: w_start=%llu nframes=%d b_span_us=%lld a_span_us=%lld diff_us=%lld\n",
+						(unsigned long long)w_start, nframes,
+						(long long)block_rst_span_us, (long long)a_span_us,
+						(long long)( a_span_us >= 0 ? block_rst_span_us - a_span_us : 0 ));
+				}
+			}
+		}
+		(void)span_source;
 		entry->block_rst_span = (int)(block_rst_span_us / 1000);
 		s->atempo_ledger_next_rst_us += block_rst_span_us;
 	}
@@ -216,10 +261,11 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		s->atempo_ledger_output_frames -= (UINT64)reserved_frames;
 		s->atempo_ledger_next_ts_us -= _stream_atempo_ledger_frames_to_us(reserved_frames, sample_rate);
 		// Roll back the media/RST cursor too so a cancelled (zero-write) reserve does
-		// not leave the RST clock ahead.
+		// not leave the RST clock ahead.  next_rst_us rolls by the chosen span;
+		// media_cursor (the Option-A pointer) rolls by the live A delta we advanced.
 		s->atempo_ledger_next_rst_us -= (int64_t)entry->block_rst_span * 1000;
-		if( s->atempo_ledger_media_valid && entry->rate > 0 ) {
-			s->atempo_ledger_media_cursor -= ((INT64)entry->block_rst_span * entry->rate) / 1000;
+		if( s->atempo_ledger_media_valid ) {
+			s->atempo_ledger_media_cursor -= entry->block_media_frames;
 		}
 		if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
 			DBG serprintf("at_ledger_cancel: reserved=%d out_next=%llu ts_next=%lld\n",
@@ -239,7 +285,8 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		s->atempo_ledger_next_ts_us += _stream_atempo_ledger_frames_to_us(delta, sample_rate);
 		// Scale this block's media/RST span by the written/reserved ratio so the RST
 		// slope stays consistent on a partial write, and roll the RST cursor + media
-		// cursor by the same shrink/grow.
+		// cursor by the same shrink/grow.  block_rst_span (chosen source) drives
+		// next_rst_us; block_media_frames (live A delta) drives media_cursor.
 		int old_span_ms = entry->block_rst_span;
 		int new_span_ms = reserved_frames > 0
 			? (int)(((int64_t)old_span_ms * written_frames) / reserved_frames)
@@ -247,8 +294,13 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		int span_diff_ms = new_span_ms - old_span_ms;
 		entry->block_rst_span = new_span_ms;
 		s->atempo_ledger_next_rst_us += (int64_t)span_diff_ms * 1000;
-		if( s->atempo_ledger_media_valid && entry->rate > 0 ) {
-			s->atempo_ledger_media_cursor += ((INT64)span_diff_ms * entry->rate) / 1000;
+		if( s->atempo_ledger_media_valid ) {
+			INT64 old_media_frames = entry->block_media_frames;
+			INT64 new_media_frames = reserved_frames > 0
+				? ( old_media_frames * written_frames ) / reserved_frames
+				: old_media_frames;
+			s->atempo_ledger_media_cursor += new_media_frames - old_media_frames;
+			entry->block_media_frames = new_media_frames;
 		}
 	}
 	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {

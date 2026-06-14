@@ -80,6 +80,11 @@ extern void avfilter_atempo_get_state(AVFilterContext *ctx,
 #define SPEED_MIN 0.5f
 #define SPEED_MAX 2.0f
 
+// Production-time output->media map depth.  Each entry is one _filter drain
+// burst; 64 covers well over a second of bursts, far more than the consumer
+// ledger's lookahead window.
+#define ATEMPO_OMAP_SIZE 64
+
 struct ctx {
 	AVFilterGraph *filter_graph;
 	AVFilterContext *abuffer_ctx;
@@ -114,9 +119,87 @@ struct ctx {
 	UINT64 total_output_samples;        // cumulative samples read from wrapper FIFO
 	int tempo_change_seq;               // diagnostic sequence for runtime tempo changes
 	int post_tempo_marker_pending;      // first output block after tempo command not yet logged
+
+	// Option B production-time output->media map.  Each drain burst records the
+	// media (af_atempo ns_in - ring) consumed to produce that burst of output
+	// samples, keyed by the cumulative OUTPUT-sample index of the wrapper stream.
+	// The wrapper FIFO preserves order, so the cumulative output-sample index used
+	// when samples are produced into the wrapper FIFO is the same index observed
+	// later when those samples are read from the wrapper FIFO; an entry keyed at
+	// production time is therefore directly addressable by the consumer's
+	// read-cursor index (total_output_samples).  This is the wrapper output stream
+	// index, NOT AudioTrack written frames.  It decouples the media-consumed lookup
+	// from AudioTrack write time (Option A sampled ns_in-ring live at reserve,
+	// over-attributing media for output still queued in the FIFO).
+	struct atempo_omap_entry {
+		UINT64 out_start;               // cumulative output-sample index at burst start
+		int    nsamples;                // output samples produced in this burst
+		INT64  media_start;             // media (ns_in - ring) at burst start
+		INT64  media_span;              // media consumed across this burst (af samples)
+	} omap[ATEMPO_OMAP_SIZE];
+	int    omap_head;                   // index of oldest live entry
+	int    omap_count;                  // number of live entries
+	UINT64 omap_write_cursor;           // cumulative output samples WRITTEN to FIFO
+	INT64  omap_prev_media;             // last (ns_in - ring) sampled
+	int    omap_prev_valid;             // prev_media initialised
 };
 
 static int _flush(STREAM_FILTER_AUDIO *f);
+
+// Clear the production output->media map.  The map's write_cursor (the wrapper
+// output-sample index where the next produced burst will be recorded) is realigned
+// to the supplied origin so the map index space stays consistent with the
+// consumer's read cursor (total_output_samples): on a full flush both restart at 0;
+// on a format change total_output_samples keeps running while the FIFO is dropped,
+// so the next produced burst must be recorded at that current index.
+static void atempo_omap_reset(struct ctx *ctx, UINT64 write_origin)
+{
+	if (!ctx) {
+		return;
+	}
+	ctx->omap_head = 0;
+	ctx->omap_count = 0;
+	ctx->omap_write_cursor = write_origin;
+	ctx->omap_prev_media = 0;
+	ctx->omap_prev_valid = 0;
+}
+
+// Record one drain burst: output samples [write_cursor, write_cursor+nsamples)
+// consumed (media_now - prev_media) of media.  media_now = af ns_in - ring.
+static void atempo_omap_push(struct ctx *ctx, int nsamples, INT64 media_now)
+{
+	if (!ctx || nsamples <= 0) {
+		return;
+	}
+	if (!ctx->omap_prev_valid) {
+		// First burst after a reset has no prior media reference, so its true span
+		// is unknown (would be a spurious zero).  Seed the reference and advance the
+		// write cursor past this burst WITHOUT emitting an entry: that output range
+		// then misses the map and the consumer falls back to Option A for it.
+		ctx->omap_prev_media = media_now;
+		ctx->omap_prev_valid = 1;
+		ctx->omap_write_cursor += (UINT64)nsamples;
+		return;
+	}
+	INT64 span = media_now - ctx->omap_prev_media;
+	if (span < 0) {
+		span = 0;
+	}
+	int tail = (ctx->omap_head + ctx->omap_count) % ATEMPO_OMAP_SIZE;
+	if (ctx->omap_count >= ATEMPO_OMAP_SIZE) {
+		// Drop oldest; the consumer never looks that far back.
+		ctx->omap_head = (ctx->omap_head + 1) % ATEMPO_OMAP_SIZE;
+		tail = (ctx->omap_head + ATEMPO_OMAP_SIZE - 1) % ATEMPO_OMAP_SIZE;
+	} else {
+		ctx->omap_count++;
+	}
+	ctx->omap[tail].out_start = ctx->omap_write_cursor;
+	ctx->omap[tail].nsamples = nsamples;
+	ctx->omap[tail].media_start = ctx->omap_prev_media;
+	ctx->omap[tail].media_span = span;
+	ctx->omap_write_cursor += (UINT64)nsamples;
+	ctx->omap_prev_media = media_now;
+}
 
 static void atempo_reset_runtime_baseline(struct ctx *ctx, const char *reason)
 {
@@ -630,6 +713,9 @@ static int atempo_reconfigure_format(struct ctx *ctx, int channels,
 	}
 
 	atempo_reset_runtime_baseline(ctx, "format_change");
+	// FIFO was dropped but the read cursor keeps running; realign the map write
+	// cursor to it so future entries stay addressable by the consumer.
+	atempo_omap_reset(ctx, ctx->total_output_samples);
 	return 0;
 }
 
@@ -738,6 +824,19 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		av_frame_unref(ctx->out_frame);
 	}
 
+	// Record this drain burst in the production output->media map.  Sample the
+	// media position (af ns_in - ring) once after the burst: af_atempo consumed
+	// the input for these output samples by now, so (media_now - prev) is the
+	// media this burst represents, keyed by the burst's cumulative output index.
+	if (drained_samples > 0 && ctx->atempo_ctx) {
+		int af_ring = -1;
+		int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
+		double af_tempo = 0.0;
+		avfilter_atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+			&af_ns_in, &af_ns_out, &af_tempo);
+		atempo_omap_push(ctx, drained_samples, (INT64)af_ns_in - (INT64)af_ring);
+	}
+
     // Read from FIFO to fill output frame using the expected output duration
     int input_samples = ctx->in_frame->nb_samples;
     int available_samples = av_audio_fifo_size(ctx->fifo);
@@ -841,6 +940,8 @@ static int _flush(STREAM_FILTER_AUDIO *f)
 	if (ctx) {
 		ctx->total_output_samples = 0;
 		ctx->post_tempo_marker_pending = 0;
+		// Read and write cursors both restart at 0 for the new stream.
+		atempo_omap_reset(ctx, 0);
 	}
 
 	if (ctx && ctx->filter_graph && ctx->abuffer_ctx && ctx->abuffersink_ctx) {
@@ -1078,6 +1179,54 @@ int stream_filter_audio_atempo_get_audit_state(STREAM_FILTER_AUDIO *f, INT64 *ns
 	return 1;
 }
 
+// Option B lookup: resolve the media (af ns_in domain) consumed across an output
+// block [out_start, out_start + nframes) by integrating the production map.
+// out_start is the wrapper output-sample index (read-cursor space == write-cursor
+// space, see omap design).  Returns 1 with *media_span_frames set only when the
+// whole requested range is covered by live map entries; returns 0 on any miss so
+// the caller can fall back to the Option A live ns_in-ring estimate.  Partial
+// entries are prorated by sample fraction.
+int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *f,
+	UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate)
+{
+	struct ctx *ctx = f ? f->priv : NULL;
+	if (!ctx || ctx->sample_rate <= 0 || nframes <= 0 || ctx->omap_count <= 0) {
+		return 0;
+	}
+	UINT64 q_start = out_start;
+	UINT64 q_end = out_start + (UINT64)nframes;
+	// Reject ranges outside the live map window.
+	struct atempo_omap_entry *oldest = &ctx->omap[ctx->omap_head];
+	int newest_idx = (ctx->omap_head + ctx->omap_count - 1) % ATEMPO_OMAP_SIZE;
+	struct atempo_omap_entry *newest = &ctx->omap[newest_idx];
+	UINT64 map_lo = oldest->out_start;
+	UINT64 map_hi = newest->out_start + (UINT64)newest->nsamples;
+	if (q_start < map_lo || q_end > map_hi) {
+		return 0;
+	}
+	INT64 span = 0;
+	for (int i = 0; i < ctx->omap_count; i++) {
+		struct atempo_omap_entry *e = &ctx->omap[(ctx->omap_head + i) % ATEMPO_OMAP_SIZE];
+		UINT64 e_start = e->out_start;
+		UINT64 e_end = e_start + (UINT64)e->nsamples;
+		UINT64 lo = q_start > e_start ? q_start : e_start;
+		UINT64 hi = q_end < e_end ? q_end : e_end;
+		if (lo >= hi || e->nsamples <= 0) {
+			continue;
+		}
+		UINT64 overlap = hi - lo;
+		// Prorate this entry's media span by the overlapping output fraction.
+		span += ((INT64)overlap * e->media_span) / (INT64)e->nsamples;
+	}
+	if (media_span_frames) {
+		*media_span_frames = span;
+	}
+	if (rate) {
+		*rate = ctx->sample_rate;
+	}
+	return 1;
+}
+
 #else
 // Stub implementation when FFmpeg is not available
 STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new(void)
@@ -1092,6 +1241,12 @@ int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *f, UINT64 *
 }
 
 int stream_filter_audio_atempo_get_audit_state(STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate)
+{
+	return 0;
+}
+
+int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *f,
+	UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate)
 {
 	return 0;
 }

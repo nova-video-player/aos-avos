@@ -22,11 +22,10 @@ three separate clocks/anchors:
   sample currently audible.
 - **Media/RST anchor:** speed commits need an RST anchor for
   `timeline_map_apply()`. The old `TS_TO_RST_TIME(anchor_ts)` projection used the
-  pre-step committed speed and accumulated error across ramps. The committed fix
-  (Option A) stores a media/RST span per ledger block from the patched atempo
-  state (`ns_in - ring`) and uses that ledger RST for the first
-  `timeline_map_apply()` argument when the playhead resolves strictly inside a
-  ledger block.
+  pre-step committed speed and accumulated error across ramps. The current fix
+  stores a media/RST span per ledger block and uses that ledger RST for the
+  first `timeline_map_apply()` argument when the playhead resolves strictly
+  inside a ledger block.
 
 Speed changes are no longer committed to the video side immediately. The atempo
 tempo command is applied to the audio filter immediately, but
@@ -35,23 +34,25 @@ deferred until the AudioTrack playhead crosses the output-frame boundary where
 the new-speed content is audible. Pending speed commits are queued and promoted
 in order.
 
-### Option A Shipped, Option B Pending
+### Option B Current, Option A Fallback
 
-**Option A (current, validated):** media/RST spans are sampled at
-AudioTrack-write time from the patched atempo state. This fixed the accumulating
-ramp desync in stress logs, including seek/pause reset cases, by preventing the
+**Option A (fallback):** media/RST spans are sampled at AudioTrack-write time
+from the patched atempo state (`ns_in - ring`). This fixed the accumulating ramp
+desync in stress logs, including seek/pause reset cases, by preventing the
 stale-speed RST projection from being used at commit time.
 
-Known caveat: write-time sampling still includes variable wrapper-FIFO lead
-between filter output production and AudioTrack write. This lead is bounded and
-has not been audible in the validated stress logs, but it is not the cleanest
-model.
+Option A's caveat is that write-time sampling includes variable wrapper-FIFO
+lead between filter output production and AudioTrack write. This is why it is no
+longer the primary source when the production map can resolve a block.
 
-**Option B (next step):** move media/RST assignment into
+**Option B (current, validated):** media/RST assignment happens in
 `stream_filter_audio_atempo.c` at output-production time. The atempo wrapper
-will keep an output-position to media/RST map keyed by cumulative atempo output
-frames; the AVOS ledger will query that map instead of sampling `ns_in - ring`
-later at AudioTrack write time. This removes the variable wrapper-FIFO lead.
+keeps an output-position to media/RST map keyed by cumulative atempo output
+frames. Each drained output burst records the media span produced from the
+patched atempo state (`ns_in - ring`). The AVOS ledger queries this map by the
+output frame range just read from the wrapper FIFO. If the map misses, the code
+falls back to Option A; if Option A cannot read state, it falls back to the 1:1
+TS slope.
 
 Both Option A and Option B depend on the local FFmpeg patch
 `native/ffmpeg-android-builder/atempo.patch`, which exposes atempo's internal
@@ -367,6 +368,14 @@ during software speed changes. Instead:
   - TS block start,
   - block frame count/rate,
   - media/RST start and span.
+- The media/RST span normally comes from the Option B production map in
+  `stream_filter_audio_atempo.c`, keyed by the wrapper output-sample index. The
+  stream ledger queries the range `[output_cursor - nframes, output_cursor)` for
+  the block just read from the wrapper FIFO.
+- If the production map does not cover the full range, the ledger falls back to
+  the Option A live `ns_in - ring` delta sampled at reserve time; a final 1:1
+  TS-slope fallback keeps the clock progressing if the patched state is
+  unavailable.
 - `stream_sync.c` looks up the current AudioTrack presented frame in this ledger
   to compute the heard TS. Timestamp-based presented frames are treated as
   DAC-position evidence; playback-head evidence uses a calibrated post-playhead
@@ -575,6 +584,8 @@ Timeline mapping anchors are re-established after seek completes.
 - `Include/audio_interface.h` - Added atempo detection and presented/written frame helpers
 - `Source/stream.c` - Playhead-gated atempo video-speed commit queue
 - `Source/stream_audio.c` - Audio time accounting and atempo output ledger
+- `Source/stream_filter_audio_atempo.c` - Atempo filter, output FIFO, and
+  production-time output-to-media map
 - `Source/stream_video.c` - Initialize atempo filter
 - `Source/stream_sync.c` - Atempo ledger heard clock and ledger RST lookup
 - `Source/audio_interface.c` - Atempo flag setter/getter
@@ -601,6 +612,7 @@ int Debug[DBG_MAX_ENTRIES] = {
 stream_open_audio_filter: opened [atempo]
 at_ledger_arm: written=... playhead=... queued=... audio=... epoch_rst=...
 atempo_commit_arm: prev=1.000 target=1.500 boundary=... out_cursor=... flt_fifo=...
+at_ledger_omap: w_start=... nframes=... b_span_us=... a_span_us=... diff_us=...
 at_ledger: ledger_heard=... heard=... applied=1 playhead=... state=0 speed=1.500
 atempo_commit_apply: prev=1.000 speed=1.500 boundary=... crossed=1 anchor_ts=...
 atempo_rst_anchor: speed=1.500 anchor_rst_proj=... anchor_rst_ledger=... state=0 flipped=1
@@ -614,9 +626,12 @@ atempo_rst_anchor: speed=1.500 anchor_rst_proj=... anchor_rst_ledger=... state=0
 3. Confirm no `RST_TO_TS_DELTA` applied when `using_atempo` is true
 4. Check `atempo_commit_arm` / `atempo_commit_apply` ordering and that commits
    usually log `atempo_rst_anchor ... state=0 flipped=1`
-5. After seek/flush during a ramp, verify deferred sentinel commits do not drain
+5. Check `at_ledger_omap` during dense logging. Large differences from the live
+   Option A estimate are expected only around wrapper-FIFO lead; map misses
+   should remain rare and fall back cleanly.
+6. After seek/flush during a ramp, verify deferred sentinel commits do not drain
    against an empty ledger
-6. Confirm the FFmpeg atempo patch is present when building this path
+7. Confirm the FFmpeg atempo patch is present when building this path
 
 ### Audio Quality Issues
 1. Verify filter graph rebuilds correctly on speed changes
@@ -632,6 +647,6 @@ atempo_rst_anchor: speed=1.500 anchor_rst_proj=... anchor_rst_ledger=... state=0
 
 **Document Version:** 2.0
 **Last Updated:** 2026-06-14
-**Implementation:** Timeline mapping + playhead-gated atempo commit + Option A ledger RST anchor
+**Implementation:** Timeline mapping + playhead-gated atempo commit + Option B production media map with Option A fallback
 **FFmpeg Version:** N7.1
 **Android API:** All versions supported

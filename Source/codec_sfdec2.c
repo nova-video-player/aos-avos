@@ -139,6 +139,7 @@ typedef struct priv {
 	INT64 sched_last_off_ns;
 	INT64 sched_last_mono_ns;
 	int sched_late;
+	INT64 sched_debt_ns;	// schedule delay accumulated by the late ratchet, recovered by slew
 	int prev_paused;
 	int pause_start_ms;
 	int pause_armed;
@@ -242,6 +243,7 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	    (delta < -500 * NSEC_PER_MSEC || delta > 500 * NSEC_PER_MSEC) ) {
 		p->sched_start_mono_ns = now_ns + 100 * NSEC_PER_MSEC;
 		p->sched_start_off_ns = timestamp_ns;
+		p->sched_debt_ns = 0;
 		asap = 1;
 		reset_sched = 1;
 	}
@@ -249,15 +251,37 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	target_ns = timestamp_ns - p->sched_start_off_ns + p->sched_start_mono_ns;
 	delta = target_ns - now_ns;
 
-	if( !asap && delta < 0 ) {
+	// Only count a frame as "late" for the ratchet when it misses by more
+	// than half a frame duration (min 10ms).  At high playback speeds the
+	// frame cadence shrinks (~21ms at 1.45x) and ordinary jitter makes
+	// 3 consecutive small misses (1-6ms) common; with zero tolerance the
+	// ratchet then fires every ~1s, holding video 25-55ms behind audio —
+	// a real, audible A/V offset invisible to every clock-domain diff.
+	int frame_ms = (f && f->duration > 0) ? f->duration : 16;
+	INT64 late_tol_ns = (INT64)(frame_ms > 20 ? frame_ms / 2 : 10) * NSEC_PER_MSEC;
+	if( !asap && delta < -late_tol_ns ) {
 		p->sched_late++;
 		if( p->sched_late >= 3 ) {
-			int frame_ms = (f && f->duration > 0) ? f->duration : 16;
 			int step_ms = frame_ms * 2;
 			p->sched_start_mono_ns += (INT64)step_ms * NSEC_PER_MSEC;
+			// Remember the push so it can be slewed back once frames are
+			// on time again; otherwise each ratchet is a permanent A/V
+			// offset below the put_time reanchor threshold.
+			p->sched_debt_ns += (INT64)step_ms * NSEC_PER_MSEC;
 		}
 	} else {
 		p->sched_late = 0;
+		if( !asap && p->sched_debt_ns > 0 && delta > 0 ) {
+			// Recover ratchet debt with a bounded slew (max 2ms per frame),
+			// never making the current frame late (step <= delta).
+			INT64 step = 2 * NSEC_PER_MSEC;
+			if( step > p->sched_debt_ns )
+				step = p->sched_debt_ns;
+			if( step > delta )
+				step = delta;
+			p->sched_start_mono_ns -= step;
+			p->sched_debt_ns -= step;
+		}
 	}
 
 	target_ns = timestamp_ns - p->sched_start_off_ns + p->sched_start_mono_ns;
@@ -266,7 +290,7 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 
 	if( asap ) {
 		DBGSI serprintf(
-			"sink_wait_calc: frame=%d base=%d ts_ms=%d now_mono_ms=%lld target_mono_ms=%lld wait_ms=0 asap=1 reset=%d late=%d->%d start_off_ms=%lld start_mono_ms=%lld av_ts=%d\n",
+			"sink_wait_calc: frame=%d base=%d ts_ms=%d now_mono_ms=%lld target_mono_ms=%lld wait_ms=0 asap=1 reset=%d late=%d->%d start_off_ms=%lld start_mono_ms=%lld av_ts=%d debt_ms=%lld\n",
 			f ? f->index : -1,
 			f ? f->time : -1,
 			frame_time,
@@ -277,7 +301,8 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 			p->sched_late,
 			(long long)(p->sched_start_off_ns / NSEC_PER_MSEC),
 			(long long)(p->sched_start_mono_ns / NSEC_PER_MSEC),
-			av_delay_ts);
+			av_delay_ts,
+			(long long)(p->sched_debt_ns / NSEC_PER_MSEC));
 		return 0;
 	}
 
@@ -290,7 +315,7 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	{
 		int wait_ms = (int)( delta / 1000000LL );
 		DBGSI serprintf(
-			"sink_wait_calc: frame=%d base=%d ts_ms=%d now_mono_ms=%lld target_mono_ms=%lld wait_ms=%d asap=0 reset=%d late=%d->%d start_off_ms=%lld start_mono_ms=%lld av_ts=%d\n",
+			"sink_wait_calc: frame=%d base=%d ts_ms=%d now_mono_ms=%lld target_mono_ms=%lld wait_ms=%d asap=0 reset=%d late=%d->%d start_off_ms=%lld start_mono_ms=%lld av_ts=%d debt_ms=%lld\n",
 			f ? f->index : -1,
 			f ? f->time : -1,
 			frame_time,
@@ -302,7 +327,8 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 			p->sched_late,
 			(long long)(p->sched_start_off_ns / NSEC_PER_MSEC),
 			(long long)(p->sched_start_mono_ns / NSEC_PER_MSEC),
-			av_delay_ts);
+			av_delay_ts,
+			(long long)(p->sched_debt_ns / NSEC_PER_MSEC));
 		return wait_ms;
 	}
 }
@@ -541,6 +567,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->sched_last_off_ns   = p->sched_start_off_ns;
 		p->sched_last_mono_ns  = p->sched_start_mono_ns;
 		p->sched_late          = 0;
+		p->sched_debt_ns       = 0;
 		DBGSI serprintf("videosink_put_time: reset sched anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d)\n",
 			time, diff, speed_changed, discontinuity, no_sched_anchor);
 		pthread_mutex_unlock(&p->locked.mtx);
@@ -566,6 +593,7 @@ void sfdec2_refresh_sched_anchor( STREAM *s )
 	p->sched_last_off_ns   = 0;
 	p->sched_last_mono_ns  = 0;
 	p->sched_late          = 0;
+	p->sched_debt_ns       = 0;
 }
 
 static int videosink_get_time( STREAM_SINK_VIDEO *sink )
@@ -997,6 +1025,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->sched_last_off_ns = 0;
 	p->sched_last_mono_ns = 0;
 	p->sched_late = 0;
+	p->sched_debt_ns = 0;
 
 	p->reorder_pts = video->reorder_pts;
 
@@ -1491,6 +1520,7 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->sched_last_off_ns = 0;
 	p->sched_last_mono_ns = 0;
 	p->sched_late = 0;
+	p->sched_debt_ns = 0;
 	p->last_user_av_delay = s->av_delay;
 	p->effective_av_delay_ms = s->av_delay;
 	pthread_mutex_unlock( &p->locked.mtx );

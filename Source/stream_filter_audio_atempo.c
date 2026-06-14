@@ -59,6 +59,16 @@
 #include <libavutil/opt.h>
 #include <libavutil/audio_fifo.h>
 
+// Read-only af_atempo state accessor added to the vendored filter: reports
+// media counters and WSOLA ring occupancy used by the atempo output ledger.
+extern void avfilter_atempo_get_state(AVFilterContext *ctx,
+                                  int *ring_size,
+                                  int64_t *pos_in,
+                                  int64_t *pos_out,
+                                  int64_t *ns_in,
+                                  int64_t *ns_out,
+                                  double *tempo);
+
 #define DBGA DBG_IF(Debug[DBG_AUD])
 #define DBG DBG_IF(Debug[DBG_AUD])
 
@@ -101,6 +111,9 @@ struct ctx {
 	int last_input_samples;             // input samples from last _filter() call
 	int last_target_samples;            // target output samples from last _filter() call
 	int last_output_samples;            // actual output samples from last _filter() call
+	UINT64 total_output_samples;        // cumulative samples read from wrapper FIFO
+	int tempo_change_seq;               // diagnostic sequence for runtime tempo changes
+	int post_tempo_marker_pending;      // first output block after tempo command not yet logged
 };
 
 static int _flush(STREAM_FILTER_AUDIO *f);
@@ -115,7 +128,13 @@ static void atempo_reset_runtime_baseline(struct ctx *ctx, const char *reason)
 		int fifo_ms = (ctx->sample_rate > 0) ? (fifo_samples * 1000) / ctx->sample_rate : -1;
 		DBGA serprintf("atempo: reset runtime baseline reason=%s fifo_samples=%d fifo_ms=%d last_delay=%d\n",
 			reason ? reason : "unknown", fifo_samples, fifo_ms, ctx->last_delay_ms);
-		av_audio_fifo_reset(ctx->fifo);
+		// Do NOT reset the FIFO here: it holds real already-converted media.
+		// Discarding it on a speed change silently drops ~33-70ms of audio
+		// content per transition (whenever the FIFO is non-empty at the
+		// command), making the speaker run ahead of every content label —
+		// an A/V desync invisible to all internal clocks because the ledger
+		// and audio_time count output samples, not content. Format changes
+		// reallocate the FIFO separately in atempo_reconfigure_format().
 	}
 	ctx->last_delay_ms = -1;
 	ctx->last_speed_change_ms = 0;
@@ -150,12 +169,22 @@ static int atempo_update_speed(struct ctx *ctx, float speed)
 		ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1,
 		(ctx->fifo && ctx->sample_rate > 0) ? (av_audio_fifo_size(ctx->fifo) * 1000) / ctx->sample_rate : -1,
 		ctx->last_input_samples, ctx->last_target_samples, ctx->last_output_samples);
+	{
+		int fifo_samples = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : 0;
+		UINT64 boundary_out = ctx->total_output_samples + (UINT64)fifo_samples;
+		ctx->tempo_change_seq++;
+		ctx->post_tempo_marker_pending = 1;
+		DBGA serprintf("atempo_ckpt_request: seq=%d prev=%.3f new=%.3f out_total=%llu fifo_samples=%d boundary_out=%llu rate=%d\n",
+			ctx->tempo_change_seq, ctx->current_speed, speed,
+			(unsigned long long)ctx->total_output_samples, fifo_samples,
+			(unsigned long long)boundary_out, ctx->sample_rate);
+	}
 	ctx->current_speed = speed;
 
-	// Reusing the same FFmpeg atempo runtime state across tempo changes can
-	// carry a stale FIFO backlog into the next steady state. Reset the wrapper
-	// locally on every tempo change and let the normal cadence rebuild delay
-	// from the new speed.
+	// Reset the wrapper diagnostics on every tempo change and let the normal
+	// cadence rebuild delay from the new speed. FIFO content is preserved:
+	// it is real old-speed media that must still be played (the stage-3
+	// commit boundary already accounts for it via flt_fifo).
 	atempo_reset_runtime_baseline(ctx, "speed_change");
 	// Re-arm the post-speed-change window after the reset clears it.
 	ctx->last_speed_change_ms = atime();
@@ -755,8 +784,10 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
         if (read_samples > 0) {
             frame->data = ctx->output_buffer;
             frame->size = read_samples * bytes_per_sample;
+            samples_to_read = read_samples;
         } else {
             frame->size = 0;
+            samples_to_read = 0;
         }
     } else {
         // No output available yet (initial buffering)
@@ -767,9 +798,32 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	ctx->last_input_samples = input_samples;
 	ctx->last_target_samples = target_samples;
 	ctx->last_output_samples = samples_to_read;
+	if (samples_to_read > 0) {
+		if (ctx->post_tempo_marker_pending) {
+			DBGA serprintf("atempo_ckpt_first_output: seq=%d speed=%.3f out_start=%llu out=%d fifo_after=%d rate=%d\n",
+				ctx->tempo_change_seq, speed,
+				(unsigned long long)ctx->total_output_samples,
+				samples_to_read, fifo_after_read, ctx->sample_rate);
+			ctx->post_tempo_marker_pending = 0;
+		}
+		ctx->total_output_samples += (UINT64)samples_to_read;
+	}
 	DBGA serprintf("atempo_flow: speed=%.3f in=%d target=%d drained_frames=%d drained_samples=%d fifo_before=%d fifo_after_push=%d out=%d fifo_after_read=%d\n",
 		speed, input_samples, target_samples, drained_frames, drained_samples,
 		fifo_before_push, fifo_after_push, samples_to_read, fifo_after_read);
+	DBGA {
+		int af_ring = -1;
+		int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
+		double af_tempo = 0.0;
+		if (ctx->atempo_ctx) {
+			avfilter_atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+				&af_ns_in, &af_ns_out, &af_tempo);
+		}
+		serprintf("atempo_internal: tempo=%.3f ring=%d pos_in=%lld pos_out=%lld ns_in=%lld ns_out=%lld rate=%d\n",
+			af_tempo, af_ring,
+			(long long)af_pos_in, (long long)af_pos_out,
+			(long long)af_ns_in, (long long)af_ns_out, ctx->sample_rate);
+	}
 	DBG serprintf("atempo: filter speed=%.3f in=%d samples out=%d samples fifo=%d\n",
 		speed, ctx->in_frame->nb_samples, samples_to_read, fifo_after_read);
 
@@ -783,6 +837,10 @@ static int _flush(STREAM_FILTER_AUDIO *f)
 
 	if (ctx && ctx->fifo) {
 		av_audio_fifo_reset(ctx->fifo);
+	}
+	if (ctx) {
+		ctx->total_output_samples = 0;
+		ctx->post_tempo_marker_pending = 0;
 	}
 
 	if (ctx && ctx->filter_graph && ctx->abuffer_ctx && ctx->abuffersink_ctx) {
@@ -971,11 +1029,70 @@ STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new(void)
 	return f;
 }
 
+int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate)
+{
+	struct ctx *ctx = f ? f->priv : NULL;
+	if (!ctx || ctx->sample_rate <= 0) {
+		return 0;
+	}
+	if (out_samples) {
+		*out_samples = ctx->total_output_samples;
+	}
+	if (fifo_samples) {
+		*fifo_samples = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : 0;
+	}
+	if (rate) {
+		*rate = ctx->sample_rate;
+	}
+	return 1;
+}
+
+// Expose the filter's intrinsic media counters (af_atempo nsamples_in/out, RST/media
+// domain) and ring occupancy.  The atempo output ledger uses (ns_in - ring) at
+// reserve time to advance each output block's media/RST span, which the video-speed
+// commit then anchors to (the raw ns_in is filter-input, ahead of the audible
+// playhead, so it must be referenced through the ledger/playhead, not used directly).
+int stream_filter_audio_atempo_get_audit_state(STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate)
+{
+	struct ctx *ctx = f ? f->priv : NULL;
+	if (!ctx || ctx->sample_rate <= 0 || !ctx->atempo_ctx) {
+		return 0;
+	}
+	int af_ring = -1;
+	int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
+	double af_tempo = 0.0;
+	avfilter_atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+		&af_ns_in, &af_ns_out, &af_tempo);
+	if (ns_in) {
+		*ns_in = (INT64)af_ns_in;
+	}
+	if (ns_out) {
+		*ns_out = (INT64)af_ns_out;
+	}
+	if (ring) {
+		*ring = af_ring;
+	}
+	if (rate) {
+		*rate = ctx->sample_rate;
+	}
+	return 1;
+}
+
 #else
 // Stub implementation when FFmpeg is not available
 STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new(void)
 {
 	serprintf("atempo: filter not available (FFmpeg disabled)\n");
 	return NULL;
+}
+
+int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate)
+{
+	return 0;
+}
+
+int stream_filter_audio_atempo_get_audit_state(STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate)
+{
+	return 0;
 }
 #endif

@@ -265,6 +265,12 @@ int audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int
 	return impl->get_presented_frames(ctx, frames, rate, source, age_ms, prefer_fresh);
 }
 
+int audio_interface_get_written_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate)
+{
+	if (!impl || !impl->get_written_frames) return 0;
+	return impl->get_written_frames(ctx, frames, rate);
+}
+
 void audio_interface_flush_output(audio_ctx_t *ctx)
 {
 	impl->flush_output(ctx);

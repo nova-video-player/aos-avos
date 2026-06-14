@@ -37,11 +37,13 @@ struct STREAM;
 #include "stream_buffer.h"
 
 #include <pthread.h>
+#include <stdint.h>
 
 #define STREAM_DEFAULT_BUFFER_SIZE 64
 #define STREAM_LARGE_BUFFER_SIZE   128
 #define STREAM_MAX_FRAMES 64
 #define STREAM_PCM_DELAY_STABLE_STREAK 3
+#define STREAM_ATEMPO_LEDGER_SIZE 64
 
 // in sync with android/vendor/archos/frameworks/ArchosFrameworks/java/com/archos/frameworks/media/AvosPlayer.java
 typedef enum
@@ -70,6 +72,32 @@ typedef enum
 	STREAM_PCM_REANCHOR_APPLIED,
 	STREAM_PCM_REANCHOR_EXPIRED,
 } STREAM_PCM_REANCHOR_STATE;
+
+typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
+	UINT64	output_frames_start;
+	int	block_ts_start;
+	int	block_nframes;
+	int	rate;
+	// Media/RST span of this output block, advanced from af_atempo media-consumed
+	// deltas (ns_in - ring) at reserve time.  block_rst_start is the media position
+	// at block start; block_rst_span is the media ms this block spans.
+	int	block_rst_start;
+	int	block_rst_span;
+} STREAM_ATEMPO_LEDGER_ENTRY;
+
+// Deferred atempo video-commit checkpoint (one per speed step).
+#define STREAM_ATEMPO_COMMIT_MAX 16
+// Sentinel boundary: the ledger frame domain was invalidated (seek/flush/pause), so
+// this checkpoint must NOT drain against the stale timeline map.  The commit poll
+// applies it only once the new ledger is active and the playhead resolves state==0
+// (so the RST anchor is the fresh ledger value, not the poisoned TS_TO_RST_TIME()).
+#define STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER (~0ULL)
+typedef struct STREAM_ATEMPO_COMMIT {
+	float	speed;        // clamped target speed
+	float	prev_speed;   // mapping speed in effect before this checkpoint (diag)
+	UINT64	boundary;     // ledger-domain output frame boundary
+	int	wall_ms;      // request time (timeout safety)
+} STREAM_ATEMPO_COMMIT;
 
 typedef enum
 {
@@ -775,6 +803,46 @@ typedef struct STREAM {
 	int		at_speed_epoch_wall_ms;         // wall time at checkpoint (diagnostics)
 	UINT64		at_speed_epoch_frames_cached;   // last playhead sample read during epoch
 	int		at_speed_epoch_cache_wall_ms;   // wall time of last playhead sample
+	int		atempo_ledger_active;
+	int		atempo_ledger_count;
+	int		atempo_ledger_write;
+	UINT64		atempo_ledger_output_frames;
+	UINT64		atempo_ledger_base_written_frames;
+	int64_t		atempo_ledger_next_ts_us;
+	int		atempo_ledger_last_log_ms;
+	int		atempo_ledger_dense_until_ms;
+	// RST(media) baseline captured ONCE per ledger epoch (arm/seek/flush), NOT per
+	// speed step.  The commit poll anchors the timeline to this filter-paced media
+	// clock instead of the TS_TO_RST_TIME() projection, which lags the audible
+	// playhead by the sink+wrapper+ring backlog.
+	int		atempo_epoch_rst;               // RST(media) ms at ledger epoch
+	// Running media/RST cursor advanced per reserve from af media-consumed deltas
+	// (ns_in - ring).  next_rst_us is the RST(media) clock the ledger reports to
+	// the commit poll.
+	int64_t		atempo_ledger_next_rst_us;      // RST(media) us at next reserve
+	INT64		atempo_ledger_media_cursor;     // last (ns_in - ring) media frame
+	int		atempo_ledger_media_valid;      // media cursor initialised this epoch
+	// Post-playhead sink latency in output frames, self-calibrated at 1.0x
+	// against the legacy heard model.  Survives ledger re-arms (track property).
+	int64_t		atempo_ledger_lat_frames;
+	int		atempo_ledger_lat_samples;
+	int		atempo_ledger_lat_valid;
+	int		atempo_ledger_lat_last_ms;
+	// Playhead-gated video commit for atempo speed changes.
+	// The filter switches speed immediately, but ~300-400ms of old-speed output
+	// is still queued in the sink; switching the video timeline at write time
+	// makes video and audible content advance at different media rates during
+	// the drain, leaving a permanent offset of queue_ms * delta_speed per step.
+	// Defer the video-side commit until the playhead crosses the output-frame
+	// boundary where new-speed content begins.  Ramp steps can arrive faster
+	// than the ~400ms drain gate, so checkpoints are held in an ordered FIFO
+	// and promoted strictly in order (a single slot would collapse the ramp:
+	// later arms overwrote earlier un-promoted commits, jumping the video
+	// timeline straight to the final speed).
+	STREAM_ATEMPO_COMMIT atempo_commit_q[STREAM_ATEMPO_COMMIT_MAX];
+	int		atempo_commit_head;        // index of front (oldest) checkpoint
+	int		atempo_commit_count;       // number of queued checkpoints
+	STREAM_ATEMPO_LEDGER_ENTRY atempo_ledger[STREAM_ATEMPO_LEDGER_SIZE];
 
 	ID3_TAG		tag;
 	int		tag_new;
@@ -853,12 +921,15 @@ int	stream_refresh_audio_stream( STREAM *s );
 int	stream_set_audio_filter_level( STREAM *s, int level, int night_on );
 void	stream_set_audio_downmix( int downmix );
 void	stream_disable_atempo_filter( int disable );
+int	stream_filter_audio_atempo_get_ledger_stats( STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate );
+int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate );
 int	stream_check_subtitles( STREAM *s );
 int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
 void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
+int	stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state );
 int	stream_get_anchor_delay_ms( STREAM *s, int allow_static );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
@@ -891,6 +962,7 @@ int	stream_set_progress_handler ( STREAM *s, PROGRESS_HANDLER progress   );
 int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
 int	stream_set_av_speed         ( STREAM *s, float av_speed );
+void	stream_atempo_commit_poll   ( STREAM *s );
 int	stream_can_apply_av_speed   ( STREAM *s );
 
 int 	stream_set_crypt( STREAM *s, int crypt, void *key );

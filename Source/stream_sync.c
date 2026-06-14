@@ -149,6 +149,35 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
 	s->at_speed_epoch_active = 0;
+	s->atempo_ledger_active = 0;
+	s->atempo_ledger_count = 0;
+	s->atempo_ledger_write = 0;
+	s->atempo_ledger_output_frames = 0;
+	s->atempo_ledger_base_written_frames = 0;
+	s->atempo_ledger_next_ts_us = 0;
+	s->atempo_ledger_last_log_ms = 0;
+	s->atempo_ledger_dense_until_ms = 0;
+	s->atempo_ledger_next_rst_us = 0;
+	s->atempo_ledger_media_cursor = 0;
+	s->atempo_ledger_media_valid = 0;
+	// Pending commits reference the old ledger frame domain; on seek/flush the
+	// boundaries AND their RST anchor source are invalid.  The target speeds are
+	// already live in the filter, so the video-side commit must still happen or the
+	// timelines run at different rates forever.  Zeroing the boundaries would drain
+	// the whole queue at the next poll against the just-reset (empty) ledger and the
+	// stale TS_TO_RST_TIME() map, anchoring video to a wildly wrong RST.  Instead,
+	// collapse the queue to the single latest target speed and mark it DEFER, so the
+	// poll applies it once the new ledger is active and resolves state==0 (a fresh,
+	// correct RST anchor), not before.
+	if( s->atempo_commit_count > 0 ) {
+		int last = ( s->atempo_commit_head + s->atempo_commit_count - 1 ) % STREAM_ATEMPO_COMMIT_MAX;
+		STREAM_ATEMPO_COMMIT collapsed = s->atempo_commit_q[last];
+		collapsed.boundary = STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER;
+		collapsed.wall_ms = atime();
+		s->atempo_commit_head = 0;
+		s->atempo_commit_count = 1;
+		s->atempo_commit_q[0] = collapsed;
+	}
 }
 
 static void _stream_pcm_reanchor_reset( STREAM *s )
@@ -578,6 +607,99 @@ static int _stream_current_heard_delay( STREAM *s,
 	return delay_status->effective_delay_ms;
 }
 
+// Map an output-frame playhead position to the media TS of the sample at that
+// position using the atempo output ledger.
+// state: 0 = inside a ledger block, -1 = before oldest block (stale/startup),
+// +1 = past newest block (extrapolated at the newest block rate).
+typedef struct {
+	int	heard;		// STREAM_NO_PTS_VALUE if not resolvable
+	int	heard_rst;	// media/RST interpolation (STREAM_NO_PTS_VALUE if invalid)
+	int	state;
+	UINT64	block_start;
+	int	block_ts;
+	int	block_nframes;
+} ATEMPO_LEDGER_LOOKUP;
+
+static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup( STREAM *s, UINT64 playhead, int playhead_rate )
+{
+	ATEMPO_LEDGER_LOOKUP r = { STREAM_NO_PTS_VALUE, STREAM_NO_PTS_VALUE, 0, 0, 0, 0 };
+	int oldest = (s->atempo_ledger_write - s->atempo_ledger_count + STREAM_ATEMPO_LEDGER_SIZE) %
+		STREAM_ATEMPO_LEDGER_SIZE;
+	int newest = (s->atempo_ledger_write - 1 + STREAM_ATEMPO_LEDGER_SIZE) %
+		STREAM_ATEMPO_LEDGER_SIZE;
+	for( int i = 0; i < s->atempo_ledger_count; ++i ) {
+		int idx = (oldest + i) % STREAM_ATEMPO_LEDGER_SIZE;
+		STREAM_ATEMPO_LEDGER_ENTRY *entry = &s->atempo_ledger[idx];
+		UINT64 block_end = entry->output_frames_start + (UINT64)entry->block_nframes;
+		if( playhead >= entry->output_frames_start && playhead < block_end ) {
+			UINT64 delta_frames = playhead - entry->output_frames_start;
+			int rate = entry->rate > 0 ? entry->rate : playhead_rate;
+			r.heard = entry->block_ts_start + (int)((delta_frames * 1000) / (UINT64)rate);
+			// Media/RST interpolation: prorate the block's media span across its
+			// output frames (RST slope differs from the 1:1 TS slope by tempo).
+			if( entry->block_nframes > 0 ) {
+				r.heard_rst = entry->block_rst_start +
+					(int)((delta_frames * (UINT64)entry->block_rst_span) / (UINT64)entry->block_nframes);
+			} else {
+				r.heard_rst = entry->block_rst_start;
+			}
+			r.block_start = entry->output_frames_start;
+			r.block_ts = entry->block_ts_start;
+			r.block_nframes = entry->block_nframes;
+			r.state = 0;
+			return r;
+		}
+	}
+	STREAM_ATEMPO_LEDGER_ENTRY *oldest_entry = &s->atempo_ledger[oldest];
+	STREAM_ATEMPO_LEDGER_ENTRY *newest_entry = &s->atempo_ledger[newest];
+	UINT64 newest_end = newest_entry->output_frames_start + (UINT64)newest_entry->block_nframes;
+	if( playhead < oldest_entry->output_frames_start ) {
+		r.heard = oldest_entry->block_ts_start;
+		r.heard_rst = oldest_entry->block_rst_start;
+		r.block_start = oldest_entry->output_frames_start;
+		r.block_ts = oldest_entry->block_ts_start;
+		r.block_nframes = oldest_entry->block_nframes;
+		r.state = -1;
+	} else if( playhead >= newest_end ) {
+		int rate = newest_entry->rate > 0 ? newest_entry->rate : playhead_rate;
+		int block_end_ts = newest_entry->block_ts_start +
+			(int)(((UINT64)newest_entry->block_nframes * 1000) / (UINT64)rate);
+		UINT64 delta_after = playhead - newest_end;
+		r.heard = block_end_ts + (int)((delta_after * 1000) / (UINT64)rate);
+		// Extend the media/RST clock at the newest block's RST slope.
+		if( newest_entry->block_nframes > 0 ) {
+			r.heard_rst = newest_entry->block_rst_start + newest_entry->block_rst_span +
+				(int)((delta_after * (UINT64)newest_entry->block_rst_span) / (UINT64)newest_entry->block_nframes);
+		} else {
+			r.heard_rst = newest_entry->block_rst_start + newest_entry->block_rst_span;
+		}
+		r.block_start = newest_entry->output_frames_start;
+		r.block_ts = newest_entry->block_ts_start;
+		r.block_nframes = newest_entry->block_nframes;
+		r.state = 1;
+	}
+	return r;
+}
+
+// Public accessor for the ledger's media/RST interpolation at a given output-frame
+// playhead.  Returns the heard media (RST) ms, or STREAM_NO_PTS_VALUE if the ledger
+// is inactive/unresolvable.  *state (optional) gets the lookup state (-1 stale /
+// 0 inside / +1 extrapolated).
+int stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state )
+{
+	if( !s || !s->atempo_ledger_active || s->atempo_ledger_count <= 0 ) {
+		if( state ) {
+			*state = 0;
+		}
+		return STREAM_NO_PTS_VALUE;
+	}
+	ATEMPO_LEDGER_LOOKUP r = _stream_atempo_ledger_lookup( s, playhead, playhead_rate );
+	if( state ) {
+		*state = r.state;
+	}
+	return r.heard_rst;
+}
+
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
@@ -684,6 +806,88 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				}
 			}
 			heard_ts = checkpoint_heard;
+		}
+	}
+
+	if( s->atempo_ledger_active && s->atempo_ledger_count > 0 &&
+		audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() &&
+		!passthrough_mode && !is_mode2_sync && s->audio_ctx ) {
+		UINT64 playhead = 0;
+		int playhead_rate = 0, playhead_src = 0, playhead_age = 0;
+		if( audio_interface_get_presented_frames( s->audio_ctx, &playhead, &playhead_rate,
+				&playhead_src, &playhead_age, 1 ) && playhead_rate > 0 ) {
+			ATEMPO_LEDGER_LOOKUP raw = _stream_atempo_ledger_lookup( s, playhead, playhead_rate );
+			float cur_speed = audio_interface_get_audio_speed();
+			// SRC_TIMESTAMP = extrapolated AudioTrack getTimestamp framePosition:
+			// the frame at the DAC, latency-free, so the raw ledger lookup IS the
+			// heard clock.  SRC_PLAYHEAD = getPlaybackHeadPosition (mixer hand-off),
+			// which needs the calibrated post-playhead latency subtracted first.
+			int playhead_is_dac = (playhead_src == AT_PRESENTED_FRAMES_SRC_TIMESTAMP);
+
+			// Calibrate the post-playhead latency (in output frames) at 1.0x against
+			// the legacy heard model.  Only meaningful for the mixer playhead source.
+			if( !playhead_is_dac &&
+				raw.heard != STREAM_NO_PTS_VALUE && raw.state == 0 &&
+				delay_valid && cur_speed > 0.999f && cur_speed < 1.001f &&
+				wall_now - s->atempo_ledger_lat_last_ms >= 250 ) {
+				s->atempo_ledger_lat_last_ms = wall_now;
+				int bias_ms = raw.heard - heard_ts;
+				int64_t target = ((int64_t)bias_ms * playhead_rate) / 1000;
+				if( target < 0 )
+					target = 0;
+				if( s->atempo_ledger_lat_samples == 0 )
+					s->atempo_ledger_lat_frames = target;
+				else
+					s->atempo_ledger_lat_frames += (target - s->atempo_ledger_lat_frames) / 4;
+				if( s->atempo_ledger_lat_samples < 1000 )
+					s->atempo_ledger_lat_samples++;
+				if( s->atempo_ledger_lat_samples >= 4 )
+					s->atempo_ledger_lat_valid = 1;
+			}
+
+			// Use the atempo ledger heard clock in place of the legacy delay model.
+			int ledger_applied = 0;
+			int eff_heard = STREAM_NO_PTS_VALUE;
+			if( playhead_is_dac ) {
+				if( raw.heard != STREAM_NO_PTS_VALUE && raw.state >= 0 ) {
+					eff_heard = raw.heard;
+					ledger_applied = 1;
+				}
+			} else if( s->atempo_ledger_lat_valid ) {
+				UINT64 lat = (UINT64)s->atempo_ledger_lat_frames;
+				UINT64 playhead_eff = playhead > lat ? playhead - lat : 0;
+				ATEMPO_LEDGER_LOOKUP eff = _stream_atempo_ledger_lookup( s, playhead_eff, playhead_rate );
+				if( eff.heard != STREAM_NO_PTS_VALUE && eff.state >= 0 ) {
+					eff_heard = eff.heard;
+					ledger_applied = 1;
+				}
+			}
+
+			if( raw.heard != STREAM_NO_PTS_VALUE ) {
+				int now_ms = wall_now;
+				int dense = s->atempo_ledger_dense_until_ms > 0 &&
+					now_ms <= s->atempo_ledger_dense_until_ms;
+				if( dense || now_ms - s->atempo_ledger_last_log_ms >= 500 ) {
+					UINT64 flt_out = 0;
+					int flt_fifo = 0, flt_rate = 0;
+					stream_filter_audio_atempo_get_ledger_stats( s->audio_filter_atempo,
+						&flt_out, &flt_fifo, &flt_rate );
+					s->atempo_ledger_last_log_ms = now_ms;
+					DBG serprintf("at_ledger: ledger_heard=%d heard=%d diff=%d eff_heard=%d lat_frames=%lld applied=%d playhead=%llu out_written=%llu state=%d block_start=%llu block_ts=%d block_nframes=%d q_fifo=%d flt_out=%llu flt_rate=%d src=%d age=%d speed=%.3f dense=%d\n",
+						raw.heard, heard_ts, raw.heard - heard_ts,
+						eff_heard, (long long)s->atempo_ledger_lat_frames, ledger_applied,
+						(unsigned long long)playhead,
+						(unsigned long long)s->atempo_ledger_output_frames,
+						raw.state, (unsigned long long)raw.block_start,
+						raw.block_ts, raw.block_nframes, flt_fifo,
+						(unsigned long long)flt_out, flt_rate,
+						playhead_src, playhead_age, cur_speed, dense);
+				}
+			}
+
+			if( ledger_applied ) {
+				heard_ts = eff_heard;
+			}
 		}
 	}
 
@@ -1212,6 +1416,10 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			audio_time, s->video_time, s->seek_epoch, s->seek_target_sync_time,
 			s->seek_use_target_sync, s->seek_audio_drop, s->seek_audio_target_ts );
 	}
+
+	// Apply a deferred atempo video commit once the playhead crosses the boundary
+	// where new-speed content starts playing.
+	stream_atempo_commit_poll( s );
 
 #ifdef CONFIG_ANDROID
 	int allow_static = 1;

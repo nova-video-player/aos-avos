@@ -69,6 +69,197 @@ static int _stream_audio_speed_diag_active( STREAM *s )
 	return s && s->audio_speed_diag_writes_left > 0;
 }
 
+static void _stream_atempo_ledger_reset(STREAM *s)
+{
+	if (!s) {
+		return;
+	}
+	s->atempo_ledger_active = 0;
+	s->atempo_ledger_count = 0;
+	s->atempo_ledger_write = 0;
+	s->atempo_ledger_output_frames = 0;
+	s->atempo_ledger_base_written_frames = 0;
+	s->atempo_ledger_next_ts_us = 0;
+	s->atempo_ledger_last_log_ms = 0;
+	s->atempo_ledger_dense_until_ms = 0;
+	s->atempo_ledger_next_rst_us = 0;
+	s->atempo_ledger_media_cursor = 0;
+	s->atempo_ledger_media_valid = 0;
+}
+
+static int _stream_atempo_ledger_arm(STREAM *s, int sample_rate)
+{
+	if (!s || !s->audio_ctx || sample_rate <= 0 || s->audio_time < 0) {
+		return 0;
+	}
+	UINT64 written_frames = 0;
+	int written_rate = 0;
+	if (!audio_interface_get_written_frames(s->audio_ctx, &written_frames, &written_rate) || written_rate <= 0) {
+		return 0;
+	}
+	s->atempo_ledger_active = 1;
+	s->atempo_ledger_count = 0;
+	s->atempo_ledger_write = 0;
+	s->atempo_ledger_base_written_frames = written_frames;
+	s->atempo_ledger_output_frames = written_frames;
+	s->atempo_ledger_next_ts_us = (int64_t)s->audio_time * 1000;
+	s->atempo_ledger_last_log_ms = 0;
+	// Snapshot the af_atempo media/RST baseline at the ledger epoch.  epoch_rst is
+	// the media position of the ledger anchor TS; seed the running media/RST cursor
+	// from it.  media_cursor tracks (ns_in - ring) = filter-consumed media that has
+	// reached the ring head; next_rst_us is the RST(media) clock the ledger reports
+	// back to the commit poll.
+	s->atempo_epoch_rst = TS_TO_RST_TIME( s->audio_time, int );
+	s->atempo_ledger_next_rst_us = (int64_t)s->atempo_epoch_rst * 1000;
+	s->atempo_ledger_media_cursor = 0;
+	s->atempo_ledger_media_valid = 0;
+	{
+		INT64 epoch_ns_in = 0, epoch_ns_out = 0;
+		int epoch_ring = 0, epoch_af_rate = 0;
+		if( stream_filter_audio_atempo_get_audit_state( s->audio_filter_atempo, &epoch_ns_in, &epoch_ns_out, &epoch_ring, &epoch_af_rate ) ) {
+			s->atempo_ledger_media_cursor = epoch_ns_in - epoch_ring;
+			s->atempo_ledger_media_valid = 1;
+		}
+	}
+	DBG {
+		UINT64 playhead_frames = 0;
+		int playhead_rate = 0, playhead_src = 0, playhead_age = 0;
+		int playhead_valid = audio_interface_get_presented_frames(
+			s->audio_ctx, &playhead_frames, &playhead_rate, &playhead_src, &playhead_age, 1);
+		int old_heard = stream_get_heard_audio_ts( s, s->audio_time );
+		int ledger_at_playhead = STREAM_NO_PTS_VALUE;
+		int arm_bias = STREAM_NO_PTS_VALUE;
+		if( playhead_valid && written_rate > 0 ) {
+			int64_t queued_frames = (int64_t)written_frames - (int64_t)playhead_frames;
+			int64_t queued_us = (queued_frames * 1000000LL) / written_rate;
+			ledger_at_playhead = s->audio_time - (int)(queued_us / 1000);
+			arm_bias = ledger_at_playhead - old_heard;
+		}
+		serprintf("at_ledger_arm: written=%llu playhead=%llu queued=%lld out_cursor=%llu audio=%d old_heard=%d ledger_at_playhead=%d arm_bias=%d rate=%d playhead_valid=%d src=%d age=%d epoch_rst=%d\n",
+			(unsigned long long)written_frames, (unsigned long long)playhead_frames,
+			playhead_valid ? (long long)((int64_t)written_frames - (int64_t)playhead_frames) : -1,
+			(unsigned long long)s->atempo_ledger_output_frames, s->audio_time,
+			old_heard, ledger_at_playhead, arm_bias,
+			written_rate, playhead_valid, playhead_src, playhead_age,
+			s->atempo_epoch_rst);
+	}
+	return 1;
+}
+
+static int64_t _stream_atempo_ledger_frames_to_us(int frames, int sample_rate)
+{
+	return sample_rate > 0 ? ((int64_t)frames * 1000000) / sample_rate : 0;
+}
+
+static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate)
+{
+	if (!s || nframes <= 0 || sample_rate <= 0) {
+		return 0;
+	}
+	if (!s->atempo_ledger_active && !_stream_atempo_ledger_arm(s, sample_rate)) {
+		return 0;
+	}
+	STREAM_ATEMPO_LEDGER_ENTRY *entry = &s->atempo_ledger[s->atempo_ledger_write];
+	entry->output_frames_start = s->atempo_ledger_output_frames;
+	entry->block_ts_start = (int)(s->atempo_ledger_next_ts_us / 1000);
+	entry->block_nframes = nframes;
+	entry->rate = sample_rate;
+	// Advance the media/RST span of this output block from the af_atempo
+	// media-consumed delta (ns_in - ring) sampled now.  When the filter has no
+	// readable state, fall back to a 1:1 (TS-slope) span so the ledger never stalls.
+	entry->block_rst_start = (int)(s->atempo_ledger_next_rst_us / 1000);
+	{
+		int64_t block_rst_span_us = _stream_atempo_ledger_frames_to_us(nframes, sample_rate);
+		if( s->atempo_ledger_media_valid ) {
+			INT64 ns_in_now = 0, ns_out_now = 0;
+			int ring_now = 0, af_rate_now = 0;
+			if( stream_filter_audio_atempo_get_audit_state( s->audio_filter_atempo, &ns_in_now, &ns_out_now, &ring_now, &af_rate_now ) && af_rate_now > 0 ) {
+				INT64 media_now = ns_in_now - ring_now;
+				INT64 span_frames = media_now - s->atempo_ledger_media_cursor;
+				if( span_frames < 0 ) {
+					span_frames = 0;
+				}
+				block_rst_span_us = ((int64_t)span_frames * 1000000) / af_rate_now;
+				s->atempo_ledger_media_cursor = media_now;
+			}
+		}
+		entry->block_rst_span = (int)(block_rst_span_us / 1000);
+		s->atempo_ledger_next_rst_us += block_rst_span_us;
+	}
+	s->atempo_ledger_write = (s->atempo_ledger_write + 1) % STREAM_ATEMPO_LEDGER_SIZE;
+	if (s->atempo_ledger_count < STREAM_ATEMPO_LEDGER_SIZE) {
+		s->atempo_ledger_count++;
+	}
+	s->atempo_ledger_output_frames += (UINT64)nframes;
+	s->atempo_ledger_next_ts_us += _stream_atempo_ledger_frames_to_us(nframes, sample_rate);
+	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+		DBG serprintf("at_ledger_reserve: out_start=%llu ts=%d nframes=%d rate=%d out_next=%llu ts_next=%lld\n",
+			(unsigned long long)entry->output_frames_start, entry->block_ts_start,
+			nframes, sample_rate, (unsigned long long)s->atempo_ledger_output_frames,
+			(long long)(s->atempo_ledger_next_ts_us / 1000));
+	}
+	return 1;
+}
+
+static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int written_frames, int sample_rate)
+{
+	if (!s || !s->atempo_ledger_active || reserved_frames <= 0 || sample_rate <= 0) {
+		return;
+	}
+	int idx = (s->atempo_ledger_write - 1 + STREAM_ATEMPO_LEDGER_SIZE) % STREAM_ATEMPO_LEDGER_SIZE;
+	STREAM_ATEMPO_LEDGER_ENTRY *entry = &s->atempo_ledger[idx];
+	if (written_frames <= 0) {
+		s->atempo_ledger_write = idx;
+		if (s->atempo_ledger_count > 0) {
+			s->atempo_ledger_count--;
+		}
+		s->atempo_ledger_output_frames -= (UINT64)reserved_frames;
+		s->atempo_ledger_next_ts_us -= _stream_atempo_ledger_frames_to_us(reserved_frames, sample_rate);
+		// Roll back the media/RST cursor too so a cancelled (zero-write) reserve does
+		// not leave the RST clock ahead.
+		s->atempo_ledger_next_rst_us -= (int64_t)entry->block_rst_span * 1000;
+		if( s->atempo_ledger_media_valid && entry->rate > 0 ) {
+			s->atempo_ledger_media_cursor -= ((INT64)entry->block_rst_span * entry->rate) / 1000;
+		}
+		if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+			DBG serprintf("at_ledger_cancel: reserved=%d out_next=%llu ts_next=%lld\n",
+				reserved_frames, (unsigned long long)s->atempo_ledger_output_frames,
+				(long long)(s->atempo_ledger_next_ts_us / 1000));
+		}
+		return;
+	}
+	if (written_frames != reserved_frames) {
+		int delta = written_frames - reserved_frames;
+		entry->block_nframes = written_frames;
+		if (delta > 0) {
+			s->atempo_ledger_output_frames += (UINT64)delta;
+		} else {
+			s->atempo_ledger_output_frames -= (UINT64)(-delta);
+		}
+		s->atempo_ledger_next_ts_us += _stream_atempo_ledger_frames_to_us(delta, sample_rate);
+		// Scale this block's media/RST span by the written/reserved ratio so the RST
+		// slope stays consistent on a partial write, and roll the RST cursor + media
+		// cursor by the same shrink/grow.
+		int old_span_ms = entry->block_rst_span;
+		int new_span_ms = reserved_frames > 0
+			? (int)(((int64_t)old_span_ms * written_frames) / reserved_frames)
+			: old_span_ms;
+		int span_diff_ms = new_span_ms - old_span_ms;
+		entry->block_rst_span = new_span_ms;
+		s->atempo_ledger_next_rst_us += (int64_t)span_diff_ms * 1000;
+		if( s->atempo_ledger_media_valid && entry->rate > 0 ) {
+			s->atempo_ledger_media_cursor += ((INT64)span_diff_ms * entry->rate) / 1000;
+		}
+	}
+	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+		DBG serprintf("at_ledger_append: out_start=%llu ts=%d reserved=%d nframes=%d rate=%d out_next=%llu ts_next=%lld\n",
+			(unsigned long long)entry->output_frames_start, entry->block_ts_start,
+			reserved_frames, written_frames, sample_rate,
+			(unsigned long long)s->atempo_ledger_output_frames,
+			(long long)(s->atempo_ledger_next_ts_us / 1000));
+	}
+}
+
 static int _stream_audio_time_diag_active( STREAM *s )
 {
 	if( !s ) {
@@ -312,6 +503,7 @@ void stream_audio_flush( STREAM *s )
 	// AudioTrack playhead epoch is anchored to the pre-flush frame position;
 	// clear it so the epoch clock does not run against a stale base.
 	s->at_speed_epoch_active = 0;
+	_stream_atempo_ledger_reset( s );
 
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
@@ -520,6 +712,7 @@ static void _audio_decode( STREAM *s )
 			int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 			if( s->audio_sink->syncable( s ) && !passthrough ) {
 				s->at_speed_epoch_active = 0;
+				_stream_atempo_ledger_reset( s );
 				s->audio_sink->flush( s );
 				s->manual_audio_delay_applied_ms = 0;
 				s->audio_sink->preload( s );
@@ -1163,6 +1356,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							int passthrough_mode = stream_audio_requested_passthrough_for_format( s->audio->format );
 							if( passthrough_mode == 0 ) {
 								s->at_speed_epoch_active = 0;
+								_stream_atempo_ledger_reset( s );
 								s->audio_sink->flush( s );
 							}
 							s->audio_sink->stop( s );
@@ -1454,6 +1648,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
+					int ledger_reserved = 0;
+					int ledger_reserved_frames = 0;
+					int ledger_bpf = 0;
+					if( use_atempo && !passthrough_active && !ac3_recoding &&
+						bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
+						ledger_bpf = bytes_per_sample * channels;
+						ledger_reserved_frames = ledger_bpf > 0 ? audio_frame.size / ledger_bpf : 0;
+						ledger_reserved = _stream_atempo_ledger_reserve(
+							s, ledger_reserved_frames, sample_rate );
+					}
 					// Arm the one-shot reanchor before the write so the latch is ready,
 					// but do not apply yet: audio_time must only be rebased after bytes
 					// are confirmed committed (size_written > 0).
@@ -1465,6 +1669,12 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG3 serprintf("stream_audio: sink->write returned %d\n", size_written);
+					if( ledger_reserved ) {
+						int written_frames = (size_written > 0 && ledger_bpf > 0) ?
+							size_written / ledger_bpf : 0;
+						_stream_atempo_ledger_finalize(
+							s, ledger_reserved_frames, written_frames, sample_rate );
+					}
 
 					// For A/V sync scaling, we need the PCM-equivalent duration of written data.
 					// Mode 2 / AC3 recoding: fakeSize carries the PCM-equivalent payload size.

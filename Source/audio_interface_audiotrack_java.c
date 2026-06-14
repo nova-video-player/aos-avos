@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <math.h>
+#include <time.h>
 
 #include "global.h"
 #include "debug.h"
@@ -111,6 +112,7 @@ struct audio_ctx {
 	jclass audioAttributesBuilderClass;
 	jclass audioFormatBuilderClass;
 	uint64_t i_samples_written; // Total samples written to AudioTrack (for dynamic latency tracking)
+	uint64_t playhead_epoch_offset; // Raw presented-frame base after AudioTrack.flush()
 	jclass audioTimestampClass;
 	jobject audioTimestamp;
 	int64_t last_timestamp_ns;
@@ -1288,6 +1290,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		return -1;
 	}
 
+	at->i_samples_written = 0;
+	at->timestamp_written_offset = 0;
 	audiotrack_reset_timing(at);
 	audiotrack_update_latency(at, at->env);
 
@@ -1619,6 +1623,19 @@ static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples)
 	if (!audiotrack_mode2_audit || !at || samples <= 0) return;
 	at->mode2_logical_samples += (uint64_t)samples;
 	audiotrack_mode2_playhead_audit(at);
+}
+
+static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64_t raw_frames)
+{
+	if (!at || at->playhead_epoch_offset == 0) {
+		return raw_frames;
+	}
+	if (raw_frames >= at->playhead_epoch_offset) {
+		return raw_frames - at->playhead_epoch_offset;
+	}
+	// Treat wrap/reset as a new raw epoch. This keeps diagnostics bounded
+	// instead of underflowing against a stale offset.
+	return raw_frames;
 }
 
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
@@ -2234,6 +2251,15 @@ ERR		LOG("track not valid, error");
 	// Reset timing state after flush
 	at->i_samples_written = 0;
 	audiotrack_reset_timing(at);
+	jint flush_playhead = call_int_method_with_env(at, env_local, "getPlaybackHeadPosition", "()I");
+	if (flush_playhead > 0) {
+		at->playhead_epoch_offset = (uint64_t)(uint32_t)flush_playhead;
+		DBG LOG("audiotrack_flush_output: playhead_epoch_offset=%llu",
+			(unsigned long long)at->playhead_epoch_offset);
+	} else {
+		at->playhead_epoch_offset = 0;
+		DBG LOG("audiotrack_flush_output: playhead_epoch_offset unavailable (%d)", flush_playhead);
+	}
 	if (at->passthrough) {
 		DBG LOG("audiotrack_flush_output: scheduling passthrough restart after flush");
 		at->passthrough_restart_after_flush = 1;
@@ -2461,6 +2487,7 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->last_timestamp_ns = 0;
 	at->last_timestamp_frames = 0;
 	at->timestamp_written_offset = 0;
+	at->playhead_epoch_offset = 0;
 	at->ts_success_streak = 0;
 	at->ts_use_timestamp = 0;
 	at->ts_last_query_ms = 0;
@@ -2660,12 +2687,44 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 {
 	if (!at || !frames || !rate || at->rate <= 0) return 0;
 
-	// Prefer getTimestamp cache only when caller does not need a fresh sample and
-	// the cache was updated within 500ms (well within the 2000ms getTimestamp throttle window).
+	// DAC-accurate source: extrapolate the last stable AudioTrack timestamp to now.
+	// framePosition is the frame actually presented at the DAC, so this position is
+	// latency-free, unlike getPlaybackHeadPosition() (frames handed to the mixer).
+	// Extrapolation covers the 2000ms getTimestamp throttle window; if the sample is
+	// older than 2500ms (pause, stall) fall through to the playhead query below.
+	if (at->ts_use_timestamp && at->last_timestamp_ns > 0 && at->last_timestamp_frames > 0) {
+		struct timespec now_ts;
+		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+		int64_t now_ns = (int64_t)now_ts.tv_sec * 1000000000LL + now_ts.tv_nsec;
+		int64_t age_ns = now_ns - at->last_timestamp_ns;
+		if (age_ns >= 0 && age_ns < 2500LL * 1000000LL) {
+			int64_t adv = (age_ns * at->rate) / 1000000000LL;
+			// With AudioTrack PlaybackParams(speed S) the DAC consumes frames at
+			// rate*S; with atempo the track drains at 1x (filter already resampled).
+			if (!(audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo())) {
+				float spd = get_effective_audio_speed();
+				if (spd > 1e-3f && fabsf(spd - 1.0f) > 1e-6f)
+					adv = (int64_t)(adv * spd);
+			}
+			uint64_t f = at->last_timestamp_frames + (uint64_t)adv;
+			// Never report beyond what was written (underrun/pause guard).
+			uint64_t written_adj = at->i_samples_written > at->timestamp_written_offset ?
+				at->i_samples_written - at->timestamp_written_offset : 0;
+			if (written_adj > 0 && f > written_adj)
+				f = written_adj;
+			*frames = audiotrack_epoch_adjust_presented_frames(at, f);
+			*rate = at->rate;
+			if (source) *source = AT_PRESENTED_FRAMES_SRC_TIMESTAMP;
+			if (age_ms) *age_ms = (int)(age_ns / 1000000LL);
+			return 1;
+		}
+	}
+
+	// Stale-cache fallback for callers that do not need a fresh sample.
 	if (!prefer_fresh && at->ts_use_timestamp && at->last_timestamp_frames > 0 && at->ts_last_query_ms > 0) {
 		int ts_age = atime() - at->ts_last_query_ms;
 		if (ts_age < 500) {
-			*frames = at->last_timestamp_frames;
+			*frames = audiotrack_epoch_adjust_presented_frames(at, at->last_timestamp_frames);
 			*rate = at->rate;
 			if (source) *source = AT_PRESENTED_FRAMES_SRC_TIMESTAMP;
 			if (age_ms) *age_ms = ts_age;
@@ -2681,10 +2740,19 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 	jint ph_frames = call_int_method_with_env(at, env, "getPlaybackHeadPosition", "()I");
 	if (ph_frames <= 0) return 0;
 
-	*frames = (uint64_t)(uint32_t)ph_frames;  // 32-bit position; wraps at ~27h at 44100Hz
+	*frames = audiotrack_epoch_adjust_presented_frames(
+		at, (uint64_t)(uint32_t)ph_frames);  // 32-bit position; wraps at ~27h at 44100Hz
 	*rate = at->rate;
 	if (source) *source = AT_PRESENTED_FRAMES_SRC_PLAYHEAD;
 	if (age_ms) *age_ms = 0;
+	return 1;
+}
+
+static int audiotrack_get_written_frames(audio_ctx_t *at, uint64_t *frames, int *rate)
+{
+	if (!at || !frames || !rate || at->rate <= 0) return 0;
+	*frames = at->i_samples_written;
+	*rate = at->rate;
 	return 1;
 }
 
@@ -2723,6 +2791,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.invalidate_delay_cache = audiotrack_invalidate_delay_cache,
 	.add_logical_samples = audiotrack_add_logical_samples,
 	.get_presented_frames = audiotrack_get_presented_frames,
+	.get_written_frames = audiotrack_get_written_frames,
 };
 
 #ifdef DEBUG_MSG

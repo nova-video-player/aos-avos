@@ -9,6 +9,56 @@ AudioTrack PlaybackParams, the atempo filter is part of the steady PCM audio
 pipeline even at exactly 1.0x. Keeping the neutral filter hot avoids a pipeline
 discontinuity when the user changes speed while playback is running.
 
+## Current State (2026-06-14)
+
+The current implementation uses the atempo path as a software speed backend with
+three separate clocks/anchors:
+
+- **TS clock:** atempo output samples are already time-scaled, so the live
+  `audio_time` / heard clock advances 1:1 with emitted output duration.
+- **Output ledger:** every atempo PCM block written to AudioTrack is recorded in
+  an output-frame ledger keyed by cumulative AudioTrack written frames. The
+  ledger lets the sync path map the current AudioTrack playhead back to the TS
+  sample currently audible.
+- **Media/RST anchor:** speed commits need an RST anchor for
+  `timeline_map_apply()`. The old `TS_TO_RST_TIME(anchor_ts)` projection used the
+  pre-step committed speed and accumulated error across ramps. The committed fix
+  (Option A) stores a media/RST span per ledger block from the patched atempo
+  state (`ns_in - ring`) and uses that ledger RST for the first
+  `timeline_map_apply()` argument when the playhead resolves strictly inside a
+  ledger block.
+
+Speed changes are no longer committed to the video side immediately. The atempo
+tempo command is applied to the audio filter immediately, but
+`timeline_map_apply()`, `set_playback_speed()`, and the video-sink re-anchor are
+deferred until the AudioTrack playhead crosses the output-frame boundary where
+the new-speed content is audible. Pending speed commits are queued and promoted
+in order.
+
+### Option A Shipped, Option B Pending
+
+**Option A (current, validated):** media/RST spans are sampled at
+AudioTrack-write time from the patched atempo state. This fixed the accumulating
+ramp desync in stress logs, including seek/pause reset cases, by preventing the
+stale-speed RST projection from being used at commit time.
+
+Known caveat: write-time sampling still includes variable wrapper-FIFO lead
+between filter output production and AudioTrack write. This lead is bounded and
+has not been audible in the validated stress logs, but it is not the cleanest
+model.
+
+**Option B (next step):** move media/RST assignment into
+`stream_filter_audio_atempo.c` at output-production time. The atempo wrapper
+will keep an output-position to media/RST map keyed by cumulative atempo output
+frames; the AVOS ledger will query that map instead of sampling `ns_in - ring`
+later at AudioTrack write time. This removes the variable wrapper-FIFO lead.
+
+Both Option A and Option B depend on the local FFmpeg patch
+`native/ffmpeg-android-builder/atempo.patch`, which exposes atempo's internal
+WSOLA state (`ns_in`, `ns_out`, and ring occupancy). A stock-FFmpeg strategy
+would require a less precise tempo-schedule estimate or proper filter PTS
+ownership and is a separate design goal.
+
 ## Design Principles
 
 ### Core Philosophy
@@ -38,7 +88,7 @@ using AudioTrack-based speed, atempo is not the active speed backend. Passthroug
 and AC3 recoding are also excluded from atempo sample filtering because they do
 not send ordinary PCM samples through the software tempo chain.
 
-### Why atempo with Timeline Mapping (Option B)
+### Why atempo with Timeline Mapping
 
 **The fundamental relationship:** `Δts = Δwc` (time-scaled duration equals wall clock duration)
 
@@ -156,7 +206,7 @@ audio_time += output_time_ms;  // = 667ms ✓ CORRECT!
 
 ## Implementation Details
 
-### 1. Timeline Mapping (`stream.c:570-590`)
+### 1. Timeline Mapping and Deferred Video Commit (`stream.c`)
 
 When speed changes:
 
@@ -168,18 +218,29 @@ if (using_atempo) {
     float clamped_speed = clamp(av_speed, 0.25f, 2.0f);
     audio_interface_set_audio_speed(clamped_speed);
 
-    // ENABLE timeline mapping with atempo speed
-    // Anchor on heard_audio_ts for continuity with what is actually heard.
-    // android_sync=1 + invalid delay: fall back to current_time_ts for mapping
-    // and defer sink re-anchoring to avoid visible catch-up bursts.
-    timeline_map_apply((double)stream_current_time_rst,
-                      (double)anchor_ts,
-                      clamped_speed);
+    // Queue the video-side speed commit. The filter sees the target now,
+    // but timeline/video speed are promoted only when AudioTrack playhead
+    // reaches the output-frame boundary where new-speed content is audible.
+    atempo_commit_q.push({
+        speed = clamped_speed,
+        boundary = atempo_ledger_output_frames + wrapper_fifo_samples
+    });
 }
 ```
 
-**Key:** Timeline mapping is enabled, NOT disabled. This creates the TS domain that matches physical playback time.
-**Current behavior:** On android_sync=0, a frame‑accurate seek may be triggered after applying the new mapping to realign both audio/video to the audible target TS (see Seeking and Speed Changes). On android_sync=1 with invalid delay, the mapping anchor falls back to `current_time_ts` and sink re‑anchoring is deferred.
+When the playhead crosses a queued boundary, `stream_atempo_commit_poll()`:
+
+1. computes `anchor_ts` from the current heard-audio clock;
+2. resolves the playhead in the atempo ledger;
+3. uses the ledger media/RST value as the first `timeline_map_apply()` argument
+   when the lookup is strictly inside a ledger block (`state == 0`);
+4. falls back to `TS_TO_RST_TIME(anchor_ts)` if the ledger is unavailable,
+   stale, or extrapolated;
+5. updates `set_playback_speed()` and re-anchors the video sink to `anchor_ts`.
+
+**Key:** Timeline mapping is enabled, but the video-side commit is
+playhead-gated. This avoids committing video at the moment old-speed PCM is
+written to AudioTrack, which is earlier than when the user hears that content.
 
 ### 2. Parser Timestamp Scaling (`stream_parser_ffmpeg.c`)
 
@@ -294,7 +355,29 @@ if (!failed && is_audio_speed_enabled && !using_atempo && ...) {
 }
 ```
 
-### 6. A/V Sync Delay Compensation (`stream_sync.c:138-141`)
+### 6. Atempo Output Ledger and Heard Clock (`stream_audio.c`, `stream_sync.c`)
+
+The atempo path does not rely on `last_good_delay_ms` as the primary authority
+during software speed changes. Instead:
+
+- `stream_audio.c` reserves a ledger entry before each atempo PCM write and
+  finalizes/cancels it after `AudioTrack.write()` returns.
+- Each entry records:
+  - output-frame start,
+  - TS block start,
+  - block frame count/rate,
+  - media/RST start and span.
+- `stream_sync.c` looks up the current AudioTrack presented frame in this ledger
+  to compute the heard TS. Timestamp-based presented frames are treated as
+  DAC-position evidence; playback-head evidence uses a calibrated post-playhead
+  latency.
+- The same ledger exposes media/RST interpolation for deferred speed commits.
+
+The TS side of the ledger advances 1:1 with emitted atempo output. Do not
+multiply the live heard clock by tempo; `ns_in/ns_out ~= tempo` is expected
+because `ns_in` is RST/media and the heard clock is TS.
+
+### 7. A/V Sync Delay Compensation (`stream_sync.c`)
 
 atempo introduces processing delay that must be added to A/V sync calculation:
 
@@ -408,7 +491,7 @@ if (blit_duration > 0) {
 - But `Δts = Δwc`, so numerical comparison is valid
 - Result: video pacing matches audio timeline
 
-## Seeking and Speed Changes
+## Seeking, Reset, and Speed Changes
 
 ### Seeking (`_stream_seek_real`)
 
@@ -419,26 +502,20 @@ if (blit_duration > 0) {
 
 Timeline mapping anchors are re-established after seek completes.
 
-### Speed Changes (`stream_set_av_speed`)
+### Speed Changes (`stream_set_av_speed` + `stream_atempo_commit_poll`)
 
-1. Capture current position (`heard_audio_ts` + derived `anchor_rst`)
-2. Apply new timeline mapping with new anchor:
-   ```c
-   timeline_map_apply(anchor_rst,
-                     heard_audio_ts,
-                     new_speed);
-   ```
-3. **android_sync=1 + invalid delay**: mapping anchor falls back to `current_time_ts`,
-   and sink re‑anchoring is deferred to avoid fast catch‑up bursts.
-4. Update atempo filter speed (runtime update; rebuild only on failure)
-5. No pipeline flush required
-6. Continuity maintained via anchors
-6. **android_sync=0 + atempo realignment:** optionally call
-   `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` to
-   seek to the nearest keyframe and drop frames until `ts_target`. Audio
-   chunks are dropped until the same `ts_target` so both streams resume in
-   lock‑step. The pure “anchor‑only” path remains valid and can be used to
-   disable realignment if needed.
+1. Apply the new atempo tempo command immediately.
+2. Queue a video-side commit at the current atempo output boundary.
+3. Keep the video timeline and decoder playback speed at the previous committed
+   speed while old-speed content is still queued in AudioTrack.
+4. Promote queued commits in order when the playhead crosses each boundary.
+5. Anchor `timeline_map_apply()` with:
+   - `anchor_ts`: the current heard TS;
+   - `anchor_rst`: the ledger media/RST at the same audible playhead when
+     available (`state == 0`), otherwise a projection fallback.
+6. On seek/flush/reset, clear the ledger and collapse pending commits to the
+   latest target speed using a deferred sentinel. The collapsed commit waits for
+   the new ledger to become active before applying, avoiding stale-map drains.
 
 ## Time Domain Variable Reference
 
@@ -457,6 +534,9 @@ Timeline mapping anchors are re-established after seek completes.
 | `stream_get_current_time()` | RST | Returns UI position (converts from TS) |
 | `stream_seek_time()` | RST | Accepts UI seek position |
 | `stream_seek_time_frame_accurate()` | RST+TS | Seek to RST keyframe, then drop to TS target |
+| `atempo_ledger_output_frames` | output frames | Cumulative AudioTrack-written frame cursor for atempo ledger |
+| `STREAM_ATEMPO_LEDGER_ENTRY.block_ts_start` | TS | TS timestamp of the output block |
+| `STREAM_ATEMPO_LEDGER_ENTRY.block_rst_start` | RST | Media/RST timestamp of the output block, used for speed commit anchors |
 
 ## Performance Characteristics
 
@@ -492,14 +572,15 @@ Timeline mapping anchors are re-established after seek completes.
 
 ### Modified Files
 - `Include/stream.h` - Added `audio_filter_atempo` member
-- `Include/audio_interface.h` - Added atempo detection functions
-- `Source/stream.c` - Timeline mapping with atempo
-- `Source/stream_audio.c` - Audio time accounting (both sync modes)
+- `Include/audio_interface.h` - Added atempo detection and presented/written frame helpers
+- `Source/stream.c` - Playhead-gated atempo video-speed commit queue
+- `Source/stream_audio.c` - Audio time accounting and atempo output ledger
 - `Source/stream_video.c` - Initialize atempo filter
-- `Source/stream_sync.c` - Add atempo delay
+- `Source/stream_sync.c` - Atempo ledger heard clock and ledger RST lookup
 - `Source/audio_interface.c` - Atempo flag setter/getter
-- `Source/audio_interface_audiotrack_java.c` - Skip buffer scaling and PlaybackParams
+- `Source/audio_interface_audiotrack_java.c` - Skip buffer scaling/PlaybackParams, expose presented/written frames
 - `codecs.mk` - Added to build system
+- `native/ffmpeg-android-builder/atempo.patch` - Required local FFmpeg patch exposing atempo internal media/ring state
 
 ## Debugging
 
@@ -518,11 +599,11 @@ int Debug[DBG_MAX_ENTRIES] = {
 
 ```
 stream_open_audio_filter: opened [atempo]
-stream:stream_set_av_speed av_speed=1.500000, audio_interface_get_audio_speed=1.000000
-stream:stream_set_av_speed current_time_ts=917583, current_time_rst=917583
-stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=917583 anchor_ts=917583, speed=1.500
-stream_audio: applying atempo filter
-stream_audio SAMPLES: atempo active, audio_time = 917583 + 21 (no scaling)
+at_ledger_arm: written=... playhead=... queued=... audio=... epoch_rst=...
+atempo_commit_arm: prev=1.000 target=1.500 boundary=... out_cursor=... flt_fifo=...
+at_ledger: ledger_heard=... heard=... applied=1 playhead=... state=0 speed=1.500
+atempo_commit_apply: prev=1.000 speed=1.500 boundary=... crossed=1 anchor_ts=...
+atempo_rst_anchor: speed=1.500 anchor_rst_proj=... anchor_rst_ledger=... state=0 flipped=1
 ```
 
 ## Troubleshooting
@@ -531,7 +612,11 @@ stream_audio SAMPLES: atempo active, audio_time = 917583 + 21 (no scaling)
 1. Check both audio time accounting paths (non-SAMPLES and SAMPLES modes)
 2. Verify `using_atempo` check exists in both paths
 3. Confirm no `RST_TO_TS_DELTA` applied when `using_atempo` is true
-4. Check atempo delay calculation and compensation
+4. Check `atempo_commit_arm` / `atempo_commit_apply` ordering and that commits
+   usually log `atempo_rst_anchor ... state=0 flipped=1`
+5. After seek/flush during a ramp, verify deferred sentinel commits do not drain
+   against an empty ledger
+6. Confirm the FFmpeg atempo patch is present when building this path
 
 ### Audio Quality Issues
 1. Verify filter graph rebuilds correctly on speed changes
@@ -546,7 +631,7 @@ stream_audio SAMPLES: atempo active, audio_time = 917583 + 21 (no scaling)
 ---
 
 **Document Version:** 2.0
-**Last Updated:** 2025-01-06
-**Implementation:** Option B (Timeline Mapping Enabled)
+**Last Updated:** 2026-06-14
+**Implementation:** Timeline mapping + playhead-gated atempo commit + Option A ledger RST anchor
 **FFmpeg Version:** N7.1
 **Android API:** All versions supported

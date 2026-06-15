@@ -599,8 +599,10 @@ enum {
 	int	header_sent;		/* we have sent the "setup" header*/\
 	int	extra_sent;		/* we have sent the extradata inline*/\
 	int	no_extra;		/* do not send extradata inline */\
-	
+	int 	disposition;
+
 typedef struct _audio_props {
+
 	AV_COMMON_PROPS
 	
 	int 	samplesPerSec;

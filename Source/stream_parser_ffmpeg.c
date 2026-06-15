@@ -207,30 +207,34 @@ static struct id_fmt_str {
 };
 
 
-static const char *disposition_name( int disposition )
+static const char *disposition_name( int disposition, int is_audio )
 {
-	if( disposition & AV_DISPOSITION_DEFAULT )
-		return "(default)";
-	if (disposition & AV_DISPOSITION_DUB)
-		return "(dub)";
+	if (disposition & AV_DISPOSITION_HEARING_IMPAIRED)
+		return "(hearing impaired)";
+	if (disposition & AV_DISPOSITION_VISUAL_IMPAIRED)
+		return is_audio ? "(audio description)" : "(visual impaired)";
+	if (disposition & AV_DISPOSITION_FORCED)
+		return "(forced)";
 	if (disposition & AV_DISPOSITION_ORIGINAL)
 		return "(original)";
+	if (disposition & AV_DISPOSITION_DUB)
+		return is_audio ? "(dubbed)" : "(translated)";
+	if (disposition & AV_DISPOSITION_CAPTIONS)
+		return "(captions)";
+	if (disposition & AV_DISPOSITION_DESCRIPTIONS)
+		return "(descriptions)";
+	if( disposition & AV_DISPOSITION_DEFAULT )
+		return "(default)";
 	if (disposition & AV_DISPOSITION_COMMENT)
-		return "(comment)";
+		return "(commentary)";
 	if (disposition & AV_DISPOSITION_LYRICS)
 		return "(lyrics)";
 	if (disposition & AV_DISPOSITION_KARAOKE)
 		return "(karaoke)";
-	if (disposition & AV_DISPOSITION_FORCED)
-		return "(forced)";
-	if (disposition & AV_DISPOSITION_HEARING_IMPAIRED)
-		return "(hearing impaired)";
-	if (disposition & AV_DISPOSITION_VISUAL_IMPAIRED)
-		return "(visual impaired)";
-	if (disposition & AV_DISPOSITION_CLEAN_EFFECTS)
-		return "(clean effects)";
 	if( disposition & AV_DISPOSITION_ATTACHED_PIC)
 		return "(attached pic)";
+	if (disposition & AV_DISPOSITION_CLEAN_EFFECTS)
+		return "(clean effects)";
 		
 	return "(none)";
 }
@@ -346,13 +350,13 @@ DBGP serprintf("\textra      ");
 DBGP DumpLine( codecpar->extradata, MIN(128,codecpar->extradata_size), MIN(128,codecpar->extradata_size) );
 		}
 DBGP serprintf("\tbitrate    %d\r\n", codecpar->bit_rate);
-DBGP serprintf("\tdisposition %d / %s\r\n", st->disposition, disposition_name(st->disposition));
+DBGP serprintf("\tdisposition %d / %s\r\n", st->disposition, disposition_name(st->disposition, st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO));
 		
 		if(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
 			//
 			// video
 			//
-			if( st->disposition == AV_DISPOSITION_ATTACHED_PIC ) {
+			if( st->disposition & AV_DISPOSITION_ATTACHED_PIC ) {
 				goto DISCARD_STREAM;
 			}
 			if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
@@ -632,9 +636,9 @@ DBGP serprintf( "arate=%d; ascale=%d\n", audio->rate, audio->scale );
 					strnZcpy( audio->lang, lang->value, AV_NAME_LEN );
 				}
 
+				audio->disposition = st->disposition;
+
 				if (st->disposition && st->disposition != AV_DISPOSITION_DEFAULT) {
-					int n = snprintf(audio->name, AV_NAME_LEN, "%s %s", audio->name, disposition_name(st->disposition));
-					if (n >= AV_NAME_LEN) audio->name[AV_NAME_LEN - 1] = '\0';
 					if (st->disposition & (AV_DISPOSITION_HEARING_IMPAIRED | AV_DISPOSITION_VISUAL_IMPAIRED)) {
 						audio->priority = 2;
 					}
@@ -693,6 +697,14 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 
 				if (lang) {
 					strnZcpy( sub->lang, lang->value, AV_NAME_LEN );
+				}
+
+				sub->disposition = st->disposition;
+
+				if (st->disposition && st->disposition != AV_DISPOSITION_DEFAULT) {
+					if (st->disposition & (AV_DISPOSITION_HEARING_IMPAIRED | AV_DISPOSITION_VISUAL_IMPAIRED)) {
+						sub->priority = 2;
+					}
 				}
 
 				priv->av.subs_max ++;

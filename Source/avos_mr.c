@@ -274,6 +274,7 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 			ADD_INT(gap_key + AVOS_MR_METADATA_AUDIO_TRACK_VBR, audiop->vbr);
 
 			ADD_STR(gap_key + AVOS_MR_METADATA_AUDIO_TRACK_LANGUAGE, audiop->lang);
+			ADD_INT(gap_key + AVOS_MR_METADATA_AUDIO_TRACK_DISPOSITION, audiop->disposition);
 
 			int supported = 0;
 			STREAM_DEC_AUDIO *dec = stream_get_audio_dec( audiop );
@@ -296,6 +297,8 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 			ADD_INT(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_IS_GFX, av->sub[i].gfx);
 			ADD_INT(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_FORMAT, av->sub[i].format);
 			ADD_STR(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_LANGUAGE, av->sub[i].lang);
+			serprintf("avos_mr_fillmetadata: sub[%d] disp=%d\n", i, av->sub[i].disposition);
+			ADD_INT(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_DISPOSITION, av->sub[i].disposition);
 		}
 	}
 

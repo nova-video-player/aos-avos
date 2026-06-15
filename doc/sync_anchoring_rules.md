@@ -77,6 +77,10 @@ explicit AudioTrack PlaybackParams speed-epoch checkpoint described below.
   of to write bursts or stale delay-cache state.
 - The speed epoch is re-armed on every hardware speed change, including return
   to 1.0x, and is cleared on seek, flush, or stop.
+- For atempo software speed changes, the authoritative media anchor comes from
+  the atempo output ledger. The ledger maps transformed output samples back to
+  their media/RST position and lets video/timeline speed commits wait until the
+  matching output boundary reaches the AudioTrack playhead.
 
 ## Android Path (sfdec2)
 

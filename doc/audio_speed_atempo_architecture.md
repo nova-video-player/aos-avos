@@ -60,6 +60,24 @@ WSOLA state (`ns_in`, `ns_out`, and ring occupancy). A stock-FFmpeg strategy
 would require a less precise tempo-schedule estimate or proper filter PTS
 ownership and is a separate design goal.
 
+### Why the atempo ledger exists
+
+The atempo filter does not transform audio in a strict one-input-frame to
+one-output-frame way. It uses an internal bounded ring buffer to perform
+time-stretching while preserving pitch, so after a speed change some audio may
+already be transformed, some may still be buffered by atempo, and some may
+already be written to AudioTrack but not yet audible.
+
+To keep video synchronized with what the user actually hears, AVOS keeps an
+output ledger that maps atempo-produced samples back to their media position.
+Video and timeline speed commits are then gated on the AudioTrack playhead
+reaching the matching output boundary, rather than on when the speed request was
+made or when samples were merely written.
+
+This avoids accumulated drift during speed ramps because the video timeline
+switches at the audible audio boundary, not at an earlier internal processing
+boundary.
+
 ## Design Principles
 
 ### Core Philosophy

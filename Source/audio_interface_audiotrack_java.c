@@ -990,8 +990,13 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		min_buffer_size = 32768;
 	}
 
-	if (at->passthrough == 2) {
-		// For compressed passthrough, use getMinBufferSize() with a safety margin
+	if (at->passthrough) {
+		// All compressed passthrough modes (mode 1 IEC encapsulation and mode 2
+		// codec-specific encodings) write whole compressed bursts that must reach
+		// AudioTrack atomically. getMinBufferSize() returns a PCM-style minimum that
+		// can be smaller than a single IEC burst (e.g. 5672 < 6144 for AC3), which
+		// causes audiotrack_write()'s MIN(buf_size, len) to truncate every burst and
+		// drop the remainder -> progressive passthrough desync.
 		// Different formats have varying frame sizes (AC3 ~6KB, DTS ~2KB, TrueHD ~20KB)
 		// Ensure minimum of 32KB for compatibility, but respect larger system requirements
 		at->buf_size = (min_buffer_size > 32768) ? min_buffer_size : 32768;

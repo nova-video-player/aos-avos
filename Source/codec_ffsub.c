@@ -30,6 +30,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#include "sub_engine.h"
 
 #define DBGS	if(Debug[DBG_STREAM])
 #define DBG 	if(Debug[DBG_SUB])
@@ -52,18 +53,7 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	dec->ctx = ctx;
 
 	const AVCodec* myCodec;
-	if (sub->format == SUB_FORMAT_TEXT) {
-		DBGS serprintf("codec_ffsub: ffsub: Open text\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_TEXT);
-	} else if (sub->format == SUB_FORMAT_SSA) {
-		// TODO MARC codec not found with embedded ssa subs: need to add libssa
-		DBGS serprintf("codec_ffsub: ffsub: Open ssa\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_SSA);
-	} else if (sub->format == SUB_FORMAT_ASS) {
-		// TODO MARC codec not found with embedded ssa subs: need to add libssa
-		DBGS serprintf("codec_ffsub: ffsub: Open ass\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_SSA);
-	} else if (sub->format == SUB_FORMAT_MOV_TEXT) {
+	if (sub->format == SUB_FORMAT_MOV_TEXT) {
 		DBGS serprintf("codec_ffsub: ffsub: Open mov_text\n");
 		myCodec = avcodec_find_decoder(AV_CODEC_ID_MOV_TEXT);
 	} else if (sub->format == SUB_FORMAT_DVD_GFX) {
@@ -83,6 +73,45 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	if (!myCodec)
 		return 1;
 	self->avcontext = avcodec_alloc_context3(myCodec);
+	// --- NATIVE OPENGL UPGRADE ---
+	// Safely initialize the hardware GFX track for PGS and DVD subtitles
+	//extern SUB_ENGINE *g_sub_engine;
+	STREAM *stream = (STREAM *)ctx;
+	if (stream && stream->sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
+		int w = 1920;
+		int h = 1080;
+		STREAM *stream = (STREAM *)ctx;
+		// Must mirror _decode()'s own per-format reference-size logic below exactly --
+		// this value becomes real_video_w/h (the space PGS/VobSub bitmap x/y/w/h are
+		// assumed to be relative to), and _decode() is what actually produces those
+		// coordinates, so the two must agree on what space they're in.
+		if (sub->format == SUB_FORMAT_DVD_GFX) {
+			// VobSub has no canvas of its own -- its coordinates are always relative to
+			// the DVD video's own real resolution (matches _decode()'s
+			// SUB_FORMAT_DVD_GFX branch, base_width/base_height defaulting 720x576).
+			w = 720;
+			h = 576;
+			if (stream && stream->video) {
+				if (stream->video->width > 0) w = stream->video->width;
+				if (stream->video->height > 0) h = stream->video->height;
+			}
+		}
+		// else: SUB_FORMAT_PGS keeps the 1920x1080 default above, unconditionally --
+		// PGS bitmap coordinates are relative to the Presentation Graphics plane's own
+		// resolution, fixed by the BD-ROM spec (virtually always 1920x1080) and
+		// independent of the actual encoded video's resolution. These can genuinely
+		// differ -- e.g. a video with its letterbox bars physically cropped out of the
+		// encode (video_h < 1080) while the PGS plane keeps its original 1080-tall
+		// canvas -- and using the video's own dimensions here instead, as this branch
+		// used to unconditionally do, put real_video_w/h in the wrong coordinate space
+		// for exactly that (fairly common) case, silently offsetting every PGS bitmap.
+		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, sub_fmt_from_format(sub->format), w, h, NULL, 0, NULL, 0, NULL);
+		// GFX/bitmap track (PGS/VobSub), opened synchronously here off the codec's own open() call --
+		// fed via sub_engine_feed_bitmap(), not the checkpointed _gen() token system, so there's no
+		// long-lived job to pin a generation token to; see sub_engine_open_track()'s doc comment
+		// in sub_engine.h and the matching internal-track call sites in stream_subtitle.c.
+	}
+
 	if (!self->avcontext)
 		return 1;
 	// Reopening a track must install that track's codec initialization data
@@ -142,6 +171,27 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	frame->time = time;
 	frame->duration = -1;
 
+    // Fix: Explicitly clear the buffer to prevent ghosting of old text
+    // when a container sends an empty clear-screen packet.
+    if (frame->data[0]) {
+        frame->data[0][0] = '\0';
+    }
+
+	// mov_text/webvtt packets carry a 4-byte little-endian duration prepended by
+	// stream_parser_ffmpeg.c's _get_subtitle_cdata() (same trick already used for
+	// raw SSA/TEXT passthrough), because AVSubtitle.start_display_time/
+	// end_display_time always come back 0 from these two ffmpeg decoders -- there
+	// is no other source for the real per-cue duration. Strip it before handing
+	// the payload to avcodec_decode_subtitle2().
+	int packet_duration = -1;
+	if ((self->base._subtitle.format == SUB_FORMAT_MOV_TEXT ||
+	     self->base._subtitle.format == SUB_FORMAT_WEBVTT) &&
+	    size >= (int)sizeof(int)) {
+		packet_duration = *(int*)data;
+		data += sizeof(int);
+		size -= sizeof(int);
+	}
+
 	DBGS serprintf("codec_ffsub: frame width=%d, height=%d, size=%d\n", frame->width, frame->height, frame->size);
 
 	AVPacket *avpkt = av_packet_alloc();
@@ -156,23 +206,20 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		return 1;
 	}
 
+	// av_new_packet() allocates size + AV_INPUT_BUFFER_PADDING_SIZE and zeroes the
+	// padding, so text decoders (webvtt/mov_text) and the sscanf() below never read
+	// uninitialized heap past the payload.
 	memcpy(avpkt->data, data, size);
 	DBGS serprintf("codec_ffsub: avpkt->pts=%d, avpkt->dts=%d overridden by time=%d\n", avpkt->pts, avpkt->dts, time);
 	avpkt->pts = time >= 0 ? time : AV_NOPTS_VALUE;
 	avpkt->dts = avpkt->pts;
-	// Only plain TEXT packets receive Nova's private start:end prefix.
-	// Strip it before FFmpeg creates an ASS rectangle; caption text itself
-	// (e.g. "12:34 lunch" in mov_text/WebVTT) is never timing metadata.
-	int private_start = -1, private_duration = -1;
-	if (dec->_subtitle.format == SUB_FORMAT_TEXT) {
-		int start, end, prefix = 0;
-		if (sscanf((char *)avpkt->data, "%d:%d,%n", &start, &end, &prefix) == 2 &&
-		    prefix > 0 && prefix <= avpkt->size && start >= 0 && end >= start) {
-			private_start = start;
-			private_duration = end - start;
-			avpkt->data += prefix;
-			avpkt->size -= prefix;
-		}
+	// Mirror mpv's sub/lavc_conv.c (mp_set_av_packet): hand the real packet
+	// duration to ffmpeg via avpkt->duration BEFORE decode, not just read it
+	// out afterwards. This is what lets avcodec_decode_subtitle2() populate
+	// AVSubtitle.end_display_time correctly for mov_text/webvtt -- without
+	// it, avpkt->duration is left unset (0) and end_display_time comes back 0.
+	if (packet_duration >= 0) {
+		avpkt->duration = packet_duration;
 	}
 
 	int got_frame;
@@ -209,9 +256,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		av_packet_free(&avpkt);
 		return 1;
 	}
-	frame->time = private_start >= 0 ? private_start : (int)start_time;
-	frame->duration = private_duration;
-	if (private_start < 0 && sub.end_display_time != UINT32_MAX &&
+	frame->time = (int)start_time;
+	frame->duration = -1;
+	if (sub.end_display_time != UINT32_MAX &&
 	    sub.end_display_time >= sub.start_display_time) {
 		int64_t duration = RST_TO_TS_DELTA(
 			(int64_t)sub.end_display_time - sub.start_display_time, int64_t);
@@ -252,7 +299,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		has_bitmap = 1;
 		// create small empty bitmap
 		left = 0; top = 0; right = 1, bottom = 1;
-		frame->duration = 0; // cannot be -1 to get timed subtitle in java world but signal that this is a special end subtitle to SubtitleManager
+		frame->duration = 0; // cannot be -1: signals that this is a special end subtitle
 	}
 
 	if (has_bitmap) {
@@ -311,12 +358,6 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 				}
 			}
 			strnZcpy((char *)frame->data[0], text ? text : "", max);
-			char *pos = (char *)frame->data[0];
-			while ((pos = strstr(pos, "\\N"))) {
-				pos[0] = ' ';
-				pos[1] = '\n';
-				pos += 2;
-			}
 		} else if (rect->type == SUBTITLE_BITMAP) {
 			// Check if the bitmap rect is not empty and contains non-black pixels
 			DBGS serprintf("codec_ffsub: blend bitmap rect\n");
@@ -417,7 +458,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	if (has_bitmap) {
 		if (sub.num_rects && sub.end_display_time == UINT32_MAX) {
 			// PGS ends with the next composition/clear, not a fixed timeout.
-			// Keep the timed-message contract without overflowing Java's end time.
+			// Keep time + duration from overflowing an int.
 			frame->duration = INT_MAX - MAX(0, frame->time);
 		}
 		frame->window.x = left;
@@ -458,7 +499,7 @@ static int _flush( STREAM_DEC_SUB *dec )
 	}
 	if (self->avcontext) avcodec_flush_buffers(self->avcontext);
 	return 0;
-} 
+}
 
 static int _destroy( STREAM_DEC_SUB *dec )
 {
@@ -466,7 +507,7 @@ static int _destroy( STREAM_DEC_SUB *dec )
 		afree( dec );
 	}
 	return 0;
-} 
+}
 
 static STREAM_DEC_SUB *_new_dec( void )
 {
@@ -486,15 +527,13 @@ static STREAM_DEC_SUB *_new_dec( void )
 	dec->close   = _close;
 	dec->decode  = _decode;
 	dec->flush   = _flush;
-	
+
 	return dec;
 }
 
 // TODO MARC XSUB not covered
 
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_MOV_TEXT, _new_dec, "MOV_TEXT" );
-STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec, "TEXT" );
-//STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec, "SSA" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_PGS, _new_dec, "PGS" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_DVD_GFX, _new_dec, "vobsub" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_WEBVTT, _new_dec, "WEBVTT" );

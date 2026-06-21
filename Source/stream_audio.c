@@ -156,6 +156,40 @@ static int64_t _stream_atempo_ledger_frames_to_us(int frames, int sample_rate)
 	return sample_rate > 0 ? ((int64_t)frames * 1000000) / sample_rate : 0;
 }
 
+// Append an output-side hold block for manual-delay silence: the playhead must
+// be able to cross these output frames, but heard media time must NOT advance
+// through them.  So advance output_frames only; leave next_ts_us / next_rst_us
+// (the media/RST clocks) frozen and mark block_is_hold so the lookup plateaus
+// heard media across the inserted silence.
+static void _stream_atempo_ledger_append_hold(STREAM *s, int nframes, int sample_rate)
+{
+	if (!s || nframes <= 0 || sample_rate <= 0) {
+		return;
+	}
+	if (!s->atempo_ledger_active && !_stream_atempo_ledger_arm(s, sample_rate)) {
+		return;
+	}
+	STREAM_ATEMPO_LEDGER_ENTRY *entry = &s->atempo_ledger[s->atempo_ledger_write];
+	entry->output_frames_start = s->atempo_ledger_output_frames;
+	entry->block_ts_start = (int)(s->atempo_ledger_next_ts_us / 1000);
+	entry->block_nframes = nframes;
+	entry->rate = sample_rate;
+	entry->block_rst_start = (int)(s->atempo_ledger_next_rst_us / 1000);
+	entry->block_rst_span = 0;
+	entry->block_is_hold = 1;
+	entry->block_media_frames = 0;
+	s->atempo_ledger_write = (s->atempo_ledger_write + 1) % STREAM_ATEMPO_LEDGER_SIZE;
+	if (s->atempo_ledger_count < STREAM_ATEMPO_LEDGER_SIZE) {
+		s->atempo_ledger_count++;
+	}
+	s->atempo_ledger_output_frames += (UINT64)nframes;
+	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+		DBG serprintf("at_ledger_hold: out_start=%llu ts=%d nframes=%d rate=%d out_next=%llu\n",
+			(unsigned long long)entry->output_frames_start, entry->block_ts_start,
+			nframes, sample_rate, (unsigned long long)s->atempo_ledger_output_frames);
+	}
+}
+
 static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate)
 {
 	if (!s || nframes <= 0 || sample_rate <= 0) {
@@ -178,6 +212,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 	// on map miss, and its media_cursor is advanced every block so it stays current.
 	// 1:1 (TS-slope) is the final fallback so the ledger never stalls.
 	entry->block_rst_start = (int)(s->atempo_ledger_next_rst_us / 1000);
+	entry->block_is_hold = 0;
 	entry->block_media_frames = 0;
 	{
 		int64_t block_rst_span_us = _stream_atempo_ledger_frames_to_us(nframes, sample_rate);
@@ -726,8 +761,16 @@ static int _wait( STREAM *s, int wait )
 			}
 
 			// This silence is an output hold for user A/V delay, not media
-			// progress.  Do not advance audio_time.
+			// progress.  Do not advance audio_time.  When the atempo ledger is
+			// active, append a zero-span hold block so the playhead can cross
+			// the inserted silence without advancing heard media time.
 			int size_written = s->audio_sink->write( s, &frame );
+			if( size_written > 0 && audio_interface_is_using_atempo() &&
+			    s->audio->bytesPerFrame > 0 && s->audio->samplesPerSec > 0 ) {
+				_stream_atempo_ledger_append_hold( s,
+					size_written / s->audio->bytesPerFrame,
+					s->audio->samplesPerSec );
+			}
 			// Credit only the silence actually accepted by the sink. A partial or
 			// failed write must not over-credit the scheduler hold, which would
 			// push manual_audio_delay_applied_ms above what was really inserted.

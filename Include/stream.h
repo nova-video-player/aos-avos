@@ -87,6 +87,9 @@ typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
 	// this block, tracked separately from block_rst_span because the span may be
 	// sourced from the Option-B production map while media_cursor stays the A pointer.
 	INT64	block_media_frames;
+	// 1 when this block is an output-side manual-delay hold (inserted silence):
+	// the playhead crosses its output frames but heard media time must not advance.
+	int	block_is_hold;
 } STREAM_ATEMPO_LEDGER_ENTRY;
 
 // Deferred atempo video-commit checkpoint (one per speed step).

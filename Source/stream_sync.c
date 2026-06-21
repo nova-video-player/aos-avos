@@ -655,7 +655,14 @@ static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup( STREAM *s, UINT64 play
 		if( playhead >= entry->output_frames_start && playhead < block_end ) {
 			UINT64 delta_frames = playhead - entry->output_frames_start;
 			int rate = entry->rate > 0 ? entry->rate : playhead_rate;
-			r.heard = entry->block_ts_start + (int)((delta_frames * 1000) / (UINT64)rate);
+			if( entry->block_is_hold ) {
+				// Output-only hold, used for negative manual A/V delay.  The
+				// playhead crosses inserted silence, but heard media time must
+				// stay frozen at the block's start TS.
+				r.heard = entry->block_ts_start;
+			} else {
+				r.heard = entry->block_ts_start + (int)((delta_frames * 1000) / (UINT64)rate);
+			}
 			// Media/RST interpolation: prorate the block's media span across its
 			// output frames (RST slope differs from the 1:1 TS slope by tempo).
 			if( entry->block_nframes > 0 ) {

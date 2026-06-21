@@ -23,6 +23,11 @@
 #include "util.h"
 
 #include <string.h>
+#include "sub_engine.h"
+extern SUB_ENGINE *g_sub_engine;
+// --- NATIVE ENGINE CLOCK ---
+static int64_t g_player_time = 0;
+static int64_t engine_clock(void *ctx) { return g_player_time; }
 
 #define DBGS if(Debug[DBG_STREAM])
 #define DBG  if(Debug[DBG_SUB])
@@ -139,18 +144,29 @@ DBG serprintf("new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_t
 // *****************************************************************************
 static void _get_next_int_sub( STREAM *s, int time )
 {
-	if( !s->seek ) {
-		if( !s->sub_dec ) {
-			// try to get a sub decoder
-			s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
+	g_player_time = time; // CAPTURE AVOS TIME!
 
-			// open the decoder		
-			if( stream_open_sub_dec( s ) ) {
-				// no subs, disable it
-				stream_drop_subtitles( s );
-				return;
-			} 
-			
+	if( !s->seek ) {
+		// CRITICAL FIX: Check subtitle_frame so this block ONLY RUNS ONCE!
+		if( !s->sub_dec && !s->subtitle_frame ) {
+
+			// --- NEW ROUTING LOGIC FOR INTERNAL SUBS ---
+			if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+				if (g_sub_engine) {
+					int engine_fmt = (s->subtitle->format == SUB_FORMAT_TEXT) ? SUB_FMT_SRT : SUB_FMT_SSA;
+					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
+					sub_engine_start(g_sub_engine, engine_clock, NULL);
+				}
+			} else {
+				// try to get a sub decoder
+				s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
+				if( stream_open_sub_dec( s ) ) {
+					stream_drop_subtitles( s );
+					return;
+				}
+			}
+
+			// Allocates the frame so this initialization block NEVER runs again!
 			alloc_sub_frame( s );
 			
 			if( !s->subtitle_frame ) {
@@ -173,18 +189,29 @@ serprintf("cannot allocate subtitle frame!\r\n");
 		}
 		
 		if( s->cdata_sub.valid ) {
-			if( time == -1 ) {
-				// no video yet...
-				return;
-			}
-			// if the sub has a time of -1 just let it pass...
+			if( time == -1 ) return;
+
 			if( s->cdata_sub.time == -1 || s->cdata_sub.time <= time ) {
-				VIDEO_FRAME *f = s->subtitle_frame;
-//DBG serprintf("SUB: size %5d  sub %8d  video %8d\r\n", s->cdata_sub.size, s->cdata_sub.time, s->video_time );
-				s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f ); 
-				s->cdata_sub.valid = 0;
-				if( f ) {
-					_output_sub( s, f, s->cdata_sub.pos );
+				if (g_sub_engine) {
+					int duration = 0;
+					uint8_t *payload = s->sub_buffer.data;
+					int payload_size = s->cdata_sub.size;
+
+					if ((s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) && payload_size >= (int)sizeof(int)) {
+						duration = *(int*)payload;
+						payload += sizeof(int);
+						payload_size -= sizeof(int);
+					}
+					sub_engine_feed(g_sub_engine, payload, payload_size, s->cdata_sub.time, duration);
+				}
+
+				if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+					s->cdata_sub.valid = 0;
+				} else {
+					VIDEO_FRAME *f = s->subtitle_frame;
+					s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f );
+					s->cdata_sub.valid = 0;
+					if( f ) _output_sub( s, f, s->cdata_sub.pos );
 				}
 			}
 		}
@@ -198,34 +225,38 @@ serprintf("cannot allocate subtitle frame!\r\n");
 // *****************************************************************************
 static void _get_next_ext_sub( STREAM *s, int time )
 {
-	if( !s->seek ) {
-		if( !s->sub_dec && s->subtitle->format == SUB_FORMAT_DVD_GFX ) {
-			// try to get a sub decoder
-			s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
+	g_player_time = time; // CAPTURE AVOS TIME!
 
-			// open the decoder		
-			if( s->sub_dec && stream_open_sub_dec( s ) ) {
-				// no subs, disable it
+	if( !s->seek ) {
+
+		// CRITICAL FIX: Only initialize ONCE per track!
+		if( !s->sub_dec && !s->subtitle_frame ) {
+			// --- NEW ROUTING LOGIC FOR EXTERNAL SUBS ---
+			if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+				if (g_sub_engine) {
+					int engine_fmt = (s->subtitle->format == SUB_FORMAT_TEXT) ? SUB_FMT_SRT : SUB_FMT_SSA;
+					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
+					sub_engine_start(g_sub_engine, engine_clock, NULL);
+				}
+			} else if( s->subtitle->format == SUB_FORMAT_DVD_GFX ) {
+				s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
+				if( s->sub_dec && stream_open_sub_dec( s ) ) {
+					stream_drop_subtitles( s );
+					return;
+				}
+			}
+
+			alloc_sub_frame( s );
+
+			if( !s->subtitle_frame ) {
+				serprintf("cannot allocate subtitle frame!\r\n");
+				stream_close_sub_dec( s );
 				stream_drop_subtitles( s );
 				return;
-			} 
-		}
-		
-		alloc_sub_frame( s );
-		
-		if( !s->subtitle_frame ) {
-serprintf("cannot allocate subtitle frame!\r\n");
-			stream_close_sub_dec( s );
-			// no subs, disable it
-			stream_drop_subtitles( s );
-			return;
-		}
-		
-		if( time == -1 ) {
-			// no video yet...
-			return;
+			}
 		}
 
+		if( time == -1 ) return;
 		if( s->sub_dec ) {
 			VIDEO_FRAME f_;
 			VIDEO_FRAME *f = &f_;
@@ -233,27 +264,38 @@ serprintf("cannot allocate subtitle frame!\r\n");
 			f->data[0] = data;
 			f->size = sizeof( data );
 
-			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) {
-				return;
-			}
+			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
+
 			if( f && f->valid ) {
-DBG serprintf("got gfx data: %8d %8d  size %d\r\n", f->time, f->duration, f->valid );
-				VIDEO_FRAME *f2 = s->subtitle_frame;
-				
-				s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 ); 
-				if( f2 ) {
-					f2->time = f->time;
-					_output_sub( s, f2, 0 );
+				if (g_sub_engine) {
+					sub_engine_feed(g_sub_engine, f->data[0], f->valid, f->time, f->duration);
+				}
+				if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+					// Bypass old renderer
+				} else {
+					VIDEO_FRAME *f2 = s->subtitle_frame;
+					s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 );
+					if( f2 ) {
+						f2->time = f->time;
+						_output_sub( s, f2, 0 );
+					}
 				}
 			}
 		} else {
 			VIDEO_FRAME *f = s->subtitle_frame;
-			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) {
-				return;
-			}
-			
+			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
+
 			if( f ) {
-				_output_sub( s, f, 0 );
+				if (g_sub_engine && f->data[0] && (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT)) {
+					int text_len = strlen((char*)f->data[0]);
+					sub_engine_feed(g_sub_engine, f->data[0], text_len, f->time, f->duration);
+				}
+
+				if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+					// Bypass old renderer
+				} else {
+					_output_sub( s, f, 0 );
+				}
 			}
 		}
 	}

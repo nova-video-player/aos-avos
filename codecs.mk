@@ -119,6 +119,12 @@ ifeq ($(VIDEO),ON)
 	DEFINES += -DCONFIG_SUBTITLES
         DEFINES += -DCONFIG_VOBSUB
 
+        ifeq ($(LIBASS),ON)
+		DEFINES += -DCONFIG_LIBASS
+		INCLUDES += -I$(LOCAL_PATH)/../../native/prebuilt/libass-deps/$(TARGET_ARCH_ABI)/include
+		SHARED_LIBS      += -lm
+	endif
+
 	ifeq ($(VIDEO_FFMPEG),ON)
 		# FFmpeg
 		DEFINES += -DCONFIG_FFMPEG_VIDEO

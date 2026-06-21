@@ -24,7 +24,9 @@
 #include "image.h"
 #include "stream.h"
 #include "stream_subtitle.h"
+#include "sub_engine.h"
 
+extern SUB_ENGINE *g_sub_engine;
 extern int libavos_get_ac3_recoding_enabled(void);
 
 #define DBG if(Debug[DBG_VIDEO_PLAYER])
@@ -33,6 +35,14 @@ extern int libavos_get_ac3_recoding_enabled(void);
 #define MPLOG(fmt, ...) serprintf("%p|%s: " fmt "\n", mp, __FUNCTION__, ##__VA_ARGS__)
 
 #define SUBTITLE_SEND_OFFSET (-100)
+
+static int64_t engine_clock_cb(void *ctx) {
+	STREAM *s = (STREAM *)ctx; // Cast the context directly to the STREAM pointer
+	if (!s) return 0;
+	int dummy_duration = 0;
+	// Returns the current video PTS in milliseconds directly from the stream
+	return stream_get_current_time(s, &dummy_duration);
+}
 
 static int stream_buffer_size = 24;
 
@@ -117,6 +127,13 @@ static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
 
 	if (!video->send_sub)
 		return;
+
+	// NEW: If the track is SSA/ASS, our C OpenGL compositor handles it.
+	// Do NOT send the bitmap to Java!
+	int fmt = video->s->av.sub[video->s->av.subs].format;
+	if (fmt == SUB_FORMAT_SSA || fmt == SUB_FORMAT_TEXT) {
+		return;
+	}
 	sub_frame = stream_get_current_subtitle(video->s);
 	sub_time = sub_frame->time - SUBTITLE_SEND_OFFSET;
 
@@ -334,6 +351,10 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	send_state_msg(mp, video);
 
 	stream_set_volume(video->s, 100, 100);
+	// NEW: Start the subtitle engine clock
+	if (g_sub_engine) {
+		sub_engine_start(g_sub_engine, engine_clock_cb, video->s); // Pass video->s instead of video
+	}
 
 	return AVOS_ERR_OK;
 stream_err:
@@ -349,6 +370,8 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	MPLOG();
 
+	// NEW: Stop the subtitle engine
+	if (g_sub_engine) sub_engine_stop(g_sub_engine);
 	if (video->s) {
 		AV_set_state(AV_STOPPED, 0, 0, NULL, NULL);
 		stream_stop(video->s);
@@ -368,6 +391,8 @@ void stream_un_pause_from_jni( STREAM *s, int was_paused );
 
 int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video)
 {
+	// NEW: Unpause the subtitle engine
+	if (g_sub_engine) sub_engine_set_paused(g_sub_engine, 0);
 	if (stream_is_paused(video->s))
 		stream_un_pause_from_jni(video->s, 0);
 	else if (!is_stream_pauseable(mp, video))
@@ -377,6 +402,8 @@ int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video)
 
 int avos_mp_video_pause(avos_mp_t *mp, avos_mp_video_t *video)
 {
+	// NEW: Pause the subtitle engine
+	if (g_sub_engine) sub_engine_set_paused(g_sub_engine, 1);
 	if (is_stream_pauseable(mp, video))
 		stream_pause(video->s);
 	else
@@ -463,9 +490,13 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 	if (track < 0 || track >= video->s->av.subs_max) {
 		video->send_sub = 0;
 		*ret = 1;
+		// Clear the screen if track is disabled
+		if (g_sub_engine) sub_engine_close_track(g_sub_engine);
 	} else {
 		video->send_sub = 1;
 		*ret = stream_set_subtitle_stream(video->s, track) == 0 ? 1 : 0;
+		// DO NOT open or close the track here!
+		// stream_subtitle.c will natively open it when the first packet arrives.
 	}
 	return AVOS_ERR_OK;
 }

@@ -1789,10 +1789,16 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 	
 	int duration_rst = GET_SUB_TS( packet->duration );
 	int duration_ts = RST_TO_TS_DELTA(duration_rst, int);
-	if( s->subtitle->format == SUB_FORMAT_SSA ) {
-		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
+	// Prepend the 4-byte duration natively!
+	if( s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT ) {
+		memcpy(sub_buffer->data, &duration_ts, sizeof(int));
+		memcpy(sub_buffer->data + sizeof(int), packet->data, packet->size);
+		cdata->size = packet->size + sizeof(int);
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
-		cdata->size = msk_fixup_srt( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
+		// Shift buffer start by 4 bytes to leave room for the duration integer!
+		int srt_len = msk_fixup_srt( sub_buffer->data + sizeof(int), sub_buffer->size - sizeof(int), packet->data, packet->size, cdata->time, duration_ts );
+		memcpy(sub_buffer->data, &duration_ts, sizeof(int));
+		cdata->size = srt_len + sizeof(int);
 	} else {
 		memcpy( sub_buffer->data, packet->data, packet->size );
 	}

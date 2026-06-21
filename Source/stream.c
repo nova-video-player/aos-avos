@@ -537,6 +537,13 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 {
 	if( !s )
 		return 1;
+
+	int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough)
+		? s->audio_sink->get_passthrough( s ) : 0;
+	if( av_delay < 0 && passthrough_mode ) {
+		serprintf("stream_set_av_delay: negative av_delay=%d is not supported with passthrough mode %d\n",
+			av_delay, passthrough_mode);
+	}
 		
 	s->av_delay = av_delay;
 	s->manual_audio_delay_target_ms = (av_delay < 0) ? -av_delay : 0;

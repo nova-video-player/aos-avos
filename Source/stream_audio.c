@@ -62,6 +62,10 @@ extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
 
+#define AC3_RECODE_FRAME_SAMPLES 1536
+#define AC3_RECODE_SAMPLE_RATE 48000
+#define AC3_RECODE_FRAME_US ((int64_t)AC3_RECODE_FRAME_SAMPLES * 1000000 / AC3_RECODE_SAMPLE_RATE)
+
 static int pcm_channel_cap = 0;
 
 static int _stream_audio_speed_diag_active( STREAM *s )
@@ -677,6 +681,17 @@ static void _pcm_accum_flush_to_sink(STREAM *s)
 
 extern int DEBUG_delay;
 void _stream_resync( STREAM *s );
+
+static int64_t _stream_ac3_recode_written_duration_us(int size_written, int frame_size)
+{
+	if( size_written <= 0 ) {
+		return 0;
+	}
+	if( frame_size <= 0 || size_written >= frame_size ) {
+		return AC3_RECODE_FRAME_US;
+	}
+	return (AC3_RECODE_FRAME_US * size_written) / frame_size;
+}
 
 static void _wait( STREAM *s, int wait )
 {
@@ -1847,7 +1862,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							bytes_per_sec > 0 &&
 							total_size > 0);
 
-						if( use_rational_timing ) {
+						if( ac3_recoding && passthrough_active ) {
+							chunk_time_us = _stream_ac3_recode_written_duration_us(
+								size_written, audio_frame.size );
+						} else if( use_rational_timing ) {
 							chunk_time_us = ((int64_t)effective_chunk_size * 1000000) / bytes_per_sec;
 						} else if( s->audio->bytesPerSec > 0 ) {
 							chunk_time_us = ((int64_t)effective_chunk_size * 1000000) / s->audio->bytesPerSec;
@@ -1928,13 +1946,20 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Mode 1 IEC: the write IS the full IEC burst; use size_written so the
 							// clock advances by the complete burst duration (e.g. 20 ms for TrueHD,
 							// 32 ms for EAC3).  fakeSize is a per-subframe unit and under-counts by
-							// up to 96x.  Mode 2 / AC3 recoding: fakeSize carries the correct
-							// PCM-equivalent payload size.
+							// up to 96x.  Mode 2 uses fakeSize as the logical PCM-equivalent duration.
+							// AC3 recoding emits fixed AC3 encoder frames: 1536 samples at 48 kHz.
 							int pt_bytes = size_written;
-							if (passthrough_active && (passthrough != 1 || ac3_recoding) && audio_frame.fakeSize > 0) {
+							if( ac3_recoding ) {
+								int ac3_samples = AC3_RECODE_FRAME_SAMPLES;
+								if( size_written > 0 && audio_frame.size > 0 && size_written < audio_frame.size ) {
+									ac3_samples = (int)(((int64_t)AC3_RECODE_FRAME_SAMPLES * size_written) /
+										audio_frame.size);
+								}
+								pt_bytes = ac3_samples;
+							} else if (passthrough_active && passthrough != 1 && audio_frame.fakeSize > 0) {
 								pt_bytes = audio_frame.fakeSize;
 							}
-							s->audio_samples += pt_bytes / bpf;
+							s->audio_samples += ac3_recoding ? pt_bytes : pt_bytes / bpf;
 							// Use actual source sample rate for sync when passthrough is inactive.
 							// When decoding to PCM, use decoded frame rate if available (most reliable),
 							// else fallback to the currently configured rate.
@@ -1943,7 +1968,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							int sync_rate = s->audio->samplesPerSec;
 							// Track logical chunk duration for mode2 lead gate lower bound.
 							// Ceiling division: gate_ms >= chunk_ms ensures a single write never trips the gate.
-							if (passthrough_active && passthrough == 2 && bpf > 0 && sync_rate > 0) {
+							if( ac3_recoding ) {
+								s->mode2_last_chunk_ms = (int)(AC3_RECODE_FRAME_US / 1000);
+							} else if (passthrough_active && passthrough == 2 && bpf > 0 && sync_rate > 0) {
 								int64_t denom = (int64_t)bpf * sync_rate;
 								int ckt_ms = (int)(((int64_t)pt_bytes * 1000 + denom - 1) / denom);
 								if (ckt_ms > 0 && ckt_ms < 1000) {
@@ -1955,6 +1982,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							} else if (passthrough_active && passthrough == 1 && !ac3_recoding &&
 								audio_frame.samplesPerSec > 0) {
 								sync_rate = audio_frame.samplesPerSec; // container rate (192 kHz)
+							} else if( ac3_recoding ) {
+								sync_rate = AC3_RECODE_SAMPLE_RATE;
 							}
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)sync_rate;
 							int prev_audio_time = s->audio_time;

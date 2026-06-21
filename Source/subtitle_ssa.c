@@ -14,258 +14,150 @@
  * limitations under the License.
  */
 
+/*
+ * This is a complete rewrite of the external SSA parser.
+ *
+ * Unlike all other subtitle_*.c parsers, this one does NOT build a uni_sub
+ * linked list of cue nodes. ASS/SSA files are fed directly to Libass as a
+ * raw buffer via ass_process_data(), so the full script — [Script Info],
+ * [V4+ Styles], [Events], embedded fonts — is preserved exactly as the
+ * fansubber intended.
+ *
+ * parse_SSA() reads the entire file into a heap buffer and stores it in
+ * uni_sub->raw_data / uni_sub->raw_size. stream_sub_ext_feed_engine() in
+ * stream_sub_ext.c detects is_ssa=1 and calls sub_engine_feed_raw() instead
+ * of the normal per-cue sub_engine_feed() loop.
+ */
+
 #include "global.h"
 #include "debug.h"
-#include "subtitle_format.h"
-#include "i18n.h"
-#include "util.h"
 #include "astdlib.h"
+#include "subtitle_format.h"
 
-#include <ctype.h>
+#include <stdio.h>
 #include <string.h>
-#include <strings.h>
-#include <limits.h>
+#include <stdlib.h>
 
 #define DBG if(Debug[DBG_SUB])
 
-#define SS_TO_MS(x) ((x)*1000)
-#define MM_TO_MS(x) ((SS_TO_MS(x))*60)
-#define HH_TO_MS(x) ((MM_TO_MS(x))*60)
-
-/************************
- * Function: subtitle_get_sub_time
- * input: timeline of sub-formatted subtitle
- * output: array of start and endtime in int
- * 
- * Converts the given string to start end endtime.
- * The string must be in "{XX}{YY}ZTY" where XX and YY are int
- * *********************/
-#define USED_ID 4
-#define SKIP_SPACE(x) while(isspace(*x)){x++;}
-#define Xfgets(str,len,fd) do { \
-	do { str = fgets(str, len, fd); } \
-	while (str && (*str == '\r' || *str == '\n' || !*str)); \
-} while (0);
-
-
-char *subtitle_get_next_line( char *start, int len, FILE *fd );
-
-static const char* rel_str[USED_ID] ={
-	"Start","End", "Text", NULL
-};
-		
-static void ssa_clean_line(char* line,int rep){
-	char* tmp = strchr(line,'\r');
-	if(tmp){
-		*tmp = rep;
-	}
-}
-
+// ---------------------------------------------------------------------------
+// detect_SSA
+//
+// ASS/SSA files always start with [Script Info] as the first non-blank line.
+// Both .ass and .ssa use the same header — the version is indicated inside
+// the ScriptType field, not the file extension.
+// ---------------------------------------------------------------------------
 static int detect_SSA( FILE *file )
 {
 	//make sure that read starts at the beginning of file
 	fseek( file, 0, SEEK_SET );
-	char _line[ LINE_LEN + 1 ];
-	char* line = _line;
-	line = fgets( line, LINE_LEN, file );
-	while( line && (*line == '\r' || *line == '\n') ){//skip possible empty lines
-		line = fgets( line, 83, file );
+
+	char line[256];
+	while ( fgets( line, sizeof(line), file ) ) {
+		char *p = line;
+		// Strip UTF-8 BOM (EF BB BF) if present on this line
+		if ( (unsigned char)p[0] == 0xEF &&
+			(unsigned char)p[1] == 0xBB &&
+			(unsigned char)p[2] == 0xBF ) {
+			p += 3;
+		}
+		// Strip trailing whitespace/newlines
+		char *end = p + strlen(p) - 1;
+		while ( end >= p && (*end == '\r' || *end == '\n' || *end == ' ') ) *end-- = '\0';
+		// Skip leading whitespace
+		while ( *p == ' ' || *p == '\t' ) p++;
+		// Skip blank lines
+		if ( *p == '\0' ) continue;
+
+		if ( strncmp( p, "[Script Info]", 13 ) == 0 ) {
+			DBG serprintf( "SSA: found!\n" );
+			return 0; // detected
+		}
+		// First non-blank line didn't match — not ASS/SSA
+		break;
 	}
-	if(line && strstrNC(line,"[Script Info]")){
-DBG serprintf( "SSA: found!\n" );
-		return 0;
-	}
-DBG serprintf( "SSA: not SSA\n" );
+
+	DBG serprintf( "SSA: not SSA\n" );
 	return 1;
-
 }
 
-static int *ssa_pick_relevant(char *line)
-{
-	if (!line) return NULL;
-	char *start = strchr(line, ':');
-	if (!start) return NULL;
-	int *used = amalloc(USED_ID * sizeof(*used));
-	if (!used) return NULL;
-	for (int i = 0; i < USED_ID; ++i) used[i] = -1;
-	int column = 0;
-	for (++start; *start; ++column) {
-		while (isspace((unsigned char)*start)) ++start;
-		char *end = strchr(start, ',');
-		char *next = end ? end + 1 : start + strlen(start);
-		if (!end) end = next;
-		while (end > start && isspace((unsigned char)end[-1])) --end;
-		for (int i = 0; i < USED_ID - 1; ++i) {
-			if ((size_t)(end - start) == strlen(rel_str[i]) &&
-			    !strncmp(start, rel_str[i], end - start)) {
-				if (used[i] >= 0) { afree(used); return NULL; }
-				used[i] = column;
-			}
-		}
-		start = next;
-	}
-	// The line reader consumes these fields in Start, End, Text order.
-	if (used[0] < 0 || used[1] <= used[0] || used[2] <= used[1]) {
-		afree(used);
-		return NULL;
-	}
-	return used;
-}
-
-static void ssa_handle_text(sub_line *sb, char *line, int utf8)
-{
-	char *tmp;
-// ***********
-// Remove styling and convert to utf8 here!
-// **********		
-#ifdef CONFIG_I18N
-	if( !utf8 ) {
-		wchar unicode[ LINE_LEN + 1 ];
-		memset(unicode, 0, LINE_LEN);
-		wchar *uc = unicode;
-		char* c= line;
-		while(*c){
-			c+= I18N_codepage_to_unicode(c, uc);
-			uc++;
-		}
-		utf16_to_utf8( line, unicode, LINE_LEN);
-	}
-#endif //CONFIG_I18N
-	ssa_clean_line(line,'\0');
-	tmp = strstr(line,"\\N");
-	if(!tmp) {
-
-		sb->top = astrdup(line);
-	}
-	else{
-		tmp += 2;
-		sb->top = acalloc(tmp-line + 1, 1);
-		strncpy(sb->top,line,tmp-line-2);
-		sb->bottom = astrdup(tmp);
-	}
-	return;
-}
-
-static int calc_time(char *line)
-{
-	unsigned hh, mm, ss, cs;
-	if (sscanf(line, "%u:%u:%u.%u", &hh, &mm, &ss, &cs) != 4 ||
-	    mm >= 60 || ss >= 60 || cs >= 100) return -1;
-	int64_t time = ((int64_t)hh * 3600 + mm * 60 + ss) * 1000 + cs * 10;
-	return time <= INT_MAX ? (int)time : -1;
-}
-
-static sub_line *ssa_handle_line(char *line, int *fields, int utf8)
-{
-	while (isspace((unsigned char)*line)) ++line;
-	if (strncasecmp(line, "Dialogue:", 9)) return NULL;
-	char *text = line + 9;
-	int start = -1, end = -1;
-	for (int field = 0; field < fields[2]; ++field) {
-		char *comma = strchr(text, ',');
-		if (!comma) return NULL;
-		*comma = 0;
-		if (field == fields[0]) start = calc_time(text);
-		if (field == fields[1]) end = calc_time(text);
-		text = comma + 1;
-	}
-	if (start < 0 || end <= start) return NULL;
-	sub_line *cue = acalloc(1, sizeof(*cue));
-	if (!cue) return NULL;
-	cue->start = start;
-	cue->end = end;
-	ssa_handle_text(cue, text, utf8);
-	return cue;
-}
-
+// ---------------------------------------------------------------------------
+// parse_SSA
+//
+// Reads the entire file into a single heap buffer. No cue parsing —
+// Libass will do that internally when we call ass_process_data().
+//
+// Sets uni_sub->is_ssa = 1 so stream_sub_ext.c routes it to the SSA
+// engine path instead of the SRT bulk-feed path.
+// ---------------------------------------------------------------------------
 static uni_sub *parse_SSA( subt_orig *spex, int clean_tags )
 {
-	if(!spex){
-		return 0;
-	}
-	if(!spex->filename){
-		return 0;
-	}
-	FILE *fd = fopen(spex->filename,"r");
-	if(!fd){
-		DBG serprintf("Subtitle: parse_SSA, could not open file %s\n",spex->filename);
-		return 0;
-	}
-	char _line[LINE_LEN];
-	char *line = _line;
-	//go to begin on events
-	while(line){
-		line = subtitle_get_next_line(line, LINE_LEN,fd);
-		if(line && strstrNC(line,"[Events]")){
-			memset(line,0,LINE_LEN);
-			Xfgets(line, LINE_LEN,fd)			
+	// ASS styling must NEVER be stripped — override regardless of caller
+	(void)clean_tags;
 
-			break;
-		}
+	if ( !spex || !spex->filename ) {
+		DBG serprintf( "SSA: invalid params\n" );
+		return NULL;
 	}
-	int *relevant = ssa_pick_relevant(line);
-	if(!relevant){
-		fclose(fd);
-		DBG serprintf("Subtitle: parse_SSA, could not obtain format data\n");
-		return 0;
-	}
-	uni_sub *sub_record = acalloc(1,sizeof(uni_sub));
 
-	line = subtitle_get_next_line(_line, LINE_LEN,fd);
-	while(line){
-		sub_line *new_line = ssa_handle_line(line,relevant, spex->utf8);
-		if(new_line == 0){
-			Xfgets(line, LINE_LEN,fd)
-			continue;
-		}
-		if(!sub_record->first){
-			sub_record->first = new_line;
-			sub_record->last  = new_line;
-		} else {
-			if( new_line->start >= sub_record->last->start ) {
-				// add at end
-				sub_record->last->next = new_line;
-				new_line->prev         = sub_record->last;
-				sub_record->last       = new_line;
-			} else {
-				// insertion in list
-				sub_line *l = sub_record->last->prev;
-				while( l && new_line->start < l->start ) {
-					l = l->prev;
-				}
+	FILE *fd = fopen( spex->filename, "rb" );
+	if ( !fd ) {
+		DBG serprintf( "SSA: cannot open %s\n", spex->filename );
+		return NULL;
+	}
 
-				if( !l ) {
-					// insert at the start
-					sub_record->first->prev = new_line;
-					new_line->next          = sub_record->first;
-					sub_record->first       = new_line;
-				} else {
-					// insert at l
-					new_line->next  = l->next;
-					l->next->prev   = new_line;
-					new_line->prev  = l;
-					l->next         = new_line;
-				}
-			}
-		}
-		memset(line,0,LINE_LEN);
-		Xfgets(line, LINE_LEN,fd)
+	// Get file size
+	fseek( fd, 0, SEEK_END );
+	long file_size = ftell( fd );
+	fseek( fd, 0, SEEK_SET );
+
+	if ( file_size <= 0 ) {
+		fclose( fd );
+		return NULL;
 	}
-	fclose(fd);
-	if(!sub_record->first){ //nothing could be acquired
-		afree(sub_record);
-		afree(relevant);
-		return 0;
+
+	char *buf = amalloc( file_size + 1 );
+	if ( !buf ) {
+		fclose( fd );
+		return NULL;
 	}
-	afree(relevant);
+
+	long bytes_read = (long)fread( buf, 1, file_size, fd );
+	fclose( fd );
+
+	if ( bytes_read <= 0 ) {
+		afree( buf );
+		return NULL;
+	}
+	buf[bytes_read] = '\0';
+
+	uni_sub *sub_record = acalloc( 1, sizeof( uni_sub ) );
+	if ( !sub_record ) {
+		afree( buf );
+		return NULL;
+	}
+
+	// Store raw buffer — stream_sub_ext_feed_engine() will pass this
+	// directly to ass_process_data() / sub_engine_feed_raw()
+	sub_record->raw_data  = buf;
+	sub_record->raw_size  = (int)bytes_read;
+	sub_record->is_ssa    = 1;
+
+	DBG serprintf( "SSA: loaded %ld bytes from %s\n", bytes_read, spex->filename );
 	return sub_record;
 }
 
+// ---------------------------------------------------------------------------
+// Format registration
+// ---------------------------------------------------------------------------
 static struct SUBTITLE_FORMAT SSA = {
-	"SubStation",
+	"ASS/SSA",
 	detect_SSA,
-	NULL,		// no info
+	NULL,       // no info() — ASS language tracks handled by Libass internally
 	parse_SSA,
+	NULL,		// no get_gfx
+	NULL,		// no close
+	NULL,		// no feed — raw buffer path via is_ssa flag, not streaming callback
 };
 
 SUBTITLE_REGISTER_FORMAT( SSA );

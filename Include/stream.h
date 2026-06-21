@@ -764,6 +764,9 @@ typedef struct STREAM {
 	int		audio_start_pts;
 	int		audio_start_target_ts;
 	int		mode2_last_chunk_ms;	// logical duration of last mode2 write; lower bound for lead gate
+	int		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
+	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
+	int		ac3_recode_pacer_max_lead_ms;	// bounded write-ahead reservoir to subtract from heard time
 
 	int		play_n_video_frames;
 	int		play_n_video_one;

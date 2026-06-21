@@ -65,6 +65,7 @@ extern int libavos_get_max_pcm_channels(void);
 #define AC3_RECODE_FRAME_SAMPLES 1536
 #define AC3_RECODE_SAMPLE_RATE 48000
 #define AC3_RECODE_FRAME_US ((int64_t)AC3_RECODE_FRAME_SAMPLES * 1000000 / AC3_RECODE_SAMPLE_RATE)
+#define AC3_RECODE_WRITE_AHEAD_BURSTS 3
 
 static int pcm_channel_cap = 0;
 
@@ -556,6 +557,9 @@ void stream_audio_flush( STREAM *s )
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
 	s->mode2_last_chunk_ms = 0;
+	s->ac3_recode_next_write_wall_ms = 0;
+	s->ac3_recode_pacer_valid = 0;
+	s->ac3_recode_pacer_max_lead_ms = 0;
 	// AudioTrack playhead epoch is anchored to the pre-flush frame position;
 	// clear it so the epoch clock does not run against a stale base.
 	s->at_speed_epoch_active = 0;
@@ -992,6 +996,9 @@ DBGS serprintf("~");
 			s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
 			s->audio_time_remainder_us = 0;
 			s->mode2_last_chunk_ms    = 0;
+			s->ac3_recode_next_write_wall_ms = 0;
+			s->ac3_recode_pacer_valid = 0;
+			s->ac3_recode_pacer_max_lead_ms = 0;
 			// Seed sample clock from the current chunk PTS if available so the first write
 			// can immediately accumulate fakeSize duration without waiting for the next chunk.
 			if( chunk_pts != STREAM_NO_PTS_VALUE ) {
@@ -1681,13 +1688,49 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// ahead of video. Applies to PCM and mode2 passthrough: audio_time
 					// advances by logical (fakeSize-equivalent) duration, so the gate
 					// correctly reflects queued logical audio, not raw byte capacity.
-					// Mode1 passthrough and ac3_recoding are exempt (see gate function).
+					// Normal IEC mode1 passthrough and AC3 recode are exempt (the gate
+					// returns 0 for them); AC3 recode is paced by the wall-clock burst
+					// rate limiter below instead.
 					while( !_abort( s ) && stream_sync_pcm_audio_lead_gate( s, ac3_recoding ) ) {
 							msec_sleep( 10 );
 							stream_yield_RT();
 					}
 					if( _abort( s ) ) {
 						return;
+					}
+
+					// AC3 recode wall-clock burst pacer (entry wait). AC3 recode reports
+					// mode 1 but re-encodes frames freely: AudioTrack can_write blind-
+					// latches (no real backpressure) and the heard playhead never goes
+					// dynamic, so a sleep-gate either starves the compressed producer or
+					// only relocates the steady-state error (avos-229/231/232/233).
+					// Instead, pace burst writes against media wall time with a small,
+					// bounded write-ahead. Exact just-in-time pacing made process-wide
+					// stalls show up as 90ms receiver holes; a few bursts of headroom lets
+					// the receiver ride through those stalls without allowing startup
+					// runaway. The schedule is advanced after each successful write below.
+					int ac3_pace_chunk_ms = 0;
+					int ac3_pace_lead_ms = 0;
+					if( ac3_recoding && passthrough_active ) {
+						// AC3 encoder output is one 1536-sample frame at 48 kHz
+						// (32 ms). Do not derive the cadence from fakeSize/source
+						// bytes_per_sec: decoded input may be 44.1 kHz or have a
+						// different channel count, which was advancing AC3 recode
+						// timing by ~34.8 ms per burst instead of 32 ms.
+						ac3_pace_chunk_ms = (int)(AC3_RECODE_FRAME_US / 1000);
+						ac3_pace_lead_ms = ac3_pace_chunk_ms * AC3_RECODE_WRITE_AHEAD_BURSTS;
+						s->ac3_recode_pacer_max_lead_ms = ac3_pace_lead_ms;
+						if( s->ac3_recode_pacer_valid ) {
+							int wait_ms = s->ac3_recode_next_write_wall_ms - ac3_pace_lead_ms - atime();
+							while( wait_ms > 0 && !_abort( s ) ) {
+								msec_sleep( wait_ms > 10 ? 10 : wait_ms );
+								stream_yield_RT();
+								wait_ms = s->ac3_recode_next_write_wall_ms - ac3_pace_lead_ms - atime();
+							}
+							if( _abort( s ) ) {
+								return;
+							}
+						}
 					}
 
 					// no error, output PCM
@@ -1787,6 +1830,29 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 						size = 0;
 						break;
+					}
+					// AC3 recode wall-clock burst pacer (schedule advance). Keep an ideal
+					// media-time write cursor and allow a bounded lead at entry. Do not
+					// rebase on normal 50-100ms process stalls: catch up into the allowed
+					// headroom instead. Rebase only after a large discontinuity such as
+					// pause/seek/long stall.
+					if( ac3_recoding && passthrough_active && ac3_pace_chunk_ms > 0 ) {
+						int now_ms = atime();
+						int old_next_ms = s->ac3_recode_next_write_wall_ms;
+						int late_ms = s->ac3_recode_pacer_valid ? now_ms - old_next_ms : 0;
+						int rebase_ms = MAX( 200, ac3_pace_lead_ms * 3 );
+						if( !s->ac3_recode_pacer_valid || late_ms > rebase_ms ) {
+							s->ac3_recode_next_write_wall_ms = now_ms + ac3_pace_chunk_ms;
+						} else {
+							s->ac3_recode_next_write_wall_ms += ac3_pace_chunk_ms;
+						}
+						s->ac3_recode_pacer_valid = 1;
+						DBG2 serprintf("ac3_recode_pacer: chunk_ms=%d lead_ms=%d cur_lead=%d now=%d old_next=%d next=%d late=%d fake=%d bps=%lld\n",
+							ac3_pace_chunk_ms, ac3_pace_lead_ms,
+							s->ac3_recode_next_write_wall_ms - now_ms,
+							now_ms, old_next_ms,
+							s->ac3_recode_next_write_wall_ms, late_ms,
+							audio_frame.fakeSize, (long long)bytes_per_sec);
 					}
 					// Apply one-shot reanchor now that bytes are confirmed committed.
 					int rw_audio_time_before = s->audio_time;

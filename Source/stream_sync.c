@@ -148,6 +148,9 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->last_good_candidate_count = 0;
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
+	s->ac3_recode_next_write_wall_ms = 0;
+	s->ac3_recode_pacer_valid = 0;
+	s->ac3_recode_pacer_max_lead_ms = 0;
 	s->at_speed_epoch_active = 0;
 	s->atempo_ledger_active = 0;
 	s->atempo_ledger_count = 0;
@@ -590,6 +593,21 @@ static int _stream_mode2_heard_delay( STREAM *s, int static_latency, int fallbac
 	return static_latency > 0 ? static_latency : fallback_delay;
 }
 
+static int _stream_ac3_recode_pacer_lead_ms( STREAM *s )
+{
+	if( !s || !s->ac3_recode_pacer_valid || s->ac3_recode_pacer_max_lead_ms <= 0 ) {
+		return 0;
+	}
+	int lead_ms = s->ac3_recode_next_write_wall_ms - atime();
+	if( lead_ms < 0 ) {
+		return 0;
+	}
+	if( lead_ms > s->ac3_recode_pacer_max_lead_ms ) {
+		lead_ms = s->ac3_recode_pacer_max_lead_ms;
+	}
+	return lead_ms;
+}
+
 static int _stream_current_heard_delay( STREAM *s,
 	const stream_delay_status_t *delay_status, int is_mode2_sync )
 {
@@ -714,9 +732,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
 	int delay_valid = delay_status.is_delay_valid;
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-	int is_mode2_sync = (passthrough_mode >= 2) || libavos_get_ac3_recoding_enabled();
+	int ac3_recoding = libavos_get_ac3_recoding_enabled();
+	int is_mode2_sync = (passthrough_mode >= 2) || ac3_recoding;
 	int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
 	int heard_delay = _stream_current_heard_delay( s, &delay_status, is_mode2_sync );
+	int ac3_pacer_lead = 0;
+	if( ac3_recoding ) {
+		ac3_pacer_lead = _stream_ac3_recode_pacer_lead_ms( s );
+		heard_delay += ac3_pacer_lead;
+	}
 
 	int wall_now = atime();
 
@@ -899,17 +923,18 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			delay_status.effective_delay_ms, delay_status.is_delay_valid,
 			_stream_delay_source_name(delay_status.source),
 			delay_status.source_tag ? delay_status.source_tag : "none");
-		if( passthrough_mode >= 2 ) {
+		if( passthrough_mode >= 2 || ac3_recoding ) {
 			int user_av_delay = s->av_delay + stream_dbg_delay;
 			int diff = STREAM_NO_PTS_VALUE;
-			int raw_heard_ts = s->audio_time - heard_delay;
+			int heard_no_pacer = s->audio_time - (heard_delay - ac3_pacer_lead);
 			if( s->sync_v_time != STREAM_NO_PTS_VALUE ) {
 				diff = (s->sync_v_time - heard_ts) + RST_TO_TS_DELTA( user_av_delay, int );
 			}
-			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d audio=%d heard=%d raw_heard=%d video=%d sync_v=%d diff=%d latency=%d source=%s tag=%s\n",
+			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d ac3=%d audio=%d heard=%d heard_no_pacer=%d pacer_lead=%d video=%d sync_v=%d diff=%d latency=%d latency_no_pacer=%d source=%s tag=%s\n",
 				wall_now, s->audio ? s->audio->format : 0, passthrough_mode,
-				s->audio_time, heard_ts, raw_heard_ts, s->video_time, s->sync_v_time,
-				diff, heard_delay, _stream_delay_source_name(delay_status.source),
+				ac3_recoding, s->audio_time, heard_ts, heard_no_pacer,
+				ac3_pacer_lead, s->video_time, s->sync_v_time, diff, heard_delay,
+				heard_delay - ac3_pacer_lead, _stream_delay_source_name(delay_status.source),
 				delay_status.source_tag ? delay_status.source_tag : "none");
 		}
 	}
@@ -1050,6 +1075,11 @@ int stream_sync_av_delay( STREAM *s )
 
 	// world time audio sink delay (audiotrack system_delay on android) not dependant on audio speed
 	int sink_delay = s->audio_sink ? s->audio_sink->delay( s ) : 0;
+	int ac3_pacer_lead = 0;
+	if( ac3_recoding ) {
+		ac3_pacer_lead = _stream_ac3_recode_pacer_lead_ms( s );
+		sink_delay += ac3_pacer_lead;
+	}
 	// wold time video sink delay not dependant on audio speed
 	int video_delay;
 	if( s->vtime_post_sink ) {
@@ -1065,16 +1095,20 @@ int stream_sync_av_delay( STREAM *s )
 		// so it's excluded to prevent an incorrect sync bias.
 		int total_delay = /*codec_delay +*/ filter_delay + sink_delay - video_delay;
 		if (diag_log) {
-			DBGY2 serprintf("stream_sync_av_delay: samples mode codec=%d filter=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
-				codec_delay, filter_delay, atempo_delay, sink_delay, video_delay, total_delay,
+			DBGY2 serprintf("stream_sync_av_delay: samples mode codec=%d filter=%d (atempo=%d) sink=%d sink_no_pacer=%d pacer_lead=%d video=%d total=%d total_no_pacer=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
+				codec_delay, filter_delay, atempo_delay, sink_delay,
+				sink_delay - ac3_pacer_lead, ac3_pacer_lead, video_delay, total_delay,
+				total_delay - ac3_pacer_lead,
 				audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL, passthrough, ac3_recoding);
 		}
 		return total_delay;
 	} else {
 		int total_delay = codec_delay + filter_delay + sink_delay - video_delay;
 		if (diag_log) {
-			DBGY2 serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d video=%d total=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
-				codec_delay, filter_delay, atempo_delay, sink_delay, video_delay, total_delay,
+			DBGY2 serprintf("stream_sync_av_delay: codec=%d filter=%d (atempo=%d) sink=%d sink_no_pacer=%d pacer_lead=%d video=%d total=%d total_no_pacer=%d speed=%.3f using_atempo=%d passthrough=%d ac3=%d\n",
+				codec_delay, filter_delay, atempo_delay, sink_delay,
+				sink_delay - ac3_pacer_lead, ac3_pacer_lead, video_delay, total_delay,
+				total_delay - ac3_pacer_lead,
 				audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL, passthrough, ac3_recoding);
 		}
 		return total_delay;

@@ -237,6 +237,28 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
 30fps, imperceptible), and ~15ms post-convergence from
 `_snap_timestamp_ns` half-frame rounding — also imperceptible.
 
+## Manual A/V Delay
+
+- **Positive internal `av_delay` (delay video) is supported on all routes**,
+  including passthrough. It is realized physically by the sfdec2 video-hold
+  (the effective delay slews into the blit schedule), independent of the audio
+  sink. This is the direction normally needed for AVR setups, where compressed
+  decode/DSP makes audio late and the player must hold video to match.
+- **Negative internal `av_delay` (delay audio) is not supported on compressed
+  passthrough.** It works only for decoded PCM, where the delay is realized by
+  inserting PCM silence on the audio path. On passthrough AVOS does not own
+  decoded samples, and on-device testing showed timestamp/anchor-only schemes
+  cannot realize it: the video pacer is anchored to physical audio progression,
+  and mode 2's heard clock is synthetic (`heard = audio_time - static_latency`),
+  so shifting anchors only makes the internal clocks agree without physically
+  delaying the audio the receiver hears. A real compressed-audio hold (IEC
+  pause/null bursts, codec-specific silent frames, or an AudioTrack pause/gap)
+  would be required and carries high AVR-mute / decoder-relock / drift risk.
+- **Guarding**: Nova's UI prevents selecting a negative passthrough delay (live
+  slider and remembered presets), so native code does not need to clamp it. If a
+  future path could bypass the UI, a defensive native clamp of `av_delay < 0` to
+  `0` for passthrough routes would be the place to add it.
+
 ## Edge Cases
 
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.

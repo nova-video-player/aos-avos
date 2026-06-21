@@ -408,7 +408,6 @@ typedef int (*PARSER_START_NEXT)     ( struct STREAM *s );
 typedef struct STREAM_PARSER_STATS *
             (*PARSER_GET_STATS)      ( struct STREAM *s, struct STREAM_PARSER_STATS *stats );
 typedef int (*PARSER_GET_TIME)       ( struct STREAM *s, int *total );
-typedef int (*PARSER_GET_TIME_FOR_POS)( struct STREAM *s, UINT64 for_pos );
 
 typedef struct stream_parser_str {
 	const char		*name;
@@ -432,7 +431,6 @@ typedef struct stream_parser_str {
 	PARSER_START_NEXT	start_next;
 	PARSER_GET_STATS	get_stats;
 	PARSER_GET_TIME		get_time;
-	PARSER_GET_TIME_FOR_POS	get_time_for_pos;
 	// Optional subtitle-only queue reset. Parser and subtitle threads are idle;
 	// s->subtitle already selects the new track. Must not seek or reset A/V.
 	int (*reset_subtitle)(struct STREAM *s);
@@ -501,9 +499,7 @@ typedef enum {
 	STREAM_AUDIO_PROPS_CHANGED = 1,
 	STREAM_VIDEO_PROPS_CHANGED,
 	STREAM_SUB_PROPS_CHANGED,
-	STREAM_SUBTITLE_CHANGED,
 	STREAM_DECODER_CHANGED,
-	STREAM_SUBTITLE_CLEARED,
 } STREAM_MESSAGE;
 
 typedef enum {
@@ -807,7 +803,6 @@ typedef struct STREAM {
 	STREAM_VIDEO_MANGLER   *video_mangler;
 	
 	STREAM_DEC_SUB *sub_dec;
-	int		sub_dec_open;
 
 	STREAM_SINK_VIDEO *video_sink;
 	// Serializes speed callbacks with decoder creation/destruction.
@@ -857,6 +852,60 @@ typedef struct STREAM {
 	int		subtitle_ratio_n;		// allow to scale sub timestamps with a given ratio
 	int		subtitle_ratio_d;
 	void		*subtitle_priv;		// private data for subtitles
+	// Set to 1 by _seek_init() (stream_video.c) whenever the active subtitle track is an
+	// external, bulk-fed-once text track (SRT/VTT/ASS -- see _is_ext_text() in
+	// stream_subtitle.c). sub_engine_flush() clears whatever cues/events the engine already
+	// has loaded on every seek, but external text tracks are only ever bulk-fed ONCE at track
+	// open (stream_sub_ext_feed_engine(), gated by subtitle_frame being NULL) -- a seek does
+	// NOT free subtitle_frame, so nothing would otherwise re-trigger that feed, leaving the
+	// engine permanently empty for that track post-seek. _get_next_ext_sub() checks this flag
+	// once the seek completes, re-feeds if set, then clears it. Internal embedded text tracks
+	// don't need this: they keep receiving fresh packets from the demuxer every frame via the
+	// per-frame block in _get_next_int_sub(), so a flush there is naturally refilled by the
+	// next packet with no separate re-feed step required.
+	int		subtitle_ext_needs_refeed;
+
+	// -------------------------------------------------------------------
+	// External-subtitle lifetime guard (for _owner_acquire() / _release()).
+	// Stored in STREAM, not SUB_PRIV, to protect the subtitle_priv pointer
+	// itself. If embedded in SUB_PRIV, a race condition during teardown
+	// (stream_sub_ext_close) could cause a use-after-free if the struct is
+	// freed just before a caller acquires the lock. Tied to the STREAM
+	// lifecycle: initialized in stream_init(), destroyed in stream_close().
+	pthread_mutex_t	subtitle_owner_lock;
+	pthread_cond_t	subtitle_owner_cond;
+	int		subtitle_owner_refs;	// callers currently inside an _owner_acquire()/_owner_release() pair
+	int		subtitle_owner_closing;	// set while THIS stream's current subtitle_priv is being torn down; blocks new acquires until reset
+
+	// Guards the live subtitle track table as one unit: which slots exist
+	// (av.subs_max), their content (av.sub[i]'s fields), and which one is
+	// selected (av.subs, subtitle). One lock rather than two, since reads
+	// like subtitle->valid need both the pointer and its target stable
+	// together. Writers are stream_sub_ext.c's _add_menu_entries() and
+	// stream_sub_ext_close(), both on the discovery-worker thread; readers
+	// needing it are stream_set_subtitle_stream() and
+	// avos_mp_video_setsubtitletrack() (JNI thread) -- stream_sub_dec_thread
+	// doesn't need it, already covered by the sub_tstate idle rendezvous.
+	//
+	// Without this lock, a manual track switch (JNI thread) racing the
+	// discovery worker's autoscan/rebuild could produce a torn (av.subs,
+	// subtitle) snapshot, or get silently reverted by the rescan's
+	// post-rebuild reselect.
+	//
+	// Lifecycle mirrors subtitle_owner_lock: init in stream_init(),
+	// destroy in stream_delete() -- NOT stream_close() -- since the
+	// discovery worker can still be mid-scan when stream_close() runs.
+	// stream_stop()'s later stream_sub_ext_close() ->
+	// stream_sub_ext_wait_for_discovery() is what guarantees it's done,
+	// and that happens after stream_close() but before stream_delete().
+	pthread_mutex_t	subtitle_table_lock;
+
+	// Bumped by every writer of (av.subs, subtitle) under subtitle_table_lock.
+	// _stream_check_subtitles_sync() snapshots this before its (potentially
+	// slow) rescan and rechecks it before its post-rebuild reselect write;
+	// if it moved, a manual switch happened mid-scan and the reselect is
+	// skipped instead of reverting that fresher choice.
+	uint64_t	subtitle_select_generation;
 	
 	// current subtitle chunk
 	STREAM_CDATA	cdata_sub;
@@ -1025,6 +1074,7 @@ typedef struct STREAM {
 	int		fps_start;
 	int		fps_count;
 	void		*surface_handle;
+	void *sub_engine;
 
 } STREAM;
 #define STREAM_POS_MAX 1000

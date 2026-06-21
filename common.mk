@@ -151,7 +151,7 @@ CSRC_STREAM_PARSER = \
 	
 CSRC_STREAM_CODEC = \
 	codec_yuv.c \
-	codec_ssa.c codec_textsub.c vobsub.c codec_vobsub.c codec_utils.c  \
+	codec_textsub.c vobsub.c codec_vobsub.c codec_utils.c  \
 	codec_ffsub.c
 
 CSRC_STREAM_SINK = \
@@ -162,7 +162,8 @@ CSRC_STREAM_SINK = \
 CSRC_STREAM_SUB = \
 	stream_subtitle.c stream_sub_ext.c \
 	subtitle_formats.c subtitle_ssa.c subtitle_srt.c subtitle_smi.c subtitle_sub.c subtitle_idx.c \
-	subtitle_mpl2.c subtitle_vtt.c
+	subtitle_mpl2.c subtitle_vtt.c subtitle_pgs.c sub_format_ssa.c sub_format_srt.c sub_format_gfx.c \
+	font_name_parser.c
 
 CSRC_AUDIO = \
 	id3tag.c mp3.c \

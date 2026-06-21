@@ -542,6 +542,7 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 	s->manual_audio_delay_target_ms = (av_delay < 0) ? -av_delay : 0;
 	if( av_delay >= 0 ) {
 		s->manual_audio_delay_applied_ms = 0;
+		s->manual_audio_hold_pending_ms = 0;
 	}
 	
 	return 0;

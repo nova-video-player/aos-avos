@@ -513,6 +513,7 @@ typedef struct STREAM {
 	int		put_time_mode;		// video sink uses put_time pacing
 	int		manual_audio_delay_target_ms;   // extra audio hold for negative av_delay
 	int		manual_audio_delay_applied_ms;  // currently applied extra audio hold
+	int		manual_audio_hold_pending_ms;   // wall-clock gap intentionally inserted before next burst (PCM silence)
 	// PCM accumulation buffer to coalesce tiny decoder output chunks.
 	unsigned char	*pcm_accum_data;
 	int		pcm_accum_size;

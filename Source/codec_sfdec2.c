@@ -201,9 +201,13 @@ static INT64 _snap_timestamp_ns(priv_t *p, int frame_time)
 
 static int _update_effective_av_delay_ts(priv_t *p, STREAM *s)
 {
-	int target_av_delay = s ? s->av_delay : 0;
+	// Video can only be delayed; negative user delay is realized by holding
+	// audio, so the sfdec2 video-delay state must never slew below zero.
+	int target_av_delay = (s && s->av_delay > 0) ? s->av_delay : 0;
 	int effective_av_delay = p->effective_av_delay_ms;
 	const int av_delay_slew_step_ms = 40;
+	if( effective_av_delay < 0 )
+		effective_av_delay = 0;
 
 	if( effective_av_delay < target_av_delay ) {
 		int step = target_av_delay - effective_av_delay;
@@ -226,8 +230,10 @@ static int _update_effective_av_delay_ts(priv_t *p, STREAM *s)
 static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 {
 	int frame_time = f ? f->time : -1;
+	// Video can only be delayed; negative user delay is realized by holding audio.
+	int video_av_delay_ts = av_delay_ts > 0 ? av_delay_ts : 0;
 	if( frame_time >= 0 )
-		frame_time += av_delay_ts;
+		frame_time += video_av_delay_ts;
 	INT64 timestamp_ns = _snap_timestamp_ns(p, frame_time);
 	INT64 now_ns = _get_monotonic_ns();
 	INT64 start_off = p->sched_start_off_ns;
@@ -488,11 +494,26 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int drift_threshold_ms = 200;
 	int passthrough_mode = (p->s && p->s->audio_sink && p->s->audio_sink->get_passthrough) ?
 		p->s->audio_sink->get_passthrough( p->s ) : 0;
+	int manual_hold_ms = 0;
+	if( p->s && p->s->manual_audio_hold_pending_ms > 0 ) {
+		// A manual negative A/V delay just inserted an intentional audio hold
+		// (PCM silence). The next put_time sees that gap as grown dr; subtract it
+		// so the gap is not mistaken for clock drift and reanchored away, which
+		// would cancel the user delay.
+		manual_hold_ms = p->s->manual_audio_hold_pending_ms;
+		p->s->manual_audio_hold_pending_ms = 0;
+	}
+	int dr_for_sync = dr - manual_hold_ms;
+	if( dr_for_sync < 0 )
+		dr_for_sync = 0;
 	if( p->s && p->s->put_time_mode && !passthrough_mode ) {
 		int frame_ms = (p->s->video && p->s->video->msPerFrame > 0) ?
 			p->s->video->msPerFrame : 33;
 		drift_threshold_ms = MAX( 160, frame_ms * 4 );
 	}
+	expected = p->venc_put_time + dr_for_sync;
+	diff = time - expected;
+	abs_diff = diff < 0 ? -diff : diff;
 	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
 	int reanchor_discontinuity = discontinuity;
 	int smooth_burst_mode = p->s && p->s->put_time_mode &&
@@ -1238,7 +1259,7 @@ retry_decoder_open:
 	p->passthrough_cached = _is_passthrough(sctx);
 	p->grace_until_ms = 0;
 	p->last_user_av_delay = sctx ? sctx->av_delay : 0;
-	p->effective_av_delay_ms = sctx ? sctx->av_delay : 0;
+	p->effective_av_delay_ms = (sctx && sctx->av_delay > 0) ? sctx->av_delay : 0;
 
 	VIDEO_PROPERTIES opened_video = *video;
 	opened_video.format = effective_format;
@@ -1522,7 +1543,7 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->sched_late = 0;
 	p->sched_debt_ns = 0;
 	p->last_user_av_delay = s->av_delay;
-	p->effective_av_delay_ms = s->av_delay;
+	p->effective_av_delay_ms = s->av_delay > 0 ? s->av_delay : 0;
 	pthread_mutex_unlock( &p->locked.mtx );
 }
 

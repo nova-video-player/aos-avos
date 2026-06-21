@@ -148,6 +148,9 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->last_good_candidate_count = 0;
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
+	s->manual_audio_delay_target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
+	s->manual_audio_delay_applied_ms = 0;
+	s->manual_audio_hold_pending_ms = 0;
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
@@ -1429,10 +1432,24 @@ int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 	} else {
 		gate_ms = STREAM_PCM_AUDIO_LEAD_GATE_MS;
 	}
-	int diff = s->sync_v_time - heard_ts;
+	int user_av_delay = s->av_delay + stream_dbg_delay;
+	if( user_av_delay < 0 ) {
+		// The lead gate prevents producer runaway; it is not the realizer for
+		// negative manual A/V delay.  Negative delay is applied once in the
+		// output domain by _wait().  If the gate also includes the negative
+		// target, it continuously holds audio and can deadlock startup before
+		// the one-shot hold has a stable anchor.
+		user_av_delay = 0;
+	}
+	// Positive manual delay intentionally holds video behind audio, so audio
+	// legitimately leads sync_v by up to user_av_delay.  Fold that into the
+	// gate threshold; otherwise the gate reads the intended lead as runaway
+	// and stalls the producer, deadlocking video and audio together.
+	int raw_diff = s->sync_v_time - heard_ts;
+	int diff = raw_diff + RST_TO_TS_DELTA( user_av_delay, int );
 	if( diff < -gate_ms ) {
-		DBG serprintf("pcm_audio_lead_gate: hold sync_v=%d heard=%d diff=%d gate=%d\n",
-			s->sync_v_time, heard_ts, diff, gate_ms);
+		DBG serprintf("pcm_audio_lead_gate: hold sync_v=%d heard=%d diff=%d raw_diff=%d av_delay=%d dbg_delay=%d gate=%d\n",
+			s->sync_v_time, heard_ts, diff, raw_diff, s->av_delay, stream_dbg_delay, gate_ms);
 		return 1;
 	}
 	return 0;
@@ -1705,6 +1722,13 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 	
 	// if audio is in the future, delay it (but only if significantly ahead)
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
+	if( diff < 0 && s->av_delay < 0 ) {
+		// Negative manual delay is realized by the one-shot audio hold
+		// (_wait), not by continuous producer blocking. Keep _stream_av_diff()
+		// signed for diagnostics/accounting, but do not let the negative
+		// user-delay term deadlock this gate.
+		diff -= RST_TO_TS_DELTA( s->av_delay, int );
+	}
 
 	// Only block audio if it's significantly ahead (more than threshold)
 	if( diff < 0 ) {
@@ -2006,41 +2030,53 @@ void *AV_get_ctx( void );
 
 static void _stream_delay_plus( int argc, char *argv[] )
 {
-	if( argc > 1 ) {
-		stream_dbg_delay += atoi( argv[1] );
-	} else {
-		stream_dbg_delay += 20;
-	}
-	
 	STREAM *s = AV_get_ctx();
 	if( s ) {
-serprintf("av_delay  %5d\n", stream_sync_av_delay( s ) );
+		int delta = argc > 1 ? atoi( argv[1] ) : 20;
+		stream_set_av_delay( s, s->av_delay + delta );
+		stream_dbg_delay = 0;
+serprintf("user_delay %5d\n", s->av_delay );
+serprintf("av_delay   %5d\n", stream_sync_av_delay( s ) );
+	} else {
+		if( argc > 1 ) {
+			stream_dbg_delay += atoi( argv[1] );
+		} else {
+			stream_dbg_delay += 20;
+		}
 	}
 serprintf("dbg_delay %5d\n", stream_dbg_delay );
 }
 
 static void _stream_delay_minus( int argc, char *argv[] )
 {
-	if( argc > 1 ) {
-		stream_dbg_delay -= atoi( argv[1] );
-	} else {
-		stream_dbg_delay -= 20;
-	}
 	STREAM *s = AV_get_ctx();
 	if( s ) {
-serprintf("av_delay  %5d\n", stream_sync_av_delay( s ) );
+		int delta = argc > 1 ? atoi( argv[1] ) : 20;
+		stream_set_av_delay( s, s->av_delay - delta );
+		stream_dbg_delay = 0;
+serprintf("user_delay %5d\n", s->av_delay );
+serprintf("av_delay   %5d\n", stream_sync_av_delay( s ) );
+	} else {
+		if( argc > 1 ) {
+			stream_dbg_delay -= atoi( argv[1] );
+		} else {
+			stream_dbg_delay -= 20;
+		}
 	}
 serprintf("dbg_delay %5d\n", stream_dbg_delay );
 }
 
 static void _stream_delay_set( int argc, char *argv[] )
 {
-	if( argc > 1 ) {
-		stream_dbg_delay = atoi( argv[1] );
-	}
 	STREAM *s = AV_get_ctx();
 	if( s ) {
-serprintf("av_delay  %5d\n", stream_sync_av_delay( s ) );
+		int delay = argc > 1 ? atoi( argv[1] ) : 0;
+		stream_set_av_delay( s, delay );
+		stream_dbg_delay = 0;
+serprintf("user_delay %5d\n", s->av_delay );
+serprintf("av_delay   %5d\n", stream_sync_av_delay( s ) );
+	} else if( argc > 1 ) {
+		stream_dbg_delay = atoi( argv[1] );
 	}
 serprintf("dbg_delay %5d\n", stream_dbg_delay );
 }

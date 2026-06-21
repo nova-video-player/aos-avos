@@ -560,6 +560,9 @@ void stream_audio_flush( STREAM *s )
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
+	s->manual_audio_delay_target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
+	s->manual_audio_delay_applied_ms = 0;
+	s->manual_audio_hold_pending_ms = 0;
 	// AudioTrack playhead epoch is anchored to the pre-flush frame position;
 	// clear it so the epoch clock does not run against a stale base.
 	s->at_speed_epoch_active = 0;
@@ -697,8 +700,9 @@ static int64_t _stream_ac3_recode_written_duration_us(int size_written, int fram
 	return (AC3_RECODE_FRAME_US * size_written) / frame_size;
 }
 
-static void _wait( STREAM *s, int wait )
+static int _wait( STREAM *s, int wait )
 {
+	int inserted = 0;
 	if( s->audio_sink ) {
 		while( wait ) {
 			int to_wait = MIN( 20, wait );
@@ -713,19 +717,33 @@ static void _wait( STREAM *s, int wait )
 
 			while( !s->audio_sink->can_write( s, frame.size ) ) {
 				if( _abort( s ) ) {
-					return;
+					return inserted;
 				}
 				stream_yield_RT();
 			}
 			if( _abort( s ) ) {
-				return;
+				return inserted;
 			}
-			_add_audio_time( s, RST_TO_TS_DELTA(to_wait, int) );
 
-			s->audio_sink->write( s, &frame );
+			// This silence is an output hold for user A/V delay, not media
+			// progress.  Do not advance audio_time.
+			int size_written = s->audio_sink->write( s, &frame );
+			// Credit only the silence actually accepted by the sink. A partial or
+			// failed write must not over-credit the scheduler hold, which would
+			// push manual_audio_delay_applied_ms above what was really inserted.
+			int written_ms = ( size_written > 0 && s->audio->bytesPerFrame > 0 &&
+			    s->audio->samplesPerSec > 0 )
+				? ( size_written / s->audio->bytesPerFrame ) * 1000 / s->audio->samplesPerSec
+				: 0;
 			wait -= to_wait;
+			inserted += written_ms;
+			if( size_written < size ) {
+				// Sink did not take the full chunk; stop rather than spin.
+				break;
+			}
 		}
-	}				
+	}
+	return inserted;
 }
 
 static void _write_zero_data( STREAM *s, int time ) 
@@ -773,6 +791,7 @@ static void _audio_decode( STREAM *s )
 			s->video_hold_for_resume_audio = 1;
 		}
 		s->manual_audio_delay_applied_ms = 0;
+		s->manual_audio_hold_pending_ms = 0;
 		s->pcm_accum_size = 0;
 	}
 
@@ -786,6 +805,7 @@ static void _audio_decode( STREAM *s )
 				_stream_atempo_ledger_reset( s );
 				s->audio_sink->flush( s );
 				s->manual_audio_delay_applied_ms = 0;
+				s->manual_audio_hold_pending_ms = 0;
 				s->audio_sink->preload( s );
 				/* AudioTrack.pause()+flush leaves the track paused; resume playback so subsequent writes succeed. */
 				s->audio_sink->start( s );
@@ -1431,6 +1451,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							if( passthrough_mode == 0 ) {
 								s->at_speed_epoch_active = 0;
 								_stream_atempo_ledger_reset( s );
+								s->manual_audio_delay_target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
+								s->manual_audio_delay_applied_ms = 0;
+								s->manual_audio_hold_pending_ms = 0;
 								s->audio_sink->flush( s );
 							}
 							s->audio_sink->stop( s );
@@ -1670,8 +1693,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								int add_ms = target_ms - s->manual_audio_delay_applied_ms;
 								DBG serprintf("manual_audio_delay_hold: av_delay=%d target=%d applied=%d add=%d\n",
 									s->av_delay, target_ms, s->manual_audio_delay_applied_ms, add_ms);
-								_wait( s, add_ms );
-								s->manual_audio_delay_applied_ms = target_ms;
+								int inserted_ms = _wait( s, add_ms );
+								// The inserted silence is a real wall-clock gap before the
+								// next decoded frame reaches the video sink. Record it so
+								// videosink_put_time() can treat that gap as intentional and
+								// not reanchor (which would cancel the manual delay).
+								s->manual_audio_hold_pending_ms += inserted_ms;
+								s->manual_audio_delay_applied_ms += inserted_ms;
+								if( s->manual_audio_delay_applied_ms > target_ms ) {
+									s->manual_audio_delay_applied_ms = target_ms;
+								}
 							} else if( s->manual_audio_delay_applied_ms > target_ms ) {
 								// We cannot pull already queued audio back in time; shrink target
 								// so future holds follow the latest user setting.

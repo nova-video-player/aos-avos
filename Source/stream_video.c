@@ -3140,10 +3140,20 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( s->put_time_mode && s->audio_time >= 0 ) {
 		int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
 		int total_audio_delay = stream_sync_av_delay( s );
+		int frame_minus_heard = frame->time - heard_audio_ts;
 		DBG serprintf("video_sched_diag: frame=%d video=%d audio=%d heard=%d frame_minus_heard=%d audio_delay=%d sink_ref=%d speed=%.3f seek_epoch=%d\n",
 			frame->time, s->video_time, s->audio_time, heard_audio_ts,
-			frame->time - heard_audio_ts, total_audio_delay, s->sink_ref_time,
+			frame_minus_heard, total_audio_delay, s->sink_ref_time,
 			audio_interface_get_audio_speed(), s->seek_epoch );
+		// Track the realized A/V phase so stream_set_av_delay() can baseline it,
+		// and report the applied shift while a manual-delay window is open.
+		s->manual_delay_fmh_last = frame_minus_heard;
+		if( s->manual_delay_log_until_ms && atime() <= s->manual_delay_log_until_ms ) {
+			DBG serprintf("manual_delay_applied: av_user=%d baseline_fmh=%d now_fmh=%d delta=%d applied=%d\n",
+				s->av_delay, s->manual_delay_fmh_baseline, frame_minus_heard,
+				frame_minus_heard - s->manual_delay_fmh_baseline,
+				s->manual_audio_delay_applied_ms );
+		}
 	}
 	// For passthrough/AC3 recoding, wait for the first actual audio write
 	// before releasing video.  For PCM, do NOT wait for delay_valid: blocking

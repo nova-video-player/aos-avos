@@ -517,6 +517,9 @@ typedef struct STREAM {
 	int		manual_audio_delay_target_ms;   // extra audio hold for negative av_delay
 	int		manual_audio_delay_applied_ms;  // currently applied extra audio hold
 	int		manual_audio_hold_pending_ms;   // wall-clock gap intentionally inserted before next burst (PCM silence)
+	int		manual_delay_fmh_last;          // latest frame_minus_heard observed by the video scheduler
+	int		manual_delay_fmh_baseline;      // frame_minus_heard snapshot at the last av_delay set
+	int		manual_delay_log_until_ms;      // atime() until which to emit manual_delay_applied diagnostics
 	// PCM accumulation buffer to coalesce tiny decoder output chunks.
 	unsigned char	*pcm_accum_data;
 	int		pcm_accum_size;

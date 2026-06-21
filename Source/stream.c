@@ -544,7 +544,15 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 		s->manual_audio_delay_applied_ms = 0;
 		s->manual_audio_hold_pending_ms = 0;
 	}
-	
+	// Snapshot the current realized A/V phase and open a short diagnostic window
+	// so the applied shift is unmistakable in the log: manual_delay_applied lines
+	// report frame_minus_heard against this baseline as the hold takes effect.
+	s->manual_delay_fmh_baseline = s->manual_delay_fmh_last;
+	s->manual_delay_log_until_ms = atime() + 5000;
+DBG serprintf("stream_set_av_delay: av_delay=%d manual_target=%d applied=%d baseline_fmh=%d\r\n",
+		av_delay, s->manual_audio_delay_target_ms, s->manual_audio_delay_applied_ms,
+		s->manual_delay_fmh_baseline);
+
 	return 0;
 }
 

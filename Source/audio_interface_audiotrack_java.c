@@ -2295,20 +2295,23 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 	}
 	// Mode2 selected delay policy (per format, tested on Nvidia Shield / eARC route):
 	//
-	// EAC3 (plain): pipeline_latency captures the real HAL delay on this route;
-	// app_latency underestimates it, causing the lead gate to throttle too early
-	// and audio to fall behind (sound late) or drift (desync).
+	// EAC3 (plain) and E_AC3_JOC (Atmos): pipeline_latency captures the real HAL
+	// delay on this route; app_latency underestimates it, causing the lead gate to
+	// throttle too early and audio to fall behind (sound late) or drift (desync).
+	// JOC is E-AC3 plus Atmos metadata and uses the same HAL decode path as plain
+	// E-AC3, so it must use the same pipeline_latency policy (Atmos-tagged streams
+	// such as scarpetta were ~30ms late under app_latency, while non-Atmos EAC3
+	// such as belfast stayed in sync).
 	//
-	// TrueHD, DTS-HD, DTS-HD MA, E_AC3_JOC (Atmos): pipeline_latency
-	// overestimates the actual audible delay on tested routes; app_latency gives
-	// correct heard_ts and bounded A/V diff.
+	// TrueHD, DTS-HD, DTS-HD MA: pipeline_latency overestimates the actual audible
+	// delay on tested routes; app_latency gives correct heard_ts and bounded
+	// A/V diff.
 	//
 	// AC3 and unknown formats: default to pipeline_latency (conservative).
 	if (at->passthrough >= 2) {
 		if (at->format == WAVE_FORMAT_TRUEHD ||
 		    at->format == WAVE_FORMAT_DTS_HD ||
-		    at->format == WAVE_FORMAT_DTS_HD_MA ||
-		    at->format == WAVE_FORMAT_E_AC3_JOC) {
+		    at->format == WAVE_FORMAT_DTS_HD_MA) {
 DBG3		LOG("audiotrack_get_latency: mode2 format=%04X using app_latency=%u (pipeline=%u)",
 				at->format, at->latency, at->pipeline_latency);
 			return (int)at->latency;

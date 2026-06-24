@@ -361,7 +361,7 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 			flushed_samples += ctx->out_frame->nb_samples;
 			av_frame_unref(ctx->out_frame);
 		}
-		serprintf("atempo: flushed %d samples. FIFO size after: %d\n", flushed_samples, av_audio_fifo_size(ctx->fifo));
+		DBGA serprintf("atempo: flushed %d samples. FIFO size after: %d\n", flushed_samples, av_audio_fifo_size(ctx->fifo));
 	}
 
 	// Free existing graph
@@ -1058,9 +1058,9 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 			emit_delay_log = 1;
 		}
 		if (emit_delay_log) {
-			serprintf("atempo: delay=%d ms (fifo_ms=%d, atempo_ms=%d, speed=%.2f)\n",
+			DBGA serprintf("atempo: delay=%d ms (fifo_ms=%d, atempo_ms=%d, speed=%.2f)\n",
 				delay_ms, fifo_ms, atempo_internal_ms, ctx->current_speed);
-			serprintf("atempo_var: reason=%s speed=%.3f delay=%d->%d delta=%d fifo_ms=%d->%d delta=%d fifo_samples=%d->%d delta=%d in=%d target=%d out=%d\n",
+			DBGA serprintf("atempo_var: reason=%s speed=%.3f delay=%d->%d delta=%d fifo_ms=%d->%d delta=%d fifo_samples=%d->%d delta=%d in=%d target=%d out=%d\n",
 				reason, ctx->current_speed, ctx->last_delay_ms, delay_ms, delta_delay,
 				ctx->last_fifo_ms, fifo_ms, delta_fifo_ms,
 				ctx->last_fifo_samples, fifo_samples, delta_fifo_samples,

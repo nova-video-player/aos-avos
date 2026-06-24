@@ -149,75 +149,158 @@ static void store_line(char *line, sub_line *sub, int utf8, int clean_tags)
 
 static uni_sub *parse_SUB( subt_orig *spex, int clean_tags )
 {
-	if ( !spex ) {
-		DBG serprintf( "Subtitle:parseSUB: Invalid parameter\n" );
-		return 0;
-	}
-
-	if ( !spex->filename ) {
-		DBG serprintf( "Subtitle:parseSUB: Invalid filename\n" );
-		return 0;
-	}
-	
-	FILE *fd = fopen( spex->filename, "r" );
-	if ( !fd ) {
-		DBG serprintf( "Subtitle:parseSUB: could not read file %s\n", spex->filename );
-		return 0;
-	}
+	// --- NATIVE LIBASS UPGRADE ---
+	// Prevent AVOS from destroying HTML colors/italics!
+	clean_tags = 0;
 
 	uni_sub *sub_record = acalloc(1, sizeof( uni_sub ) );
-	sub_record->frame_multiplier = 1;
-	int cnt = 0;
-	char _line[LINE_LEN+1];
-	memset(_line,0,LINE_LEN+1);
-	char* line = _line;
+	char _line[ LINE_LEN + 1 ];
+	memset(_line,0,LINE_LEN);
+	char *line = _line;
+	FILE *fd = 0;
+	sub_line *new_line = 0;
+	char *store = 0;
+
+	if ( !spex ) {
+		goto CLEAR_ERROR;
+	}
+	if ( !spex->filename ) {
+		goto CLEAR_ERROR;
+	}
+	fd = fopen( spex->filename, "r" );
+	if( !fd ) {
+		goto CLEAR_ERROR;
+	}
+
 	line = subtitle_get_next_line( line, LINE_LEN, fd );
 	while ( line ) {
-		char *tmp = line;
-		//remove empty spaces from the beginning
-		while ( isspace( *tmp ) ) {
-			tmp++;
+		char *tmp = strchr( line, NEW_LINE_CH );
+		if( tmp ) {
+			*tmp = '\0';
 		}
-		int *times = subtitle_get_sub_time( tmp );
-		if ( !times ) {
-			DBG serprintf( "could not get timing from line %i\n", cnt );
-			cnt++;
+		tmp = strchr( line, MS_CURSOR_BEGIN );
+		if( tmp ) {
+			*tmp = '\0';
+		}
+
+		if(*line == '\0'){
+			memset(line,0,LINE_LEN);
 			line = subtitle_get_next_line( line, LINE_LEN, fd );
 			continue;
 		}
-		tmp = strrchr( line, '}' );
-		if ( !tmp ) {
-			DBG serprintf( "subtitle:parseSUB: Error in file: line %i\n", cnt );
-		} else {
-			tmp++;
-			//erase newline and cursorbegin
-			char *cut = strchr( line, NEW_LINE_CH );
-			if ( cut ) {
-				*cut = '\0';
+
+		char *start_str = strchr(line, '{');
+		if(!start_str) {
+			memset(line,0,LINE_LEN);
+			line = subtitle_get_next_line( line, LINE_LEN, fd );
+			continue;
+		}
+		start_str++;
+
+		char *end_str = strchr(start_str, '}');
+		if(!end_str) {
+			memset(line,0,LINE_LEN);
+			line = subtitle_get_next_line( line, LINE_LEN, fd );
+			continue;
+		}
+		*end_str = '\0';
+		end_str++;
+
+		if(*end_str != '{') {
+			memset(line,0,LINE_LEN);
+			line = subtitle_get_next_line( line, LINE_LEN, fd );
+			continue;
+		}
+		end_str++;
+
+		char *text_str = strchr(end_str, '}');
+		if(!text_str) {
+			memset(line,0,LINE_LEN);
+			line = subtitle_get_next_line( line, LINE_LEN, fd );
+			continue;
+		}
+		*text_str = '\0';
+		text_str++;
+
+		new_line = acalloc(1, sizeof( sub_line ) );
+		new_line->start = atoi(start_str);
+		new_line->end = atoi(end_str);
+
+		char *line_bottom = strchr( text_str, '|' );
+		if ( line_bottom ) {
+			*line_bottom = '\0';
+			line_bottom++;
+		}
+
+		#ifdef CONFIG_I18N
+		if( !spex->utf8 ) {
+			wchar unicode[ LINE_LEN + 1 ];
+			memset(unicode,0, LINE_LEN);
+			wchar *uc = unicode;
+			char *c = text_str;
+			while( *c ) {
+				c += I18N_codepage_to_unicode( c, uc );
+				uc++;
 			}
-			cut = strchr( line, MS_CURSOR_BEGIN );
-			if ( cut ) {
-				*cut = '\0';
-			}
-			sub_line *new_line = acalloc(1, sizeof( sub_line ) );
-			new_line->start = times[0];
-			new_line->end   = times[1];
-			store_line(tmp,new_line, spex->utf8, clean_tags);
-			if ( sub_record->first == 0 ) {
-				sub_record->first = new_line;
-				sub_record->last = new_line;
-			} else {
-				sub_record->last->next = new_line;
-				new_line->prev = sub_record->last;
-				sub_record->last = new_line;
+			utf16_to_utf8( text_str, unicode, LINE_LEN );
+
+			if (line_bottom) {
+				memset(unicode,0, LINE_LEN);
+				uc = unicode;
+				c = line_bottom;
+				while( *c ) {
+					c += I18N_codepage_to_unicode( c, uc );
+					uc++;
+				}
+				utf16_to_utf8( line_bottom, unicode, LINE_LEN );
 			}
 		}
-		cnt++;
-		line = subtitle_get_next_line( line,  LINE_LEN , fd );
-		afree( times );
+		#endif
+
+		store = subtitle_clean_formatter(text_str, clean_tags);
+		new_line->top = astrdup( store );
+		afree(store);
+
+		if( line_bottom ) {
+			store = subtitle_clean_formatter(line_bottom, clean_tags);
+
+			// --- NATIVE LIBASS UPGRADE ---
+			// Do not split into bottom! Concatenate using ASS \N line break!
+			new_line->top = arealloc(new_line->top, strlen(new_line->top) + strlen(store) + 3);
+			strcat(new_line->top, "\\N");
+			strcat(new_line->top, store);
+			afree(store);
+		}
+
+		if ( sub_record->first == 0 ) {
+			sub_record->first = new_line;
+			sub_record->last = new_line;
+		} else {
+			sub_record->last->next = new_line;
+			new_line->prev = sub_record->last;
+			sub_record->last = new_line;
+		}
+
+		memset(line,0,LINE_LEN);
+		line = subtitle_get_next_line( line, LINE_LEN, fd );
 	}
-	fclose(fd);
-	return sub_record;
+
+	if(fd) {
+		fclose(fd);
+	}
+
+	if ( sub_record && sub_record->first ) {
+		sub_record->frame_multiplier = 1; // MicroDVD is frame-based
+		return sub_record;
+	}
+
+	CLEAR_ERROR:
+	if(fd) {
+		fclose(fd);
+	}
+	subtitle_clean_error(sub_record);
+	afree(sub_record);
+	return 0;
 }
 
 static struct SUBTITLE_FORMAT SUB = {

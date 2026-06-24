@@ -26,7 +26,7 @@ SUB_USER_STYLE* sub_style_create(void) {
     style->bg_enabled = 0;
     style->bg_color = 0x00000088; // Semi-transparent black
     style->margin_bottom = 0;
-    style->override_mode = ASS_OVERRIDE_SCALE;
+    style->override_mode = ASS_OVERRIDE_FORCE;
     style->serial = 1;
     return style;
 }

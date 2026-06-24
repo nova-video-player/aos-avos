@@ -135,16 +135,17 @@ char *subtitle_get_next_line( char *start, int len, FILE *fd )
 }
 
 /**************
- * 
- * Parses SRT formatted subtitle text
+ * * Parses SRT formatted subtitle text
  * input:
  * spex->filename must exist and point to VALID srt file
- * 
- * returns subtitles, packed into uni_sub*
- * 
- * ***********************/
+ * * returns subtitles, packed into uni_sub*
+ * * ***********************/
 static uni_sub *parse_SRT( subt_orig *spex, int clean_tags )
 {
+	// --- NATIVE LIBASS UPGRADE ---
+	// Force clean_tags to 0 so AVOS stops deleting HTML/Colors! Libass needs them.
+	clean_tags = 0;
+
 	uni_sub *sub_record = acalloc(1, sizeof( uni_sub ) );
 	char _line[ LINE_LEN + 1];
 	memset(_line,0,LINE_LEN);
@@ -156,11 +157,11 @@ static uni_sub *parse_SRT( subt_orig *spex, int clean_tags )
 	int next_index = 0;
 	//in SRT there is no data for all fields
 	if ( !spex ) {
-DBG serprintf( "SRT: Invalid parameter\n" );
+		DBG serprintf( "SRT: Invalid parameter\n" );
 		goto CLEAR_ERROR;
 	}
 	if ( !spex->filename ) {
-DBG serprintf( "SRT: Invalid filename parameter\n" );
+		DBG serprintf( "SRT: Invalid filename parameter\n" );
 		goto CLEAR_ERROR;
 	}
 	fd = fopen( spex->filename, "r" );
@@ -170,127 +171,122 @@ DBG serprintf( "SRT: Invalid filename parameter\n" );
 	while ( line ) {
 
 		switch ( srt_state ) {
-		case SRT_NR:{
-			//here should be data, but ignore possible blank lines
-			srt_chop(line);
-			if(*line == '\0'){
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
-			}
-			if ( next_index == atoi( line ) ) {
-				next_index++;
-				srt_state = SRT_TIME;
-			} else {
-DBG2 serprintf( "SRT: missing index %i(%i),line='%s'\n", next_index, atoi( line ), line );
-				next_index = atoi( line ) + 1;
-				srt_state = SRT_TIME;
-			}
-			memset(line,0,LINE_LEN);
-			line = subtitle_get_next_line( line, LINE_LEN, fd );
-			continue;
-		}
-		case SRT_TIME:{
-			int start;
-			int end;
-			if ( subtitle_get_srt_time( line, &start, &end ) ) {
-DBG serprintf( "subtitle: SRT time error near index %i  line %s\n", next_index - 1, line );
-				srt_state = SRT_NR;
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
-			}
-			//new title coming, init new struct for it
-			new_line = acalloc(1, sizeof( sub_line ) );
-			new_line->start = start;
-			new_line->end   = end;
-
-			srt_state = SRT_TEXT;
-			memset(line,0,LINE_LEN);
-			line = subtitle_get_next_line( line, LINE_LEN, fd );
-			continue;
-		}
-		case SRT_TEXT:{
-			//here can be either blank (ends this title) or text.
-			//ok. the title ends to this line
-			if ( line[0] == NEW_LINE_CH || line[0] == MS_CURSOR_BEGIN ) {
-				if ( new_line->top == 0 && new_line->bottom == 0 ) {
-DBG serprintf( "no text found for index %i\n", next_index - 1 );
-					afree( new_line );
+			case SRT_NR:{
+				//here should be data, but ignore possible blank lines
+				srt_chop(line);
+				if(*line == '\0'){
 					memset(line,0,LINE_LEN);
-					new_line = 0;
 					line = subtitle_get_next_line( line, LINE_LEN, fd );
-					if( !line ) {
-						continue;
-					}
+					continue;
+				}
+				if ( next_index == atoi( line ) ) {
+					next_index++;
+					srt_state = SRT_TIME;
 				} else {
-					//end of this title. Store it
-					if ( sub_record->first == 0 ) {
-						sub_record->first = new_line;
-						sub_record->last = new_line;
-					} else {
-						if( sub_record->last->end < new_line->end ) {
-							sub_record->last->next = new_line;
-							new_line->prev   = sub_record->last;
-							sub_record->last = new_line;
-						}
-					}
-					new_line = 0;
+					DBG2 serprintf( "SRT: missing index %i(%i),line='%s'\n", next_index, atoi( line ), line );
+					next_index = atoi( line ) + 1;
+					srt_state = SRT_TIME;
 				}
-				srt_state = SRT_NR;
+				memset(line,0,LINE_LEN);
+				line = subtitle_get_next_line( line, LINE_LEN, fd );
+				continue;
 			}
-			//IF \n or \r must be erased, do it here!!
-			srt_chop(line);
-			if ( strlen( line ) ) {
-#ifdef CONFIG_I18N
-				if( !spex->utf8 ) {
-					//serprintf("LINE: %s\r\n", line );
-					wchar unicode[ LINE_LEN + 1 ];
-					memset(unicode,0, LINE_LEN);
-					wchar *uc = unicode;
-					char *c = line;
-					while( *c ) {
-						// take care about wide codepage chars!
-						c += I18N_codepage_to_unicode( c, uc );
-						uc++; 
-					}
-					// convert to utf8
-					utf16_to_utf8( line, unicode, LINE_LEN );
-					//serprintf("LINE: %s\r\n", line );
+			case SRT_TIME:{
+				int start;
+				int end;
+				if ( subtitle_get_srt_time( line, &start, &end ) ) {
+					DBG serprintf( "subtitle: SRT time error near index %i  line %s\n", next_index - 1, line );
+					srt_state = SRT_NR;
+					memset(line,0,LINE_LEN);
+					line = subtitle_get_next_line( line, LINE_LEN, fd );
+					continue;
 				}
-#endif
-				store = subtitle_clean_formatter(line, clean_tags);
-				//There may be multiple lines. If true put to top line
-				if(new_line){
-					if ( new_line->top == 0 ) {
-						new_line->top = amalloc( strlen( store ) + 1 );
-						strcpy( new_line->top, store );
-					} else {	//hopefully the bottom line is empty
-						if ( new_line->bottom == 0 ) {
-							new_line->bottom = amalloc( strlen( store ) + 1 );
-							strcpy( new_line->bottom, store );
-						} else {
-							//Only allow catting until line is LINE_LEN after that we know that
-							//the line is crap
-							if((strlen(new_line->bottom) + strlen(store)) < LINE_LEN){
+				//new title coming, init new struct for it
+				new_line = acalloc(1, sizeof( sub_line ) );
+				new_line->start = start;
+				new_line->end   = end;
 
-								new_line->bottom = arealloc( new_line->bottom,
-										strlen( store ) + strlen( new_line->bottom ) + 2 );
-								strcat( new_line->bottom, store );
+				srt_state = SRT_TEXT;
+				memset(line,0,LINE_LEN);
+				line = subtitle_get_next_line( line, LINE_LEN, fd );
+				continue;
+			}
+			case SRT_TEXT:{
+				//here can be either blank (ends this title) or text.
+				//ok. the title ends to this line
+				if ( line[0] == NEW_LINE_CH || line[0] == MS_CURSOR_BEGIN ) {
+					if ( new_line->top == 0 && new_line->bottom == 0 ) {
+						DBG serprintf( "no text found for index %i\n", next_index - 1 );
+						afree( new_line );
+						memset(line,0,LINE_LEN);
+						new_line = 0;
+						line = subtitle_get_next_line( line, LINE_LEN, fd );
+						if( !line ) {
+							continue;
+						}
+					} else {
+						//end of this title. Store it
+						if ( sub_record->first == 0 ) {
+							sub_record->first = new_line;
+							sub_record->last = new_line;
+						} else {
+							if( sub_record->last->end < new_line->end ) {
+								sub_record->last->next = new_line;
+								new_line->prev   = sub_record->last;
+								sub_record->last = new_line;
+							}
+						}
+						new_line = 0;
+					}
+					srt_state = SRT_NR;
+				}
+				//IF \n or \r must be erased, do it here!!
+				srt_chop(line);
+				if ( strlen( line ) ) {
+					#ifdef CONFIG_I18N
+					if( !spex->utf8 ) {
+						//serprintf("LINE: %s\r\n", line );
+						wchar unicode[ LINE_LEN + 1 ];
+						memset(unicode,0, LINE_LEN);
+						wchar *uc = unicode;
+						char *c = line;
+						while( *c ) {
+							// take care about wide codepage chars!
+							c += I18N_codepage_to_unicode( c, uc );
+							uc++;
+						}
+						// convert to utf8
+						utf16_to_utf8( line, unicode, LINE_LEN );
+						//serprintf("LINE: %s\r\n", line );
+					}
+					#endif
+					store = subtitle_clean_formatter(line, clean_tags);
+					//There may be multiple lines. If true put to top line
+					if(new_line){
+						if ( new_line->top == 0 ) {
+							new_line->top = amalloc( strlen( store ) + 1 );
+							strcpy( new_line->top, store );
+						} else {
+							// --- NATIVE LIBASS UPGRADE ---
+							// Concatenate multi-line subs using ASS line break (\N)
+							if((strlen(new_line->top) + strlen(store) + 2) < LINE_LEN){
+								new_line->top = arealloc( new_line->top,
+														  strlen( store ) + strlen( new_line->top ) + 3 );
+								strcat( new_line->top, "\\N" );
+								strcat( new_line->top, store );
 							}
 						}
 					}
+					else{
+						srt_state = SRT_NR;
+					}
+					afree(store);
+					store = 0;
 				}
-				else{
-					srt_state = SRT_NR;
-				}
-				afree(store);
-				store = 0;
+				memset(line,0,LINE_LEN);
+				line = subtitle_get_next_line( line, LINE_LEN, fd );
+				continue;
 			}
-			memset(line,0,LINE_LEN);
-			line = subtitle_get_next_line( line, LINE_LEN, fd );
-			continue;
-		}
 		}
 	}
 	if( new_line ) { //last one was not stored;
@@ -305,7 +301,7 @@ DBG serprintf( "no text found for index %i\n", next_index - 1 );
 			}
 		}
 	}
-	
+
 	if(fd){
 		fclose(fd);
 	}
@@ -313,7 +309,7 @@ DBG serprintf( "no text found for index %i\n", next_index - 1 );
 		afree(store);
 	}
 	return sub_record;
-CLEAR_ERROR:
+	CLEAR_ERROR:
 	if(fd){
 		fclose(fd);
 	}
@@ -321,7 +317,7 @@ CLEAR_ERROR:
 		afree(store);
 	}
 	subtitle_clean_error(sub_record);
-		
+
 	afree(sub_record);
 	if(new_line){
 		free(new_line);

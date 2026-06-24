@@ -147,26 +147,26 @@ static void _get_next_int_sub( STREAM *s, int time )
 	g_player_time = time; // CAPTURE AVOS TIME!
 
 	if( !s->seek ) {
-		// CRITICAL FIX: Check subtitle_frame so this block ONLY RUNS ONCE!
+		// Initialize once per track!
 		if( !s->sub_dec && !s->subtitle_frame ) {
 
-			// --- NEW ROUTING LOGIC FOR INTERNAL SUBS ---
-			if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+			if (!s->subtitle->gfx) {
+				// IT IS TEXT: Initialize the OpenGL C-Engine!
 				if (g_sub_engine) {
-					int engine_fmt = (s->subtitle->format == SUB_FORMAT_TEXT) ? SUB_FMT_SRT : SUB_FMT_SSA;
+					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
 					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
 					sub_engine_start(g_sub_engine, engine_clock, NULL);
 				}
+				// Notice: We completely bypass s->sub_dec for Text!
 			} else {
-				// try to get a sub decoder
+				// IT IS A PICTURE (VobSub/PGS): Initialize the legacy decoder!
 				s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
-				if( stream_open_sub_dec( s ) ) {
+				if( s->sub_dec && stream_open_sub_dec( s ) ) {
 					stream_drop_subtitles( s );
 					return;
 				}
 			}
 
-			// Allocates the frame so this initialization block NEVER runs again!
 			alloc_sub_frame( s );
 			
 			if( !s->subtitle_frame ) {
@@ -192,22 +192,24 @@ serprintf("cannot allocate subtitle frame!\r\n");
 			if( time == -1 ) return;
 
 			if( s->cdata_sub.time == -1 || s->cdata_sub.time <= time ) {
-				if (g_sub_engine) {
-					int duration = 0;
-					uint8_t *payload = s->sub_buffer.data;
-					int payload_size = s->cdata_sub.size;
 
-					if ((s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) && payload_size >= (int)sizeof(int)) {
-						duration = *(int*)payload;
-						payload += sizeof(int);
-						payload_size -= sizeof(int);
+				if (!s->subtitle->gfx) {
+					// FAST LANE: Pure Text straight from the demuxer to OpenGL!
+					if (g_sub_engine) {
+						int duration = 0;
+						uint8_t *payload = s->sub_buffer.data;
+						int payload_size = s->cdata_sub.size;
+
+						if (payload_size >= (int)sizeof(int)) {
+							duration = *(int*)payload;
+							payload += sizeof(int);
+							payload_size -= sizeof(int);
+						}
+						sub_engine_feed(g_sub_engine, payload, payload_size, s->cdata_sub.time, duration);
 					}
-					sub_engine_feed(g_sub_engine, payload, payload_size, s->cdata_sub.time, duration);
-				}
-
-				if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
-					s->cdata_sub.valid = 0;
+					s->cdata_sub.valid = 0; // Packet consumed!
 				} else {
+					// LEGACY PICTURE LANE: Decode Bitmap and send to Java!
 					VIDEO_FRAME *f = s->subtitle_frame;
 					s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f );
 					s->cdata_sub.valid = 0;
@@ -220,7 +222,7 @@ serprintf("cannot allocate subtitle frame!\r\n");
 
 // *****************************************************************************
 //
-//	_get_next_ext_sub
+//    _get_next_ext_sub
 //
 // *****************************************************************************
 static void _get_next_ext_sub( STREAM *s, int time )
@@ -229,16 +231,16 @@ static void _get_next_ext_sub( STREAM *s, int time )
 
 	if( !s->seek ) {
 
-		// CRITICAL FIX: Only initialize ONCE per track!
 		if( !s->sub_dec && !s->subtitle_frame ) {
-			// --- NEW ROUTING LOGIC FOR EXTERNAL SUBS ---
-			if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
+			if (!s->subtitle->gfx) {
+				// IT IS EXTERNAL TEXT: Initialize OpenGL C-Engine!
 				if (g_sub_engine) {
-					int engine_fmt = (s->subtitle->format == SUB_FORMAT_TEXT) ? SUB_FMT_SRT : SUB_FMT_SSA;
+					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
 					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
 					sub_engine_start(g_sub_engine, engine_clock, NULL);
 				}
-			} else if( s->subtitle->format == SUB_FORMAT_DVD_GFX ) {
+			} else {
+				// IT IS AN EXTERNAL PICTURE (IDX/SUB)
 				s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
 				if( s->sub_dec && stream_open_sub_dec( s ) ) {
 					stream_drop_subtitles( s );
@@ -257,7 +259,10 @@ static void _get_next_ext_sub( STREAM *s, int time )
 		}
 
 		if( time == -1 ) return;
-		if( s->sub_dec ) {
+
+		if( s->subtitle->gfx ) {
+			// EXTERNAL PICTURE LANE
+			if ( !s->sub_dec ) return;
 			VIDEO_FRAME f_;
 			VIDEO_FRAME *f = &f_;
 			UCHAR data[SUBTITLE_CHUNK];
@@ -267,34 +272,23 @@ static void _get_next_ext_sub( STREAM *s, int time )
 			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
 
 			if( f && f->valid ) {
-				if (g_sub_engine) {
-					sub_engine_feed(g_sub_engine, f->data[0], f->valid, f->time, f->duration);
-				}
-				if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
-					// Bypass old renderer
-				} else {
-					VIDEO_FRAME *f2 = s->subtitle_frame;
-					s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 );
-					if( f2 ) {
-						f2->time = f->time;
-						_output_sub( s, f2, 0 );
-					}
+				VIDEO_FRAME *f2 = s->subtitle_frame;
+				s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 );
+				if( f2 ) {
+					f2->time = f->time;
+					_output_sub( s, f2, 0 );
 				}
 			}
 		} else {
+			// EXTERNAL TEXT FAST LANE
+			// The file parser puts the text directly into f->data[0]!
 			VIDEO_FRAME *f = s->subtitle_frame;
 			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
 
-			if( f ) {
-				if (g_sub_engine && f->data[0] && (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT)) {
+			if( f && f->data[0] ) {
+				if (g_sub_engine) {
 					int text_len = strlen((char*)f->data[0]);
 					sub_engine_feed(g_sub_engine, f->data[0], text_len, f->time, f->duration);
-				}
-
-				if (s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT) {
-					// Bypass old renderer
-				} else {
-					_output_sub( s, f, 0 );
 				}
 			}
 		}

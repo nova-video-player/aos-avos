@@ -12,6 +12,7 @@
 
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_srt_create(void);
+extern SUB_FORMAT_BACKEND *sub_format_gfx_create(void);
 
 struct SUB_ENGINE {
     SUB_RENDERER         *renderer;
@@ -54,6 +55,8 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w,
         backend = sub_format_ssa_create();
     } else if (format_id == SUB_FMT_SRT) {
         backend = sub_format_srt_create(); // Routes SRT to your dynamic ASS generator!
+    } else if (format_id == SUB_FMT_GFX) {
+        backend = sub_format_gfx_create(); // Routes Bitmaps to OpenGL Texture Uploader!
     } else {
         return -1;
     }
@@ -179,4 +182,17 @@ void sub_engine_free_frame(SUB_FRAME *frame) {
         ev = next;
     }
     free(frame);
+}
+
+int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms) {
+    if (!eng || !pixels || width <= 0 || height <= 0) return -1;
+
+    pthread_mutex_lock(&eng->lock);
+    SUB_FORMAT_BACKEND *backend = eng->active_backend;
+    pthread_mutex_unlock(&eng->lock);
+
+    if (backend && backend->feed_bitmap) {
+        return backend->feed_bitmap(backend, pixels, width, height, pitch, colorspace, x_offset, y_offset, pts_ms, duration_ms);
+    }
+    return -1;
 }

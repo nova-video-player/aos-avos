@@ -114,6 +114,10 @@ static void vtt_chop( char *line )
 
 static uni_sub *parse_VTT( subt_orig *spex, int clean_tags )
 {
+    // --- NATIVE LIBASS UPGRADE ---
+    // Force clean_tags to 0 so AVOS stops deleting HTML/Colors!
+    clean_tags = 0;
+
     uni_sub *sub_record = acalloc(1, sizeof( uni_sub ) );
     char _line[ LINE_LEN + 1];
     memset(_line,0,LINE_LEN);
@@ -129,11 +133,11 @@ static uni_sub *parse_VTT( subt_orig *spex, int clean_tags )
     fd = fopen( spex->filename, "r" );
     if( !fd )
         goto CLEAR_ERROR;
-        
+
     // Skip Header
     line = subtitle_get_next_line( line, LINE_LEN, fd );
     if (!line || strncmp(line, "WEBVTT", 6) != 0) {
-         goto CLEAR_ERROR;
+        goto CLEAR_ERROR;
     }
 
     memset(line,0,LINE_LEN);
@@ -143,142 +147,123 @@ static uni_sub *parse_VTT( subt_orig *spex, int clean_tags )
         vtt_chop(line);
 
         switch ( vtt_state ) {
-        case VTT_SEARCH: {
-            if (*line == '\0') {
-                 // Empty line, continue searching
-            } else if (strncmp(line, "NOTE", 4) == 0) {
-                // Comment block, skip until empty line
-                while(line && *line != '\0') {
-                     memset(line,0,LINE_LEN);
-                     line = subtitle_get_next_line( line, LINE_LEN, fd );
-                     if(line) vtt_chop(line);
-                }
-            } else if (strstr(line, "-->")) {
-                // This is a time line
-                // Go to VTT_TIME logic directly (simulated by falling through or goto?)
-                // Let's just handle it here to avoid goto or complex state
-                int start, end;
-                if ( subtitle_get_vtt_time( line, &start, &end ) ) {
-                     DBG serprintf( "subtitle: VTT time error line %s\n", line );
-                     // maybe it was an ID after all? but it had -->
-                     // ignore and reset
-                } else {
-                     new_line = acalloc(1, sizeof( sub_line ) );
-                     new_line->start = start;
-                     new_line->end   = end;
-                     vtt_state = VTT_TEXT;
-                }
-            } else {
-                // Probably an ID (cue identifier)
-                // Next line SHOULD be time
-                vtt_state = VTT_TIME;
-            }
-            break;
-        }
-        case VTT_TIME: {
-             // We expected time line here
-             if (strstr(line, "-->")) {
-                int start, end;
-                if ( subtitle_get_vtt_time( line, &start, &end ) ) {
-                     DBG serprintf( "subtitle: VTT time error line %s\n", line );
-                     vtt_state = VTT_SEARCH; // Abort this cue
-                } else {
-                     new_line = acalloc(1, sizeof( sub_line ) );
-                     new_line->start = start;
-                     new_line->end   = end;
-                     vtt_state = VTT_TEXT;
-                }
-             } else {
-                 // We expected time but got something else.
-                 // Maybe previous line wasn't an ID but garbage? 
-                 // Reset to search
-                 vtt_state = VTT_SEARCH;
-                 continue; // Re-evaluate this line as SEARCH
-             }
-             break;
-        }
-        case VTT_TEXT: {
-            if (*line == '\0') {
-                // End of cue
-                if ( new_line ) {
-                    if ( sub_record->first == 0 ) {
-                        sub_record->first = new_line;
-                        sub_record->last = new_line;
+            case VTT_SEARCH: {
+                if (*line == '\0') {
+                    // Empty line, continue searching
+                } else if (strncmp(line, "NOTE", 4) == 0) {
+                    // Comment block, skip until empty line
+                    while(line && *line != '\0') {
+                        memset(line,0,LINE_LEN);
+                        line = subtitle_get_next_line( line, LINE_LEN, fd );
+                        if(line) vtt_chop(line);
+                    }
+                } else if (strstr(line, "-->")) {
+                    int start, end;
+                    if ( subtitle_get_vtt_time( line, &start, &end ) ) {
+                        DBG serprintf( "subtitle: VTT time error line %s\n", line );
                     } else {
-                        if( sub_record->last->end < new_line->end ) {
-                            sub_record->last->next = new_line;
-                            new_line->prev   = sub_record->last;
+                        new_line = acalloc(1, sizeof( sub_line ) );
+                        new_line->start = start;
+                        new_line->end   = end;
+                        vtt_state = VTT_TEXT;
+                    }
+                } else {
+                    vtt_state = VTT_TIME;
+                }
+                break;
+            }
+            case VTT_TIME: {
+                if (strstr(line, "-->")) {
+                    int start, end;
+                    if ( subtitle_get_vtt_time( line, &start, &end ) ) {
+                        DBG serprintf( "subtitle: VTT time error line %s\n", line );
+                        vtt_state = VTT_SEARCH;
+                    } else {
+                        new_line = acalloc(1, sizeof( sub_line ) );
+                        new_line->start = start;
+                        new_line->end   = end;
+                        vtt_state = VTT_TEXT;
+                    }
+                } else {
+                    vtt_state = VTT_SEARCH;
+                    continue;
+                }
+                break;
+            }
+            case VTT_TEXT: {
+                if (*line == '\0') {
+                    if ( new_line ) {
+                        if ( sub_record->first == 0 ) {
+                            sub_record->first = new_line;
                             sub_record->last = new_line;
+                        } else {
+                            if( sub_record->last->end < new_line->end ) {
+                                sub_record->last->next = new_line;
+                                new_line->prev   = sub_record->last;
+                                sub_record->last = new_line;
+                            }
+                        }
+                        new_line = 0;
+                    }
+                    vtt_state = VTT_SEARCH;
+                } else {
+                    #ifdef CONFIG_I18N
+                    if( !spex->utf8 ) {
+                        wchar unicode[ LINE_LEN + 1 ];
+                        memset(unicode,0, LINE_LEN);
+                        wchar *uc = unicode;
+                        char *c = line;
+                        while( *c ) {
+                            c += I18N_codepage_to_unicode( c, uc );
+                            uc++;
+                        }
+                        utf16_to_utf8( line, unicode, LINE_LEN );
+                    }
+                    #endif
+                    store = subtitle_clean_formatter(line, clean_tags);
+                    if(new_line){
+                        if ( new_line->top == 0 ) {
+                            new_line->top = amalloc( strlen( store ) + 1 );
+                            strcpy( new_line->top, store );
+                        } else {
+                            // --- NATIVE LIBASS UPGRADE ---
+                            // Concatenate multi-line VTT subs using ASS line break (\N)
+                            if((strlen(new_line->top) + strlen(store) + 2) < LINE_LEN){
+                                new_line->top = arealloc( new_line->top,
+                                                          strlen( store ) + strlen( new_line->top ) + 3 );
+                                strcat( new_line->top, "\\N" );
+                                strcat( new_line->top, store );
+                            }
                         }
                     }
-                    new_line = 0;
+                    afree(store);
+                    store = 0;
                 }
-                vtt_state = VTT_SEARCH;
-            } else {
-                // Text content
-#ifdef CONFIG_I18N
-				if( !spex->utf8 ) {
-                    // ... (utf8 conversion logic same as SRT, reusing code from SRT would be ideal but copying for now)
-					wchar unicode[ LINE_LEN + 1 ];
-					memset(unicode,0, LINE_LEN);
-					wchar *uc = unicode;
-					char *c = line;
-					while( *c ) {
-						// take care about wide codepage chars!
-						c += I18N_codepage_to_unicode( c, uc );
-						uc++; 
-					}
-					// convert to utf8
-					utf16_to_utf8( line, unicode, LINE_LEN );
-				}
-#endif
-				store = subtitle_clean_formatter(line, clean_tags);
-                if(new_line){
-					if ( new_line->top == 0 ) {
-						new_line->top = amalloc( strlen( store ) + 1 );
-						strcpy( new_line->top, store );
-					} else { 
-						if ( new_line->bottom == 0 ) {
-							new_line->bottom = amalloc( strlen( store ) + 1 );
-							strcpy( new_line->bottom, store );
-						} else {
-							if((strlen(new_line->bottom) + strlen(store)) < LINE_LEN){
-								new_line->bottom = arealloc( new_line->bottom,
-												strlen( store ) + strlen( new_line->bottom ) + 2 );
-								strcat( new_line->bottom, store );
-							}
-						}
-					}
-				}
-				afree(store);
-				store = 0;
+                break;
             }
-            break;
         }
-        }
-        
+
         memset(line,0,LINE_LEN);
         line = subtitle_get_next_line( line, LINE_LEN, fd );
     }
 
-    // Handle last entry if file ends without newline
-	if( new_line ) { 
-		if( sub_record->first == 0 ) {
-			sub_record->first = new_line;
-			sub_record->last = new_line;
-		} else {
-			if( sub_record->last->end < new_line->end ) {
-				sub_record->last->next = new_line;
-				new_line->prev = sub_record->last;
-				sub_record->last = new_line;
-			}
-		}
-	}
+    if( new_line ) {
+        if( sub_record->first == 0 ) {
+            sub_record->first = new_line;
+            sub_record->last = new_line;
+        } else {
+            if( sub_record->last->end < new_line->end ) {
+                sub_record->last->next = new_line;
+                new_line->prev = sub_record->last;
+                sub_record->last = new_line;
+            }
+        }
+    }
 
     if(fd) fclose(fd);
     return sub_record;
 
-CLEAR_ERROR:
+    CLEAR_ERROR:
     if(fd) fclose(fd);
     if(store) afree(store);
     subtitle_clean_error(sub_record);

@@ -39,3 +39,6 @@ void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out);
 // --- NEW: Polling API for the GL Thread to use exclusively ---
 SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng);
 void sub_engine_free_frame(SUB_FRAME *frame);
+
+// Feed a raw decompressed bitmap (VobSub/PGS) into the OpenGL texture engine
+int sub_engine_feed_bitmap(void *engine, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms);

@@ -339,10 +339,9 @@ static char *set_SMI_code( subt_orig * subs, FILE * file )
 //determines where to copy the new line
 static inline void store_text_line( sub_line *new_line, char *line, int clean_tags, int utf8 )
 {
-#ifdef CONFIG_I18N
+	#ifdef CONFIG_I18N
 	char utf[ LINE_LEN * 2 + 1 ] = { 0 };
 	if( !utf8 ) {
-//serprintf("cp: %s\r\n", line );
 		wchar unicode[ LINE_LEN + 1 ] = { 0 };
 		wchar *uc = unicode;
 		char *c   = line;
@@ -351,41 +350,27 @@ static inline void store_text_line( sub_line *new_line, char *line, int clean_ta
 			uc++;
 		}
 		*uc = 0;
-	
 		utf16_to_utf8( utf, unicode, LINE_LEN);
 		line = utf;
-//serprintf("uc: %s\r\n", line );
 	}
-#endif
+	#endif
 	char *tmp_line = subtitle_clean_formatter(line, clean_tags);
 	char *end = strstr(line, "&nbsp");
 	if(end == line || end == line + 1){
-		new_line->top = astrdup(" ");
+		if (!new_line->top) new_line->top = astrdup(" ");
 		goto SMI_TXT_CLEAN;
 	}
+
 	if ( !new_line->top ) {
 		new_line->top = astrdup( tmp_line );
-		goto SMI_TXT_CLEAN;
+	} else {
+		// --- NATIVE LIBASS UPGRADE ---
+		// Do not split to bottom line. Use \N
+		new_line->top = arealloc( new_line->top, ( strlen( new_line->top ) + strlen( tmp_line ) + 3 ) );
+		strcat( new_line->top, "\\N" );
+		strcat( new_line->top, tmp_line );
 	}
-	if ( !new_line->bottom ) {
-		new_line->bottom = astrdup( tmp_line );
-		goto SMI_TXT_CLEAN; 
-	}
-	//both lines are alread filled. do some rearring
-	if ( strlen( tmp_line ) < ( strlen( new_line->bottom ) + strlen( new_line->top ) ) ) {
-		new_line->bottom = arealloc( new_line->bottom, ( strlen( new_line->bottom ) + strlen( tmp_line ) + 3 ) );
-		strcat( new_line->bottom, " " );
-		strcat( new_line->bottom, tmp_line );
-		goto SMI_TXT_CLEAN; 		
-	} else {		// move the bottom line to end of upperline and tmpline to bottomline
-		new_line->top = arealloc( new_line->top, ( strlen( new_line->top ) + strlen( new_line->bottom ) + 3 ) );
-		strcat( new_line->top, " " );
-		strcat( new_line->top, new_line->bottom );
-		afree( new_line->bottom );
-		new_line->bottom = astrdup( tmp_line );
-		goto SMI_TXT_CLEAN; 		
-	}
-SMI_TXT_CLEAN:
+	SMI_TXT_CLEAN:
 	afree(tmp_line);
 }
 
@@ -397,17 +382,19 @@ static inline void handle_linebreak( char *data, sub_line *title, int clean_tags
 	char* dataline = subtitle_clean_formatter(data, clean_tags);
 	if ( !strncmp( dataline, "<br", 3 ) ) {
 		data_low = strchr(dataline, '>');
-		data_low++;
+		if (data_low) data_low++;
 		*dataline = '\0';
 	} else {
 		//split the string to two C strings
 		data_low = strstr( dataline, "<br" );
-		*data_low = '\0';
-		data_low += 4;
-		if(*data_low == '>')
-			data_low++;
+		if (data_low) {
+			*data_low = '\0';
+			data_low += 4;
+			if(*data_low == '>') data_low++;
+		}
 	}
-	if ( dataline ) {
+
+	if ( dataline && *dataline ) {
 		if ( !title->top ) {
 			title->top = astrdup( dataline );
 		} else {
@@ -416,11 +403,16 @@ static inline void handle_linebreak( char *data, sub_line *title, int clean_tags
 		}
 	}
 
-	if ( !title->bottom ) {
-		title->bottom = astrdup( data_low );
-	} else {
-		title->bottom = arealloc( title->bottom, strlen( title->bottom ) + strlen( data_low ) + 1 );
-		strcat( title->bottom, data_low );
+	if ( data_low && *data_low ) {
+		if ( !title->top ) {
+			title->top = astrdup( data_low );
+		} else {
+			// --- NATIVE LIBASS UPGRADE ---
+			// Translate the SMI <br> tag into an ASS \N line break!
+			title->top = arealloc( title->top, strlen( title->top ) + strlen( data_low ) + 3 );
+			strcat( title->top, "\\N" );
+			strcat( title->top, data_low );
+		}
 	}
 	afree(dataline);
 }
@@ -662,6 +654,7 @@ char *getNextLine(char* start, int len, FILE* fd)
  * **********/
 static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 {
+	clean_tags = 0;
 	FILE *file;
 	char _line_read[LINE_LEN + 1];
 	char* line_read = _line_read;

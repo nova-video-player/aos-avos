@@ -21,15 +21,26 @@ struct SUB_RENDERER {
     int             running;
     int             surface_width;
     int             surface_height;
+    int             ui_mode; // 0 = 2D, 1 = SBS, 2 = TB
     const SUB_FRAME *current_frame;
     GLuint           gl_program;
     GLuint           gl_texture;
+    GLint            attrib_pos;
+    GLint            attrib_tex;
 };
 
 static GLuint compile_shader(GLenum type, const char *source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, NULL);
     glCompileShader(shader);
+
+    GLint status = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (!status) {
+        char buf[512];
+        glGetShaderInfoLog(shader, sizeof(buf), NULL, buf);
+        LOGE("Shader compile error: %s", buf);
+    }
     return shader;
 }
 
@@ -40,6 +51,14 @@ static GLuint create_program(const char *vertex_src, const char *fragment_src) {
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glLinkProgram(program);
+
+    GLint status = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (!status) {
+        char buf[512];
+        glGetProgramInfoLog(program, sizeof(buf), NULL, buf);
+        LOGE("Program link error: %s", buf);
+    }
     glDeleteShader(vs);
     glDeleteShader(fs);
     return program;
@@ -76,50 +95,61 @@ static void* egl_render_thread(void* arg) {
             break;
         }
 
-        if (r->window != current_window) {
+        ANativeWindow *target_window = r->window;
+        pthread_mutex_unlock(&r->lock);
+
+        // --- CLEAN EGL SURFACE CREATION ---
+        if (target_window != current_window) {
             if (surface != EGL_NO_SURFACE) {
                 eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
                 eglDestroySurface(display, surface);
                 surface = EGL_NO_SURFACE;
             }
-            current_window = r->window;
+
+            current_window = target_window;
+
             if (current_window) {
                 surface = eglCreateWindowSurface(display, config, current_window, NULL);
-                eglMakeCurrent(display, surface, surface, context);
-                eglSwapInterval(display, 1);
+                if (surface != EGL_NO_SURFACE) {
+                    eglMakeCurrent(display, surface, surface, context);
+                    eglSwapInterval(display, 1);
 
-                if (r->gl_program == 0) {
-                    const char* vs_src =
-                    "attribute vec4 aPosition;\n"
-                    "attribute vec2 aTexCoord;\n"
-                    "varying vec2 vTexCoord;\n"
-                    "void main() {\n"
-                    "  gl_Position = aPosition;\n"
-                    "  vTexCoord = aTexCoord;\n"
-                    "}\n";
+                    if (r->gl_program == 0) {
+                        const char* vs_src =
+                        "attribute vec4 aPosition;\n"
+                        "attribute vec2 aTexCoord;\n"
+                        "varying vec2 vTexCoord;\n"
+                        "void main() {\n"
+                        "  gl_Position = aPosition;\n"
+                        "  vTexCoord = aTexCoord;\n"
+                        "}\n";
 
-const char* fs_src =
-"precision mediump float;\n"
-"varying vec2 vTexCoord;\n"
-"uniform sampler2D uTexture;\n"
-"void main() {\n"
-"  gl_FragColor = texture2D(uTexture, vTexCoord);\n"
-"}\n";
+        const char* fs_src =
+        "precision mediump float;\n"
+        "varying vec2 vTexCoord;\n"
+        "uniform sampler2D uTexture;\n"
+        "void main() {\n"
+        "  gl_FragColor = texture2D(uTexture, vTexCoord);\n"
+        "}\n";
 
-r->gl_program = create_program(vs_src, fs_src);
-glGenTextures(1, &r->gl_texture);
-glBindTexture(GL_TEXTURE_2D, r->gl_texture);
-glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        r->gl_program = create_program(vs_src, fs_src);
+        r->attrib_pos = glGetAttribLocation(r->gl_program, "aPosition");
+        r->attrib_tex = glGetAttribLocation(r->gl_program, "aTexCoord");
+
+        glGenTextures(1, &r->gl_texture);
+        glBindTexture(GL_TEXTURE_2D, r->gl_texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    }
                 }
             }
         }
-        pthread_mutex_unlock(&r->lock);
 
-        // --- NEW: Safe Memory Polling ---
-        // Poll the engine outside the lock so we don't stall the Android UI thread
+        // --- HYBRID FIX: ALWAYS POLL THE ENGINE ---
+        // Even if the 3D Mode deactivated the GPU Surface, we MUST continue
+        // to poll the clock so the memory frames update for the CPU Blender!
         SUB_FRAME *new_frame = NULL;
         if (g_sub_engine) {
             new_frame = sub_engine_poll_frame(g_sub_engine);
@@ -128,7 +158,7 @@ glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         pthread_mutex_lock(&r->lock);
         if (new_frame != NULL) {
             if (r->current_frame) {
-                sub_engine_free_frame((SUB_FRAME*)r->current_frame); // Free safely!
+                sub_engine_free_frame((SUB_FRAME*)r->current_frame);
             }
             r->current_frame = new_frame;
         }
@@ -136,71 +166,81 @@ glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         int w = r->surface_width;
         int h = r->surface_height;
         const SUB_FRAME *frame_to_draw = r->current_frame;
+        GLint attrib_pos = r->attrib_pos;
+        GLint attrib_tex = r->attrib_tex;
         pthread_mutex_unlock(&r->lock);
 
-        if (surface != EGL_NO_SURFACE) {
-            glViewport(0, 0, w, h);
-            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
+        // If EGL is offline (e.g. we are in 3D Canvas mode), sleep and skip drawing.
+        // The Java onFrameAvailable() callback will extract frames via RAM instead.
+        if (surface == EGL_NO_SURFACE) {
+            usleep(16000);
+            continue;
+        }
 
-            if (frame_to_draw && frame_to_draw->events) {
-                glUseProgram(r->gl_program);
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // --- NATIVE 2D OPENGL RENDERING ---
+        glViewport(0, 0, w, h);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-                SUB_EVENT *ev = frame_to_draw->events;
-                while (ev) {
-                    if (ev->kind == SUB_EVENT_BITMAP) {
-                        glBindTexture(GL_TEXTURE_2D, r->gl_texture);
-                        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ev->w, ev->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, ev->data.bitmap.rgba);
+        if (frame_to_draw && frame_to_draw->events
+            && r->gl_program != 0
+            && attrib_pos != -1 && attrib_tex != -1) {
 
-                        float x1 = (ev->x / (float)frame_to_draw->video_w) * 2.0f - 1.0f;
-                        float y1 = 1.0f - (ev->y / (float)frame_to_draw->video_h) * 2.0f;
-                        float x2 = ((ev->x + ev->w) / (float)frame_to_draw->video_w) * 2.0f - 1.0f;
-                        float y2 = 1.0f - ((ev->y + ev->h) / (float)frame_to_draw->video_h) * 2.0f;
+            glUseProgram(r->gl_program);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-                        GLfloat vertices[] = {
-                            x1, y2, 0.0f,  0.0f, 1.0f,
-                            x2, y2, 0.0f,  1.0f, 1.0f,
-                            x1, y1, 0.0f,  0.0f, 0.0f,
-                            x2, y1, 0.0f,  1.0f, 0.0f
-                        };
+        SUB_EVENT *ev = frame_to_draw->events;
+        while (ev) {
+            if (ev->kind == SUB_EVENT_BITMAP) {
+                glBindTexture(GL_TEXTURE_2D, r->gl_texture);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                             ev->w, ev->h, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE,
+                             ev->data.bitmap.rgba);
 
-                        GLint posLoc = glGetAttribLocation(r->gl_program, "aPosition");
-                        GLint texLoc = glGetAttribLocation(r->gl_program, "aTexCoord");
+                float x1 = (ev->x / (float)frame_to_draw->video_w) * 2.0f - 1.0f;
+                float y1 = 1.0f - (ev->y / (float)frame_to_draw->video_h) * 2.0f;
+                float x2 = ((ev->x + ev->w) / (float)frame_to_draw->video_w) * 2.0f - 1.0f;
+                float y2 = 1.0f - ((ev->y + ev->h) / (float)frame_to_draw->video_h) * 2.0f;
 
-                        glVertexAttribPointer(posLoc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), vertices);
-                        glVertexAttribPointer(texLoc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), vertices + 3);
+                GLfloat vertices[] = {
+                    x1, y2, 0.0f,  0.0f, 1.0f,
+                    x2, y2, 0.0f,  1.0f, 1.0f,
+                    x1, y1, 0.0f,  0.0f, 0.0f,
+                    x2, y1, 0.0f,  1.0f, 0.0f
+                };
 
-                        glEnableVertexAttribArray(posLoc);
-                        glEnableVertexAttribArray(texLoc);
+                glVertexAttribPointer(attrib_pos, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), vertices);
+                glVertexAttribPointer(attrib_tex, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), vertices + 3);
 
-                        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                glEnableVertexAttribArray(attrib_pos);
+                glEnableVertexAttribArray(attrib_tex);
 
-                        glDisableVertexAttribArray(posLoc);
-                        glDisableVertexAttribArray(texLoc);
-                    }
-                    ev = ev->next;
-                }
-                glDisable(GL_BLEND);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+                glDisableVertexAttribArray(attrib_pos);
+                glDisableVertexAttribArray(attrib_tex);
+            }
+            ev = ev->next;
+        }
+        glDisable(GL_BLEND);
             }
 
             eglSwapBuffers(display, surface);
-        }
 
-        struct timespec t_render_end;
-        clock_gettime(CLOCK_MONOTONIC, &t_render_end);
+            struct timespec t_render_end;
+            clock_gettime(CLOCK_MONOTONIC, &t_render_end);
 
-        double render_ms = (t_render_end.tv_sec - t_loop_start.tv_sec) * 1000.0 +
-        (t_render_end.tv_nsec - t_loop_start.tv_nsec) / 1000000.0;
+            double render_ms = (t_render_end.tv_sec  - t_loop_start.tv_sec)  * 1000.0 +
+            (t_render_end.tv_nsec - t_loop_start.tv_nsec) / 1000000.0;
 
-        double target_ms = 16.666;
-
-        if (render_ms < target_ms) {
-            long sleep_us = (long)((target_ms - render_ms) * 1000.0);
-            usleep(sleep_us);
-        }
+            double target_ms = 16.666;
+            if (render_ms < target_ms) {
+                long sleep_us = (long)((target_ms - render_ms) * 1000.0);
+                usleep(sleep_us);
+            }
     }
 
     if (surface != EGL_NO_SURFACE) {
@@ -219,7 +259,9 @@ glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 SUB_RENDERER *sub_render_gl_create(void) {
     SUB_RENDERER *r = calloc(1, sizeof(SUB_RENDERER));
     pthread_mutex_init(&r->lock, NULL);
-    r->running = 1;
+    r->running    = 1;
+    r->attrib_pos = -1;
+    r->attrib_tex = -1;
     pthread_create(&r->thread, NULL, egl_render_thread, r);
     return r;
 }
@@ -252,8 +294,15 @@ void sub_render_gl_detach_surface(SUB_RENDERER *r) {
 
 void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
     pthread_mutex_lock(&r->lock);
-    r->surface_width = width;
+    r->surface_width  = width;
     r->surface_height = height;
+    pthread_mutex_unlock(&r->lock);
+}
+
+void sub_render_gl_set_ui_mode(SUB_RENDERER *r, int mode) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->ui_mode = mode;
     pthread_mutex_unlock(&r->lock);
 }
 
@@ -270,3 +319,62 @@ void sub_render_gl_clear(SUB_RENDERER *r) {
 }
 
 void sub_render_gl_invalidate_cache(SUB_RENDERER *r) {}
+
+// --- HYBRID 3D BRIDGE FAST CPU BLENDER ---
+int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_h, int dst_stride) {
+    if (!r) return 0;
+    int has_subs = 0;
+
+    pthread_mutex_lock(&r->lock);
+    const SUB_FRAME *frame = r->current_frame;
+
+    if (frame && frame->events) {
+        has_subs = 1;
+        SUB_EVENT *ev = frame->events;
+
+        while (ev) {
+            if (ev->kind == SUB_EVENT_BITMAP && ev->data.bitmap.rgba) {
+                const uint8_t *src_rgba = ev->data.bitmap.rgba;
+
+                int src_w = ev->w;
+                int src_h = ev->h;
+                int src_x = ev->x;
+                int src_y = ev->y;
+
+                // 1:1 Pixel copy. No scaling, no rounding errors, no clipping!
+                for (int y = 0; y < src_h; y++) {
+                    int dy = src_y + y;
+                    if (dy < 0 || dy >= dst_h) continue;
+
+                    uint8_t *dst_row = (uint8_t *)pixels + (dy * dst_stride);
+                    const uint8_t *src_row = src_rgba + (y * ev->data.bitmap.stride);
+
+                    for (int x = 0; x < src_w; x++) {
+                        int dx = src_x + x;
+                        if (dx < 0 || dx >= dst_w) continue;
+
+                        uint8_t *dst_px = dst_row + (dx * 4);
+                        const uint8_t *src_px = src_row + (x * 4);
+
+                        uint8_t sa = src_px[3];
+                        if (sa == 0) continue;
+
+                        if (sa == 255 || dst_px[3] == 0) {
+                            dst_px[0] = src_px[0]; dst_px[1] = src_px[1]; dst_px[2] = src_px[2]; dst_px[3] = sa;
+                        } else {
+                            uint8_t dr = dst_px[0], dg = dst_px[1], db = dst_px[2], da = dst_px[3];
+                            int inv_sa = 255 - sa;
+                            dst_px[0] = (src_px[0] * sa + dr * inv_sa) >> 8;
+                            dst_px[1] = (src_px[1] * sa + dg * inv_sa) >> 8;
+                            dst_px[2] = (src_px[2] * sa + db * inv_sa) >> 8;
+                            dst_px[3] = sa + ((da * inv_sa) >> 8);
+                        }
+                    }
+                }
+            }
+            ev = ev->next;
+        }
+    }
+    pthread_mutex_unlock(&r->lock);
+    return has_subs;
+}

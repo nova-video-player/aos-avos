@@ -58,6 +58,9 @@ struct SUB_FORMAT_BACKEND {
     int  (*open)      (SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params);
     int  (*feed)       (SUB_FORMAT_BACKEND *be, const uint8_t *data, int size,
                         int64_t pts_ms, int64_t duration_ms);
+    int (*feed_bitmap)(struct SUB_FORMAT_BACKEND *be, uint8_t *pixels, int width,
+                       int height, int pitch, int colorspace, int x_offset, int y_offset,
+                       int64_t pts_ms, int64_t duration_ms);
     SUB_FRAME *(*render_at)(SUB_FORMAT_BACKEND *be, int64_t pts_ms);
     void (*free_frame)(SUB_FORMAT_BACKEND *be, SUB_FRAME *frame);
     int  (*resize)    (SUB_FORMAT_BACKEND *be, int video_w, int video_h);

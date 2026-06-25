@@ -26,11 +26,15 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be, uint8_t *pixels, int width, i
 
     SUB_EVENT *ev = calloc(1, sizeof(SUB_EVENT));
     ev->kind = SUB_EVENT_BITMAP;
-    ev->data.bitmap.x = x_offset;
-    ev->data.bitmap.y = y_offset;
-    ev->data.bitmap.w = width;
-    ev->data.bitmap.h = height;
-    ev->data.bitmap.pitch = pitch;
+
+    // Position properties belong to the parent event!
+    ev->x = x_offset;
+    ev->y = y_offset;
+    ev->w = width;
+    ev->h = height;
+
+    // Bitmap specifics belong to the union
+    ev->data.bitmap.stride = pitch;
 
     // Allocate memory and copy the pixels so OpenGL can upload them asynchronously
     int pixel_bytes = pitch * height;

@@ -128,10 +128,14 @@ static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
 	if (!video->send_sub)
 		return;
 
-	// NEW: If the track is SSA/ASS, our C OpenGL compositor handles it.
-	// Do NOT send the bitmap to Java!
+	// --- NATIVE OPENGL UPGRADE ---
+	// ALL subtitle formats (Text and Bitmap) are now handled natively by the GPU compositor.
+	// Explicitly abort sending any JNI payload to the legacy Java SubtitleManager.
 	int fmt = video->s->av.sub[video->s->av.subs].format;
-	if (fmt == SUB_FORMAT_SSA || fmt == SUB_FORMAT_TEXT) {
+	if (fmt == SUB_FORMAT_SSA ||
+		fmt == SUB_FORMAT_TEXT ||
+		fmt == SUB_FORMAT_DVD_GFX ||
+		fmt == SUB_FORMAT_PGS) {
 		return;
 	}
 	sub_frame = stream_get_current_subtitle(video->s);

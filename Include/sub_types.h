@@ -106,7 +106,6 @@ typedef struct {
 typedef enum {
     SUB_FMT_SRT     = 0,
     SUB_FMT_SSA     = 1,   /* via libass */
-    SUB_FMT_VOBSUB  = 2,
-    SUB_FMT_PGS     = 3,
+    SUB_FMT_GFX     = 2,   /* NEW: Universal OpenGL Bitmap Backend */
     SUB_FMT_UNKNOWN = -1,
 } SUB_FORMAT_ID;

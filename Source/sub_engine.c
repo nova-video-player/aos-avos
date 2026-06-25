@@ -2,7 +2,6 @@
 #include "sub_render_gl.h"
 #include "sub_format.h"
 #include <stdlib.h>
-#include <string.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -45,7 +44,11 @@ void sub_engine_destroy(SUB_ENGINE *eng) {
 
 void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window) { sub_render_gl_attach_surface(eng->renderer, window); }
 void sub_engine_detach_surface(SUB_ENGINE *eng) { sub_render_gl_detach_surface(eng->renderer); }
-void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) { sub_render_gl_resize(eng->renderer, width, height); }
+void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
+    if (!eng) return;
+    sub_render_gl_resize(eng->renderer, width, height);
+    sub_engine_resize_video(eng, width, height); // <--- Tells Libass to wrap text to the new 3D box!
+}
 
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h, const uint8_t *codec_private, int codec_private_size) {
     sub_engine_close_track(eng);
@@ -114,10 +117,13 @@ void sub_engine_flush(SUB_ENGINE *eng) {
 }
 
 void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h) {
+    if (!eng) return;
     pthread_mutex_lock(&eng->lock);
-    SUB_FORMAT_BACKEND *backend = eng->active_backend;
+    if (eng->active_backend && eng->active_backend->resize) {
+        // Direct passthrough: Libass will wrap natively to whatever size Java tells it
+        eng->active_backend->resize(eng->active_backend, video_w, video_h);
+    }
     pthread_mutex_unlock(&eng->lock);
-    if (backend && backend->resize) backend->resize(backend, video_w, video_h);
 }
 
 SUB_USER_STYLE *sub_engine_get_style(SUB_ENGINE *eng) { return eng->style; }
@@ -195,4 +201,14 @@ int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int heig
         return backend->feed_bitmap(backend, pixels, width, height, pitch, colorspace, x_offset, y_offset, pts_ms, duration_ms);
     }
     return -1;
+}
+
+void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode) {
+    if (!eng || !eng->renderer) return;
+    sub_render_gl_set_ui_mode(eng->renderer, mode);
+}
+
+int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride) {
+    if (!eng || !eng->renderer) return 0;
+    return sub_render_gl_fill_bitmap(eng->renderer, pixels, w, h, stride);
 }

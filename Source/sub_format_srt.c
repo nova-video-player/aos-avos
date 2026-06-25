@@ -15,6 +15,11 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
     if (video_w <= 0) video_w = 1920;
     if (video_h <= 0) video_h = 1080;
 
+    int font_size = (int)(video_h * 0.055);
+    int margin_v = (int)(video_h * 0.06);
+    int margin_h = (int)(video_w * 0.05);
+
+    // Alignment 2 = Bottom-Center. BorderStyle 3 = Tight Box.
     snprintf(header, 2048,
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -22,10 +27,9 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
         "PlayResY: %d\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,sans-serif,150,&H0000FF00,&H000000FF,&H00000000,&H99000000,0,0,0,0,100,100,0,0,1,3,1,2,20,20,50,1\n"
-        "[Events]\n"
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
-        video_w, video_h);
+        "Style: Default,sans-serif,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,3,0,0,2,%d,%d,%d,1\n",
+        video_w, video_h, font_size, margin_h, margin_h, margin_v);
+
     return header;
 }
 

@@ -36,6 +36,11 @@ JNIEXPORT void   JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine
 JNIEXPORT void   JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSurfaceChanged(JNIEnv *env, jobject thiz, jlong handle, jint width, jint height);
 JNIEXPORT void   JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSurfaceDestroyed(JNIEnv *env, jobject thiz, jlong handle);
 
+/* ── 3D Mode ── */
+JNIEXPORT void   JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetUIMode(JNIEnv *env, jobject thiz, jlong handle, jint mode);
+/* ── 3D Hybrid Render Bridge ── */
+JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject bitmap);
+
 /* ── Playback state ── */
 JNIEXPORT void   JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetPaused(JNIEnv *env, jobject thiz, jlong handle, jboolean paused);
 

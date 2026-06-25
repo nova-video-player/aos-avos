@@ -36,9 +36,11 @@ typedef struct {
 
 void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out);
 
-// --- NEW: Polling API for the GL Thread to use exclusively ---
 SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng);
 void sub_engine_free_frame(SUB_FRAME *frame);
+int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms);
 
-// Feed a raw decompressed bitmap (VobSub/PGS) into the OpenGL texture engine
-int sub_engine_feed_bitmap(void *engine, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms);
+void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode);
+
+// --- HYBRID 3D BRIDGE ---
+int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride);

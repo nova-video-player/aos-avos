@@ -16,7 +16,7 @@ ifeq ($(MASTER_OS),ANDROID)
 ifeq (YES,$(LIBAVOS))
 CSRC += avos_common.c avos_mp.c avos_mp_video.c avos_mp_audio.c avos_mr.c android_config.c android_codecs.c jni_sub_engine.c sub_engine.c sub_render_gl.c sub_style.c
 INCLUDES += -I$(LOCAL_PATH)/public
-AVOS_SHARED_LIBS += -lavos_android -lEGL -lGLESv2 -landroid
+AVOS_SHARED_LIBS += -lavos_android -lEGL -lGLESv2 -landroid -ljnigraphics
 endif
 DEFINES += -DCONFIG_ANDROID
 endif

@@ -29,6 +29,8 @@
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#include "sub_engine.h" // <-- ADD THIS
+#include "sub_types.h"  // <-- ADD THIS (if SUB_FMT_GFX is defined here)
 
 #define DBGS	if(Debug[DBG_STREAM])
 #define DBG 	if(Debug[DBG_SUB])
@@ -86,6 +88,20 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	self->avcontext = avcodec_alloc_context3(myCodec);
 	avcodec_open2(self->avcontext, myCodec, NULL);
 	DBGS serprintf("codec_ffsub: ffsub: Allocated avcontext %p\n", self->avcontext);
+
+	// --- NATIVE OPENGL UPGRADE ---
+	// Safely initialize the hardware GFX track for PGS and DVD subtitles
+	extern SUB_ENGINE *g_sub_engine;
+	if (g_sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
+		int w = 1920;
+		int h = 1080;
+		STREAM *stream = (STREAM *)ctx;
+		if (stream && stream->video) {
+			if (stream->video->width > 0) w = stream->video->width;
+			if (stream->video->height > 0) h = stream->video->height;
+		}
+		sub_engine_open_track(g_sub_engine, SUB_FMT_GFX, w, h, NULL, 0);
+	}
 
 	return 0;
 }

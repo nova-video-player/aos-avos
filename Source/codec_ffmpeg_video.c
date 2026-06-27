@@ -29,6 +29,7 @@
 #include "codec_utils.h"
 #include "device_config.h"
 #include "pts_reorder.h"
+#include <pthread.h>
 
 #ifdef CONFIG_SINK_VIDEO_ANDROID
 #include "android_config.h"
@@ -155,6 +156,7 @@ typedef struct PRIV {
 	AVFrame		*vframe;
 	void		*mt_ctx;
 	int		reorder_pts;
+	pthread_mutex_t mutex;
 } PRIV;
 
 //
@@ -434,6 +436,11 @@ serprintf("ffmpeg_video_codec_prepare\n");
 static int ffmpeg_video_codec_cleanup(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **frames, int num_frames)
 {
 serprintf("ffmpeg_video_codec_cleanup\n");
+	PRIV *p = (PRIV*)dec->priv;
+	if( !p )
+		return 1;
+
+	pthread_mutex_lock( &p->mutex );
 	int i;
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
@@ -443,6 +450,7 @@ serprintf("ffmpeg_video_codec_cleanup\n");
 			f->dec  = NULL;
 		}
 	}
+	pthread_mutex_unlock( &p->mutex );
 
 	return 0;
 }
@@ -714,14 +722,21 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	if( !dec || !src )
 		return 1;
 	PRIV *p = (PRIV*)dec->priv;
-	if( !p || !p->vctx || !src->priv ) {
-		// decoder already cleaned up, skip render
-		src->dec = NULL;
+	if( !p || !p->vctx ) {
 		return 1;
 	}
+	
+	pthread_mutex_lock( &p->mutex );
+	
+	if( !src->priv || src->dec != dec ) {
+		pthread_mutex_unlock( &p->mutex );
+		return 1;
+	}
+	
 	AVCodecContext *vctx = p->vctx;
 	AVFrame	*avframe = (AVFrame*)src->priv;
-DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );
+	
+	DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );
 	if( dst ) {
 		dst->color_space = avframe->colorspace;
 		if( p->mt_ctx ) {
@@ -730,10 +745,11 @@ DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avf
 			codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
 		}
 	}
-	if( src->priv && src->dec == dec ) {
-		av_frame_free((AVFrame**)&src->priv);
-		src->dec = NULL;
-	}
+	
+	av_frame_free((AVFrame**)&src->priv);
+	src->dec = NULL;
+	
+	pthread_mutex_unlock( &p->mutex );
 
 	return 0;
 }
@@ -778,8 +794,12 @@ static int ffmpeg_video_codec_destroy( STREAM_DEC_VIDEO *dec )
 	if( !dec ) 
 		return 1;
 		
-DBGS serprintf( "FFM: delete\n");
-	afree( dec->priv );
+	DBGS serprintf( "FFM: delete\n");
+	PRIV *p = (PRIV*)dec->priv;
+	if( p ) {
+		pthread_mutex_destroy( &p->mutex );
+		afree( p );
+	}
 	afree( dec );
 
 	return 0;
@@ -811,6 +831,9 @@ serprintf("FFM: cannot alloc priv\n");
 		free( dec );
 		return NULL;		
 	}
+	
+	PRIV *p = (PRIV*)dec->priv;
+	pthread_mutex_init( &p->mutex, NULL );
 	
 	return dec;
 }

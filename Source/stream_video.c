@@ -855,20 +855,24 @@ DBGS serprintf("stream_open_video_dec: %s/%d/%d done!\r\n", s->video_dec->name, 
 
 		return 0;
 next:
-		// Close the video sink first to join its threads and ensure no
-		// render/convert callbacks reference decoder-owned data
+		// Clean up the decoder frames first (while frames are still allocated and valid)
+		if (s->video_dec) {
+			if (s->video_dec->is_open) {
+				if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
+					serprintf("error, could not cleanup video dec!\n");
+				}
+			}
+		}
+		// Close the video sink to stop and join its threads
 		if (s->video_sink) {
 			if (s->video_sink->is_open) {
 				s->video_sink->close(s->video_sink);
 			}
 			s->put_time_mode = 0;
 		}
+		// Close and destroy the decoder (safe now that sink threads are joined)
 		if (s->video_dec) {
 			if (s->video_dec->is_open) {
-				// call cleanup if needed
-				if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
-serprintf("error, could not cleanup video dec!\n");
-				}
 				s->video_dec->close( s->video_dec );
 			}
 			s->video_dec->destroy( s->video_dec );
@@ -1034,18 +1038,19 @@ static int stream_restart_audio_as_pcm( STREAM *s, const char *reason )
 // *****************************************************************************
 static void stream_close_video_dec( STREAM *s )
 {
-	// Close the video sink first to join its threads (venc_thread, copy_thread)
-	// and ensure no render/convert callbacks are in progress that reference
-	// decoder-owned data (AVFrame pointers in frame->priv)
+	// Clean up the decoder frames first (while frames are still allocated and valid)
+	if( s->video_dec ) {
+		DBGS serprintf("stream_close_video_dec\r\n");
+		if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
+			serprintf("error, could not cleanup video dec!\n");
+		}
+	}
+	// Close the video sink to stop and join its threads
 	if( s->video_sink && s->video_sink->is_open ) {
 		s->video_sink->close( s->video_sink );
 	}
+	// Close and destroy the decoder (safe now that sink threads are joined)
 	if( s->video_dec) {
-DBGS serprintf("stream_close_video_dec\r\n");
-		// call cleanup if needed
-		if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
-serprintf("error, could not cleanup video dec!\n");
-		}
 		s->video_dec->close( s->video_dec );
 		s->video_dec->destroy( s->video_dec );
 		s->video_dec = NULL;

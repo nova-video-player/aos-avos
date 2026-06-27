@@ -13,12 +13,12 @@ typedef struct {
     double FontSize;
     char *FontName;
     int Bold;
-    int Italic;
     uint32_t PrimaryColour;
     uint32_t OutlineColour;
     uint32_t BackColour;
     int BorderStyle;
     double Outline;
+    double Shadow;
     int MarginV;
 } ASS_Style_Backup;
 
@@ -42,54 +42,54 @@ static void sync_styles(SSA_BACKEND *ctx) {
     if (!ctx->user_style_ptr || !ctx->track) return;
 
     SUB_USER_STYLE u;
-    memset(&u, 0, sizeof(SUB_USER_STYLE)); // MUST ZERO-INITIALIZE!
+    memset(&u, 0, sizeof(SUB_USER_STYLE));
     sub_style_snapshot(ctx->user_style_ptr, &u);
 
-    // Skip heavy processing if the user hasn't touched the sliders!
-    if (u.serial == ctx->last_serial && ctx->num_backups == ctx->track->n_styles) {
-        if (u.font_family) free(u.font_family);
-        return;
-    }
+    if (u.serial == ctx->last_serial) return;
+    ctx->last_serial = u.serial;
 
-    // 1. If the track added new styles, expand our backup array!
-    if (ctx->num_backups < ctx->track->n_styles) {
-        ctx->backups = realloc(ctx->backups, ctx->track->n_styles * sizeof(ASS_Style_Backup));
-        for (int i = ctx->num_backups; i < ctx->track->n_styles; i++) {
+    // 1. Create Backups of the Original ASS Styles on first run
+    if (!ctx->backups && ctx->track->n_styles > 0) {
+        ctx->num_backups = ctx->track->n_styles;
+        ctx->backups = calloc(ctx->num_backups, sizeof(ASS_Style_Backup));
+        for (int i = 0; i < ctx->num_backups; i++) {
             ASS_Style *s = &ctx->track->styles[i];
             ctx->backups[i].FontSize = s->FontSize;
             ctx->backups[i].FontName = s->FontName ? strdup(s->FontName) : NULL;
             ctx->backups[i].Bold = s->Bold;
-            ctx->backups[i].Italic = s->Italic;
             ctx->backups[i].PrimaryColour = s->PrimaryColour;
             ctx->backups[i].OutlineColour = s->OutlineColour;
             ctx->backups[i].BackColour = s->BackColour;
             ctx->backups[i].BorderStyle = s->BorderStyle;
             ctx->backups[i].Outline = s->Outline;
+            ctx->backups[i].Shadow = s->Shadow;
             ctx->backups[i].MarginV = s->MarginV;
         }
-        ctx->num_backups = ctx->track->n_styles;
     }
 
-    // 2. Safely restore all styles to their original fansub state
-    for (int i = 0; i < ctx->track->n_styles; i++) {
-        ASS_Style *s = &ctx->track->styles[i];
-        ASS_Style_Backup *b = &ctx->backups[i];
-        s->FontSize = b->FontSize;
-        if (s->FontName) free(s->FontName);
-        s->FontName = b->FontName ? strdup(b->FontName) : NULL;
-        s->Bold = b->Bold;
-        s->Italic = b->Italic;
-        s->PrimaryColour = b->PrimaryColour;
-        s->OutlineColour = b->OutlineColour;
-        s->BackColour = b->BackColour;
-        s->BorderStyle = b->BorderStyle;
-        s->Outline = b->Outline;
-        s->MarginV = b->MarginV;
+    // 2. Restore everything to original ASS baseline first
+    if (ctx->backups) {
+        for (int i = 0; i < ctx->num_backups && i < ctx->track->n_styles; i++) {
+            ASS_Style *s = &ctx->track->styles[i];
+            s->FontSize = ctx->backups[i].FontSize;
+            if (s->FontName) free(s->FontName);
+            s->FontName = ctx->backups[i].FontName ? strdup(ctx->backups[i].FontName) : NULL;
+            s->Bold = ctx->backups[i].Bold;
+            s->PrimaryColour = ctx->backups[i].PrimaryColour;
+            s->OutlineColour = ctx->backups[i].OutlineColour;
+            s->BackColour = ctx->backups[i].BackColour;
+            s->BorderStyle = ctx->backups[i].BorderStyle;
+            s->Outline = ctx->backups[i].Outline;
+            s->Shadow = ctx->backups[i].Shadow;
+            s->MarginV = ctx->backups[i].MarginV;
+        }
     }
 
     // 3. Apply the Java Overrides!
-    int force_all = ctx->is_plain_text || (u.override_mode == ASS_OVERRIDE_FORCE);
-    if (force_all || u.override_mode == ASS_OVERRIDE_SCALE) {
+    // 0 = ASS_OVERRIDE_NO, 1 = ASS_OVERRIDE_FORCE, 2 = ASS_OVERRIDE_SCALE
+    int force_all = ctx->is_plain_text || (u.override_mode == 1);
+
+    if (force_all || u.override_mode == 2) {
         for (int i = 0; i < ctx->track->n_styles; i++) {
             ASS_Style *style = &ctx->track->styles[i];
 
@@ -102,29 +102,44 @@ static void sync_styles(SSA_BACKEND *ctx) {
                     if (style->FontName) free(style->FontName);
                     style->FontName = strdup(u.font_family);
                 }
+
                 style->Bold = u.is_bold ? -1 : 0;
-                style->Italic = u.is_italic ? -1 : 0;
-                if (u.text_color != 0) style->PrimaryColour = u.text_color;
-                if (u.outline_color != 0) style->OutlineColour = u.outline_color;
-                if (u.bg_enabled) {
+                style->PrimaryColour = u.text_color;
+
+                if (u.bg_mode == 1) {
+                    // PER-LINE BOX (Legacy CC style)
                     style->BorderStyle = 3;
                     style->BackColour = u.bg_color;
-                } else {
-                    style->BorderStyle = 1;
+                    style->Outline = 0;
+                    style->Shadow = 0;
+
+                } else if (u.bg_mode == 2) {
+                    // UNIFIED BOX (The Libass Secret Weapon)
+                    style->BorderStyle = 4;
+                    style->OutlineColour = u.outline_color;
+                    style->BackColour = u.bg_color;
                     style->Outline = u.outline_width;
-                    style->BackColour = 0x00000000;
+                    style->Shadow = u.shadow_width; // Hijacked for Padding!
+
+                } else {
+                    // STANDARD OUTLINE + SHADOW
+                    style->BorderStyle = 1;
+                    style->OutlineColour = u.outline_color;
+                    style->BackColour = u.shadow_color;
+                    style->Outline = u.outline_width;
+                    style->Shadow = u.shadow_width;
                 }
+
                 if (u.margin_bottom > 0) style->MarginV = u.margin_bottom;
-            } else if (u.override_mode == ASS_OVERRIDE_SCALE) {
+
+            } else if (u.override_mode == 2) {
+                // SCALE ONLY MODE
                 if (u.font_scale > 0 && u.font_scale != 1.0f) {
                     style->FontSize = style->FontSize * u.font_scale;
                 }
             }
         }
     }
-
-    ctx->last_serial = u.serial;
-    if (u.font_family) free(u.font_family);
 }
 
 static void ass_msg_cb(int level, const char *fmt, va_list va, void *data) {

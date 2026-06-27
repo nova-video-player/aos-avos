@@ -2,128 +2,168 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Helper: Converts Android ARGB to Libass RGBA
-static uint32_t argb_to_rgba(uint32_t argb) {
-    uint8_t a = (argb >> 24) & 0xFF;
-    uint8_t r = (argb >> 16) & 0xFF;
-    uint8_t g = (argb >> 8) & 0xFF;
-    uint8_t b = argb & 0xFF;
+// Helper: Android ARGB (0xAARRGGBB) -> Libass RGBA (0xRRGGBBAA where AA is transparency)
+static uint32_t argb_to_libass(uint32_t argb) {
+    uint32_t a = (argb >> 24) & 0xFF;
+    uint32_t r = (argb >> 16) & 0xFF;
+    uint32_t g = (argb >> 8)  & 0xFF;
+    uint32_t b =  argb        & 0xFF;
 
-    // CRITICAL FIX: Libass treats 'A' as Transparency!
-    // Android 255 (Solid) -> Libass 0 (Solid)
-    uint8_t ass_alpha = 255 - a;
+    // Libass treats Alpha as "Transparency" (0x00 = Solid, 0xFF = Invisible)
+    uint32_t libass_transparency = 255 - a;
 
-    return (r << 24) | (g << 16) | (b << 8) | ass_alpha;
+    return (r << 24) | (g << 16) | (b << 8) | libass_transparency;
 }
 
 SUB_USER_STYLE* sub_style_create(void) {
     SUB_USER_STYLE *style = calloc(1, sizeof(SUB_USER_STYLE));
-    style->font_size = 24.0f;
-    style->font_scale = 1.0f;
-    style->text_color = 0xFFFFFFFF; // White
-    style->outline_color = 0x000000FF; // Black
+
+    style->font_size     = 55.0f;
+    style->font_scale    = 1.0f;
+    style->font_family   = strdup("roboto medium"); // Locked internal fontconfig target
+    style->is_bold       = 0;
+    style->text_color    = argb_to_libass(0xFFFFFFFF); // Solid White
+
+    style->bg_mode       = 0;                          // Default: Floating Text
+    style->bg_color      = argb_to_libass(0x88000000); // 50% Transparent Black
+
     style->outline_width = 2;
-    style->bg_enabled = 0;
-    style->bg_color = 0x00000088; // Semi-transparent black
+    style->outline_color = argb_to_libass(0xFF000000); // Solid Black
+
+    style->shadow_width  = 2;
+    style->shadow_color  = argb_to_libass(0xAA000000); // Drop Shadow
+
     style->margin_bottom = 0;
-    style->override_mode = ASS_OVERRIDE_FORCE;
-    style->serial = 1;
+    style->override_mode = 1;                          // Default: Force Custom
+    style->serial        = 1;
+
     return style;
 }
 
 void sub_style_destroy(SUB_USER_STYLE *style) {
-    if (style) {
-        if (style->font_family) free(style->font_family);
-        free(style);
+    if (!style) return;
+    if (style->font_family) free(style->font_family);
+    free(style);
+}
+
+int sub_style_get_serial(const SUB_USER_STYLE *style) {
+    return style ? style->serial : 0;
+}
+
+// --- SNAPSHOT (For Engine Sync) ---
+void sub_style_snapshot(const SUB_USER_STYLE *style, SUB_USER_STYLE *out) {
+    if (!style || !out) return;
+
+    // Perform a fast memory copy of the entire struct.
+    // Shallow copy of the font_family pointer is perfectly safe here
+    // because sync_styles() only reads it transiently.
+    memcpy(out, style, sizeof(SUB_USER_STYLE));
+}
+
+// --- MASTER & GEOMETRY SETTERS ---
+
+void sub_style_set_override_mode(SUB_USER_STYLE *style, int mode) {
+    if (style && style->override_mode != mode) {
+        style->override_mode = mode;
+        style->serial++;
     }
 }
 
+void sub_style_set_margin_bottom(SUB_USER_STYLE *style, int margin) {
+    if (style && style->margin_bottom != margin) {
+        style->margin_bottom = margin;
+        style->serial++;
+    }
+}
+
+// --- TYPOGRAPHY SETTERS ---
+
 void sub_style_set_font_size(SUB_USER_STYLE *style, float pt) {
-    if (style){
+    if (style && style->font_size != pt) {
         style->font_size = pt;
         style->serial++;
     }
 }
 
 void sub_style_set_font_scale(SUB_USER_STYLE *style, float scale) {
-    if (style) {
+    if (style && style->font_scale != scale) {
         style->font_scale = scale;
         style->serial++;
     }
 }
 
-void sub_style_set_font_family(SUB_USER_STYLE *style, const char *family_name) {
-    if (style && family_name) {
-        if (style->font_family) free(style->font_family);
-        style->font_family = strdup(family_name);
-        style->serial++;
-    }
+void sub_style_set_font_family(SUB_USER_STYLE *style, const char *family) {
+    if (!style || !family) return;
+    if (style->font_family && strcmp(style->font_family, family) == 0) return;
+    if (style->font_family) free(style->font_family);
+    style->font_family = strdup(family);
+    style->serial++;
 }
 
 void sub_style_set_bold(SUB_USER_STYLE *style, int bold) {
-    if (style) {
+    if (style && style->is_bold != bold) {
         style->is_bold = bold;
         style->serial++;
     }
 }
 
-void sub_style_set_italic(SUB_USER_STYLE *style, int italic) {
-    if (style) {
-        style->is_italic = italic;
+void sub_style_set_text_color(SUB_USER_STYLE *style, uint32_t argb) {
+    if (!style) return;
+    uint32_t converted = argb_to_libass(argb);
+    if (style->text_color != converted) {
+        style->text_color = converted;
         style->serial++;
     }
 }
 
-void sub_style_set_text_color(SUB_USER_STYLE *style, uint32_t argb_color) {
-    if (style) {
-        style->text_color = argb_to_rgba(argb_color);
+// --- INTERDEPENDENT BACKGROUNDS, OUTLINES & SHADOWS ---
+
+void sub_style_set_bg_mode(SUB_USER_STYLE *style, int mode) {
+    if (style && style->bg_mode != mode) {
+        style->bg_mode = mode;
         style->serial++;
     }
 }
 
-void sub_style_set_outline_color(SUB_USER_STYLE *style, uint32_t argb_color) {
-    if (style) {
-        style->outline_color = argb_to_rgba(argb_color);
-        style->outline_width = 2;
+void sub_style_set_bg_color(SUB_USER_STYLE *style, uint32_t argb) {
+    if (!style) return;
+    uint32_t converted = argb_to_libass(argb);
+    if (style->bg_color != converted) {
+        style->bg_color = converted;
         style->serial++;
     }
 }
 
-void sub_style_set_bg_color(SUB_USER_STYLE *style, uint32_t argb_color) {
-    if (style) {
-        style->bg_color = argb_to_rgba(argb_color);
+void sub_style_set_outline_width(SUB_USER_STYLE *style, float px) {
+    int w = (int)px;
+    if (style && style->outline_width != w) {
+        style->outline_width = w;
         style->serial++;
     }
 }
 
-void sub_style_set_bg_opacity(SUB_USER_STYLE *style, float opacity) {
-    if (style) {
-        uint8_t android_alpha = (uint8_t)(255.0f * opacity);
-        uint8_t ass_alpha = 255 - android_alpha; // INVERT FOR LIBASS
-
-        style->bg_color = (style->bg_color & 0xFFFFFF00) | ass_alpha;
+void sub_style_set_outline_color(SUB_USER_STYLE *style, uint32_t argb) {
+    if (!style) return;
+    uint32_t converted = argb_to_libass(argb);
+    if (style->outline_color != converted) {
+        style->outline_color = converted;
         style->serial++;
     }
 }
 
-void sub_style_set_vertical_offset(SUB_USER_STYLE *style, float fraction) {
-    if (style) {
-        style->margin_bottom = (int)fraction;
+void sub_style_set_shadow_width(SUB_USER_STYLE *style, float px) {
+    int w = (int)px;
+    if (style && style->shadow_width != w) {
+        style->shadow_width = w;
         style->serial++;
     }
 }
 
-void sub_style_set_force_override(SUB_USER_STYLE *style, int force) {
-    if (style) {
-        style->override_mode = force ? ASS_OVERRIDE_FORCE : ASS_OVERRIDE_NO;
+void sub_style_set_shadow_color(SUB_USER_STYLE *style, uint32_t argb) {
+    if (!style) return;
+    uint32_t converted = argb_to_libass(argb);
+    if (style->shadow_color != converted) {
+        style->shadow_color = converted;
         style->serial++;
     }
-}
-
-void sub_style_snapshot(const SUB_USER_STYLE *src, SUB_USER_STYLE *dst) {
-    if (!src || !dst) return;
-    char *old_family = dst->font_family;
-    memcpy(dst, src, sizeof(SUB_USER_STYLE));
-    dst->font_family = src->font_family ? strdup(src->font_family) : NULL;
-    if (old_family) free(old_family);
 }

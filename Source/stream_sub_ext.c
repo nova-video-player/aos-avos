@@ -92,8 +92,10 @@ static subtitle_files *get_subtitle_files( STREAM *s )
 	if (!name)
 		return NULL;
 	// make the current path the 1st entry in the url list
-	if( s->sub_url[0] )
+	if( s->sub_url[0] ) {
 		afree( s->sub_url[0] );
+		s->sub_url[0] = NULL;
+	}
 	s->sub_url[0] = astrdup( s->src.url );
 	return subtitle_check_files( (const char**)s->sub_url, name );
 }

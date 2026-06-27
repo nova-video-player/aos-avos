@@ -1388,8 +1388,11 @@ static void _free_subtitle_urls( STREAM *s )
 {
 	if( s ) {
 		int i;
-		for ( i = 0; i < SUB_TRACK_MAX && s->sub_url[i]; i++ ) {
-			afree( s->sub_url[i] );
+		for ( i = 0; i < SUB_TRACK_MAX + 2; i++ ) {
+			if( s->sub_url[i] ) {
+				afree( s->sub_url[i] );
+				s->sub_url[i] = NULL;
+			}
 		}
 	}
 }

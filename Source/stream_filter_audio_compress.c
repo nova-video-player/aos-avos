@@ -44,6 +44,7 @@
 #include "compress.h"
 #include "astdlib.h"
 #include "util.h"
+#include <pthread.h>
 
 #define DBG if(0)
 
@@ -52,6 +53,7 @@ struct ctx {
 	struct CompressorConfig *cfg;    // Configuration structure for compressor parameters
 	int level;                       // Audio boost level (0=OFF, 3=ON from Android UI)
 	int nightmode;                   // Night mode flag (0=OFF, 1=ON from Android UI)
+	pthread_mutex_t mutex;           // Protects configuration updates against concurrent rendering
 };
 
 int _delete( STREAM_FILTER_AUDIO *f )
@@ -62,6 +64,7 @@ int _delete( STREAM_FILTER_AUDIO *f )
 		if( ctx->cmp ) {
 			Compressor_delete(ctx->cmp);
 		}
+		pthread_mutex_destroy( &ctx->mutex );
 		afree(f->priv);  // Fix memory leak - free the context
 	}
 	if( f ) {
@@ -134,10 +137,13 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 		return -1;
 	}
 
+	pthread_mutex_init( &ctx->mutex, NULL );
+
 	// Initialize AudioCompress library
 	ctx->cmp = Compressor_new(0);
 	if( !ctx->cmp ) {
 		serprintf("facomp: failed to create compressor\n");
+		pthread_mutex_destroy( &ctx->mutex );
 		afree(ctx);
 		return -1;
 	}
@@ -146,6 +152,7 @@ static int _open( STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio )
 	if( !ctx->cfg ) {
 		serprintf("facomp: failed to get compressor config\n");
 		Compressor_delete(ctx->cmp);
+		pthread_mutex_destroy( &ctx->mutex );
 		afree(ctx);
 		return -1;
 	}
@@ -176,6 +183,8 @@ static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 		return 0;
 	}
 
+	pthread_mutex_lock( &ctx->mutex );
+
 	// Only process if compression is enabled (level > 0 or nightmode > 0)
 	if( (ctx->level + 4*ctx->nightmode) > 0 ) {
 		// AudioCompress processes 16-bit signed integer samples
@@ -191,6 +200,8 @@ static int _filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 			DBG serprintf("facomp: processed 1000 frames (lvl=%d, samples=%d)\n", lvl, sample_count);
 		}
 	}
+
+	pthread_mutex_unlock( &ctx->mutex );
 
 	return 0;
 }
@@ -211,6 +222,8 @@ static int _set_param( STREAM_FILTER_AUDIO *f, void *params, void *night_on )
 	int *level = params;
 	int *nightmode = night_on;
 	struct ctx *ctx = f->priv;
+
+	pthread_mutex_lock( &ctx->mutex );
 
 	// Validate parameter ranges
 	int new_level = MAX(0, MIN(3, *level));      // Audio boost: 0 or 3 only
@@ -239,6 +252,8 @@ static int _set_param( STREAM_FILTER_AUDIO *f, void *params, void *night_on )
 	} else {
 		DBG serprintf("facomp: no parameter change, keeping current configuration\n");
 	}
+
+	pthread_mutex_unlock( &ctx->mutex );
 
 	return 0;
 }

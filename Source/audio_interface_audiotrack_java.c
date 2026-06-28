@@ -31,6 +31,7 @@
 #include "av.h"
 #include "atime.h"
 #include "util.h"
+#include "ac3_recode.h"
 
 extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
@@ -97,6 +98,9 @@ struct audio_ctx {
 	uint32_t app_latency;       // local buffer geometry: buf_size / (frame_size * rate * speed)
 	uint32_t pipeline_latency;  // max(track, system+app): selected static delay for mode2; write-gate timeout for mode1
 	int passthrough;
+	int ac3_recode;                // latched at output config; do not read global recode state in timing code
+	int ac3_mode2_plain_policy;    // latched with the clock policy for this playback
+	int ac3_recode_target_stereo;  // latched encoder target: stereo uses pipeline latency
 	int applied_passthrough;
 	int applied_spatialization_behavior;
 	JNIEnv * env;
@@ -685,6 +689,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	// This ensures AudioTrack is created with AC3 format (2000) instead of original format (e.g., EAC3 18247)
 	int ac3_recoding_enabled = libavos_get_ac3_recoding_enabled();
 	int requested_passthrough = at->passthrough;
+	at->ac3_recode = ac3_recoding_enabled ? 1 : 0;
+	at->ac3_mode2_plain_policy = ac3_recoding_enabled &&
+		stream_audio_ac3_mode2_plain_policy();
 	if(ac3_recoding_enabled) {
 		format = WAVE_FORMAT_AC3;
 		// Respect the current passthrough mode selected in native (may be 1 or 2)
@@ -697,7 +704,14 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			requested_passthrough = 2;
 		}
 		channels = 2;  // IEC/codec-specific container is stereo for compressed payload
-		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d", requested_passthrough, channels );
+		// Latch the recode output layout published by the encoder filter (which opens
+		// before this sink is configured) into this context, so a later overlapping
+		// playback that changes the process-global cannot alter this AudioTrack's
+		// latency policy mid-stream. audiotrack_get_latency reads only this context copy.
+		at->ac3_recode_target_stereo = libavos_get_ac3_recode_target_stereo();
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d, plain_policy=%d, target_stereo=%d", requested_passthrough, channels, at->ac3_mode2_plain_policy, at->ac3_recode_target_stereo );
+	} else {
+		at->ac3_recode_target_stereo = 0;
 	}
 	at->passthrough = requested_passthrough;
 
@@ -2325,9 +2339,19 @@ DBG3		LOG("audiotrack_get_latency: mode2 format=%04X using app_latency=%u (pipel
 		// AC3-recode resolved-mode2 plain policy: use app_latency (AudioTrack buffer
 		// geometry) instead of pipeline_latency, which overestimates the eARC/HDMI route.
 		// Coupled with the STREAM_SYNC_SAMPLES clock in stream_audio.c; both apply together.
-		if (stream_audio_ac3_mode2_plain_policy() &&
+		if (at->ac3_mode2_plain_policy &&
 		    at->format == WAVE_FORMAT_AC3 &&
-		    libavos_get_ac3_recoding_enabled()) {
+		    at->ac3_recode) {
+			// Output-aware latency: a stereo (2.0/192k) recode shows a steady ~553ms
+			// picture-leads-sound error (= pipeline-app, 724-171) that app_latency
+			// under-compensates, so the stereo path uses pipeline_latency. Multichannel
+			// recode stays on app_latency. Distinguish by the encoder target
+			// channels, not AudioTrack ch (both compressed payloads report ch=2).
+			if (at->ac3_recode_target_stereo) {
+DBG3			LOG("audiotrack_get_latency: AC3-recode mode2 STEREO pipeline_latency=%u (app=%u)",
+					at->pipeline_latency, at->latency);
+				return (int)at->pipeline_latency;
+			}
 DBG3		LOG("audiotrack_get_latency: AC3-recode mode2 plain policy app_latency=%u (pipeline=%u)",
 				at->latency, at->pipeline_latency);
 			return (int)at->latency;

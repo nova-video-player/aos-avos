@@ -148,12 +148,24 @@ resolves to mode 2, it must adopt the plain-mode2 timing, not the mode-1 policy 
 historically left on. Two coupled changes apply together (the gate drives both):
 1. enter the PTS-seeded `STREAM_SYNC_SAMPLES` audio clock instead of the mode-1 CDATA
    synthetic startup anchor (see Startup Anchoring below), and
-2. use `app_latency` (AudioTrack buffer geometry) instead of `pipeline_latency` for the
-   static heard delay.
+2. pick the static heard delay by **recode output layout**: a stereo 2.0/192k target uses
+   `pipeline_latency`, while a multichannel/640k target uses `app_latency`
+   (AudioTrack buffer geometry).
 Under the synthetic anchor the static latency cancels, so the bug was invisible in mode 1
-but produced a fixed audio-leads-picture offset on real mode-2 (eARC) sinks; neither fix
-works alone. Mode 1 and ordinary (non-recode) mode 2 are unchanged. See
-[debug.md](debug.md) for the Shield eARC-emulation A/B workflow.
+but produced a fixed audio-leads-picture offset on real mode-2 (eARC) sinks; the samples
+clock and the latency selection apply together. Mode 1 and ordinary (non-recode) mode 2
+are unchanged. See [debug.md](debug.md) for the Shield eARC-emulation A/B workflow.
+
+**Why output-aware.** The encoded AC3 payload layouts differ, but Android configures both
+compressed AudioTracks with the same two-channel carrier (`ch=2`). A multichannel recode is
+in sync on `app_latency`, while a stereo recode using that policy leaves the picture about
+553ms ahead of the sound (= `pipeline_latency - app_latency`, 724-171). The discriminator
+is therefore the **encoder target channels** published after a successful encoder open,
+not the AudioTrack carrier channel count. This is empirical calibration: the recode-mode2
+internal sync model does not track physical sync on this path (the on-screen diff swings
+~200ms while the audible error moves ~553ms), so the latency is tuned to the acoustic
+result. The target layout is reset before encoder initialization, published only after a
+fully successful open, and latched into the AudioTrack context at sink configuration.
 
 `audio_spdif.c` mode-2 handling for recoding:
 

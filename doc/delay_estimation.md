@@ -48,7 +48,11 @@ treated as interchangeable:
   `getLatency()` value. For mode2 passthrough it is currently selected by
   codec policy: plain AC3/EAC3 uses `pipeline_latency`, while DTS/DTS-HD,
   TrueHD, and DDP/JOC use geometry/app latency based on Nvidia Shield and
-  Google Streamer 4K testing.
+  Google Streamer 4K testing. AC3 *recode* resolving to mode2 (under
+  `ac3_mode2_plain_policy`) is output-aware: a stereo 2.0/192k target uses
+  `pipeline_latency`, while a multichannel/640k target uses `app_latency` — discriminated by
+  the encoder target channels, not the AudioTrack channel count (both report
+  `ch=2`). See [audio_passthrough.md](audio_passthrough.md).
 - `selected_delay`: the delay actually subtracted from `audio_time` to derive
   heard time. It may come from dynamic AudioTrack evidence, last-good cache,
   geometry latency, or pipeline latency depending on path and stability.

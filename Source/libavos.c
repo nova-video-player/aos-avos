@@ -32,6 +32,7 @@
 #include "device_config.h"
 #include "i18n.h"
 #include "audio_spdif.h"
+#include "ac3_recode.h"
 #include "stream.h"
 
 #ifdef CONFIG_ANDROID
@@ -123,6 +124,9 @@ void libavos_avsh(const char *cmd)
 }
 
 static int ac3_recoding_enabled = 0;
+// Startup handoff from the encoder filter to AudioTrack configuration. Each
+// AudioTrack latches this value; it must never be consulted as live policy.
+static int ac3_recode_target_stereo = 0;
 static int pcm_output_max_channels = 0;
 
 static void log_audio_capabilities64(const char *label, int64_t flags)
@@ -250,6 +254,16 @@ int libavos_get_ac3_recoding_enabled(void)
 	return ac3_recoding_enabled;
 }
 
+void libavos_set_ac3_recode_target_stereo(int stereo)
+{
+	__atomic_store_n(&ac3_recode_target_stereo, stereo ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+int libavos_get_ac3_recode_target_stereo(void)
+{
+	return __atomic_load_n(&ac3_recode_target_stereo, __ATOMIC_ACQUIRE);
+}
+
 void libavos_set_passthrough(int force_passthrough)
 {
 	serprintf("libavos_set_passthrough: mode=%d\n", force_passthrough);
@@ -261,10 +275,12 @@ void libavos_set_passthrough(int force_passthrough)
 	if (force_passthrough == 3) {
 		serprintf("libavos_set_passthrough: enabling AC3 recoding (will use Mode 1 or 2 based on IEC61937 capability at sink creation)\n");
 		ac3_recoding_enabled = 1;
+		libavos_set_ac3_recode_target_stereo(0);  // republished after a successful encoder open
 		spdif_set_passthrough(1);  // Default to mode 1; stream_audio.c will override if IEC unavailable
 	} else {
 		serprintf("libavos_set_passthrough: disabling AC3 recoding\n");
 		ac3_recoding_enabled = 0;
+		libavos_set_ac3_recode_target_stereo(0);
 		spdif_set_passthrough(force_passthrough);
 	}
 	audio_interface_init();

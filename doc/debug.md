@@ -191,7 +191,7 @@ avsh at_mode2_audit 0
 | avsh name               | Type  | Default | Effect |
 |-------------------------|-------|---------|--------|
 | `ac3_force_mode2`       | param | 0       | Force raw AC3 AudioTrack mode2 for recoding, overriding IEC61937 capability. On a box that reports IEC support (resolves to mode1) this forces the mode2 (raw 2560-byte AC3 frame) path an eARC route would select. |
-| `ac3_mode2_plain_policy`| param | 1       | Production gate. When 1, AC3 recode resolving to passthrough mode2 uses the plain-mode2 PTS-seeded STREAM_SYNC_SAMPLES clock **and** app_latency. When 0, reverts BOTH to the legacy mode1 CDATA anchor + pipeline_latency (the broken baseline). |
+| `ac3_mode2_plain_policy`| param | 1       | Production gate. When 1, AC3 recode resolving to passthrough mode2 uses the plain-mode2 PTS-seeded STREAM_SYNC_SAMPLES clock, and picks the static heard delay by recode output layout (stereo 2.0/192k → pipeline_latency, multichannel/640k → app_latency). When 0, reverts to the legacy mode1 CDATA anchor + pipeline_latency (the broken baseline). |
 
 Both params latch at sink-resolve / startup, so **set them before starting a fresh
 playback** — toggling mid-stream does not re-anchor an already-running stream. See the
@@ -397,8 +397,11 @@ What to confirm in each log:
   mode2 organically. The timing policy under test is identical either way — only `iec`
   differs.
 - **(A)** `mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was 0) ac3_recode=1` then
-  `mode2_sync_mode: ref=0`, and **no** `startup_anchor_commit` → samples clock + app
-  latency; `heard_delay` ≈ static 171 + pacer 96 = **267 ms**.
+  `mode2_sync_mode: ref=0`, and **no** `startup_anchor_commit` → samples clock + the
+  output-aware static latency. A multichannel/640k recode uses app_latency → `heard_delay` ≈
+  171 + pacer 96 = **267 ms**; a stereo 2.0/192k recode (EAC3 2.0, AAC 2.0) uses
+  pipeline_latency → `heard_delay` ≈ 724 + 96 = **820 ms** (look for the
+  `AC3-recode mode2 STEREO pipeline_latency=...` line under `dbgs 3`).
 - **(B)** no `mode2_sync_mode` line, and `startup_anchor_commit: ... static=724 start=724`
   → the pipeline-latency anchor that desyncs the eARC route.
 - **(C)** `mode=1 ... forced_mode2=0` and `startup_anchor_commit: ... static=171 start=171`

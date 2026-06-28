@@ -54,11 +54,16 @@ sync. Select the sync mode by audio path and codec evidence:
   reporting differ from codec-specific mode 2.
 - **AC3 recoding**: depends on the resolved sink. In mode 1 it keeps the mode-1
   policy. When it resolves to mode 2 (e.g. an eARC route), it adopts the mode-2
-  samples clock **and** `app_latency` together, under `ac3_mode2_plain_policy`
-  (default on) — it must not stay on the mode-1 CDATA synthetic anchor, which
-  hides a fixed audio-leads-picture offset that only surfaces on real mode-2
-  hardware. It still keeps its dedicated wall-clock pacer and stays exempt from
-  the ordinary mode-2 lead gate, so it is not the *complete* plain-mode2 policy.
+  samples clock under `ac3_mode2_plain_policy` (default on) — it must not stay on
+  the mode-1 CDATA synthetic anchor, which hides a fixed audio-leads-picture
+  offset that only surfaces on real mode-2 hardware. The static heard delay is
+  picked by recode output layout: a stereo 2.0/192k target uses `pipeline_latency`,
+  while a multichannel/640k target uses `app_latency`. Both use the same two-channel
+  AudioTrack carrier configuration, so the discriminator is the encoder target
+  channels, not the AudioTrack channel count; this is empirical calibration — the
+  internal diff does not track physical sync on this path. It still keeps its
+  dedicated wall-clock pacer and stays exempt from the ordinary mode-2 lead
+  gate, so it is not the *complete* plain-mode2 policy.
 
 The design rule is: use sample sync only when submitted/decoded logical
 duration is more trustworthy than per-packet PTS for that path. The scheduler

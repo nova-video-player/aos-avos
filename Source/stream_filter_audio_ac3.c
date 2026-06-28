@@ -38,6 +38,7 @@
 #include "debug.h"
 #include "astdlib.h"
 #include "util.h"
+#include "ac3_recode.h"
 
 #ifdef CONFIG_FFMPEG_AUDIO
 #include <libavcodec/avcodec.h>
@@ -319,6 +320,11 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	serprintf("faac3: open - channels=%d sampleRate=%d bitsPerSample=%d\n",
 		audio->channels, audio->samplesPerSec, audio->bitsPerSample);
 
+	// Reset the published recode layout on entry so a partially-initialized open
+	// (or a reinit) cannot inherit or leave stale layout state; it is republished
+	// only just before this function returns success.
+	libavos_set_ac3_recode_target_stereo(0);
+
 	// Allocate filter context
 	struct ctx *ctx = acalloc(1, sizeof(struct ctx));
 	if (!ctx) {
@@ -447,6 +453,11 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	int init_bitrate_kbps = (int)(ctx->enc_ctx->bit_rate / 1000);
 	DBG serprintf("faac3: AC3 encoder initialized - %dch input @ %d Hz -> %dch AC3 %d kbps\n",
 		input_channels, audio->samplesPerSec, target_channels, init_bitrate_kbps);
+
+	// Open fully succeeded: publish the recode output layout for the mode2 latency
+	// policy. A multichannel target keeps app_latency; a stereo 2.0/192k target
+	// uses pipeline_latency. Latched into the AudioTrack context at AC3-sink config.
+	libavos_set_ac3_recode_target_stereo(target_channels <= 2);
 	return 0;
 
 error:

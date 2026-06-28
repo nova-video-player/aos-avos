@@ -63,10 +63,10 @@ static int ac3_force_mode2 = 0;  // Debug A/B: force raw AC3 AudioTrack mode2 fo
 //       (handled in audiotrack_get_latency via stream_audio_ac3_mode2_plain_policy()).
 // Both must apply together: with the synthetic anchor the static latency cancels, so
 // fixing only one is ineffective (mode1 stays in sync; only resolved-mode2 is affected).
-// Default on. This is a PER-PLAYBACK / startup policy: the samples-clock transition is
-// latched when the AC3 sink first resolves to mode2, while the latency selection is read
-// live. Toggling the flag mid-stream is therefore NOT atomic (latency would flip but the
-// already-latched clock would not) — to A/B, change the flag then start a fresh playback.
+// Default on. This is a PER-PLAYBACK / startup policy: the samples-clock transition and
+// the AudioTrack latency policy are both latched when the AC3 sink resolves to mode2.
+// Toggling the flag mid-stream does not change the current playback; to A/B, change the
+// flag and then start a fresh playback.
 static int ac3_mode2_plain_policy = 1;
 int stream_audio_ac3_mode2_plain_policy( void ) { return ac3_mode2_plain_policy; }
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations

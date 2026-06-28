@@ -49,9 +49,16 @@ sync. Select the sync mode by audio path and codec evidence:
   logical duration (`fakeSize`) is the value that represents the audio clock.
   This applies to AC3, EAC3/DDP, EAC3-JOC/Atmos, DTS/DTS-HD, and TrueHD only
   after validating that `fakeSize` reflects the codec's real logical duration.
-- **Mode 1 IEC passthrough and AC3 recoding**: do not inherit mode-2 policy
-  automatically. Treat them as separate paths because their packetization,
-  buffering, and AudioTrack reporting differ from codec-specific mode 2.
+- **Mode 1 IEC passthrough**: do not inherit mode-2 policy automatically. Treat
+  it as a separate path because its packetization, buffering, and AudioTrack
+  reporting differ from codec-specific mode 2.
+- **AC3 recoding**: depends on the resolved sink. In mode 1 it keeps the mode-1
+  policy. When it resolves to mode 2 (e.g. an eARC route), it adopts the mode-2
+  samples clock **and** `app_latency` together, under `ac3_mode2_plain_policy`
+  (default on) — it must not stay on the mode-1 CDATA synthetic anchor, which
+  hides a fixed audio-leads-picture offset that only surfaces on real mode-2
+  hardware. It still keeps its dedicated wall-clock pacer and stays exempt from
+  the ordinary mode-2 lead gate, so it is not the *complete* plain-mode2 policy.
 
 The design rule is: use sample sync only when submitted/decoded logical
 duration is more trustworthy than per-packet PTS for that path. The scheduler
@@ -179,6 +186,9 @@ On the first audio write after seek/resume, passthrough sets
 `android_sync=0` startup alignment that was lost during PCM sync
 restructuring. PCM is excluded: it uses `startup_audio_hold` to achieve
 the same alignment by holding writes rather than adjusting `audio_time`.
+Plain mode 2 and AC3-recode mode 2 (under `ac3_mode2_plain_policy`) are also
+excluded: they run the `STREAM_SYNC_SAMPLES` clock, so no `startup_anchor_commit`
+fires (its presence/absence in the log identifies the active policy).
 
 `sfdec2_refresh_sched_anchor()` is required alongside the `audio_time`
 change: on seek a `no_sched=1` reanchor fires before the commit,

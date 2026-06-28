@@ -186,6 +186,17 @@ avsh at_mode2_audit 0
 |------------------|-------|---------|--------|
 | `passthrough_on` | param | —       | Force passthrough on/off |
 
+### AC3 recode passthrough mode (stream_audio.c)
+
+| avsh name               | Type  | Default | Effect |
+|-------------------------|-------|---------|--------|
+| `ac3_force_mode2`       | param | 0       | Force raw AC3 AudioTrack mode2 for recoding, overriding IEC61937 capability. On a box that reports IEC support (resolves to mode1) this forces the mode2 (raw 2560-byte AC3 frame) path an eARC route would select. |
+| `ac3_mode2_plain_policy`| param | 1       | Production gate. When 1, AC3 recode resolving to passthrough mode2 uses the plain-mode2 PTS-seeded STREAM_SYNC_SAMPLES clock **and** app_latency. When 0, reverts BOTH to the legacy mode1 CDATA anchor + pipeline_latency (the broken baseline). |
+
+Both params latch at sink-resolve / startup, so **set them before starting a fresh
+playback** — toggling mid-stream does not re-anchor an already-running stream. See the
+eARC emulation workflow below.
+
 ---
 
 ## Stream and sync parameters
@@ -344,6 +355,58 @@ avsh dbgy 1
 
 Same as above. The audit logs `fmt=4646` (TrueHD) or `fmt=4949` (DTS-HD MA) so you can
 filter: `grep mode2_playhead_audit avos-truehd.log`.
+
+### Emulate an eARC mode2 AC3-recode sink on a non-TV box (e.g. Shield)
+
+**Why.** With AC3 recoding, a real eARC soundbar route reports no IEC61937 support, so the
+sink resolves to passthrough **mode2** (raw 2560-byte AC3 frames). An Android TV box like
+the Shield reports IEC support and resolves to **mode1** (IEC-wrapped, 6144-byte bursts),
+so the mode2 path can't normally be hit there. `ac3_force_mode2` forces mode2 on the box so
+the eARC timing path can be reproduced and validated without the eARC hardware.
+
+Because the mode/policy latch when the AC3 sink resolves, **set the knobs first, then start
+a fresh AC3-recode playback** (stop any current playback before starting).
+
+```sh
+# logging: stream engine (covers mode2_sync_mode + startup_anchor_commit) and sync
+avsh dbgs 2
+avsh dbgy 1
+avsh at_mode2_audit 0          # keep the JNI audit OFF (it is a Heisenbug, skews sync)
+
+# A) production candidate, forced mode2  -> expect IN SYNC
+avsh ac3_force_mode2 1
+avsh ac3_mode2_plain_policy 1
+# start a FRESH AC3-recode playback, collect: adb logcat -s avos_player | tee avos-A.log
+
+# B) broken baseline (policy off), forced mode2  -> expect OUT OF SYNC (audio leads)
+avsh ac3_force_mode2 1
+avsh ac3_mode2_plain_policy 0
+# fresh playback -> avos-B.log
+
+# C) mode1 regression check, policy on  -> expect UNCHANGED / in sync
+avsh ac3_force_mode2 0
+avsh ac3_mode2_plain_policy 1
+# fresh playback -> avos-C.log
+```
+
+What to confirm in each log:
+
+- **All:** `stream_audio_setup_ac3_sink: AC3 recode mode=<m> iec=<i> forced_mode2=<f>`
+  (this line is unguarded — prints without `dbgs`). On a forced-mode2 box you see
+  `mode=2 iec=1 forced_mode2=1`; a real eARC sink instead shows `iec=0` and reaches
+  mode2 organically. The timing policy under test is identical either way — only `iec`
+  differs.
+- **(A)** `mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was 0) ac3_recode=1` then
+  `mode2_sync_mode: ref=0`, and **no** `startup_anchor_commit` → samples clock + app
+  latency; `heard_delay` ≈ static 171 + pacer 96 = **267 ms**.
+- **(B)** no `mode2_sync_mode` line, and `startup_anchor_commit: ... static=724 start=724`
+  → the pipeline-latency anchor that desyncs the eARC route.
+- **(C)** `mode=1 ... forced_mode2=0` and `startup_anchor_commit: ... static=171 start=171`
+  → mode1 path, unaffected by the flag.
+
+Note: internal `diff` stays bounded near 0 in **all three** even when (B) is audibly out
+of sync — judge this path by `heard_delay` / the `startup_anchor_commit` value and the
+acoustic result, never by the `diff` column.
 
 ### Check current A/V delay offset
 

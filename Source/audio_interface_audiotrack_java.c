@@ -168,6 +168,12 @@ struct audio_ctx {
 static int audiotrack_log_underruns = 0;
 static int audiotrack_disable_recovery = 1;
 static int audiotrack_mode2_audit = 0;
+// AC3-recode mode2 plain-policy gate (single source of truth in stream_audio.c). When on,
+// AC3 recode resolved to mode2 uses app_latency instead of pipeline_latency for the static
+// heard delay, paired atomically with the PTS-seeded sample clock in stream_audio.c. Only
+// meaningful with that sample clock (no synthetic anchor), where the static value no longer
+// cancels at startup.
+extern int stream_audio_ac3_mode2_plain_policy( void );
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
@@ -2314,6 +2320,16 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 		    at->format == WAVE_FORMAT_DTS_HD_MA) {
 DBG3		LOG("audiotrack_get_latency: mode2 format=%04X using app_latency=%u (pipeline=%u)",
 				at->format, at->latency, at->pipeline_latency);
+			return (int)at->latency;
+		}
+		// AC3-recode resolved-mode2 plain policy: use app_latency (AudioTrack buffer
+		// geometry) instead of pipeline_latency, which overestimates the eARC/HDMI route.
+		// Coupled with the STREAM_SYNC_SAMPLES clock in stream_audio.c; both apply together.
+		if (stream_audio_ac3_mode2_plain_policy() &&
+		    at->format == WAVE_FORMAT_AC3 &&
+		    libavos_get_ac3_recoding_enabled()) {
+DBG3		LOG("audiotrack_get_latency: AC3-recode mode2 plain policy app_latency=%u (pipeline=%u)",
+				at->latency, at->pipeline_latency);
 			return (int)at->latency;
 		}
 		if (at->pipeline_latency > at->latency) {

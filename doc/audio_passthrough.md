@@ -141,7 +141,19 @@ Native determines IEC support by inspecting codec flags set by Java:
 `stream_audio_setup_ac3_sink()`:
 
 - If IEC supported: use mode 1
-- If IEC unsupported: switch to mode 2
+- If IEC unsupported: switch to mode 2 (e.g. an ARC/eARC route)
+
+**Mode-2 timing policy (`ac3_mode2_plain_policy`, default on).** When AC3 recoding
+resolves to mode 2, it must adopt the plain-mode2 timing, not the mode-1 policy it was
+historically left on. Two coupled changes apply together (the gate drives both):
+1. enter the PTS-seeded `STREAM_SYNC_SAMPLES` audio clock instead of the mode-1 CDATA
+   synthetic startup anchor (see Startup Anchoring below), and
+2. use `app_latency` (AudioTrack buffer geometry) instead of `pipeline_latency` for the
+   static heard delay.
+Under the synthetic anchor the static latency cancels, so the bug was invisible in mode 1
+but produced a fixed audio-leads-picture offset on real mode-2 (eARC) sinks; neither fix
+works alone. Mode 1 and ordinary (non-recode) mode 2 are unchanged. See
+[debug.md](debug.md) for the Shield eARC-emulation A/B workflow.
 
 `audio_spdif.c` mode-2 handling for recoding:
 
@@ -216,6 +228,11 @@ hundreds of milliseconds before releasing in a burst.
 
 PCM is excluded: it uses `startup_audio_hold` to achieve alignment by
 holding writes, not by adjusting `audio_time`.
+
+Plain mode 2 (and AC3-recode mode 2 under `ac3_mode2_plain_policy`) is also excluded:
+it enters `STREAM_SYNC_SAMPLES` and counts decoded samples from the first PTS, so no
+`startup_anchor_commit` fires. The presence/absence of this commit in the log is the
+quickest way to tell which timing policy a given playback used.
 
 ### Pre-commit negative anchor guard
 

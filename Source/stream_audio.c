@@ -52,6 +52,23 @@ static int stream_audio_chunk = 4096;
 static int stream_audio_pcm_accum_ms = 40;
 static int ac3_sink_configured = 0;  // Track if sink is configured for AC3 passthrough
 static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when AC3 recoding starts
+static int ac3_force_mode2 = 0;  // Debug A/B: force raw AC3 AudioTrack mode2 for recoding
+// AC3-recode mode2 plain-policy gate. When the AC3-recode sink resolves to passthrough
+// mode2 (raw AC3, e.g. an eARC route), adopt TWO elements of the ordinary-mode2 timing
+// policy (NOT the whole policy — recode keeps its dedicated wall-clock pacer and stays
+// exempt from the ordinary mode2 lead gate):
+//   (1) PTS-seeded STREAM_SYNC_SAMPLES audio clock instead of the mode1 CDATA synthetic
+//       startup anchor (handled in this file), and
+//   (2) app_latency instead of pipeline_latency for the static heard delay
+//       (handled in audiotrack_get_latency via stream_audio_ac3_mode2_plain_policy()).
+// Both must apply together: with the synthetic anchor the static latency cancels, so
+// fixing only one is ineffective (mode1 stays in sync; only resolved-mode2 is affected).
+// Default on. This is a PER-PLAYBACK / startup policy: the samples-clock transition is
+// latched when the AC3 sink first resolves to mode2, while the latency selection is read
+// live. Toggling the flag mid-stream is therefore NOT atomic (latency would flip but the
+// already-latched clock would not) — to A/B, change the flag then start a fresh playback.
+static int ac3_mode2_plain_policy = 1;
+int stream_audio_ac3_mode2_plain_policy( void ) { return ac3_mode2_plain_policy; }
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations
 static int startup_anchor_log_count = 0;  // Cap startup anchor diagnostics per playback
 static int startup_write_log_count = 0;   // Cap first-write diagnostics per playback
@@ -68,6 +85,21 @@ extern int libavos_get_max_pcm_channels(void);
 #define AC3_RECODE_WRITE_AHEAD_BURSTS 3
 
 static int pcm_channel_cap = 0;
+
+#ifdef CONFIG_SPDIF
+static int stream_audio_select_ac3_passthrough_mode(const char *tag)
+{
+	extern int get_hdmi_supports_iec(void);
+	int supports_iec = get_hdmi_supports_iec();
+	int passthrough_mode = (ac3_force_mode2 || !supports_iec) ? 2 : 1;
+	// Always restore the selected framing mode. A prior forced-mode2 run leaves
+	// the global SPDIF mode at 2, so merely clearing the debug flag is insufficient.
+	spdif_set_passthrough( passthrough_mode );
+	serprintf("%s: AC3 recode mode=%d iec=%d forced_mode2=%d\n",
+		tag, passthrough_mode, supports_iec, ac3_force_mode2);
+	return passthrough_mode;
+}
+#endif
 
 static int _stream_audio_speed_diag_active( STREAM *s )
 {
@@ -547,18 +579,8 @@ static int stream_audio_setup_ac3_sink(STREAM *s)
 		return -1;
 	}
 
-	// AC3 recoding: determine passthrough mode based on IEC61937 capability
-	// Prefer Mode 1 (manual IEC wrapping) if IEC61937 is supported
-	// Fall back to Mode 2 (codec-specific) if IEC61937 is not available (e.g., eARC without IEC)
-	int passthrough_mode = spdif_is_passthrough_on();  // Default from libavos_set_passthrough
-	extern int get_hdmi_supports_iec(void);
-	if (libavos_get_ac3_recoding_enabled() && !get_hdmi_supports_iec()) {
-		passthrough_mode = 2;  // Override to mode 2 if IEC not available
-		spdif_set_passthrough(passthrough_mode); // Keep SPDIF encapsulation mode in sync
-		serprintf("stream_audio_setup_ac3_sink: IEC61937 not available, using mode 2 (codec-specific) for AC3 recoding\n");
-	} else {
-		serprintf("stream_audio_setup_ac3_sink: using mode %d for AC3 recoding\n", passthrough_mode);
-	}
+	int passthrough_mode = stream_audio_select_ac3_passthrough_mode(
+		"stream_audio_setup_ac3_sink" );
 	s->audio_sink->set_passthrough( s, passthrough_mode );
 
 	stream_audio_wait_for_passthrough_idle(s, "ac3-prestart");
@@ -636,6 +658,42 @@ DBGA serprintf(" <<%d>> ", s->audio_time);
 			s->audio_start_pending, s->audio_resume_pending, s->audio_ref_time);
 	}
 	stream_sync_audio( s, s->audio_time );
+}
+
+// Enter the plain-mode2 PTS-seeded STREAM_SYNC_SAMPLES audio clock. Used for ordinary
+// mode2 passthrough and, under the ac3_mode2_plain_policy gate, for AC3 recode
+// whose sink resolves to mode2. Clears the CDATA synthetic startup anchor so
+// startup_anchor_commit does not fire, and seeds the sample clock from the first PTS.
+// Resets the wall-clock pacer once (it re-seeds on the next write). Callers must gate
+// on s->sync_mode != STREAM_SYNC_SAMPLES so this runs exactly once per playback.
+static void stream_audio_enter_mode2_sync_samples( STREAM *s, int chunk_pts, int ac3_recode )
+{
+DBG	serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d) ac3_recode=%d\n",
+		s->sync_mode, ac3_recode);
+	s->sync_mode = STREAM_SYNC_SAMPLES;
+	// Clear the CDATA startup anchor that may have been set by the current chunk's
+	// PTS processing above; startup_anchor_commit would otherwise reintroduce the
+	// synthetic video_time + pipeline_latency anchor we are avoiding.
+	s->audio_start_pending    = 0;
+	s->audio_start_pts        = STREAM_NO_PTS_VALUE;
+	s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
+	s->audio_time_remainder_us = 0;
+	s->mode2_last_chunk_ms    = 0;
+	s->ac3_recode_next_write_wall_ms = 0;
+	s->ac3_recode_pacer_valid = 0;
+	s->ac3_recode_pacer_max_lead_ms = 0;
+	// Seed sample clock from the current chunk PTS if available so the first write
+	// can immediately accumulate fakeSize duration without waiting for the next chunk.
+	if( chunk_pts != STREAM_NO_PTS_VALUE ) {
+		s->audio_ref_time = chunk_pts;
+		s->audio_samples  = 0;
+		_set_audio_time( s, chunk_pts );
+DBG		serprintf("mode2_sync_mode: ref=%d\n", s->audio_ref_time);
+	} else {
+		s->audio_ref_time = -1;
+		s->audio_samples  = 0;
+		s->audio_time     = -1;
+	}
 }
 
 // ************************************************************
@@ -1045,34 +1103,25 @@ DBGS serprintf("~");
 		// CDATA/PTS mode enters a synthetic startup anchor (video_time + pipeline_latency)
 		// and advances from byte-ratio duration; mode2 compressed packets are better served
 		// by sample counting from the first valid demuxer PTS (same as FLAC).
-		// ac3_recoding is excluded here; it may also resolve to mode2 on some routes but
-		// its fakeSize trustworthiness depends on the filter chain - handle separately.
-		if( passthrough_active && passthrough == 2 && !ac3_recoding &&
+		// AC3 recoding historically kept the mode1-designed recode policy (CDATA anchor +
+		// wall-clock pacer) even when its sink resolved to mode2. The plain-policy gate opts
+		// AC3 recode into this same plain-mode2 audio clock when its sink resolves to mode2.
+		// The sample clock here counts decoded PCM samples (audio_samples), independent of
+		// fakeSize, and recoded AC3 has a fixed 1536-samples/48000Hz = 32 ms cadence. The
+		// pacer is left intact so only the startup/audio-clock policy changes.
+		// Plain mode2 (non-recode) resolves its passthrough mode before this point, so it is
+		// caught here. AC3 recode resolves mode2 lazily later in this iteration
+		// (stream_audio_setup_ac3_sink), so the recode experiment normally transitions there,
+		// before the first write/anchor. The recode branch below is only a fallback for the
+		// rare case where that first chunk carried no PTS: it catches the transition on a later
+		// chunk once a valid PTS arrives (passthrough now reads 2).
+		int ac3_recode_mode2_sync = ac3_recoding && ac3_mode2_plain_policy;
+		if( passthrough_active && passthrough == 2 &&
 			s->sync_mode != STREAM_SYNC_SAMPLES ) {
-			serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d)\n", s->sync_mode);
-			s->sync_mode = STREAM_SYNC_SAMPLES;
-			// Clear the CDATA startup anchor that may have been set by the current chunk's
-			// PTS processing above; startup_anchor_commit would otherwise reintroduce the
-			// synthetic video_time + pipeline_latency anchor we are avoiding.
-			s->audio_start_pending    = 0;
-			s->audio_start_pts        = STREAM_NO_PTS_VALUE;
-			s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
-			s->audio_time_remainder_us = 0;
-			s->mode2_last_chunk_ms    = 0;
-			s->ac3_recode_next_write_wall_ms = 0;
-			s->ac3_recode_pacer_valid = 0;
-			s->ac3_recode_pacer_max_lead_ms = 0;
-			// Seed sample clock from the current chunk PTS if available so the first write
-			// can immediately accumulate fakeSize duration without waiting for the next chunk.
-			if( chunk_pts != STREAM_NO_PTS_VALUE ) {
-				s->audio_ref_time = chunk_pts;
-				s->audio_samples  = 0;
-				_set_audio_time( s, chunk_pts );
-				serprintf("mode2_sync_mode: ref=%d\n", s->audio_ref_time);
-			} else {
-				s->audio_ref_time = -1;
-				s->audio_samples  = 0;
-				s->audio_time     = -1;
+			if( !ac3_recoding ) {
+				stream_audio_enter_mode2_sync_samples( s, chunk_pts, 0 );
+			} else if( ac3_recode_mode2_sync && chunk_pts != STREAM_NO_PTS_VALUE ) {
+				stream_audio_enter_mode2_sync_samples( s, chunk_pts, 1 );
 			}
 		}
 
@@ -1427,6 +1476,16 @@ serprintf(" ae! ");
 					if( !ac3_sink_configured ) {
 						if( stream_audio_setup_ac3_sink( s ) ) {
 							DBG serprintf("stream_audio: failed to configure AC3 sink, fallback to PCM\n");
+						} else if( ac3_recode_mode2_sync &&
+						           s->sync_mode != STREAM_SYNC_SAMPLES &&
+						           s->audio_sink->get_passthrough &&
+						           s->audio_sink->get_passthrough( s ) == 2 ) {
+							// The AC3 sink just resolved to mode2. Enter the plain-mode2 samples
+							// clock NOW, before the first write commits the mode1 CDATA anchor.
+							// Seed from this first frame's PTS so frame 0 is on the clock; if the
+							// chunk has no PTS the helper enters an unseeded state (ref=-1) that a
+							// later valid PTS seeds, rather than letting frame 0 use the old policy.
+							stream_audio_enter_mode2_sync_samples( s, chunk_pts, 1 );
 						}
 						need_reconfigure = 0;
 					} else if( sink_props && sink_props->format == WAVE_FORMAT_AC3 ) {
@@ -1541,17 +1600,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 #ifdef CONFIG_SPDIF
 							int ac3_sink_started = 0;
 							if( spdif_init(sink) ) {
-								// AC3 recoding: determine passthrough mode based on IEC61937 capability
-								// Prefer Mode 1 if IEC61937 supported, fallback to Mode 2 if not
-								int passthrough_mode = spdif_is_passthrough_on();  // Default from libavos_set_passthrough
-								extern int get_hdmi_supports_iec(void);
-								if (libavos_get_ac3_recoding_enabled() && !get_hdmi_supports_iec()) {
-									passthrough_mode = 2;  // Override to mode 2 if IEC not available
-									spdif_set_passthrough(passthrough_mode); // Keep SPDIF encapsulation mode in sync
-									serprintf("AC3 recoding reconfigure: IEC61937 not available, using mode 2\n");
-								} else {
-									DBG serprintf("AC3 recoding reconfigure: using mode %d\n", passthrough_mode);
-								}
+								int passthrough_mode = stream_audio_select_ac3_passthrough_mode(
+									"AC3 recoding reconfigure" );
 								s->audio_sink->set_passthrough( s, passthrough_mode );
 								// Call start() with AC3 2-channel format
 								if( s->audio_sink->start( s ) ) {
@@ -2328,6 +2378,8 @@ serprintf("\r\n");
 DECLARE_DEBUG_COMMAND("szti", _zero_time );
 DECLARE_DEBUG_COMMAND("sac",  _audio_chunk );
 DECLARE_DEBUG_COMMAND("sa",   _audio_singlestep );
+DECLARE_DEBUG_PARAM("ac3_force_mode2", ac3_force_mode2 );
+DECLARE_DEBUG_PARAM("ac3_mode2_plain_policy", ac3_mode2_plain_policy );
 
 
 #endif

@@ -25,9 +25,10 @@
 #include <string.h>
 #include "sub_engine.h"
 extern SUB_ENGINE *g_sub_engine;
-// --- NATIVE ENGINE CLOCK ---
-static int64_t g_player_time = 0;
-static int64_t engine_clock(void *ctx) { return g_player_time; }
+// NOTE: the subtitle engine clock is registered once in avos_mp_video_open()
+// (engine_clock_cb -> stream_get_current_time) and lives for the whole stream
+// session. This file no longer owns or re-registers a clock -- see the removed
+// g_player_time/engine_clock and the comments in _get_next_int_sub()/_get_next_ext_sub().
 
 #define DBGS if(Debug[DBG_STREAM])
 #define DBG  if(Debug[DBG_SUB])
@@ -144,8 +145,6 @@ DBG serprintf("new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_t
 // *****************************************************************************
 static void _get_next_int_sub( STREAM *s, int time )
 {
-	g_player_time = time; // CAPTURE AVOS TIME!
-
 	if( !s->seek ) {
 		// Initialize once per track!
 		if( !s->sub_dec && !s->subtitle_frame ) {
@@ -155,7 +154,15 @@ static void _get_next_int_sub( STREAM *s, int time )
 				if (g_sub_engine) {
 					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
 					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
-					sub_engine_start(g_sub_engine, engine_clock, NULL);
+					// NOTE: do NOT call sub_engine_start() here. avos_mp_video_open() already
+					// registered the engine clock once (engine_clock_cb -> stream_get_current_time),
+					// and that registration stays valid for the stream's entire lifetime, including
+					// across track (re)opens. Re-registering here with engine_clock/g_player_time
+					// silently swapped the clock source to a static variable that only updates while
+					// this function is actively being pumped -- if the sub-decode thread was ever
+					// idled (e.g. during stream_check_subtitles()/stream_set_subtitle_stream()'s
+					// THREAD_IDLE transitions), g_player_time would freeze while playback continued,
+					// desyncing subtitle timing until the thread resumed.
 				}
 				// Notice: We completely bypass s->sub_dec for Text!
 			} else {
@@ -227,8 +234,6 @@ serprintf("cannot allocate subtitle frame!\r\n");
 // *****************************************************************************
 static void _get_next_ext_sub( STREAM *s, int time )
 {
-	g_player_time = time; // CAPTURE AVOS TIME!
-
 	if( !s->seek ) {
 
 		if( !s->sub_dec && !s->subtitle_frame ) {
@@ -237,7 +242,9 @@ static void _get_next_ext_sub( STREAM *s, int time )
 				if (g_sub_engine) {
 					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
 					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
-					sub_engine_start(g_sub_engine, engine_clock, NULL);
+					// NOTE: see matching comment in _get_next_int_sub() above -- the engine
+					// clock is registered once in avos_mp_video_open() and must not be
+					// re-registered here.
 				}
 			} else {
 				// IT IS AN EXTERNAL PICTURE (IDX/SUB)

@@ -1738,17 +1738,10 @@ static int msk_fixup_ssa( char *dst, int max, const char *src, int src_size, int
 	return strlen( dst );
 }
 
-static int msk_fixup_srt( char *dst, int max, const char *src, int src_size, int time, int duration )
-{
-	char *d = dst;
-	max --;
-	snprintf( d, max, "%d:%d,", time, time + duration );
-	max -= strlen(dst);
-	d   += strlen(dst);
-	int copy = MIN( max, src_size );
-	snprintf( d, copy + 1, "%s", src );
-	return strlen( dst );
-}
+// msk_fixup_srt() removed: it produced a "<start_ms>:<end_ms>,<text>" wire format for the
+// old pre-libass SRT decoder. The current pipeline (sub_format_srt.c::srt_feed()) expects
+// plain subtitle text with timing passed separately, so this function had no remaining
+// valid caller — see _get_subtitle_cdata()'s SUB_FORMAT_TEXT handling above.
 
 // ************************************************************
 //
@@ -1790,15 +1783,18 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 	int duration_rst = GET_SUB_TS( packet->duration );
 	int duration_ts = RST_TO_TS_DELTA(duration_rst, int);
 	// Prepend the 4-byte duration natively!
+	// NOTE: SUB_FORMAT_TEXT (container-embedded SRT) is intentionally handled by the SAME
+	// raw-passthrough branch as SUB_FORMAT_SSA, not by msk_fixup_srt() below. msk_fixup_srt()
+	// produces a "<start_ms>:<end_ms>,<text>" wire format that was consumed by the old
+	// pre-libass SRT decoder; the current pipeline's sub_format_srt.c::srt_feed() expects
+	// plain subtitle text and receives start time/duration separately via
+	// sub_engine_feed(..., pts_ms, duration_ms) (see stream_subtitle.c's fast lane). Routing
+	// SUB_FORMAT_TEXT through msk_fixup_srt() here would prepend a bogus timestamp string
+	// that libass would render as literal garbage text at the start of every line.
 	if( s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT ) {
 		memcpy(sub_buffer->data, &duration_ts, sizeof(int));
 		memcpy(sub_buffer->data + sizeof(int), packet->data, packet->size);
 		cdata->size = packet->size + sizeof(int);
-	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
-		// Shift buffer start by 4 bytes to leave room for the duration integer!
-		int srt_len = msk_fixup_srt( sub_buffer->data + sizeof(int), sub_buffer->size - sizeof(int), packet->data, packet->size, cdata->time, duration_ts );
-		memcpy(sub_buffer->data, &duration_ts, sizeof(int));
-		cdata->size = srt_len + sizeof(int);
 	} else {
 		memcpy( sub_buffer->data, packet->data, packet->size );
 	}

@@ -108,9 +108,18 @@ static void sync_styles(SSA_BACKEND *ctx) {
 
                 if (u.bg_mode == 1) {
                     // PER-LINE BOX (Legacy CC style)
+                    // IMPORTANT libass quirk: for BorderStyle=3, Outline is genuine uniform
+                    // box padding (all 4 sides), not a stroke width around glyphs. Shadow is
+                    // a real offset drop-shadow of the box and is intentionally left at 0.
+                    // Padding is now user-adjustable via the dedicated UI control (touch
+                    // dialog's boxed_line_padding_row / TV menu's Boxed-Line-only Padding
+                    // row), so 0 is a legitimate user choice (a tight box hugging the text)
+                    // rather than an unreachable default that needed a >0 safety fallback.
                     style->BorderStyle = 3;
                     style->BackColour = u.bg_color;
-                    style->Outline = 0;
+                    // Match OutlineColour to BackColour so the padding shares the exact alpha transparency
+                    style->OutlineColour = u.bg_color;
+                    style->Outline = u.outline_width;
                     style->Shadow = 0;
 
                 } else if (u.bg_mode == 2) {
@@ -129,8 +138,16 @@ static void sync_styles(SSA_BACKEND *ctx) {
                     style->Outline = u.outline_width;
                     style->Shadow = u.shadow_width;
                 }
+                // Apply custom vertical offset only to bottom-aligned subtitles (numpad layout 1, 2, 3).
+                // MarginV is measured from the top for top-aligned styles (7/8/9) — applying it
+                // unconditionally pushed those styles' text down from the top instead of up from
+                // the bottom, which is what the vertical-offset slider visually looked like.
+                if (u.margin_bottom > 0) {
+                    if (style->Alignment >= 1 && style->Alignment <= 3) {
+                        style->MarginV = u.margin_bottom;
+                    }
+                }
 
-                if (u.margin_bottom > 0) style->MarginV = u.margin_bottom;
 
             } else if (u.override_mode == 2) {
                 // SCALE ONLY MODE

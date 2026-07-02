@@ -21,8 +21,6 @@
 #include "debug.h"
 #include "atime.h"
 #include "util.h"
-
-#include <string.h>
 #include "sub_engine.h"
 extern SUB_ENGINE *g_sub_engine;
 // NOTE: the subtitle engine clock is registered once in avos_mp_video_open()

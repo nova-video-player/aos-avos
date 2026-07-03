@@ -165,6 +165,8 @@ struct audio_ctx {
 	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
+	int recreate_after_pause;                // compressed passthrough: recreate the track on the first write after a user pause (flushed compressed tracks wedge)
+	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
 	int mode2_ac3_average_packet_size;
@@ -943,6 +945,14 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		same_config = 1;
 	}
 
+	// A caller can demand a genuine track rebuild even when the resolved
+	// configuration is identical (e.g. resume after a user pause, where the
+	// reused compressed passthrough track is wedged after flush()).
+	if (at->force_recreate) {
+		same_config = 0;
+		at->force_recreate = 0;
+	}
+
 	audio_rate = rate;
 	at->rate = rate;
 	at->channel_count = output_channels;
@@ -1463,6 +1473,17 @@ ERR		LOG("audiotrack_pause: track not valid, error");
 	}
 	call_void_method_with_env(at, env_local, "pause", "()V");
 
+	// Compressed passthrough tracks (mode 2 raw / mode 3 recode) wedge after the
+	// pause+flush that follows on some routes (e.g. Android-TV HDMI eARC): once
+	// resumed, write() returns 0 forever and audio never advances. Arm a one-shot
+	// full track rebuild that is consumed on the first write after resume. This is
+	// scoped to user pause only (audio_interface_pause is called solely from
+	// stream_pause, never on seek), so it does not disturb the cross-seek mode 2
+	// calibration carry.
+	if (at->passthrough >= 2) {
+		at->recreate_after_pause = 1;
+	}
+
 	return 0;
 }
 
@@ -1707,6 +1728,34 @@ ERR		LOG("audiotrack_write: track not valid, error");
 	}
 
 	attach_thread(at);
+
+	// One-shot handling on the first write after a user pause, for compressed
+	// passthrough. Only a track that was *flushed* during the pause (e.g. a seek
+	// while paused) wedges on resume on some routes (write() returns 0 forever);
+	// a merely-paused track keeps its buffered data and the AVR's codec lock and
+	// resumes cleanly. So rebuild the track only when a flush happened
+	// (passthrough_restart_after_flush, set solely by flush_output). Recreating an
+	// unflushed track would force the soundbar to re-acquire AC3/EAC3 lock,
+	// producing seconds of silence after resume. In both cases we (re)arm the
+	// deferred play so play() fires once data has been accepted (no empty-track
+	// underrun and no reliance on unpause(), which stream_un_pause may skip).
+	if (at->recreate_after_pause) {
+		at->recreate_after_pause = 0;
+		if (at->passthrough >= 2 && at->init) {
+			if (at->passthrough_restart_after_flush) {
+DBG				LOG("audiotrack_write: rebuilding flushed compressed passthrough track on resume-after-pause (passthrough=%d format=%04X)", at->passthrough, at->format);
+				at->force_recreate = 1;
+				int recreate_bits = (at->passthrough == 2) ? 16 : (int)(at->frame_size * 8 / at->channel_count);
+				if (audiotrack_set_output_params(at, at->rate, at->channel_count, recreate_bits, at->format) != 0) {
+ERR					LOG("audiotrack_write: resume-after-pause track rebuild failed");
+				}
+			} else {
+DBG				LOG("audiotrack_write: resume-after-pause, track not flushed -> keeping locked track (passthrough=%d format=%04X)", at->passthrough, at->format);
+			}
+			at->passthrough_restart_after_flush = 1;
+		}
+	}
+
 	ssize_t ret = 0;
 	ssize_t len_to_write = MIN(at->buf_size, len);
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);

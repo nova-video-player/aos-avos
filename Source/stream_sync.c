@@ -1410,7 +1410,8 @@ int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 	// ac3_recoding is exempt: its timing is managed separately.
 	// No persistent state, no hysteresis.
 	if( !s || !s->put_time_mode || !s->audio_sink || ac3_recoding ||
-		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ) {
+		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ||
+		s->video_hold_for_resume_audio ) {
 		return 0;
 	}
 	int passthrough_mode = s->audio_sink->get_passthrough ?

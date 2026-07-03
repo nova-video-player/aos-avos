@@ -100,6 +100,7 @@ struct audio_ctx {
 	int passthrough;
 	int ac3_recode;                // latched at output config; do not read global recode state in timing code
 	int ac3_mode2_plain_policy;    // latched with the clock policy for this playback
+	int ac3_mode2_force_pipeline;  // diagnostic A/B: force pipeline latency without changing the clock
 	int ac3_recode_target_stereo;  // latched encoder target: stereo uses pipeline latency
 	int applied_passthrough;
 	int applied_spatialization_behavior;
@@ -178,6 +179,7 @@ static int audiotrack_mode2_audit = 0;
 // meaningful with that sample clock (no synthetic anchor), where the static value no longer
 // cancels at startup.
 extern int stream_audio_ac3_mode2_plain_policy( void );
+extern int stream_audio_ac3_mode2_force_pipeline( void );
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
@@ -692,6 +694,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->ac3_recode = ac3_recoding_enabled ? 1 : 0;
 	at->ac3_mode2_plain_policy = ac3_recoding_enabled &&
 		stream_audio_ac3_mode2_plain_policy();
+	at->ac3_mode2_force_pipeline = ac3_recoding_enabled &&
+		stream_audio_ac3_mode2_force_pipeline();
 	if(ac3_recoding_enabled) {
 		// The encoder output is always AC3 at 48 kHz. Configure that final
 		// output domain on the first AudioTrack creation instead of opening a
@@ -714,7 +718,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// playback that changes the process-global cannot alter this AudioTrack's
 		// latency policy mid-stream. audiotrack_get_latency reads only this context copy.
 		at->ac3_recode_target_stereo = libavos_get_ac3_recode_target_stereo();
-		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d, plain_policy=%d, target_stereo=%d", requested_passthrough, channels, at->ac3_mode2_plain_policy, at->ac3_recode_target_stereo );
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d, plain_policy=%d, force_pipeline=%d, target_stereo=%d", requested_passthrough, channels, at->ac3_mode2_plain_policy, at->ac3_mode2_force_pipeline, at->ac3_recode_target_stereo );
 	} else {
 		at->ac3_recode_target_stereo = 0;
 	}
@@ -2347,6 +2351,11 @@ DBG3		LOG("audiotrack_get_latency: mode2 format=%04X using app_latency=%u (pipel
 		if (at->ac3_mode2_plain_policy &&
 		    at->format == WAVE_FORMAT_AC3 &&
 		    at->ac3_recode) {
+			if (at->ac3_mode2_force_pipeline) {
+DBG3			LOG("audiotrack_get_latency: AC3-recode mode2 A/B forcing pipeline_latency=%u (app=%u stereo=%d)",
+					at->pipeline_latency, at->latency, at->ac3_recode_target_stereo);
+				return (int)at->pipeline_latency;
+			}
 			// Output-aware latency: a stereo (2.0/192k) recode shows a steady ~553ms
 			// picture-leads-sound error (= pipeline-app, 724-171) that app_latency
 			// under-compensates, so the stereo path uses pipeline_latency. Multichannel

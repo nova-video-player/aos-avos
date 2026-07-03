@@ -70,6 +70,11 @@ static int ac3_force_mode2 = 0;  // Debug A/B: force raw AC3 AudioTrack mode2 fo
 // flag and then start a fresh playback.
 static int ac3_mode2_plain_policy = 1;
 int stream_audio_ac3_mode2_plain_policy( void ) { return ac3_mode2_plain_policy; }
+// Diagnostic A/B only: retain the mode2 samples clock but force pipeline_latency
+// for every AC3-recode mode2 output layout. Latched when AudioTrack is configured;
+// set before starting a fresh playback.
+static int ac3_mode2_force_pipeline = 1;
+int stream_audio_ac3_mode2_force_pipeline( void ) { return ac3_mode2_force_pipeline; }
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations
 static int startup_anchor_log_count = 0;  // Cap startup anchor diagnostics per playback
 static int startup_write_log_count = 0;   // Cap first-write diagnostics per playback
@@ -2401,6 +2406,7 @@ DECLARE_DEBUG_COMMAND("sac",  _audio_chunk );
 DECLARE_DEBUG_COMMAND("sa",   _audio_singlestep );
 DECLARE_DEBUG_PARAM("ac3_force_mode2", ac3_force_mode2 );
 DECLARE_DEBUG_PARAM("ac3_mode2_plain_policy", ac3_mode2_plain_policy );
+DECLARE_DEBUG_PARAM("ac3_mode2_force_pipeline", ac3_mode2_force_pipeline );
 
 
 #endif

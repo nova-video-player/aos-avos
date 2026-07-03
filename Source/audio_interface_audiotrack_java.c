@@ -167,6 +167,8 @@ struct audio_ctx {
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
+	int mode2_ac3_average_packet_size;
+	int mode2_ac3_latency_corrected;
 	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
 };
 
@@ -639,6 +641,28 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 		pipeline_latency = track_latency;
 	}
 
+	if (at->passthrough == 2 && at->format == WAVE_FORMAT_AC3 &&
+	    at->mode2_ac3_latency_corrected) {
+		double avg_packet = (double)at->mode2_ac3_average_packet_size;
+		if (avg_packet > 0) {
+			uint32_t capacity_ms = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size * 1536.0 ) / ( avg_packet * (double)at->rate * speed ) );
+			uint32_t reported_buffer_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / (double)at->rate );
+			uint32_t residual_ms = 0;
+			if (track_latency > reported_buffer_latency) {
+				residual_ms = track_latency - reported_buffer_latency;
+			}
+			uint32_t corrected_pipeline = residual_ms + capacity_ms;
+			if (system_latency + capacity_ms > corrected_pipeline) {
+				corrected_pipeline = system_latency + capacity_ms;
+			}
+
+			LOG("mode2_ac3_corrected_pipeline: raw_track=%u, residual=%u, avg_packet=%d, capacity=%u, corrected_pipeline=%u",
+				track_latency, residual_ms, at->mode2_ac3_average_packet_size, capacity_ms, corrected_pipeline);
+
+			pipeline_latency = corrected_pipeline;
+		}
+	}
+
 	at->track_latency = track_latency;
 	at->system_latency = system_latency;
 	at->app_latency = app_latency;
@@ -923,6 +947,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->rate = rate;
 	at->channel_count = output_channels;
 	at->frame_size = frame_size;
+	at->mode2_ac3_average_packet_size = 0;
+	at->mode2_ac3_latency_corrected = 0;
 	channels = output_channels;
 	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
 		rate, output_channels, frame_size, track_format, track_chanmask, same_config, at->passthrough);
@@ -1695,6 +1721,14 @@ DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush
 			call_void_method(at, "play", "()V");
 			at->passthrough_restart_after_flush = 0;
 		}
+		if (at->passthrough == 2 && at->format == WAVE_FORMAT_AC3) {
+			if (ret == len && len <= at->buf_size && !at->mode2_ac3_latency_corrected) {
+				at->mode2_ac3_average_packet_size = (int)ret;
+				at->mode2_ac3_latency_corrected = 1;
+				audiotrack_update_latency(at, at->env);
+			}
+		}
+
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
 
 		if (audiotrack_log_underruns) {

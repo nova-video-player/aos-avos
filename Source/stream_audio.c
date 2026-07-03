@@ -19,6 +19,7 @@
 #include "stream_sync.h"
 #include "audio_spdif.h"
 #include "audio_interface.h"
+#include "ac3_recode.h"
 #include "atime.h"
 #include "debug.h"
 #include "atime.h"
@@ -79,8 +80,6 @@ extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
 
-#define AC3_RECODE_FRAME_SAMPLES 1536
-#define AC3_RECODE_SAMPLE_RATE 48000
 #define AC3_RECODE_FRAME_US ((int64_t)AC3_RECODE_FRAME_SAMPLES * 1000000 / AC3_RECODE_SAMPLE_RATE)
 #define AC3_RECODE_WRITE_AHEAD_BURSTS 3
 
@@ -1658,6 +1657,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 				}
 
+					int ac3_recode_output_frames = 1;
 					// After the sink is configured for passthrough, wrap AC3 frames in IEC61937
 					if( ac3_recoding && audio_frame.format == WAVE_FORMAT_AC3 && audio_frame.size > 0 ) {
 						if( !ac3_sink_configured ) {
@@ -1670,12 +1670,20 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Preserve the PCM-equivalent byte count before wrapping so we can keep
 							// accurate timing after IEC encapsulation (spdif_get overwrites fakeSize).
 							int pcm_fake_size = audio_frame.fakeSize;
+							int pcm_channels = audio_frame.channels > 0 ? audio_frame.channels : original_channels;
+							int pcm_bpf = pcm_channels > 0 ? pcm_channels * (int)sizeof(int16_t) : 0;
+							if( pcm_fake_size > 0 && pcm_bpf > 0 ) {
+								ac3_recode_output_frames = pcm_fake_size /
+									(AC3_RECODE_FRAME_SAMPLES * pcm_bpf);
+								if( ac3_recode_output_frames < 1 ) ac3_recode_output_frames = 1;
+							}
 							AUDIO_FRAME wrapped_frame = {0};
 							int dummy_decoded = 0;
 							AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );
 							DBG2 serprintf("IEC wrap input: frame=%p size=%d pcm_fake=%d\n",
 								audio_frame.data, audio_frame.size, pcm_fake_size);
-							spdif_encapsulate( spdif_props, audio_frame.data, audio_frame.size, &wrapped_frame, &dummy_decoded );
+							spdif_encapsulate_frames( spdif_props, audio_frame.data, audio_frame.size,
+								&wrapped_frame, &dummy_decoded, ac3_recode_output_frames );
 
 							if( wrapped_frame.size > 0 ) {
 								DBG2 serprintf("IEC wrap output: wrapped_size=%d wrapped_fake=%d decoded=%d\n",
@@ -1722,6 +1730,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
 				int total_size = audio_frame.size;
+				int ac3_recode_packet_size = 0;
+				int ac3_recode_fake_per_packet = 0;
+				if( ac3_recoding && ac3_recode_output_frames > 0 &&
+				    total_size % ac3_recode_output_frames == 0 ) {
+					ac3_recode_packet_size = total_size / ac3_recode_output_frames;
+					if( audio_frame.fakeSize > 0 ) {
+						ac3_recode_fake_per_packet = audio_frame.fakeSize / ac3_recode_output_frames;
+					}
+				}
 				int loop_write_count = 0;
 				while( size > 0 ) {
 					if( _abort( s ) ) {
@@ -1769,7 +1786,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// Do not split compressed passthrough bursts. IEC61937 / raw codec frames
 					// must reach AudioTrack atomically; chunking them into generic PCM-sized
 					// writes can break HAL parsing and lead to dead/broken passthrough tracks.
-					if( passthrough_active || ac3_recoding ) {
+					if( ac3_recoding && ac3_recode_packet_size > 0 ) {
+						// Preserve one raw AC3 frame / IEC burst per AudioTrack write.
+						audio_frame.size = MIN(ac3_recode_packet_size, size);
+						audio_frame.fakeSize = ac3_recode_fake_per_packet;
+					} else if( passthrough_active ) {
 						audio_frame.size = size;
 					} else {
 						audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );

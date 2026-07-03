@@ -23,6 +23,7 @@
 #include "file.h"
 #include "sysfs_ll.h"
 #include "device_config.h"
+#include "ac3_recode.h"
 
 #include <string.h>
 #include <libavcodec/avcodec.h>
@@ -288,10 +289,13 @@ static int spdif_get( AUDIO_FRAME *frame )
 	return 0;
 }
 
-int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded )
-{	
+int spdif_encapsulate_frames( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int frame_count )
+{
 	if (!size)
 		return 0;
+	if (frame_count < 1 || size % frame_count != 0) {
+		frame_count = 1;
+	}
 
 	// AC3 recoding can intentionally run without parser (encoder already emits full syncframes).
 	// In passthrough mode 2, the sink expects raw codec frames (ENCODING_AC3/E_AC3/DTS),
@@ -307,7 +311,7 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		frame->format = a->format;
 		{
 			int samples = _spdif_frame_samples(a, passthrough_on);
-			frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : size;
+			frame->fakeSize = samples > 0 ? samples * frame_count * a->bytesPerFrame : size;
 			DBGCA2 serprintf("Mode 2 duration: format=%04X source=%s samples=%d fakeSize=%d raw=%d bpf=%d rate=%d recode=1\n",
 				a->format, samples > 0 ? "fallback-ac3" : "physical", samples,
 				frame->fakeSize, size, a->bytesPerFrame, a->samplesPerSec);
@@ -315,6 +319,24 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		*decoded = size;
 		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d, bpf=%d, rate=%d, recode=1\n",
 		                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
+		return 0;
+	}
+
+	// AC3 recoding deliberately has no parser. A resampled input chunk can now
+	// produce several complete CBR AC3 frames. Feed each frame separately to the
+	// SPDIF muxer so it creates one IEC61937 burst per frame, then return the
+	// concatenated complete bursts for individual writes by stream_audio.
+	if (passthrough_on == 1 && !aparser && libavos_get_ac3_recoding_enabled() &&
+	    a->format == WAVE_FORMAT_AC3 && frame_count > 1) {
+		int packet_size = size / frame_count;
+		b.pos = 0;
+		for (int i = 0; i < frame_count; i++) {
+			int packet_decoded = 0;
+			spdif_put(data + i * packet_size, packet_size, &packet_decoded);
+		}
+		spdif_get(frame);
+		frame->fakeSize = frame_count * AC3_RECODE_FRAME_SAMPLES * a->bytesPerFrame;
+		*decoded = size;
 		return 0;
 	}
 
@@ -392,6 +414,11 @@ DBGCA2 serprintf("\n", size );
 	spdif_put( data, size, decoded );
 	spdif_get( frame );
 	return 0;
+}
+
+int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded )
+{
+	return spdif_encapsulate_frames(a, data, size, frame, decoded, 1);
 }
 
 static int spdif_free( void )

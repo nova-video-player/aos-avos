@@ -17,6 +17,12 @@
 #ifndef _AC3_RECODE_H
 #define _AC3_RECODE_H
 
+// The recoder always emits 1536-sample AC3 frames at 48 kHz, independently
+// of the decoded source rate. AudioTrack and stream timing must use these
+// output-domain values from the first sink configuration.
+#define AC3_RECODE_SAMPLE_RATE   48000
+#define AC3_RECODE_FRAME_SAMPLES 1536
+
 // AC3 recode output layout: published by the AC3 encoder filter after a fully
 // successful open, then latched into the AudioTrack context when its AC3 sink
 // is configured. The publication is only a startup handoff; latency code must

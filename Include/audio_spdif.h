@@ -22,6 +22,7 @@
 #ifdef CONFIG_SPDIF
 int spdif_init(AUDIO_PROPERTIES *);
 int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded );
+int spdif_encapsulate_frames( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int frame_count );
 int spdif_set_passthrough(int on);
 int spdif_is_passthrough_on();
 int spdif_format_passthrough_supported(int format);
@@ -32,6 +33,7 @@ int get_hdmi_supports_iec(void);
 #else
 static inline int spdif_init(AUDIO_PROPERTIES *a) { return 0; }
 static inline int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded ) { return 0; }
+static inline int spdif_encapsulate_frames( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int frame_count ) { return 0; }
 static inline int spdif_set_passthrough(int on) { return 0; }
 static inline int spdif_is_passthrough_on() { return 0; }
 static inline int spdif_format_passthrough_supported(int format) { (void)format; return 0; }

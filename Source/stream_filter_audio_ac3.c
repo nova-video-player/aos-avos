@@ -51,10 +51,9 @@
 #define DBG if(0)
 
 // AC3 encoding defaults
-#define AC3_SAMPLE_RATE 48000
 #define AC3_BITRATE_5POINT1 640000  // 640 kbps for multichannel content
 #define AC3_BITRATE_STEREO   192000 // 192 kbps for 2.0 content
-#define AC3_FRAME_SIZE 1536  // Standard AC3 frame size
+#define AC3_MAX_FRAMES_PER_OUTPUT 8 // keeps worst-case IEC batch below the 64 KiB SPDIF buffer
 #define SURROUND_FOLD_GAIN 0.70710678  // -3 dB fold-down for back surrounds
 
 struct ctx {
@@ -356,7 +355,7 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	ctx->channels = input_channels;
 
 	// Configure encoder for target output
-	ctx->enc_ctx->sample_rate = AC3_SAMPLE_RATE;
+	ctx->enc_ctx->sample_rate = AC3_RECODE_SAMPLE_RATE;
 	ctx->enc_ctx->bit_rate = (target_channels <= 2) ? AC3_BITRATE_STEREO : AC3_BITRATE_5POINT1;
 	ctx->enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;  // AC3 encoder uses planar float
 
@@ -583,9 +582,13 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 
 	av_freep(&out_data[0]);
 
-	// Encode at most one AC3 frame per invocation to keep IEC bursts 1:1
-	while (ctx->encode_buffer_used == 0 &&
-	       av_audio_fifo_size(ctx->fifo) >= ctx->enc_ctx->frame_size) {
+	// Drain every complete resampled frame, up to a bounded batch. Restricting this
+	// to one frame per decoder invocation leaks ~136 samples per 44.1 -> 48 kHz
+	// conversion and makes audio fall behind by roughly 85 ms/s. Frame boundaries
+	// are preserved downstream: mode2 writes each raw packet separately and mode1
+	// wraps/writes each packet as its own IEC burst.
+	while (av_audio_fifo_size(ctx->fifo) >= ctx->enc_ctx->frame_size &&
+	       ctx->encoded_samples / ctx->enc_ctx->frame_size < AC3_MAX_FRAMES_PER_OUTPUT) {
 		int fifo_size = av_audio_fifo_size(ctx->fifo);
 		DBG serprintf("faac3: encoding frame from fifo (size=%d)\n", fifo_size);
 		if (av_frame_make_writable(ctx->frame) < 0) {
@@ -634,7 +637,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 
 			av_packet_unref(ctx->pkt);
 			packets_produced = 1;
-			break; // hold remaining packets for next invocation
+			break; // AC3 produces one packet for each submitted encoder frame
 		}
 
 		if (!packets_produced) {
@@ -749,7 +752,7 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 
 	// 2. Encoder internal delay - AC3 encoder always has 1 frame delay (1536 samples)
 	// This is the lookahead needed to produce the first encoded frame
-	delay_samples += AC3_FRAME_SIZE;
+	delay_samples += AC3_RECODE_FRAME_SAMPLES;
 
 	// 3. Resampler delay
 	if (ctx->swr_ctx) {

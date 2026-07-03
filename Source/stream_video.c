@@ -227,6 +227,10 @@ static void _video_init( STREAM *s, int time )
 
 	if( s->video_dec && !s->video_dec->async ) {
 		_free_all_frames( s );
+	} else {
+		frame_q_flush( &s->disp_q );
+		s->current_frame = NULL;
+		s->current_out_frame = NULL;
 	}
 	
 	stream_sync_restart( s );
@@ -3142,6 +3146,16 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
 		goto Discard;
 	}
+
+	if( s->seek_video_drop && s->seek_video_target_ts > 0 ) {
+		if( frame->time < s->seek_video_target_ts ) {
+			DBG serprintf("VIDEO_SEEK_DROP: frame=%d target=%d\n", frame->time, s->seek_video_target_ts);
+			goto Discard;
+		}
+		// Async decoders can deliver older preroll frames after a frame at or
+		// beyond the target.  Keep the target floor armed for the whole seek
+		// epoch; _seek_init() clears it when the next seek begins.
+	}
 	if( s->put_time_mode && s->audio_time >= 0 ) {
 		int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
 		int total_audio_delay = stream_sync_av_delay( s );
@@ -4547,6 +4561,11 @@ static void _seek_init( STREAM *s )
 
 	s->cdata_sub.valid  = 0;
 
+	s->seek_audio_drop = 0;
+	s->seek_video_drop = 0;
+	s->seek_audio_target_ts = 0;
+	s->seek_video_target_ts = 0;
+
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;
 	}
@@ -4796,7 +4815,8 @@ serprintf("STUFF_ZERO!\n");
 
 	thread_state_set( &s->parser_tstate,  THREAD_RUNNING );
 
-	// Clear sync markers before probing frames; audio_time is already invalidated above.
+	// Clear sync markers before probing frames.
+	s->audio_time = -1;
 	s->sync_a_time = -1;
 	s->sync_v_time = -1;
 
@@ -4807,7 +4827,7 @@ DBGV serprintf("play one frame\n");
 		// display video ahead of audible audio during the initial probe.
 		if( s->video_sink && s->video_sink->put_time &&
 		    s->audio_sink && s->audio_sink->get_passthrough( s ) ) {
-			stream_sync_init( s, sc.time );
+			stream_sync_init( s, (time >= 0) ? time : sc.time );
 		}
 		if( !s->seek_skip_initial_play ) {
 			_stream_play_n_frames( s, 10, sc.time, old_time );
@@ -4822,6 +4842,8 @@ DBGV serprintf("play one frame\n");
 		int sync_time = sc.time;
 		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
 			sync_time = s->seek_target_sync_time;
+		} else if( time >= 0 ) {
+			sync_time = time;
 		}
 		if( s->video_sink && s->video_sink->put_time && first_start ) {
 			// Initial start/resume: rebase once using current delay fallback.
@@ -4842,17 +4864,24 @@ DBGV serprintf("play one frame\n");
 		s->last_good_delay_ms = last_good_delay_ms;
 		s->last_good_delay_valid = last_good_delay_valid;
 	}
-	// After seek, drop audio frames until we reach the target TS to avoid anchoring on late audio.
-	// Skip on initial start/resume when audio hasn't started to avoid silent startup.
+	// After seek, drop audio/video frames until we reach the target TS to avoid anchoring on late frames.
+	// Skip on initial start/resume when streams haven't started to avoid silent startup.
 	// If a target was pre-armed (e.g., speed-change realignment), preserve it.
-	if( s->audio && s->audio->valid ) {
-		int allow_drop = (s->audio_time >= 0) || s->seek_use_target_sync;
-		if( allow_drop ) {
-			if( s->seek_audio_target_ts <= 0 ) {
-				s->seek_audio_target_ts = sc.time;
-			}
+	int allow_drop = !first_start || s->seek_use_target_sync;
+	if( allow_drop ) {
+		if( s->seek_audio_target_ts <= 0 ) {
+			s->seek_audio_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : (time >= 0 ? time : sc.time);
+		}
+		if( s->seek_video_target_ts <= 0 ) {
+			s->seek_video_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : (time >= 0 ? time : sc.time);
+		}
+		if( s->audio && s->audio->valid ) {
 			s->seek_audio_drop = 1;
 			DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
+		}
+		if( s->video && s->video->valid ) {
+			s->seek_video_drop = 1;
+			DBG serprintf("SEEK_VIDEO_DROP_ARMED: target_ts=%d\n", s->seek_video_target_ts);
 		}
 	}
 	sfdec2_reset_sync_state_on_seek( s );
@@ -4895,10 +4924,14 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 {
 	int real_time;
 	if( s ) {
-		// Preserve pre-armed audio drop target (e.g. frame-accurate seek realignment).
+		// Preserve pre-armed audio/video drop target (e.g. frame-accurate seek realignment).
 		if( !(s->seek_use_target_sync && s->seek_audio_target_ts > 0) ) {
 			s->seek_audio_drop = 0;
 			s->seek_audio_target_ts = 0;
+		}
+		if( !(s->seek_use_target_sync && s->seek_video_target_ts > 0) ) {
+			s->seek_video_drop = 0;
+			s->seek_video_target_ts = 0;
 		}
 	}
 	
@@ -4916,6 +4949,8 @@ int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir
 		s->seek_skip_initial_play = 1;
 		s->seek_use_target_sync = 1;
 		s->seek_target_sync_time = target_ts;
+		s->seek_audio_target_ts = target_ts;
+		s->seek_video_target_ts = target_ts;
 	}
 	int ret = stream_seek_time( s, time, dir, flags );
 	if( ret ) {
@@ -4933,7 +4968,11 @@ int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir
 	if( s->seek_audio_target_ts <= 0 ) {
 		s->seek_audio_target_ts = target_ts;
 	}
+	if( s->seek_video_target_ts <= 0 ) {
+		s->seek_video_target_ts = target_ts;
+	}
 	s->seek_audio_drop = 1;
+	s->seek_video_drop = 1;
 	s->seek_force_video_drop = 1;
 	_stream_play_n_frames( s, 10, target_ts, 0 );
 	s->seek_force_video_drop = 0;
@@ -5011,7 +5050,7 @@ serprintf("PNF: not open!\r\n");
 	
 	// wait for it to play
 	while( s->play_n_video_frames && atime() < timeout ) {
-//serprintf("-");	
+		//serprintf("-");
 		stream_yield();
 	}
 	if( s->play_n_video_frames ) {
@@ -5233,7 +5272,7 @@ ErrorExit:
 	thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
 	
 	stream_un_pause( s, was_paused );
-	
+
 	return 0;
 }
 

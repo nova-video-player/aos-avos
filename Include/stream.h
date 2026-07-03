@@ -782,6 +782,8 @@ typedef struct STREAM {
 	int		play_n_old_time;
 	int		seek_audio_target_ts;
 	int		seek_audio_drop;
+	int		seek_video_target_ts;
+	int		seek_video_drop;
 	int		seek_force_video_drop;
 	int		seek_skip_initial_play;
 	int		seek_use_target_sync;

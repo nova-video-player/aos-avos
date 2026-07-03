@@ -693,6 +693,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->ac3_mode2_plain_policy = ac3_recoding_enabled &&
 		stream_audio_ac3_mode2_plain_policy();
 	if(ac3_recoding_enabled) {
+		// The encoder output is always AC3 at 48 kHz. Configure that final
+		// output domain on the first AudioTrack creation instead of opening a
+		// provisional source-rate AC3 track (for example 44.1 kHz) and replacing
+		// it after the first encoded frame.
+		rate = AC3_RECODE_SAMPLE_RATE;
 		format = WAVE_FORMAT_AC3;
 		// Respect the current passthrough mode selected in native (may be 1 or 2)
 		requested_passthrough = spdif_is_passthrough_on();

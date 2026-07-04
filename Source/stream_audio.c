@@ -976,7 +976,7 @@ DBGV serprintf("drop audio chunk: time %d\r\n", cdata.time );
 DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 					continue;
 				}
-				if( s->seek_epoch > 0 && s->audio_time < 0 &&
+				if( !s->seek_audio_drop && s->seek_epoch > 0 && s->audio_time < 0 &&
 					s->video_time >= 0 && cdata.time != STREAM_NO_PTS_VALUE &&
 					cdata.time + 1000 < s->video_time ) {
 					// First audio after seek is far behind video; rebase to avoid freeze.
@@ -984,7 +984,7 @@ DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 						cdata.time, s->video_time);
 					cdata.time = s->video_time;
 				}
-				if( s->seek_epoch > 0 && s->audio_time >= 0 &&
+				if( !s->seek_audio_drop && s->seek_epoch > 0 && s->audio_time >= 0 &&
 					cdata.time != STREAM_NO_PTS_VALUE &&
 					cdata.time + 1000 < s->audio_time ) {
 					// After seek, treat large backward PTS jumps as invalid to avoid sync freeze.

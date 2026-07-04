@@ -40,25 +40,29 @@ treated as interchangeable:
   estimates; on other routes it may be stale, rounded, or codec-insensitive.
 - System/output latency: the value reported by the output-latency path when
   available.
-- `pipeline_latency`: the conservative platform estimate used for diagnostics
-  and selected passthrough policies. It is the maximum of track/platform
-  latency and `system_latency + app_latency`.
+- Raw `pipeline_latency`: the conservative platform estimate used at startup
+  and for diagnostics. It is the maximum of track/platform latency and
+  `system_latency + app_latency`.
+- Normalized mode-2 latency: after at least 250ms of paired accepted compressed
+  bytes and logical samples, AVOS derives the compressed duration represented by
+  the AudioTrack buffer. It combines that capacity with the residual platform
+  latency and freezes the result, capped at 1000ms.
 - Static latency: a fallback selected delay used when stable dynamic evidence
   is unavailable. Static latency is not always the raw AudioTrack
-  `getLatency()` value. For mode2 passthrough it is currently selected by
-  codec policy: plain AC3/EAC3 uses `pipeline_latency`, while DTS/DTS-HD,
-  TrueHD, and DDP/JOC use geometry/app latency based on Nvidia Shield and
-  Google Streamer 4K testing. AC3 *recode* resolving to mode2 (under
-  `ac3_mode2_plain_policy`) is output-aware: a stereo 2.0/192k target uses
-  `pipeline_latency`, while a multichannel/640k target uses `app_latency` — discriminated by
-  the encoder target channels, not the AudioTrack channel count (both report
-  `ch=2`). See [audio_passthrough.md](audio_passthrough.md).
+  `getLatency()` value. Mode2 uses the normalized latency once its evidence
+  window completes for AC3/EAC3/JOC, AC3 recode, TrueHD, and DTS formats.
+  Existing codec-aware app/pipeline selection applies only before normalization
+  or when valid paired evidence is unavailable. See
+  [audio_passthrough.md](audio_passthrough.md).
 - `selected_delay`: the delay actually subtracted from `audio_time` to derive
   heard time. It may come from dynamic AudioTrack evidence, last-good cache,
   geometry latency, or pipeline latency depending on path and stability.
 - `mode2_playhead_audit`: diagnostic comparison between mode2 `fakeSize`
   logical writes and AudioTrack playhead/timestamp counters. The result is
   evidence only, not a live delay provider.
+- `mode2_normalized_latency`: production record emitted when the estimate is
+  calculated, containing the raw platform values, paired evidence, calculated
+  compressed-buffer capacity, residual, and selected normalized latency.
 
 The core scheduler rule remains:
 
@@ -292,7 +296,9 @@ Rules:
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
   - Passthrough mode 2 (raw): playhead/timestamp evidence is treated
-    conservatively. The scheduler uses platform static latency as baseline.
+    conservatively. The scheduler uses normalized compressed-buffer latency as
+    its baseline after the 250ms evidence window, with the platform/app policy
+    retained for startup fallback.
     When `enable_dynamic_audio_delay` and `stream_mode2_dynamic_delay` are
     enabled, stable AudioTrack evidence may add a capped, slewed, positive-only
     residual above static latency. Stream-level last-good fallback is not

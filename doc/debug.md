@@ -162,6 +162,19 @@ mode2_playhead_audit: fmt=<hex> logical=<samples> i_written=<bytes>
 - `derived_logical` — same but against timestamp position
 - `selected` — delay value currently returned by `audiotrack_get_latency()` (heard_ts anchor)
 
+Normal mode2 playback also emits a production record when normalization is
+calculated after the 250ms evidence window; no debug parameter is required:
+
+```
+mode2_normalized_latency: fmt=<hex> raw_track=<ms> system=<ms> app=<ms>
+    residual=<ms> bytes_written=<bytes> logical_samples=<samples>
+    capacity=<ms> selected=<ms>
+```
+
+This record applies to Dolby, AC3 recode, TrueHD, and DTS mode2 tracks. It is the
+preferred field diagnostic for the selected normalized baseline; `at_mode2_audit`
+adds periodic playhead/timestamp evidence when deeper investigation is needed.
+
 To enable:
 
 ```sh
@@ -191,7 +204,7 @@ avsh at_mode2_audit 0
 | avsh name               | Type  | Default | Effect |
 |-------------------------|-------|---------|--------|
 | `ac3_force_mode2`       | param | 0       | Force raw AC3 AudioTrack mode2 for recoding, overriding IEC61937 capability. On a box that reports IEC support (resolves to mode1) this forces the mode2 (raw 2560-byte AC3 frame) path an eARC route would select. |
-| `ac3_mode2_plain_policy`| param | 1       | Production gate. When 1, AC3 recode resolving to passthrough mode2 uses the plain-mode2 PTS-seeded STREAM_SYNC_SAMPLES clock, and picks the static heard delay by recode output layout (stereo 2.0/192k → pipeline_latency, multichannel/640k → app_latency). When 0, reverts to the legacy mode1 CDATA anchor + pipeline_latency (the broken baseline). |
+| `ac3_mode2_plain_policy`| param | 1       | Production gate. When 1, AC3 recode resolving to passthrough mode2 uses the plain-mode2 PTS-seeded STREAM_SYNC_SAMPLES clock and participates in mode2-wide normalized latency after the evidence window. When 0, it reverts to the legacy mode1 CDATA anchor + pipeline latency. |
 
 Both params latch at sink-resolve / startup, so **set them before starting a fresh
 playback** — toggling mid-stream does not re-anchor an already-running stream. See the
@@ -398,10 +411,8 @@ What to confirm in each log:
   differs.
 - **(A)** `mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was 0) ac3_recode=1` then
   `mode2_sync_mode: ref=0`, and **no** `startup_anchor_commit` → samples clock + the
-  output-aware static latency. A multichannel/640k recode uses app_latency → `heard_delay` ≈
-  171 + pacer 96 = **267 ms**; a stereo 2.0/192k recode (EAC3 2.0, AAC 2.0) uses
-  pipeline_latency → `heard_delay` ≈ 724 + 96 = **820 ms** (look for the
-  `AC3-recode mode2 STEREO pipeline_latency=...` line under `dbgs 3`).
+  normalized mode2 latency after 250ms. Confirm the selected value in
+  `mode2_normalized_latency`; the pre-window app/pipeline choice is startup fallback only.
 - **(B)** no `mode2_sync_mode` line, and `startup_anchor_commit: ... static=724 start=724`
   → the pipeline-latency anchor that desyncs the eARC route.
 - **(C)** `mode=1 ... forced_mode2=0` and `startup_anchor_commit: ... static=171 start=171`

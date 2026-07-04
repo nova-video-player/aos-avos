@@ -28,9 +28,9 @@
 ## Heard-Audio Anchor Definition
 
 - `heard_audio_ts` is computed centrally via `stream_get_heard_audio_ts()` and is the **single source of truth** for all synchronization and anchoring.
-- **Mode 2 passthrough**: For passthrough mode 2 and mode-2 AC3 recoding, `audio_time` is advanced from the submitted compressed packet duration (`fakeSize`). Heard time is then derived from that logical clock by subtracting the selected static latency baseline. Current validated mode-2 policy is codec-aware: plain AC3/EAC3 uses the larger pipeline latency, while DTS/DTS-HD, TrueHD, and DDP/JOC use app-buffer geometry latency. If mode-2 dynamic delay is enabled, a capped, slewed, positive-only residual may be added above the static baseline.
+- **Mode 2 passthrough**: For passthrough mode 2 and mode-2 AC3 recoding, `audio_time` is advanced from the submitted compressed packet duration (`fakeSize`). Heard time is derived by subtracting a normalized compressed-buffer latency. AVOS collects paired accepted bytes and logical samples for at least 250ms, replaces the platform's nominal compressed-buffer component with the observed byte/sample duration, and freezes the estimate. The former codec-aware app/pipeline policy remains only as startup fallback. If mode-2 dynamic delay is enabled, a capped, slewed, positive-only residual may be added above this baseline.
 - **Mode 2 startup**: startup still anchors on the first committed audio output and uses the same centralized heard-time calculation. The older synthetic fill-window/rebase handoff experiments are not part of the current code path.
-- **Mode 2 diagnostics**: logs expose packet-duration source, selected latency source, and write-timeline geometry (`fakeSize`, `chunk_us`, `dur_bpf`, `dur_rate`) so packet timing and codec latency policy can be audited without changing the scheduler.
+- **Mode 2 diagnostics**: logs expose packet-duration source and write-timeline geometry (`fakeSize`, `chunk_us`, `dur_bpf`, `dur_rate`). The one-shot `mode2_normalized_latency` record exposes the paired evidence and resulting selected latency without changing the scheduler after the estimate is frozen.
 
 ## Sync-Mode Selection Principle
 
@@ -56,12 +56,9 @@ sync. Select the sync mode by audio path and codec evidence:
   policy. When it resolves to mode 2 (e.g. an eARC route), it adopts the mode-2
   samples clock under `ac3_mode2_plain_policy` (default on) — it must not stay on
   the mode-1 CDATA synthetic anchor, which hides a fixed audio-leads-picture
-  offset that only surfaces on real mode-2 hardware. The static heard delay is
-  picked by recode output layout: a stereo 2.0/192k target uses `pipeline_latency`,
-  while a multichannel/640k target uses `app_latency`. Both use the same two-channel
-  AudioTrack carrier configuration, so the discriminator is the encoder target
-  channels, not the AudioTrack channel count; this is empirical calibration — the
-  internal diff does not track physical sync on this path. It still keeps its
+  offset that only surfaces on real mode-2 hardware. After startup it uses the
+  same paired byte/sample normalized latency as every other mode-2 compressed
+  format; the prior output-layout selection is only a startup fallback. It still keeps its
   dedicated wall-clock pacer and stays exempt from the ordinary mode-2 lead
   gate, so it is not the *complete* plain-mode2 policy.
 
@@ -100,7 +97,7 @@ explicit AudioTrack PlaybackParams speed-epoch checkpoint described below.
 - **android_sync=1**: The sink bypasses wait/drop and delegates scheduling to MediaCodec via `render_ts_ns`.
   - **passthrough=2 post-seek re-init rule**: synchronization anchors (`sink_ref_time`) are strictly reset on every seek so the next committed compressed write establishes a fresh latency-compensated epoch.
   - **passthrough=2 timing source**: audio TS progression uses compressed-frame `fakeSize` as logical PCM-duration. DTS/DTS-HD follows parser duration first because raw mode 2 writes can be 512-sample DTS frames; otherwise the clock can run 3x too fast. Other formats use codec metadata when available, then logical base units (1536 for EAC3/AC3, 1280 for TrueHD).
-  - **passthrough=2 delay source**: the scheduler uses a selected static baseline, not a second clock. Current testing on Nvidia Shield and Google Streamer 4K supports a codec-aware split: AC3/EAC3 use pipeline latency; DTS/DTS-HD, TrueHD, and DDP/JOC use app-buffer geometry latency. This is a tested policy, not a claim that Android exposes reliable per-codec latency. If mode-2 dynamic delay is enabled later, stable AudioTrack evidence may add a bounded correction, but stream-level last-good fallback is not treated as fresh sink evidence.
+  - **passthrough=2 delay source**: the scheduler uses one selected baseline, not a second clock. After 250ms of paired accepted-byte/logical-sample evidence, all compressed mode-2 formats use normalized buffer capacity plus the residual platform latency. Codec-specific app/pipeline selection is retained only during startup or when paired evidence is unavailable. If mode-2 dynamic delay is enabled later, stable AudioTrack evidence may add a bounded correction, but stream-level last-good fallback is not treated as fresh sink evidence.
 - **Manual A/V delay policy**: keep anchors physical; apply user delay at final presentation scheduling.
 
 ## PCM Mode 0 — Startup and Seek Sync
@@ -226,5 +223,5 @@ EAC3 2.0 passthrough (and any other passthrough format where
 ## Delay Jitter and Stability
 
 - `smoothed_av_delay` is preferred when valid to damp jitter in the audio chain.
-- Mode 2 deliberately keeps the core model simple: submitted packet duration plus static latency baseline, with only a conservative positive residual when dynamic delay evidence is stable. It does not currently use a synthetic fill window or a steady-state interpolation layer.
+- Mode 2 deliberately keeps the core model simple: submitted packet duration plus a normalized latency baseline, with only a conservative positive residual when dynamic delay evidence is stable. It does not currently use a synthetic fill window or a steady-state interpolation layer.
 - Internal sync stability does not prove physical lipsync when downstream devices add unreported decode/DSP latency after HDMI/ARC. That class of offset must be handled as route/user delay outside the core scheduler.

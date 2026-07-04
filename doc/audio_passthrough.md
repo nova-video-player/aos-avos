@@ -148,38 +148,46 @@ resolves to mode 2, it must adopt the plain-mode2 timing, not the mode-1 policy 
 historically left on. Two coupled changes apply together (the gate drives both):
 1. enter the PTS-seeded `STREAM_SYNC_SAMPLES` audio clock instead of the mode-1 CDATA
    synthetic startup anchor (see Startup Anchoring below), and
-2. pick the static heard delay by **recode output layout**: a stereo 2.0/192k target uses
-   `pipeline_latency`, while a multichannel/640k target uses `app_latency`
-   (AudioTrack buffer geometry).
+2. use the mode-2 latency policy described below.
 Under the synthetic anchor the static latency cancels, so the bug was invisible in mode 1
 but produced a fixed audio-leads-picture offset on real mode-2 (eARC) sinks; the samples
 clock and the latency selection apply together. Mode 1 and ordinary (non-recode) mode 2
 are unchanged. See [debug.md](debug.md) for the Shield eARC-emulation A/B workflow.
 
-**Why output-aware.** The encoded AC3 payload layouts differ, but Android configures both
-compressed AudioTracks with the same two-channel carrier (`ch=2`). A multichannel recode is
-in sync on `app_latency`, while a stereo recode using that policy leaves the picture about
-553ms ahead of the sound (= `pipeline_latency - app_latency`, 724-171). The discriminator
-is therefore the **encoder target channels** published after a successful encoder open,
-not the AudioTrack carrier channel count. This is empirical calibration: the recode-mode2
-internal sync model does not track physical sync on this path (the on-screen diff swings
-~200ms while the audible error moves ~553ms), so the latency is tuned to the acoustic
-result. The target layout is reset before encoder initialization, published only after a
-fully successful open, and latched into the AudioTrack context at sink configuration.
+**Mode-2 normalized latency.** Android's compressed `AudioTrack` latency and local
+buffer geometry cannot be interpreted with PCM bytes-per-frame math. AVOS therefore
+collects paired accepted compressed bytes and PCM-equivalent logical samples. After at
+least 250ms of logical audio, it estimates the duration represented by the configured
+compressed buffer:
+
+```
+capacity_ms = buf_size * logical_samples * 1000
+              / (compressed_bytes * sample_rate * speed)
+residual_ms = max(0, track_latency - buf_size * 1000 / sample_rate)
+selected_ms = min(1000,
+                  max(residual_ms + capacity_ms,
+                      system_latency + capacity_ms))
+```
+
+The resulting value becomes the selected mode-2 latency for AC3 recode, direct
+AC3/EAC3/JOC, TrueHD, and the DTS family. Until the evidence window completes—or if
+valid paired evidence is unavailable—the existing codec-aware app/pipeline selection is
+retained as a startup fallback. The 1000ms ceiling is an empirical safety bound, not a
+claim about maximum physical HDMI/ARC latency.
 
 `audio_spdif.c` mode-2 handling for recoding:
 
 - In mode 2 with parser output: send raw codec frames (`ENCODING_AC3` path) and keep timing via `fakeSize`
 - In mode 2 with **no parser** (AC3 recoding path): bypass IEC wrapping and send raw AC3 syncframes directly (`PT_MODE2_NOPARSER` path)
-- Mode 1 keeps static passthrough delay. Mode 2 normally uses static
-  passthrough latency as its baseline, and may add a bounded positive dynamic
+- Mode 1 keeps static passthrough delay. Mode 2 uses the normalized compressed-buffer
+  latency as its baseline after the evidence window, and may add a bounded positive dynamic
   residual when `enable_dynamic_audio_delay` and `stream_mode2_dynamic_delay`
   are enabled.
 - `atempo` may still be instantiated for later non-passthrough speed changes,
   but no samples flow through it in passthrough and its delay is not counted in
   passthrough / AC3 recoding sync or speed-anchor calculations.
-- Mode 2 uses the platform-reported static latency (`AudioTrack.getLatency()` /
-  `getOutputLatency`) as the route baseline. Any dynamic residual is conservative:
+- Mode 2 uses platform latency only as an input to the normalized route baseline. Any
+  dynamic residual is conservative:
   it is capped, slewed, positive-only, and ignores stream-level last-good state
   as fresh sink evidence.
 
@@ -304,8 +312,8 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
   advancement; FLAC can use sample sync because decoded sample count is the
   stable clock. Mode 1 IEC passthrough and AC3 recoding must be validated
   independently before inheriting the mode-2 policy.
-- **Mode 2 heard-time baseline**: mode 2 currently uses submitted compressed packet duration to advance `audio_time`, then subtracts a selected static latency baseline to estimate heard time. The current tested policy is codec-aware: plain AC3/EAC3 uses pipeline latency, while DTS/DTS-HD, TrueHD, and DDP/JOC use app-buffer geometry latency. This split has been validated by repeated playback testing on Nvidia Shield and Google Streamer 4K, but should still be treated as an empirical policy until a reliable measured-delay path replaces it. The old synthetic fill-window and sawtooth interpolation experiments are not part of the current code path.
-- **Latency terminology**: geometry/app latency is the local AudioTrack buffer geometry (`buf_size / frame_size / sample_rate`, speed-adjusted). Pipeline latency is the platform maximum of AudioTrack-reported track latency and output/system latency plus app geometry. The selected static baseline may choose either value depending on codec policy.
+- **Mode 2 heard-time baseline**: mode 2 uses submitted compressed packet duration to advance `audio_time`, then subtracts the normalized compressed-buffer latency to estimate heard time. The estimate is frozen after a 250ms paired byte/sample evidence window. Existing codec-aware app/pipeline selection remains only as the startup fallback. The old synthetic fill-window and sawtooth interpolation experiments are not part of the current code path.
+- **Latency terminology**: geometry/app latency is the PCM-style local AudioTrack buffer calculation and is not a reliable duration for compressed bytes. Raw pipeline latency is the platform maximum of AudioTrack-reported track latency and output/system latency plus app geometry. Normalized mode-2 latency replaces the platform's nominal compressed-buffer component with the duration derived from accepted compressed bytes and logical samples.
 - **Mode 2 dynamic residual**: when dynamic delay is enabled, mode 2 can add a small measured residual above the static baseline. The residual is capped by `stream_mode2_dynamic_max_ms`, slewed by `stream_mode2_dynamic_slew_ms`, requires a stability streak, and is positive-only so it cannot pull playback earlier than the static latency baseline.
 - **Physical Route Latency Limit**: AudioTrack latency APIs stop at the Android output boundary. Unreported downstream latency added by a soundbar or AVR after HDMI/ARC still requires a route/user offset outside the scheduler model.
 
@@ -319,6 +327,10 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
   playhead/timestamp delays, selected delay, pipeline latency, and app
   latency. This is diagnostic-only: it must not update `selected_delay` or
   reanchor audio/video clocks.
+- `mode2_normalized_latency`: a production record emitted when the normalized
+  estimate is calculated (normally once per mode-2 AudioTrack configuration),
+  showing format, raw track/system/app values, paired evidence, calculated
+  capacity, residual, and selected normalized latency.
 - Nova logs:
   - `refreshAudioOutputCapabilities(...)`
   - `updateIecEncapsulationCapability`

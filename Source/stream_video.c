@@ -4829,7 +4829,13 @@ DBGV serprintf("play one frame\n");
 		// display video ahead of audible audio during the initial probe.
 		if( s->video_sink && s->video_sink->put_time &&
 		    s->audio_sink && s->audio_sink->get_passthrough( s ) ) {
-			stream_sync_init( s, (time >= 0) ? time : sc.time );
+			// On first start/resume no seek-drops are armed, so frames play from the
+			// achieved keyframe position, not the requested target. Sync to sc.time
+			// there, otherwise video_time runs ahead of real content and the first
+			// audio packet gets falsely rebased (AUDIO_PTS_BEHIND_VIDEO), causing a
+			// long silent catch-up and a permanent A/V offset.
+			int drops_armed = !first_start || s->seek_use_target_sync;
+			stream_sync_init( s, (drops_armed && time >= 0) ? time : sc.time );
 		}
 		if( !s->seek_skip_initial_play ) {
 			_stream_play_n_frames( s, 10, sc.time, old_time );
@@ -4844,7 +4850,11 @@ DBGV serprintf("play one frame\n");
 		int sync_time = sc.time;
 		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
 			sync_time = s->seek_target_sync_time;
-		} else if( time >= 0 ) {
+		} else if( time >= 0 && !first_start ) {
+			// Only sync to the requested target when seek-drops are armed to actually
+			// reach it. On first start/resume drops are skipped and playback begins at
+			// the achieved keyframe (sc.time); syncing to the requested time instead
+			// desyncs A/V by the keyframe distance and stalls audio start.
 			sync_time = time;
 		}
 		if( s->video_sink && s->video_sink->put_time && first_start ) {

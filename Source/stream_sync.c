@@ -72,6 +72,13 @@ static int stream_use_xbmc_smoothing = 1;
 // Simple audio-lead gate threshold (Phase 1B baseline).
 // Phase 4 hysteresis constants removed in Commit C.
 #define STREAM_PCM_AUDIO_LEAD_GATE_MS        200
+// Mode2 heard interpolator: max lead over the submitted frontier heard point.
+// Between accepted write batches the buffer drains while playback continues, so
+// the physical presentation position legitimately runs ahead of
+// audio_time - selected_delay by up to one HAL batch quantum (~192-350ms
+// observed). The cap only bounds true starvation, where the producer stops and
+// the interpolator must not extrapolate past drained coverage.
+#define STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS 500
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 // Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
 // delta <= COMMIT_DELTA: direct commit (normal slow drift).
@@ -818,15 +825,26 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 					elapsed_ms = 0;
 				}
 				int candidate = s->mode2_heard_interp_ts + elapsed_ms;
-				// Never run past the submitted-audio frontier or move backwards
-				// inside an epoch. Discontinuities take the reset path above.
-				if( candidate > raw_heard_ts ) {
-					candidate = raw_heard_ts;
+				// Free-run ahead of the frontier: between accepted batches the
+				// buffer drains while playback continues, so physical presentation
+				// legitimately exceeds raw. Cap the lead to bound true starvation.
+				if( candidate > raw_heard_ts + STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS ) {
+					candidate = raw_heard_ts + STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS;
 				}
 				if( candidate > s->mode2_heard_interp_ts ) {
 					s->mode2_heard_interp_ts = candidate;
 				}
 				s->mode2_heard_interp_wall_ms = wall_now;
+			}
+			// Frontier re-anchor: when a write batch is accepted, the buffer has
+			// just refilled to capacity, so at that instant physical presentation
+			// equals audio_time - selected_delay exactly. If the frontier heard
+			// point jumps above the interpolated clock (buffer fill after
+			// start/seek/track change, or HAL batch jitter), snap up to it. This
+			// restores the raw clock's self-correction during buffer fill instead
+			// of carrying a permanent heard deficit (avos-432 track-change desync).
+			if( raw_heard_ts > s->mode2_heard_interp_ts ) {
+				s->mode2_heard_interp_ts = raw_heard_ts;
 			}
 		}
 

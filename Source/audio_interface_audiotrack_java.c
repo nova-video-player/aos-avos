@@ -169,9 +169,9 @@ struct audio_ctx {
 	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
-	uint64_t mode2_ac3_bytes_accum;          // paired cumulative bytes written
-	uint64_t mode2_ac3_samples_accum;        // paired cumulative logical samples
-	int mode2_ac3_latency_corrected;
+	uint64_t mode2_latency_bytes_accum;       // paired cumulative compressed bytes written
+	uint64_t mode2_latency_samples_accum;     // paired cumulative logical samples
+	int mode2_latency_corrected;
 	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
 };
 
@@ -644,14 +644,12 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 		pipeline_latency = track_latency;
 	}
 
-	// Gated to Dolby formats (AC3, EAC3, Atmos): these are the only formats validated. TrueHD already
-	// works correctly using the default app_latency pipeline fallback, and DTS lacks telemetry.
-	int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
-	                  at->format == WAVE_FORMAT_EAC3 ||
-	                  at->format == WAVE_FORMAT_E_AC3_JOC);
-	if (at->passthrough == 2 && is_any_ac3 && at->mode2_ac3_bytes_accum > 0 && at->mode2_ac3_samples_accum > 0) {
-		uint64_t bytes_written = at->mode2_ac3_bytes_accum;
-		uint64_t logical_samples = at->mode2_ac3_samples_accum;
+	// Mode2-wide latency normalization. The paired cumulative ratio derives
+	// compressed buffer duration without assuming a codec-specific packet size,
+	// and applies to Dolby, TrueHD and the DTS family alike.
+	if (at->passthrough == 2 && at->mode2_latency_bytes_accum > 0 && at->mode2_latency_samples_accum > 0) {
+		uint64_t bytes_written = at->mode2_latency_bytes_accum;
+		uint64_t logical_samples = at->mode2_latency_samples_accum;
 
 		// Calculate buffer capacity dynamically using the paired cumulative ratio of compressed bytes
 		// written to logical samples accepted. This avoids hardcoding 1536 samples/packet or
@@ -680,8 +678,12 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 			corrected_pipeline = 1000;
 		}
 
-		LOG("mode2_ac3_corrected_pipeline: raw_track=%u, residual=%u, bytes_written=%llu, logical_samples=%llu, capacity=%u, corrected_pipeline=%u",
-			track_latency, residual_ms, (unsigned long long)bytes_written, (unsigned long long)logical_samples, capacity_ms, corrected_pipeline);
+		// Keep one production diagnostic per AudioTrack configuration. It is needed
+		// to diagnose route-specific Android/HAL latency reports from field logs.
+		LOG("mode2_normalized_latency: fmt=%04X raw_track=%u system=%u app=%u residual=%u bytes_written=%llu logical_samples=%llu capacity=%u selected=%u",
+			at->format, track_latency, system_latency, app_latency, residual_ms,
+			(unsigned long long)bytes_written, (unsigned long long)logical_samples,
+			capacity_ms, corrected_pipeline);
 
 		pipeline_latency = corrected_pipeline;
 	}
@@ -979,9 +981,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->rate = rate;
 	at->channel_count = output_channels;
 	at->frame_size = frame_size;
-	at->mode2_ac3_bytes_accum = 0;
-	at->mode2_ac3_samples_accum = 0;
-	at->mode2_ac3_latency_corrected = 0;
+	at->mode2_latency_bytes_accum = 0;
+	at->mode2_latency_samples_accum = 0;
+	at->mode2_latency_corrected = 0;
 	channels = output_channels;
 	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
 		rate, output_channels, frame_size, track_format, track_chanmask, same_config, at->passthrough);
@@ -1727,27 +1729,22 @@ static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples, int acc
 	if (!at || samples <= 0) return;
 	at->mode2_logical_samples += (uint64_t)samples;
 
-	// Gated to Dolby formats (AC3, EAC3, Atmos): these are the only formats validated. TrueHD already
-	// works correctly using the default app_latency pipeline fallback, and DTS lacks telemetry.
-	int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
-	                  at->format == WAVE_FORMAT_EAC3 ||
-	                  at->format == WAVE_FORMAT_E_AC3_JOC);
-	if (at->passthrough == 2 && is_any_ac3) {
-		if (!at->mode2_ac3_latency_corrected) {
+	if (at->passthrough == 2) {
+		if (!at->mode2_latency_corrected) {
 			if (accepted_bytes > 0) {
-				at->mode2_ac3_bytes_accum += (uint64_t)accepted_bytes;
-				at->mode2_ac3_samples_accum += (uint64_t)samples;
+				at->mode2_latency_bytes_accum += (uint64_t)accepted_bytes;
+				at->mode2_latency_samples_accum += (uint64_t)samples;
 			}
 
 			// Wait until we have accumulated at least 250ms of logical audio (e.g. 12000 samples @ 48kHz)
 			// before calculating and freezing the pipeline latency.
 			uint64_t threshold_samples = at->rate > 0 ? (uint64_t)(at->rate / 4) : 12000;
-			if (at->mode2_ac3_samples_accum >= threshold_samples) {
+			if (at->mode2_latency_samples_accum >= threshold_samples) {
 				JNIEnv *env = attach_thread_current_vm();
 				if (env) {
 					// Latch the correction flag only if the VM update executes successfully
 					if (audiotrack_update_latency(at, env)) {
-						at->mode2_ac3_latency_corrected = 1;
+						at->mode2_latency_corrected = 1;
 					}
 				}
 			}
@@ -2450,7 +2447,9 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 	if (!at || !at->init) {
 		return -1;
 	}
-	// Mode2 selected delay policy (per format, tested on Nvidia Shield / eARC route):
+	// Mode2 startup/fallback delay policy. Once enough paired compressed-byte and
+	// logical-sample evidence has been collected, every mode2 codec uses the
+	// normalized pipeline latency below instead.
 	//
 	// EAC3 (plain) and E_AC3_JOC (Atmos): pipeline_latency captures the real HAL
 	// delay on this route; app_latency underestimates it, causing the lead gate to
@@ -2460,12 +2459,19 @@ static int audiotrack_get_latency(audio_ctx_t *at)
 	// such as scarpetta were ~30ms late under app_latency, while non-Atmos EAC3
 	// such as belfast stayed in sync).
 	//
-	// TrueHD, DTS-HD, DTS-HD MA: pipeline_latency overestimates the actual audible
-	// delay on tested routes; app_latency gives correct heard_ts and bounded
-	// A/V diff.
+	// TrueHD, DTS-HD, DTS-HD MA use app_latency until normalization is available;
+	// the raw platform pipeline value overestimates their startup delay.
 	//
 	// AC3 and unknown formats: default to pipeline_latency (conservative).
 	if (at->passthrough >= 2) {
+		// Once sufficient paired byte/sample evidence exists, use the normalized
+		// pipeline for every compressed mode2 format. Before that point retain the
+		// startup fallback rather than exposing raw pipeline latency to TrueHD/DTS-HD.
+		if (at->mode2_latency_corrected) {
+DBG3		LOG("audiotrack_get_latency: mode2 format=%04X using normalized pipeline_latency=%u (app=%u)",
+				at->format, at->pipeline_latency, at->latency);
+			return (int)at->pipeline_latency;
+		}
 		if (at->format == WAVE_FORMAT_TRUEHD ||
 		    at->format == WAVE_FORMAT_DTS_HD ||
 		    at->format == WAVE_FORMAT_DTS_HD_MA) {
@@ -2702,9 +2708,9 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->passthrough_restart_after_flush = 0;
 	at->passthrough_playhead_ever_advanced = 0;
 	at->mode2_logical_samples = 0;
-	at->mode2_ac3_bytes_accum = 0;
-	at->mode2_ac3_samples_accum = 0;
-	at->mode2_ac3_latency_corrected = 0;
+	at->mode2_latency_bytes_accum = 0;
+	at->mode2_latency_samples_accum = 0;
+	at->mode2_latency_corrected = 0;
 	at->mode2_audit_last_ms = 0;
 }
 

@@ -643,7 +643,10 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 		pipeline_latency = track_latency;
 	}
 
-	if (at->passthrough == 2 && at->format == WAVE_FORMAT_AC3 &&
+	int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
+	                  at->format == WAVE_FORMAT_EAC3 ||
+	                  at->format == WAVE_FORMAT_E_AC3_JOC);
+	if (at->passthrough == 2 && is_any_ac3 &&
 	    at->mode2_ac3_latency_corrected) {
 		double avg_packet = (double)at->mode2_ac3_average_packet_size;
 		if (avg_packet > 0) {
@@ -656,6 +659,12 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 			uint32_t corrected_pipeline = residual_ms + capacity_ms;
 			if (system_latency + capacity_ms > corrected_pipeline) {
 				corrected_pipeline = system_latency + capacity_ms;
+			}
+
+			// Cap at 1000ms ceiling: low-bitrate/stereo streams mathematically project a massive
+			// buffer capacity (>1.3s), but the OS/HAL hard-caps the physical AudioTrack queue at 1s.
+			if (corrected_pipeline > 1000) {
+				corrected_pipeline = 1000;
 			}
 
 			LOG("mode2_ac3_corrected_pipeline: raw_track=%u, residual=%u, avg_packet=%d, capacity=%u, corrected_pipeline=%u",
@@ -1770,7 +1779,10 @@ DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush
 			call_void_method(at, "play", "()V");
 			at->passthrough_restart_after_flush = 0;
 		}
-		if (at->passthrough == 2 && at->format == WAVE_FORMAT_AC3) {
+		int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
+		                  at->format == WAVE_FORMAT_EAC3 ||
+		                  at->format == WAVE_FORMAT_E_AC3_JOC);
+		if (at->passthrough == 2 && is_any_ac3) {
 			if (ret == len && len <= at->buf_size && !at->mode2_ac3_latency_corrected) {
 				at->mode2_ac3_average_packet_size = (int)ret;
 				at->mode2_ac3_latency_corrected = 1;

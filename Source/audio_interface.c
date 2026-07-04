@@ -252,10 +252,10 @@ void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx)
 	}
 }
 
-void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples)
+void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples, int accepted_bytes)
 {
 	if (impl && impl->add_logical_samples) {
-		impl->add_logical_samples(ctx, samples);
+		impl->add_logical_samples(ctx, samples, accepted_bytes);
 	}
 }
 

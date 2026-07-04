@@ -169,7 +169,8 @@ struct audio_ctx {
 	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
-	int mode2_ac3_average_packet_size;
+	uint64_t mode2_ac3_bytes_accum;          // paired cumulative bytes written
+	uint64_t mode2_ac3_samples_accum;        // paired cumulative logical samples
 	int mode2_ac3_latency_corrected;
 	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
 };
@@ -615,9 +616,9 @@ static int audiotrack_close(audio_ctx_t **pat)
 	return 0;
 }
 
-static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
+static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 {
-	if (!at || !env) return;
+	if (!at || !env) return 0;
 
 	float speed = get_effective_audio_speed();
 
@@ -643,35 +644,46 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 		pipeline_latency = track_latency;
 	}
 
+	// Gated to Dolby formats (AC3, EAC3, Atmos): these are the only formats validated. TrueHD already
+	// works correctly using the default app_latency pipeline fallback, and DTS lacks telemetry.
 	int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
 	                  at->format == WAVE_FORMAT_EAC3 ||
 	                  at->format == WAVE_FORMAT_E_AC3_JOC);
-	if (at->passthrough == 2 && is_any_ac3 &&
-	    at->mode2_ac3_latency_corrected) {
-		double avg_packet = (double)at->mode2_ac3_average_packet_size;
-		if (avg_packet > 0) {
-			uint32_t capacity_ms = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size * 1536.0 ) / ( avg_packet * (double)at->rate * speed ) );
-			uint32_t reported_buffer_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / (double)at->rate );
-			uint32_t residual_ms = 0;
-			if (track_latency > reported_buffer_latency) {
-				residual_ms = track_latency - reported_buffer_latency;
-			}
-			uint32_t corrected_pipeline = residual_ms + capacity_ms;
-			if (system_latency + capacity_ms > corrected_pipeline) {
-				corrected_pipeline = system_latency + capacity_ms;
-			}
+	if (at->passthrough == 2 && is_any_ac3 && at->mode2_ac3_bytes_accum > 0 && at->mode2_ac3_samples_accum > 0) {
+		uint64_t bytes_written = at->mode2_ac3_bytes_accum;
+		uint64_t logical_samples = at->mode2_ac3_samples_accum;
 
-			// Cap at 1000ms ceiling: low-bitrate/stereo streams mathematically project a massive
-			// buffer capacity (>1.3s), but the OS/HAL hard-caps the physical AudioTrack queue at 1s.
-			if (corrected_pipeline > 1000) {
-				corrected_pipeline = 1000;
-			}
+		// Calculate buffer capacity dynamically using the paired cumulative ratio of compressed bytes
+		// written to logical samples accepted. This avoids hardcoding 1536 samples/packet or
+		// relying on the first packet size only, adapting naturally to VBR (EAC3) and different syncframes.
+		// capacity_ms = (buf_size * logical_samples * 1000) / (bytes_written * rate * speed)
+		uint32_t capacity_ms = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size * (double)logical_samples ) /
+		                                         ( (double)bytes_written * (double)at->rate * speed ) );
 
-			LOG("mode2_ac3_corrected_pipeline: raw_track=%u, residual=%u, avg_packet=%d, capacity=%u, corrected_pipeline=%u",
-				track_latency, residual_ms, at->mode2_ac3_average_packet_size, capacity_ms, corrected_pipeline);
-
-			pipeline_latency = corrected_pipeline;
+		// Isolate platform residual latency by subtracting the platform's nominal buffer delay.
+		// Note: On this device, Android calculates compressed AudioTrack getLatency() by treating
+		// 1 compressed byte as 1 frame (1 byte/frame geometry), yielding a nominal delay of buf_size / rate.
+		uint32_t reported_buffer_latency = (uint32_t)lrint( ( 1000.0 * (double)at->buf_size ) / (double)at->rate );
+		uint32_t residual_ms = 0;
+		if (track_latency > reported_buffer_latency) {
+			residual_ms = track_latency - reported_buffer_latency;
 		}
+		uint32_t corrected_pipeline = residual_ms + capacity_ms;
+		if (system_latency + capacity_ms > corrected_pipeline) {
+			corrected_pipeline = system_latency + capacity_ms;
+		}
+
+		// Apply an empirical 1000ms sync tuning cap (heuristic ceiling). Low-bitrate/stereo streams
+		// project a huge theoretical capacity (>1.3s); this empirical limit aligns the player sync
+		// pacing with physical pipeline behavior.
+		if (corrected_pipeline > 1000) {
+			corrected_pipeline = 1000;
+		}
+
+		LOG("mode2_ac3_corrected_pipeline: raw_track=%u, residual=%u, bytes_written=%llu, logical_samples=%llu, capacity=%u, corrected_pipeline=%u",
+			track_latency, residual_ms, (unsigned long long)bytes_written, (unsigned long long)logical_samples, capacity_ms, corrected_pipeline);
+
+		pipeline_latency = corrected_pipeline;
 	}
 
 	at->track_latency = track_latency;
@@ -689,6 +701,7 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	}
 
 	at->latency = scheduler_latency;
+	return 1;
 }
 
 static uint32_t audiotrack_default_channel_mask(int channels)
@@ -966,7 +979,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->rate = rate;
 	at->channel_count = output_channels;
 	at->frame_size = frame_size;
-	at->mode2_ac3_average_packet_size = 0;
+	at->mode2_ac3_bytes_accum = 0;
+	at->mode2_ac3_samples_accum = 0;
 	at->mode2_ac3_latency_corrected = 0;
 	channels = output_channels;
 	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
@@ -1708,11 +1722,41 @@ static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 // Called from stream_sink_audio after each successful mode2 write.
 // samples = fakeSize * ret / frame->size / bpf (scaled for partial writes).
 // Triggers the periodic audit after updating so each log reflects current state.
-static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples)
+static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples, int accepted_bytes)
 {
-	if (!audiotrack_mode2_audit || !at || samples <= 0) return;
+	if (!at || samples <= 0) return;
 	at->mode2_logical_samples += (uint64_t)samples;
-	audiotrack_mode2_playhead_audit(at);
+
+	// Gated to Dolby formats (AC3, EAC3, Atmos): these are the only formats validated. TrueHD already
+	// works correctly using the default app_latency pipeline fallback, and DTS lacks telemetry.
+	int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
+	                  at->format == WAVE_FORMAT_EAC3 ||
+	                  at->format == WAVE_FORMAT_E_AC3_JOC);
+	if (at->passthrough == 2 && is_any_ac3) {
+		if (!at->mode2_ac3_latency_corrected) {
+			if (accepted_bytes > 0) {
+				at->mode2_ac3_bytes_accum += (uint64_t)accepted_bytes;
+				at->mode2_ac3_samples_accum += (uint64_t)samples;
+			}
+
+			// Wait until we have accumulated at least 250ms of logical audio (e.g. 12000 samples @ 48kHz)
+			// before calculating and freezing the pipeline latency.
+			uint64_t threshold_samples = at->rate > 0 ? (uint64_t)(at->rate / 4) : 12000;
+			if (at->mode2_ac3_samples_accum >= threshold_samples) {
+				JNIEnv *env = attach_thread_current_vm();
+				if (env) {
+					// Latch the correction flag only if the VM update executes successfully
+					if (audiotrack_update_latency(at, env)) {
+						at->mode2_ac3_latency_corrected = 1;
+					}
+				}
+			}
+		}
+	}
+
+	if (audiotrack_mode2_audit) {
+		audiotrack_mode2_playhead_audit(at);
+	}
 }
 
 static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64_t raw_frames)
@@ -1779,17 +1823,6 @@ DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush
 			call_void_method(at, "play", "()V");
 			at->passthrough_restart_after_flush = 0;
 		}
-		int is_any_ac3 = (at->format == WAVE_FORMAT_AC3 ||
-		                  at->format == WAVE_FORMAT_EAC3 ||
-		                  at->format == WAVE_FORMAT_E_AC3_JOC);
-		if (at->passthrough == 2 && is_any_ac3) {
-			if (ret == len && len <= at->buf_size && !at->mode2_ac3_latency_corrected) {
-				at->mode2_ac3_average_packet_size = (int)ret;
-				at->mode2_ac3_latency_corrected = 1;
-				audiotrack_update_latency(at, at->env);
-			}
-		}
-
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
 
 		if (audiotrack_log_underruns) {
@@ -2669,6 +2702,9 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->passthrough_restart_after_flush = 0;
 	at->passthrough_playhead_ever_advanced = 0;
 	at->mode2_logical_samples = 0;
+	at->mode2_ac3_bytes_accum = 0;
+	at->mode2_ac3_samples_accum = 0;
+	at->mode2_ac3_latency_corrected = 0;
 	at->mode2_audit_last_ms = 0;
 }
 

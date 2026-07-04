@@ -108,7 +108,7 @@ DBGA2 serprintf("\r\n[%8d] size %5d  ", atime(), frame->size );
 	if (ret > 0 && frame->fakeSize > 0 && frame->size > 0 &&
 	    audio_interface_get_passthrough(s->audio_ctx) >= 2) {
 		int logical_bytes = (int)(((int64_t)frame->fakeSize * ret) / frame->size);
-		audio_interface_add_logical_samples(s->audio_ctx, logical_bytes / 4);
+		audio_interface_add_logical_samples(s->audio_ctx, logical_bytes / 4, ret);
 	}
 	return ret;
 }

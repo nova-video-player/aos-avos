@@ -2860,8 +2860,10 @@ DBGS serprintf("stream_un_pause\r\n");
 
 		// when we unpause, we re-fill the audio sink with 0 samples
 		// so that we are back to the same a2v sync as before
+		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+			s->audio_sink->get_passthrough( s ) : 0;
 		int do_audio_preload = stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL &&
-			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f;
+			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f && passthrough == 0;
 		if ( do_audio_preload ) {
 			s->audio_preload = 1;
 		} else {

@@ -165,8 +165,8 @@ struct audio_ctx {
 	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
-	int recreate_after_pause;                // compressed passthrough: recreate the track on the first write after a user pause (flushed compressed tracks wedge)
 	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
+	int track_paused;                        // AudioTrack.pause() called; a blocking write() racing it returns 0 (full paused buffer), which is not a dead track
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
 	uint64_t mode2_latency_bytes_accum;       // paired cumulative compressed bytes written
@@ -1474,6 +1474,7 @@ ERR		LOG("audiotrack_start: track not valid, error");
 	if (!env_local) {
 		return -1;
 	}
+	at->track_paused = 0;
 	if (at->passthrough && at->passthrough_restart_after_flush) {
 DBG		LOG("audiotrack_start: deferring passthrough restart until first post-flush write");
 		return 0;
@@ -1492,22 +1493,22 @@ ERR		LOG("audiotrack_pause: track not valid, error");
 		return -1;
 	}
 
+	// Always freeze the track with AudioTrack.pause(), passthrough included.
+	// Leaving a passthrough track PLAYING (b2-style drain to underrun) was tried
+	// and breaks the submitted-ledger sync model: the buffered audio (up to ~1s
+	// in mode 2) plays out audibly while video is frozen, and every pause/resume
+	// cycle accumulates that much permanent A/V desync (avos-440). Zero-preload
+	// phase repair on resume is not available either for passthrough (acf158d:
+	// caused permanent silence). The cost of pause() is the sink re-acquiring
+	// its codec lock on resume (short muted stretch), which is the lesser evil.
+	// A pause changes neither codec nor track parameters, so no recreation is
+	// armed; resume is a plain play().
 	JNIEnv *env_local = attach_thread_current_vm();
 	if (!env_local) {
 		return -1;
 	}
 	call_void_method_with_env(at, env_local, "pause", "()V");
-
-	// Compressed passthrough tracks (mode 2 raw / mode 3 recode) wedge after the
-	// pause+flush that follows on some routes (e.g. Android-TV HDMI eARC): once
-	// resumed, write() returns 0 forever and audio never advances. Arm a one-shot
-	// full track rebuild that is consumed on the first write after resume. This is
-	// scoped to user pause only (audio_interface_pause is called solely from
-	// stream_pause, never on seek), so it does not disturb the cross-seek mode 2
-	// calibration carry.
-	if (at->passthrough >= 2) {
-		at->recreate_after_pause = 1;
-	}
+	at->track_paused = 1;
 
 	return 0;
 }
@@ -1529,11 +1530,14 @@ ERR		LOG("track not valid, error");
 	if (!env_local) {
 		return -1;
 	}
-	// Flush buffered audio before stop. The track is in PAUSED state (stream_pause()
-	// is always called before audiotrack_stop()), so flush() is valid here.
-	// Without this, AudioTrack.stop() starts a drain into the HAL pipeline; when
-	// release() is called immediately after, residual HAL audio from the old file
-	// can overlap the startup of the next playback and corrupt its timing window.
+	// Flush buffered audio before stop. flush() is only valid on a paused or
+	// stopped track, and passthrough tracks are deliberately left PLAYING across
+	// stream_pause() to keep the sink codec lock, so pause here first (the track
+	// is being torn down, losing the lock no longer matters).
+	// Without the flush, AudioTrack.stop() starts a drain into the HAL pipeline;
+	// when release() is called immediately after, residual HAL audio from the old
+	// file can overlap the startup of the next playback and corrupt its timing window.
+	call_void_method_with_env(at, env_local, "pause", "()V");
 	call_void_method_with_env(at, env_local, "flush", "()V");
 	call_void_method_with_env(at, env_local, "stop", "()V");
 	at->timestamp_written_offset = at->i_samples_written;
@@ -1779,33 +1783,6 @@ ERR		LOG("audiotrack_write: track not valid, error");
 
 	attach_thread(at);
 
-	// One-shot handling on the first write after a user pause, for compressed
-	// passthrough. Only a track that was *flushed* during the pause (e.g. a seek
-	// while paused) wedges on resume on some routes (write() returns 0 forever);
-	// a merely-paused track keeps its buffered data and the AVR's codec lock and
-	// resumes cleanly. So rebuild the track only when a flush happened
-	// (passthrough_restart_after_flush, set solely by flush_output). Recreating an
-	// unflushed track would force the soundbar to re-acquire AC3/EAC3 lock,
-	// producing seconds of silence after resume. In both cases we (re)arm the
-	// deferred play so play() fires once data has been accepted (no empty-track
-	// underrun and no reliance on unpause(), which stream_un_pause may skip).
-	if (at->recreate_after_pause) {
-		at->recreate_after_pause = 0;
-		if (at->passthrough >= 2 && at->init) {
-			if (at->passthrough_restart_after_flush) {
-DBG				LOG("audiotrack_write: rebuilding flushed compressed passthrough track on resume-after-pause (passthrough=%d format=%04X)", at->passthrough, at->format);
-				at->force_recreate = 1;
-				int recreate_bits = (at->passthrough == 2) ? 16 : (int)(at->frame_size * 8 / at->channel_count);
-				if (audiotrack_set_output_params(at, at->rate, at->channel_count, recreate_bits, at->format) != 0) {
-ERR					LOG("audiotrack_write: resume-after-pause track rebuild failed");
-				}
-			} else {
-DBG				LOG("audiotrack_write: resume-after-pause, track not flushed -> keeping locked track (passthrough=%d format=%04X)", at->passthrough, at->format);
-			}
-			at->passthrough_restart_after_flush = 1;
-		}
-	}
-
 	ssize_t ret = 0;
 	ssize_t len_to_write = MIN(at->buf_size, len);
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);
@@ -1819,6 +1796,7 @@ DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d
 DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush write");
 			call_void_method(at, "play", "()V");
 			at->passthrough_restart_after_flush = 0;
+			at->track_paused = 0;
 		}
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
 
@@ -1839,6 +1817,14 @@ DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush
 	// Returning 0 immediately prevents tight loops that cause ANRs on devices with
 	// slow/broken audio HALs (e.g., MediaTek HAL timeouts on Google TV devices).
 	if (ret == 0 || ret == -6 /* ERROR_DEAD_OBJECT */) {
+		if (ret == 0 && at->track_paused) {
+			// Not a dead track: a blocking write() racing AudioTrack.pause()
+			// returns 0 once the paused buffer is full. Drop just this chunk
+			// (the audio thread stops on s->paused right after) and do not
+			// trigger recovery/recreation.
+DBG			LOG("audiotrack_write: write returned 0 on paused track (pause race) -> dropping chunk, no recovery");
+			return -1;
+		}
 		if (ret == 0) {
 ERR			LOG("audiotrack_write: write returned 0 (AudioTrack dead/broken) -> recovering track");
 		} else {
@@ -2406,6 +2392,7 @@ ERR		LOG("track not valid, error");
 	}
 	call_void_method_with_env(at, env_local, "pause", "()V");
 	call_void_method_with_env(at, env_local, "flush", "()V");
+	at->track_paused = 1;
 
 	// Reset timing state after flush
 	at->i_samples_written = 0;

@@ -678,8 +678,8 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 			corrected_pipeline = 1000;
 		}
 
-		// Keep one production diagnostic per AudioTrack configuration. It is needed
-		// to diagnose route-specific Android/HAL latency reports from field logs.
+		// Keep a production diagnostic whenever the normalized estimate is calculated.
+		// It is needed to diagnose route-specific Android/HAL reports from field logs.
 		LOG("mode2_normalized_latency: fmt=%04X raw_track=%u system=%u app=%u residual=%u bytes_written=%llu logical_samples=%llu capacity=%u selected=%u",
 			at->format, track_latency, system_latency, app_latency, residual_ms,
 			(unsigned long long)bytes_written, (unsigned long long)logical_samples,

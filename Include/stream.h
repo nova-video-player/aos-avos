@@ -770,7 +770,12 @@ typedef struct STREAM {
 	int		audio_start_pending;
 	int		audio_start_pts;
 	int		audio_start_target_ts;
-	int		mode2_last_chunk_ms;	// logical duration of last mode2 write; lower bound for lead gate
+	int		mode2_heard_interp_valid;	// direct-mode2 continuous heard clock seeded from submitted frontier
+	int		mode2_heard_interp_ts;	// last interpolated heard TS
+	int		mode2_heard_interp_wall_ms;	// monotonic wall sample for interpolation
+	int		mode2_heard_interp_raw_ts;	// latest submitted heard endpoint
+	int		mode2_heard_interp_delay_ms;	// selected delay used for the current epoch
+	int		mode2_heard_interp_last_log_ms;
 	int		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
 	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
 	int		ac3_recode_pacer_max_lead_ms;	// bounded write-ahead reservoir to subtract from heard time

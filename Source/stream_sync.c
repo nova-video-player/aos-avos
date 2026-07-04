@@ -23,6 +23,7 @@
 #include "stream_sync.h"
 
 #include <string.h>
+#include <pthread.h>
 
 #ifdef CONFIG_AUDIO_AC3
 extern int libavos_get_ac3_recoding_enabled(void);
@@ -53,6 +54,9 @@ extern int stream_bdrop_threshold;
 extern int stream_pdrop_threshold;
 
 static volatile int	stream_dbg_delay = 0;
+// Guards s->mode2_heard_interp_* read-modify-write. stream_get_heard_audio_ts()
+// is called from both the audio producer and the video scheduler threads.
+static pthread_mutex_t mode2_heard_interp_lock = PTHREAD_MUTEX_INITIALIZER;
 static int atempo_delay_log_count = 0;
 int stream_get_atempo_delay( STREAM *s );
 static int sync_diag_count = 0;
@@ -68,12 +72,6 @@ static int stream_use_xbmc_smoothing = 1;
 // Simple audio-lead gate threshold (Phase 1B baseline).
 // Phase 4 hysteresis constants removed in Commit C.
 #define STREAM_PCM_AUDIO_LEAD_GATE_MS        200
-// Mode2 passthrough lead gate: floor for the one-packet-duration gate.
-// Actual gate_ms = max(STREAM_MODE2_AUDIO_LEAD_GATE_MS, s->mode2_last_chunk_ms).
-// Startup: gate is skipped while heard_ts <= 0 (audio not yet audible) so the
-// first writes can unblock video without the gate firing on every write.
-// Once audio is hearable the gate engages immediately at one-chunk granularity.
-#define STREAM_MODE2_AUDIO_LEAD_GATE_MS  32
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 // Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
 // delta <= COMMIT_DELTA: direct commit (normal slow drift).
@@ -445,6 +443,12 @@ int stream_sync_restart( STREAM *s )
 	
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
+	s->mode2_heard_interp_valid = 0;
+	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_heard_interp_wall_ms = 0;
+	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_heard_interp_delay_ms = -1;
+	s->mode2_heard_interp_last_log_ms = 0;
 
 	_sync_diag_reset();
 
@@ -777,8 +781,74 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 	int heard_ts = s->audio_time - heard_delay;
 
-	// Mode2 wall-clock heard path and PCM interpolation are deferred to Phase 4.
-	// heard_ts = audio_time - selected_delay is the baseline for all paths.
+	// Direct mode2 AudioTrack writes are accepted in coarse compressed-buffer
+	// quanta (for example six 32ms EAC3 packets at once). The submitted endpoint
+	// remains the accounting ceiling, but it is not a continuous presentation
+	// clock. Interpolate heard time from CLOCK_MONOTONIC between accepted batches
+	// and clamp it to that endpoint. AC3 recode is excluded because its dedicated
+	// wall-clock burst pacer already supplies smooth write timing.
+	if( passthrough_mode >= 2 && !ac3_recoding && s->sync_v_time >= 0 ) {
+		int raw_heard_ts = heard_ts;
+
+		pthread_mutex_lock( &mode2_heard_interp_lock );
+
+		// A selected-delay change resets the epoch. It effectively happens once,
+		// when the normalized latency estimate freezes shortly after start: the
+		// interpolator was seeded during buffer fill from the raw track delay, so
+		// that pre-audible phase must be discarded, not preserved (avos-429 showed
+		// a permanent ~270ms heard deficit when the phase was carried across).
+		int reset_interp = !s->mode2_heard_interp_valid ||
+			heard_delay != s->mode2_heard_interp_delay_ms ||
+			raw_heard_ts < s->mode2_heard_interp_raw_ts;
+
+		if( reset_interp ) {
+			s->mode2_heard_interp_valid = 1;
+			s->mode2_heard_interp_ts = raw_heard_ts;
+			s->mode2_heard_interp_wall_ms = wall_now;
+		} else {
+			if( s->paused || s->paused_internal ) {
+				// Playback is paused: physical presentation is frozen, so hold the
+				// interpolated phase and keep the wall epoch current so resume does
+				// not credit the pause duration as elapsed audio.
+				s->mode2_heard_interp_wall_ms = wall_now;
+			} else {
+				int elapsed_ms = wall_now - s->mode2_heard_interp_wall_ms;
+				if( elapsed_ms < 0 ) {
+					// atime() wrap or an invalid epoch: preserve phase and restart.
+					elapsed_ms = 0;
+				}
+				int candidate = s->mode2_heard_interp_ts + elapsed_ms;
+				// Never run past the submitted-audio frontier or move backwards
+				// inside an epoch. Discontinuities take the reset path above.
+				if( candidate > raw_heard_ts ) {
+					candidate = raw_heard_ts;
+				}
+				if( candidate > s->mode2_heard_interp_ts ) {
+					s->mode2_heard_interp_ts = candidate;
+				}
+				s->mode2_heard_interp_wall_ms = wall_now;
+			}
+		}
+
+		s->mode2_heard_interp_raw_ts = raw_heard_ts;
+		s->mode2_heard_interp_delay_ms = heard_delay;
+		heard_ts = s->mode2_heard_interp_ts;
+
+		int do_log = 0;
+		if( wall_now - s->mode2_heard_interp_last_log_ms >= 500 ) {
+			s->mode2_heard_interp_last_log_ms = wall_now;
+			do_log = 1;
+		}
+
+		pthread_mutex_unlock( &mode2_heard_interp_lock );
+
+		if( do_log ) {
+			DBG serprintf("mode2_heard_interp: wall=%d raw=%d interp=%d ceiling_gap=%d audio=%d delay=%d reset=%d paused=%d\n",
+				wall_now, raw_heard_ts, heard_ts, raw_heard_ts - heard_ts,
+				s->audio_time, heard_delay, reset_interp,
+				s->paused || s->paused_internal);
+		}
+	}
 
 	// 3. STARTUP CLAMP (Non-Mode 2 only)
 	if( !is_mode2_sync && passthrough_mode && s->sink_ref_time == -1 &&
@@ -975,7 +1045,12 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pending = 0;
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_last_chunk_ms = 0;
+	s->mode2_heard_interp_valid = 0;
+	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_heard_interp_wall_ms = 0;
+	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_heard_interp_delay_ms = -1;
+	s->mode2_heard_interp_last_log_ms = 0;
 	_stream_pcm_delay_memory_reset( s );
 	s->warmup_video_frames = 0;
 
@@ -1402,12 +1477,11 @@ DBGA	serprintf(" <<%d>> ", s->audio_time);
 int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 {
 	// Hold the audio producer when heard audio is materially ahead of video.
-	// Applies to PCM and mode2 passthrough: audio_time advances by logical
-	// duration (fakeSize-equivalent), so heard_ts = audio_time - selected_delay
-	// correctly reflects logically queued audio, not raw byte capacity.
-	// Mode1 passthrough is exempt: IEC61937 byte accounting is accurate and
-	// the mode1 startup clamp would make the gate trigger too aggressively.
-	// ac3_recoding is exempt: its timing is managed separately.
+	// This is a PCM-only scheduler guard. Compressed passthrough is exempt:
+	// mode1 is paced by IEC writes, while mode2 relies on blocking
+	// AudioTrack.write() for real buffer backpressure. Gating mode2 from its
+	// packet-quantized logical clock creates a write/hold limit cycle and visible
+	// video stutter. AC3 recoding is paced separately.
 	// No persistent state, no hysteresis.
 	if( !s || !s->put_time_mode || !s->audio_sink || ac3_recoding ||
 		s->sync_v_time == STREAM_NO_PTS_VALUE || s->audio_time == -1 ||
@@ -1416,30 +1490,14 @@ int stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding )
 	}
 	int passthrough_mode = s->audio_sink->get_passthrough ?
 		s->audio_sink->get_passthrough( s ) : 0;
-	if( passthrough_mode == 1 ) {
+	if( passthrough_mode >= 1 ) {
 		return 0;
 	}
 	int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
 	if( heard_ts == STREAM_NO_PTS_VALUE ) {
 		return 0;
 	}
-	int gate_ms;
-	if( passthrough_mode == 2 ) {
-		// Startup: skip gate until audio is hearable (heard_ts > 0).
-		// Before this point audio must write freely so heard_ts goes positive
-		// and unblocks video. Engaging the gate while heard_ts <= 0 causes the
-		// gate to fire on every write and permanently stall the startup sequence.
-		if( heard_ts <= 0 ) {
-			return 0;
-		}
-		// Steady-state: gate >= one logical packet so a single write can never
-		// trip the gate. Use the measured chunk duration when available; fall
-		// back to STREAM_MODE2_AUDIO_LEAD_GATE_MS (32ms) as the floor.
-		gate_ms = s->mode2_last_chunk_ms > STREAM_MODE2_AUDIO_LEAD_GATE_MS
-			? s->mode2_last_chunk_ms : STREAM_MODE2_AUDIO_LEAD_GATE_MS;
-	} else {
-		gate_ms = STREAM_PCM_AUDIO_LEAD_GATE_MS;
-	}
+	int gate_ms = STREAM_PCM_AUDIO_LEAD_GATE_MS;
 	int user_av_delay = s->av_delay + stream_dbg_delay;
 	if( user_av_delay < 0 ) {
 		// The lead gate prevents producer runaway; it is not the realizer for

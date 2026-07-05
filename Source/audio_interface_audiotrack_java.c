@@ -671,12 +671,13 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 			corrected_pipeline = system_latency + capacity_ms;
 		}
 
-		// Apply an empirical 1000ms sync tuning cap (heuristic ceiling). Low-bitrate/stereo streams
-		// project a huge theoretical capacity (>1.3s); this empirical limit aligns the player sync
-		// pacing with physical pipeline behavior.
-		if (corrected_pipeline > 1000) {
-			corrected_pipeline = 1000;
-		}
+		// No empirical cap. A former 1000ms ceiling truncated the selected delay for
+		// low-bitrate streams (e.g. 209kbps AC3 2.0: 32KB buffer really holds ~1365ms;
+		// blocking writes keep it full, HAL drains in ~660ms quanta). Capping made the
+		// heard clock overestimate physical presentation by capacity-cap (~365ms), so
+		// the video scheduler slewed toward a false clock and drifted out of sync after
+		// a track change (avos-443). The paired-ratio capacity is the physically
+		// buffered duration and must be used unmodified.
 
 		// Keep a production diagnostic whenever the normalized estimate is calculated.
 		// It is needed to diagnose route-specific Android/HAL reports from field logs.

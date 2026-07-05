@@ -75,10 +75,12 @@ static int stream_use_xbmc_smoothing = 1;
 // Mode2 heard interpolator: max lead over the submitted frontier heard point.
 // Between accepted write batches the buffer drains while playback continues, so
 // the physical presentation position legitimately runs ahead of
-// audio_time - selected_delay by up to one HAL batch quantum (~192-350ms
-// observed). The cap only bounds true starvation, where the producer stops and
-// the interpolator must not extrapolate past drained coverage.
-#define STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS 500
+// audio_time - selected_delay by up to one HAL batch quantum (~192-350ms on
+// EAC3, ~660-700ms on low-bitrate AC3 2.0 routes, avos-443). The cap must
+// exceed the largest batch quantum or the clock pins mid-interval; it only
+// bounds true starvation, where the producer stops and the interpolator must
+// not extrapolate past drained coverage.
+#define STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS 800
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 // Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
 // delta <= COMMIT_DELTA: direct commit (normal slow drift).
@@ -861,9 +863,17 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				int candidate = s->mode2_heard_interp_ts + elapsed_ms;
 				// Free-run ahead of the frontier: between accepted batches the
 				// buffer drains while playback continues, so physical presentation
-				// legitimately exceeds raw. Cap the lead to bound true starvation.
-				if( candidate > raw_heard_ts + STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS ) {
-					candidate = raw_heard_ts + STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS;
+				// legitimately exceeds raw. The physical bound is the buffered
+				// amount itself (heard_delay = capacity): presentation can never
+				// be more than one full buffer ahead of the full-buffer model.
+				// This also keeps the empty-buffer frontier seed (raw + delay,
+				// track-change restart) inside the envelope during refill.
+				// MAX_LEAD_MS remains a floor for routes whose HAL batch quantum
+				// exceeds a small capacity; the cap only bounds true starvation.
+				int max_lead = heard_delay > STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS ?
+					heard_delay : STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS;
+				if( candidate > raw_heard_ts + max_lead ) {
+					candidate = raw_heard_ts + max_lead;
 				}
 				if( candidate > s->mode2_heard_interp_ts ) {
 					s->mode2_heard_interp_ts = candidate;

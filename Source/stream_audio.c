@@ -623,6 +623,10 @@ void stream_audio_flush( STREAM *s )
 	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_heard_interp_delay_ms = -1;
 	s->mode2_heard_interp_last_log_ms = 0;
+	// Discard any stale frontier seed; the paths that empty the sink buffer
+	// (sink flush in the seek paths, passthrough sink reopen on format change)
+	// re-arm it after this flush runs.
+	s->mode2_heard_frontier_seed_pending = 0;
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
@@ -1583,6 +1587,18 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										s->audio_sink_open = 0;
 									}
 								}
+								// The recreated track starts with an EMPTY buffer: the HAL
+								// consumes the first write immediately, so the first frame's
+								// physical presentation begins at write time, not
+								// selected_delay later. Tell the mode2 heard interpolator to
+								// seed its next epoch at the frontier (audio_time) instead of
+								// audio_time - selected_delay. It cannot infer this itself:
+								// audio_time is continuous across a mid-playback track change,
+								// so the raw heard endpoint does not jump backward (avos-446:
+								// raw-seeded epochs made the sync gate hold video against a
+								// phantom deficit that the wall-anchored blit schedule then
+								// kept forever, ~380-1050ms added per track change).
+								s->mode2_heard_frontier_seed_pending = 1;
 							} else if( !is_ac3_recoding &&
 							           (format_changed || channels_changed || samplerate_changed || bits_changed) &&
 							           s->audio_sink->close && s->audio_sink->open ) {

@@ -799,18 +799,52 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 		pthread_mutex_lock( &mode2_heard_interp_lock );
 
-		// A selected-delay change resets the epoch. It effectively happens once,
-		// when the normalized latency estimate freezes shortly after start: the
-		// interpolator was seeded during buffer fill from the raw track delay, so
-		// that pre-audible phase must be discarded, not preserved (avos-429 showed
-		// a permanent ~270ms heard deficit when the phase was carried across).
-		int reset_interp = !s->mode2_heard_interp_valid ||
-			heard_delay != s->mode2_heard_interp_delay_ms ||
-			raw_heard_ts < s->mode2_heard_interp_raw_ts;
+		// Epoch resets. Each cause needs a different seed because the buffer
+		// fill state differs (avos-444: seeding every reset at raw pushed video
+		// back ~360ms per mid-playback track change, accumulating):
+		//
+		// 1. First start (!valid): seed at raw. heard <= 0 then gates video
+		//    until audio becomes audible; the pre-audible phase is discarded by
+		//    the delay-change reset once the normalized latency freezes
+		//    (avos-429 showed a permanent ~270ms deficit when it was carried).
+		// 2. Mid-playback sink recreation (track change): the track was torn
+		//    down and reopened, the buffer is EMPTY, and the HAL consumes the
+		//    first write immediately - physical presentation of the first frame
+		//    begins at write time, not selected_delay later. Seed at the
+		//    frontier (audio_time, i.e. heard_delay ahead of raw): raw assumes
+		//    a full buffer and understates presentation by up to the whole
+		//    capacity during refill, making the sync gate hold video against a
+		//    phantom deficit and push it permanently late. Raw races up under
+		//    the frozen-phase clock as blocking writes refill; the normal
+		//    envelope resumes once it catches up. This case is signaled
+		//    explicitly by the reconfigure path (frontier_seed_pending): it is
+		//    not inferable here, because audio_time is continuous across a
+		//    track change so raw does not jump backward (avos-446). The
+		//    backward-raw check remains as a fallback for flush paths that
+		//    do rewind the timeline.
+		// 3. Selected-delay change with a continuous frontier (normalized
+		//    latency freezing shortly after a restart): keep the clock
+		//    monotonic. Seeding at the new raw would snap the frontier-seeded
+		//    clock back down mid-refill and reintroduce the deficit of case 2.
+		int first_start = !s->mode2_heard_interp_valid;
+		int frontier_restart = s->mode2_heard_frontier_seed_pending ||
+			(!first_start && raw_heard_ts < s->mode2_heard_interp_raw_ts);
+		int delay_change = !first_start && !frontier_restart &&
+			heard_delay != s->mode2_heard_interp_delay_ms;
+		int reset_interp = first_start || frontier_restart || delay_change;
+		s->mode2_heard_frontier_seed_pending = 0;
 
 		if( reset_interp ) {
+			int seed;
+			if( frontier_restart ) {
+				seed = raw_heard_ts + heard_delay;	// = audio_time, empty-buffer frontier
+			} else if( delay_change && s->mode2_heard_interp_ts > raw_heard_ts ) {
+				seed = s->mode2_heard_interp_ts;	// keep phase, stay monotonic
+			} else {
+				seed = raw_heard_ts;
+			}
 			s->mode2_heard_interp_valid = 1;
-			s->mode2_heard_interp_ts = raw_heard_ts;
+			s->mode2_heard_interp_ts = seed;
 			s->mode2_heard_interp_wall_ms = wall_now;
 		} else {
 			if( s->paused || s->paused_internal ) {

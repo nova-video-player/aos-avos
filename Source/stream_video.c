@@ -4682,6 +4682,16 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 	stream_audio_flush( s );
 	if( s->audio_sink ) {
 		s->audio_sink->flush( s );
+		// The sink buffer is now EMPTY: the HAL consumes the first post-flush
+		// write immediately, so its physical presentation begins at write time,
+		// not selected_delay later. Tell the mode2 heard interpolator to seed
+		// its next epoch at the frontier (audio_time), not audio_time -
+		// selected_delay; the raw seed assumes a full buffer and understates
+		// presentation by up to the whole capacity during refill, making the
+		// sync gate hold video against a phantom deficit that the wall-anchored
+		// blit schedule then keeps forever (avos-446/447: ~380-1050ms added per
+		// track change). Must be set after stream_audio_flush, which clears it.
+		s->mode2_heard_frontier_seed_pending = 1;
 	}
 
 	if( s->video_dec) {
@@ -4787,6 +4797,10 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 	stream_audio_flush( s );
 	if( s->audio_sink ) {
 		s->audio_sink->flush( s );
+		// Sink buffer now empty: arm the mode2 frontier seed (see the
+		// stream_seek_loop site for the full rationale, avos-446/447).
+		// Must be set after stream_audio_flush, which clears it.
+		s->mode2_heard_frontier_seed_pending = 1;
 	}
 	if( err ) {
 		stream_sync_init( s, sc.time );

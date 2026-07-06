@@ -44,15 +44,34 @@ static void sync_styles(SSA_BACKEND *ctx) {
     SUB_USER_STYLE u;
     memset(&u, 0, sizeof(SUB_USER_STYLE));
     sub_style_snapshot(ctx->user_style_ptr, &u);
+    // sub_style_snapshot() deep-copies font_family into a fresh strdup'd buffer that this
+    // function now owns — every exit path below must free(u.font_family) exactly once.
+    // See sub_style.c's sub_style_snapshot() doc comment for why a shallow pointer copy
+    // isn't safe here (use-after-free window against a concurrent setter call).
 
-    if (u.serial == ctx->last_serial) return;
+    if (u.serial == ctx->last_serial) {
+        free(u.font_family);
+        return;
+    }
     ctx->last_serial = u.serial;
 
-    // 1. Create Backups of the Original ASS Styles on first run
-    if (!ctx->backups && ctx->track->n_styles > 0) {
-        ctx->num_backups = ctx->track->n_styles;
-        ctx->backups = calloc(ctx->num_backups, sizeof(ASS_Style_Backup));
-        for (int i = 0; i < ctx->num_backups; i++) {
+    // 1. Create Backups of the Original ASS Styles.
+    // IMPORTANT: this must run on every call, not just the first, because ass_process_data()
+    // (called from ssa_feed() for every incoming line) can itself add NEW style definitions
+    // to the track mid-stream if the source delivers its [V4+ Styles] section incrementally
+    // or the container hands off the header in fragments. If we only ever snapshotted once
+    // (the old behavior), any style that appeared after that first snapshot had no backup
+    // entry: the restore loop below would correctly skip it (bounded by num_backups) but
+    // the apply loop further down is bounded by the CURRENT n_styles, so such a style would
+    // keep receiving the user's forced overrides forever with no way to restore its actual
+    // authored values — e.g. switching to Embedded mode later would silently fail to revert
+    // that particular style.
+    if (ctx->track->n_styles > ctx->num_backups) {
+        int old_count = ctx->num_backups;
+        int new_count = ctx->track->n_styles;
+        ctx->backups = realloc(ctx->backups, new_count * sizeof(ASS_Style_Backup));
+        memset(ctx->backups + old_count, 0, (new_count - old_count) * sizeof(ASS_Style_Backup));
+        for (int i = old_count; i < new_count; i++) {
             ASS_Style *s = &ctx->track->styles[i];
             ctx->backups[i].FontSize = s->FontSize;
             ctx->backups[i].FontName = s->FontName ? strdup(s->FontName) : NULL;
@@ -65,6 +84,7 @@ static void sync_styles(SSA_BACKEND *ctx) {
             ctx->backups[i].Shadow = s->Shadow;
             ctx->backups[i].MarginV = s->MarginV;
         }
+        ctx->num_backups = new_count;
     }
 
     // 2. Restore everything to original ASS baseline first
@@ -157,6 +177,8 @@ static void sync_styles(SSA_BACKEND *ctx) {
             }
         }
     }
+
+    free(u.font_family);
 }
 
 static void ass_msg_cb(int level, const char *fmt, va_list va, void *data) {

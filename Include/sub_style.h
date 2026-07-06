@@ -12,6 +12,7 @@
 
 #include "sub_types.h"
 #include <stdint.h>
+#include <pthread.h>
 
 /* ------------------------------------------------------------------
  * Global, persisted user style — one instance per player session.
@@ -39,6 +40,15 @@ typedef struct SUB_USER_STYLE {
     int      override_mode; // 0 = Embedded, 1 = Force Custom, 2 = Scale Only
 
     int      serial;        // Incremented on any style change to trigger cache invalidation
+
+    pthread_mutex_t lock;    // Guards every field above + serial. See sub_style.c for why:
+                             // setters run on the Android UI thread (via JNI), snapshot()
+                             // runs on the native EGL render thread — without this lock,
+                             // a setter's non-atomic "write field, then serial++" could
+                             // interleave with snapshot()'s memcpy, producing a torn read
+                             // (some fields updated, some not) or a fresh-fields/stale-serial
+                             // mismatch that silently defers a style change to whenever the
+                             // next unrelated change happens to land.
 } SUB_USER_STYLE;
 
 // --- LIFECYCLE ---

@@ -40,8 +40,17 @@ static int64_t engine_clock_cb(void *ctx) {
 	STREAM *s = (STREAM *)ctx; // Cast the context directly to the STREAM pointer
 	if (!s) return 0;
 	int dummy_duration = 0;
-	// Returns the current video PTS in milliseconds directly from the stream
-	return stream_get_current_time(s, &dummy_duration);
+
+	// 1. Get the raw video PTS
+	int64_t time = stream_get_current_time(s, &dummy_duration);
+
+	// 2. Apply the exact same correction as _sub_decode
+	time -= s->subtitle_offset;
+	if (time < 0) {
+		time = 0;
+	}
+
+	return time;
 }
 
 static int stream_buffer_size = 24;

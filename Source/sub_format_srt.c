@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <android/log.h>
+
+#define LOG_TAG "SubFormatSRT"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 
@@ -12,12 +16,21 @@ typedef struct {
 
 static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_w, int video_h) {
     char *header = malloc(2048);
-    if (video_w <= 0) video_w = 1920;
-    if (video_h <= 0) video_h = 1080;
 
-    int font_size = (int)(video_h * 0.055);
-    int margin_v = (int)(video_h * 0.06);
-    int margin_h = (int)(video_w * 0.05);
+    double aspect = 16.0 / 9.0;
+    if (video_w > 0 && video_h > 0) {
+        aspect = (double)video_w / (double)video_h;
+    }
+
+    int playres_y = 720;
+    int playres_x = (int)(playres_y * aspect);
+
+    LOGD("SUB_SURFACE: Generated ASS header with PlayResX: %d, PlayResY: %d (Aspect: %f, Surface: %dx%d)",
+         playres_x, playres_y, aspect, video_w, video_h);
+
+    int font_size = 40;
+    int margin_v = 10;
+    int margin_h = 20;
 
     // Alignment 2 = Bottom-Center. BorderStyle 3 = Tight Box.
     snprintf(header, 2048,
@@ -28,7 +41,7 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
         "Style: Default,sans-serif,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,3,0,0,2,%d,%d,%d,1\n",
-        video_w, video_h, font_size, margin_h, margin_h, margin_v);
+        playres_x, playres_y, font_size, margin_h, margin_h, margin_v);
 
     return header;
 }

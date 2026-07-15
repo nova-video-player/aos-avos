@@ -19,6 +19,10 @@ struct SUB_ENGINE {
     SUB_USER_STYLE       *style;
     SUB_FORMAT_BACKEND   *active_backend;
 
+    int surface_w;
+    int surface_h;
+
+
     int is_paused;
     sub_engine_clock_fn clock_fn;
     void *clock_ctx;
@@ -44,16 +48,63 @@ void sub_engine_destroy(SUB_ENGINE *eng) {
     free(eng);
 }
 
-void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window) { sub_render_gl_attach_surface(eng->renderer, window); }
-void sub_engine_detach_surface(SUB_ENGINE *eng) { sub_render_gl_detach_surface(eng->renderer); }
+void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window) {
+    if (!eng) return;
+    // A new native window is a NEW surface. Any surface_w/h we cached from
+    // whatever was attached before (e.g. the full-screen player.xml surface,
+    // right before switching into floating_player.xml's separate
+    // gl_subtitle_view) describes that old surface, not this one. If
+    // open_track() runs before this new surface's own surface_resized()
+    // callback arrives, it must fall back to the real video_w/h rather than
+    // silently inheriting a foreign surface's size. So: invalidate on every
+    // attach, not just on detach, since some callers attach a new window
+    // without ever detaching the previous one first.
+    pthread_mutex_lock(&eng->lock);
+    eng->surface_w = 0;
+    eng->surface_h = 0;
+    pthread_mutex_unlock(&eng->lock);
+    sub_render_gl_attach_surface(eng->renderer, window);
+}
+void sub_engine_detach_surface(SUB_ENGINE *eng) {
+    if (!eng) return;
+    // Mirror invalidation on detach too, so a gap between "surface gone" and
+    // "next surface attached" can't leave a stale nonzero size sitting
+    // around for open_track() to pick up in between.
+    pthread_mutex_lock(&eng->lock);
+    eng->surface_w = 0;
+    eng->surface_h = 0;
+    pthread_mutex_unlock(&eng->lock);
+    sub_render_gl_detach_surface(eng->renderer);
+}
 void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
     if (!eng) return;
+
+    LOGD("SUB_SURFACE: Surface resized event received: %d x %d", width, height);
+
+    pthread_mutex_lock(&eng->lock);
+    eng->surface_w = width;
+    eng->surface_h = height;
+    pthread_mutex_unlock(&eng->lock);
     sub_render_gl_resize(eng->renderer, width, height);
     sub_engine_resize_video(eng, width, height); // <--- Tells Libass to wrap text to the new 3D box!
 }
 
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h, const uint8_t *codec_private, int codec_private_size) {
     if (!eng) return -1;
+
+    int target_w, target_h;
+    if (format_id == SUB_FMT_SRT) {
+        pthread_mutex_lock(&eng->lock);
+        target_w = eng->surface_w > 0 ? eng->surface_w : video_w;
+        target_h = eng->surface_h > 0 ? eng->surface_h : video_h;
+        pthread_mutex_unlock(&eng->lock);
+    } else {
+        target_w = video_w;
+        target_h = video_h;
+    }
+
+    LOGD("SUB_SURFACE: Opening track (format=%d) with canvas dimensions: %d x %d (raw video dim: %d x %d)",
+         format_id, target_w, target_h, video_w, video_h);
 
     SUB_FORMAT_BACKEND *backend;
     if (format_id == SUB_FMT_SSA) {
@@ -67,7 +118,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w,
     }
 
     SUB_FORMAT_OPEN_PARAMS params = {
-        .video_w = video_w, .video_h = video_h,
+        .video_w = target_w, .video_h = target_h,
         .codec_private = codec_private, .codec_private_size = codec_private_size,
         .user_style = eng->style,
         .is_plain_text_format = (format_id == SUB_FMT_SRT) // Tell backend to force styles!
@@ -158,7 +209,14 @@ void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h) {
     if (!eng) return;
     pthread_mutex_lock(&eng->lock);
     if (eng->active_backend && eng->active_backend->resize) {
-        // Direct passthrough: Libass will wrap natively to whatever size Java tells it
+        // Direct passthrough: whatever size the caller reports IS both the
+        // libass canvas and where it's drawn -- for the 2D TextureView path
+        // that's now correct by construction (SurfaceController sizes
+        // mSubtitleView itself: full-screen for plain text, tethered to the
+        // video's own box for embedded ASS/SSA -- see updateSurface()), and
+        // for the 3D hybrid CPU-blend path (draw3DSubtitles) it's always the
+        // full physical screen regardless of format, same as it always was.
+        // No format-specific branching needed here at all.
         eng->active_backend->resize(eng->active_backend, video_w, video_h);
     }
     pthread_mutex_unlock(&eng->lock);

@@ -27,7 +27,12 @@ typedef struct {
     ASS_Renderer   *renderer;
     ASS_Track      *track;
     pthread_mutex_t lock;
-    int             video_w, video_h;
+    int             video_w, video_h;  // What ass_set_frame_size() was called with. Java now
+                                        // decides what this should be per-format (full surface
+                                        // for plain text, tethered to the video's own on-screen
+                                        // box for embedded ASS/SSA) via mSubtitleView's own
+                                        // layout size/position -- resize() just applies whatever
+                                        // it's given, always.
 
     // --- LIVE SYNC VARIABLES ---
     const SUB_USER_STYLE *user_style_ptr;
@@ -164,7 +169,15 @@ static void sync_styles(SSA_BACKEND *ctx) {
                 // the bottom, which is what the vertical-offset slider visually looked like.
                 if (u.margin_bottom > 0) {
                     if (style->Alignment >= 1 && style->Alignment <= 3) {
-                        style->MarginV = u.margin_bottom;
+                        if (ctx->video_h > 0 && ctx->track->PlayResY > 0) {
+                            float scale_ratio = (float)ctx->track->PlayResY / (float)ctx->video_h;
+                            style->MarginV = (int)(u.margin_bottom * scale_ratio);
+                            LOGD("SUB_SURFACE: Margin translation: UI sent %d physical px -> libass mapped to %d logical px (Scale: %f, PlayResY: %d, SurfaceH: %d)",
+                                 u.margin_bottom, style->MarginV, scale_ratio, ctx->track->PlayResY, ctx->video_h);
+                        } else {
+                            // Fallback just in case
+                            style->MarginV = u.margin_bottom;
+                        }
                     }
                 }
 
@@ -201,8 +214,10 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     ass_set_extract_fonts(ctx->library, 1);
 
     ctx->renderer = ass_renderer_init(ctx->library);
-    ass_set_frame_size(ctx->renderer, ctx->video_w > 0 ? ctx->video_w : 1920,
-                       ctx->video_h > 0 ? ctx->video_h : 1080);
+    int final_w = ctx->video_w > 0 ? ctx->video_w : 1920;
+    int final_h = ctx->video_h > 0 ? ctx->video_h : 1080;
+    LOGD("SUB_SURFACE: Configured libass renderer frame size: %d x %d", final_w, final_h);
+    ass_set_frame_size(ctx->renderer, final_w, final_h);
 
     ctx->track = ass_new_track(ctx->library);
 
@@ -216,6 +231,7 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     // Save the global style pointers so we can sync them on the render thread
     ctx->user_style_ptr = params->user_style;
     ctx->is_plain_text  = params->is_plain_text_format;
+
     be->priv = ctx;
     return 0;
 }
@@ -316,12 +332,19 @@ static void ssa_free_frame(SUB_FORMAT_BACKEND *be, SUB_FRAME *frame) {
     free(frame);
 }
 
-static int ssa_resize(SUB_FORMAT_BACKEND *be, int video_w, int video_h) {
+static int ssa_resize(SUB_FORMAT_BACKEND *be, int w, int h) {
     SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
     pthread_mutex_lock(&ctx->lock);
-    ctx->video_w = video_w;
-    ctx->video_h = video_h;
-    ass_set_frame_size(ctx->renderer, video_w, video_h);
+    // Whatever size arrives here is now always correct for the current
+    // format by construction: SurfaceController sizes mSubtitleView itself
+    // per-format (full surface for plain text -- reaches the black bars --
+    // or tethered exactly to the video's own on-screen box for embedded
+    // ASS/SSA -- preserves the author's intended aspect/positioning). So
+    // this can just be a direct, format-agnostic passthrough; no separate
+    // destination-rect tracking needed.
+    ctx->video_w = w;
+    ctx->video_h = h;
+    ass_set_frame_size(ctx->renderer, w, h);
     pthread_mutex_unlock(&ctx->lock);
     return 0;
 }

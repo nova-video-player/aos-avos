@@ -111,6 +111,10 @@ static void* egl_render_thread(void* arg) {
                 eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
                 eglDestroySurface(display, surface);
                 surface = EGL_NO_SURFACE;
+                pthread_mutex_lock(&r->lock);
+                r->surface_width  = 0;
+                r->surface_height = 0;
+                pthread_mutex_unlock(&r->lock);
             }
 
             current_window = target_window;
@@ -120,6 +124,26 @@ static void* egl_render_thread(void* arg) {
                 if (surface != EGL_NO_SURFACE) {
                     eglMakeCurrent(display, surface, surface, context);
                     eglSwapInterval(display, 1);
+
+                    // Adopt this new surface's REAL pixel size right away, instead of
+                    // waiting for a separate sub_render_gl_resize() call to arrive from
+                    // the Java/JNI side. That call is driven by an independent callback
+                    // (TextureView's onSurfaceTextureSizeChanged) whose timing relative
+                    // to attach_surface() isn't guaranteed -- e.g. switching to the
+                    // floating player's window here would otherwise keep drawing with
+                    // r->surface_width/height still left over from whichever window
+                    // (typically full-screen) was attached before, until that callback
+                    // happens to land. Querying EGL directly makes this self-correcting.
+                    EGLint real_w = 0, real_h = 0;
+                    eglQuerySurface(display, surface, EGL_WIDTH, &real_w);
+                    eglQuerySurface(display, surface, EGL_HEIGHT, &real_h);
+                    if (real_w > 0 && real_h > 0) {
+                        pthread_mutex_lock(&r->lock);
+                        r->surface_width  = real_w;
+                        r->surface_height = real_h;
+                        pthread_mutex_unlock(&r->lock);
+                        LOGD("SUB_RENDER_GL: adopted real EGL surface size %d x %d on window attach", real_w, real_h);
+                    }
 
                     if (r->gl_program == 0) {
                         const char* vs_src =

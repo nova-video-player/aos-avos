@@ -2003,6 +2003,14 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
 		audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
 	}
+	// PCM startup holds its first audio write until the rendered video position
+	// reaches audio_start_target_ts.  Admit the forward frame that closes that
+	// gap before requiring an audio clock, otherwise both threads wait forever.
+	if( s->put_time_mode && !passthrough_mode && s->audio_start_pending &&
+		s->audio_start_target_ts != STREAM_NO_PTS_VALUE &&
+		s->video_time < s->audio_start_target_ts && video_time >= s->video_time ) {
+		return 0;
+	}
 	if( s->sync_v_time == -1 || audio_time_for_diff == -1 )
 		return 1;
 	if( s->put_time_mode && audio_time_for_diff <= 0 ) {

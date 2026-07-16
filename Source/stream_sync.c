@@ -452,6 +452,8 @@ int stream_sync_restart( STREAM *s )
 	
 	s->sink_ref_time = -1;
 	s->vid_ref_time = -1;
+	s->sync_v_time = -1;
+	s->sync_a_time = -1;
 	s->mode2_heard_interp_valid = 0;
 	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_heard_interp_wall_ms = 0;
@@ -1845,6 +1847,9 @@ DBGY serprintf("{SSA %d}} ", audio_time );
 		}
 	}
 	if( s->sync_v_time == -1 || audio_time_for_diff == -1 ) {
+		if (s->put_time_mode && s->sync_v_time == -1) {
+			return 0; // Don't block audio writes during startup/resume when video hasn't outputted yet
+		}
 		return 1;
 	}
 	
@@ -2010,14 +2015,18 @@ DBGY serprintf("{SSV %d}} ", video_time );
 	// if video is in the future, delay it
 	int diff = _stream_av_diff( s, s->sync_v_time, audio_time_for_diff );
 
-	// Legacy post-sink pipelines needed a large early-start allowance because
-	// video_time was sampled after the sink. In put_time mode the sink is
-	// already paced from audio-driven anchors, so carrying that 500 ms grace
-	// forward lets video render materially ahead of heard audio during atempo
-	// speed states. Keep the grace only for non-put_time sinks.
-	int max_rst = (s->vtime_post_sink && !s->put_time_mode) ? 500 : 0;
-	// Wait if video is LATE by more than the threshold.
-	int max_wait = RST_TO_TS_DELTA( max_rst, int );
+	// Under put_time mode (android_sync=1), the video sink paces frames using precise
+	// timed release to V-Sync with a lookahead of up to 200ms in the TS domain.
+	// To avoid choking this pipeline and forcing ASAP releases via coarse thread sleeps,
+	// we allow the video thread to lead by up to 300ms in the TS domain directly.
+	// Legacy post-sink non-put_time pipelines use real-time scale (RST) allowance.
+	int max_wait;
+	if (s->put_time_mode) {
+		max_wait = 300;
+	} else {
+		int max_rst = s->vtime_post_sink ? 500 : 0;
+		max_wait = RST_TO_TS_DELTA( max_rst, int );
+	}
 	if( diff > max_wait ) {
 DBGY serprintf( "{{V %d}} ", diff );
 		s->sync_audio = 0;

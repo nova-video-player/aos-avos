@@ -1798,7 +1798,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 
 						// Only hold if we have a valid video time to compare against.
-						if (s->video_time >= 0) {
+						if (s->video_time >= 0 && (!s->put_time_mode || s->sync_v_time != -1)) {
 							int diff = s->video_time - s->audio_start_target_ts;
 							// Relax hold threshold for TrueHD (very high packet cadence) to avoid startup freeze.
 							// TrueHD emits tiny 833us bursts; holding on each one creates a massive bottleneck.

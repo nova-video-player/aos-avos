@@ -602,6 +602,11 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 				anchor_ts = 0;
 			}
 			use_last_good = 1;
+		} else if( !delay_valid && s->video_sink && s->video_sink->name && strcmp(s->video_sink->name, "sfdec2") == 0 ) {
+			// sfdec2 timed pacing: if delay is invalid, heard_ts can lag far behind stream time.
+			// Using it for timeline_map_apply bakes in large skew during speed changes.
+			// Fall back to the current stream time until delay is valid.
+			use_current = 1;
 		}
 	}
 
@@ -852,7 +857,25 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		}
 	}
 	if( s->video->valid && !defer_commit ) {
-		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+		int is_sfdec2 = (s->video_sink && s->video_sink->name && strcmp(s->video_sink->name, "sfdec2") == 0);
+		if( is_sfdec2 ) {
+			// For sfdec2 timed rendering, always seed the anchor when audio_time exists.
+			if( s->audio_time != -1 ) {
+				int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
+				if( delay_valid ) {
+					_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+				} else {
+					// Defer re-anchoring on speed change until delay is valid to avoid catch-up bursts
+					int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
+					DBG serprintf("stream:stream_set_av_speed defer anchor (delay invalid, streak=%d v=%d a=%d heard_ts=%d)\n",
+						delay_streak, s->video_time, s->audio_time, anchor_ts);
+				}
+			} else {
+				DBG serprintf( "stream:stream_set_av_speed defer anchor (audio_time=%d)\n", s->audio_time );
+			}
+		} else {
+			_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+		}
 	}
 
 	if( speed_changed ) {

@@ -2804,6 +2804,7 @@ DBGS serprintf("stream_pause\r\n");
 		}
 
 		s->paused = 1;
+		sfdec2_android_sync_on_pause( s, 1 );
 		stream_audio_mute( s );
 		if ( s->audio_ctx && s->audio_sink_open ) {
 			audio_interface_pause( s->audio_ctx );
@@ -2872,6 +2873,7 @@ DBGS serprintf("stream_un_pause\r\n");
 		}
 
 		s->paused = 0;
+		sfdec2_android_sync_on_pause( s, 0 );
 
 		if ( s->speed == STREAM_SPEED_NORMAL ) {
 			stream_audio_unmute( s );

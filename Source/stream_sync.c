@@ -831,17 +831,17 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		//    monotonic. Seeding at the new raw would snap the frontier-seeded
 		//    clock back down mid-refill and reintroduce the deficit of case 2.
 		int first_start = !s->mode2_heard_interp_valid;
-		int frontier_restart = s->mode2_heard_frontier_seed_pending ||
-			(!first_start && raw_heard_ts < s->mode2_heard_interp_raw_ts);
+		int frontier_restart = (s->mode2_heard_frontier_seed_pending ||
+			(!first_start && raw_heard_ts < s->mode2_heard_interp_raw_ts)) && s->sink_ref_time > 0;
 		int delay_change = !first_start && !frontier_restart &&
 			heard_delay != s->mode2_heard_interp_delay_ms;
 		int reset_interp = first_start || frontier_restart || delay_change;
-		s->mode2_heard_frontier_seed_pending = 0;
 
 		if( reset_interp ) {
 			int seed;
 			if( frontier_restart ) {
 				seed = raw_heard_ts + heard_delay;	// = audio_time, empty-buffer frontier
+				s->mode2_heard_frontier_seed_pending = 0;
 			} else if( delay_change && s->mode2_heard_interp_ts > raw_heard_ts ) {
 				seed = s->mode2_heard_interp_ts;	// keep phase, stay monotonic
 			} else {

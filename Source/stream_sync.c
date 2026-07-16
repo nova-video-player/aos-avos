@@ -1440,6 +1440,10 @@ void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active )
 		_stream_pcm_reanchor_disarm( s, "startup" );
 		return;
 	}
+	if( s->put_time_mode ) {
+		_stream_pcm_reanchor_disarm( s, "put_time" );
+		return;
+	}
 	s->pcm_reanchor_state = STREAM_PCM_REANCHOR_ARMED;
 	s->pcm_reanchor_seek_epoch = s->seek_epoch;
 	s->pcm_reanchor_source = PCM_REANCHOR_SOURCE_NONE;

@@ -147,7 +147,6 @@ typedef struct priv {
 	int64_t target_offset_ns;
 	int pending_reanchor;
 	int last_seek_epoch;
-	int last_audio_resume_pending;
 	STREAM_DEC_VIDEO *dec;
 	STREAM *s;
 	int64_t render_offset_ns;
@@ -514,18 +513,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->grace_until_ms = now_ms + 1000;
 	}
 
-	// Detect seek epoch or resume pending edges to force reanchor
+	// Detect seek epoch changes to force reanchor
 	int epoch_changed = 0;
 	if (p->s) {
 		if (p->s->seek_epoch != p->last_seek_epoch) {
 			epoch_changed = 1;
 			p->last_seek_epoch = p->s->seek_epoch;
-		}
-		if (p->s->audio_resume_pending != p->last_audio_resume_pending) {
-			if (p->s->audio_resume_pending) {
-				epoch_changed = 1;
-			}
-			p->last_audio_resume_pending = p->s->audio_resume_pending;
 		}
 	}
 
@@ -1385,7 +1378,6 @@ retry_decoder_open:
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
-	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
@@ -1562,7 +1554,6 @@ DBGCV	CLOG();
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
-	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
@@ -1686,7 +1677,6 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
-	p->last_audio_resume_pending = 0;
 	p->grace_until_ms = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;

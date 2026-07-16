@@ -997,6 +997,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			if( !playhead_is_dac &&
 				raw.heard != STREAM_NO_PTS_VALUE && raw.state == 0 &&
 				delay_valid && cur_speed > 0.999f && cur_speed < 1.001f &&
+				playhead_age <= 100 &&
 				wall_now - s->atempo_ledger_lat_last_ms >= 250 ) {
 				s->atempo_ledger_lat_last_ms = wall_now;
 				int bias_ms = raw.heard - heard_ts;
@@ -1029,6 +1030,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 					eff_heard = eff.heard;
 					ledger_applied = 1;
 				}
+			}
+
+			// Reject stale playhead samples (e.g. cached from before/during pause)
+			if( ledger_applied && playhead_age > 100 ) {
+				ledger_applied = 0;
 			}
 
 			if( raw.heard != STREAM_NO_PTS_VALUE ) {

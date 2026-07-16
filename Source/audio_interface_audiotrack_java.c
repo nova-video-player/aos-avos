@@ -1482,6 +1482,8 @@ DBG		LOG("audiotrack_start: deferring passthrough restart until first post-flush
 	}
 	call_void_method_with_env(at, env_local, "play", "()V");
 	at->passthrough_restart_after_flush = 0;
+	at->last_timestamp_ns = 0;
+	at->last_timestamp_frames = 0;
 
 	return 0;
 }
@@ -1502,7 +1504,7 @@ ERR		LOG("audiotrack_pause: track not valid, error");
 	// phase repair on resume is not available either for passthrough (acf158d:
 	// caused permanent silence). The cost of pause() is the sink re-acquiring
 	// its codec lock on resume (short muted stretch), which is the lesser evil.
-	// A pause changes neither codec nor track parameters, so no recreation is
+	// A pause changes changes neither codec nor track parameters, so no recreation is
 	// armed; resume is a plain play().
 	JNIEnv *env_local = attach_thread_current_vm();
 	if (!env_local) {
@@ -1510,6 +1512,8 @@ ERR		LOG("audiotrack_pause: track not valid, error");
 	}
 	call_void_method_with_env(at, env_local, "pause", "()V");
 	at->track_paused = 1;
+	at->last_timestamp_ns = 0;
+	at->last_timestamp_frames = 0;
 
 	return 0;
 }

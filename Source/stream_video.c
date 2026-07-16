@@ -4783,8 +4783,8 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 		if( ( err = s->parser->seek_time ? s->parser->seek_time( s, time, dir, flags, force_reload, &sc ) : 1 ) ) {
 			serprintf("stream_seek time err!\n");
 		} else {
-			int final_rst = sc.time;  // Parser returns RST position
-			DBG serprintf("SEEK_RESULT: final_rst = %d (%s)\n", final_rst, ms_to_hms_string(final_rst, hms_buf, sizeof(hms_buf)));
+			int final_ts = sc.time;  // Parser returns TS position
+			DBG serprintf("SEEK_RESULT: final_ts = %d (%s)\n", final_ts, ms_to_hms_string(final_ts, hms_buf, sizeof(hms_buf)));
 		}
 	} else {
 		// seek by pos
@@ -4838,8 +4838,10 @@ serprintf("STUFF_ZERO!\n");
 	s->sync_a_time = -1;
 	s->sync_v_time = -1;
 
+	int target_ts = (time >= 0) ? RST_TO_TS_TIME( time, int ) : sc.time;
+
 	if( s->video->valid ) {
-DBGV serprintf("play one frame\n");
+		DBGV serprintf("play one frame\n");
 		s->play_n_video_one = 1;
 		// Passthrough + put_time: initialize sync before any frame output so we don't
 		// display video ahead of audible audio during the initial probe.
@@ -4851,7 +4853,7 @@ DBGV serprintf("play one frame\n");
 			// audio packet gets falsely rebased (AUDIO_PTS_BEHIND_VIDEO), causing a
 			// long silent catch-up and a permanent A/V offset.
 			int drops_armed = !first_start || s->seek_use_target_sync;
-			stream_sync_init( s, (drops_armed && time >= 0) ? time : sc.time );
+			stream_sync_init( s, (drops_armed && time >= 0) ? target_ts : sc.time );
 		}
 		if( !s->seek_skip_initial_play ) {
 			_stream_play_n_frames( s, 10, sc.time, old_time );
@@ -4871,7 +4873,7 @@ DBGV serprintf("play one frame\n");
 			// reach it. On first start/resume drops are skipped and playback begins at
 			// the achieved keyframe (sc.time); syncing to the requested time instead
 			// desyncs A/V by the keyframe distance and stalls audio start.
-			sync_time = time;
+			sync_time = target_ts;
 		}
 		if( s->video_sink && s->video_sink->put_time && first_start ) {
 			// Initial start/resume: rebase once using current delay fallback.
@@ -4898,10 +4900,10 @@ DBGV serprintf("play one frame\n");
 	int allow_drop = !first_start || s->seek_use_target_sync;
 	if( allow_drop ) {
 		if( s->seek_audio_target_ts <= 0 ) {
-			s->seek_audio_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : (time >= 0 ? time : sc.time);
+			s->seek_audio_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : target_ts;
 		}
 		if( s->seek_video_target_ts <= 0 ) {
-			s->seek_video_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : (time >= 0 ? time : sc.time);
+			s->seek_video_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : target_ts;
 		}
 		if( s->audio && s->audio->valid ) {
 			s->seek_audio_drop = 1;

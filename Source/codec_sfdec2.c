@@ -764,6 +764,18 @@ static void *videosink_thread(void *ctx)
 				break;
 			}
 
+			if( s && s->audio_ctx ) {
+				int delta_ms = audio_interface_get_and_clear_latency_delta( s->audio_ctx );
+				if( delta_ms != 0 ) {
+					if( p->render_offset_ns != -1 ) {
+						p->render_offset_ns -= (int64_t)delta_ms * 1000000LL;
+						p->target_offset_ns = p->render_offset_ns;
+						DBGSI serprintf("android_sync: applied mode2 latency correction delta=%d ms -> new offset=%lld\n",
+							delta_ms, (long long)p->render_offset_ns);
+					}
+				}
+			}
+
 			// Under android_sync=1 timed rendering, check lookahead pre-release wait
 			INT64 now_ns = _get_monotonic_ns();
 
@@ -826,7 +838,6 @@ static void *videosink_thread(void *ctx)
 			if (p->render_offset_ns == -1) {
 				// Anchor Initialization
 				if (passthrough == 2 && have_audio_time) {
-					const int max_forward_lead_ms = 500;
 					int delay_for_pt = stream_get_anchor_delay_ms(s, 1);
 					if (p->hold_audio_applied_ms > 0) {
 						// Avoid double-counting startup hold + static latency.
@@ -834,6 +845,10 @@ static void *videosink_thread(void *ctx)
 						if (delay_for_pt < 0) {
 							delay_for_pt = 0;
 						}
+					}
+					int max_forward_lead_ms = delay_for_pt + 300;
+					if (max_forward_lead_ms < 500) {
+						max_forward_lead_ms = 500;
 					}
 					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_for_pt;
 					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
@@ -847,9 +862,6 @@ static void *videosink_thread(void *ctx)
 								(long long)forward_lead, max_forward_lead_ms, f->time, (long long)heard_ts);
 							heard_ts = (int64_t)f->time - max_forward_lead_ms;
 						}
-					}
-					if (heard_ts < 0) {
-						heard_ts = 0;
 					}
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					p->render_offset_from_audio = 1;

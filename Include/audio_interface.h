@@ -67,6 +67,7 @@ typedef int (*audio_interface_impl_is_startup_hold_active)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_passthrough_playhead_advanced)(audio_ctx_t *ctx);
 typedef void (*audio_interface_impl_invalidate_delay_cache)(audio_ctx_t *ctx);
 typedef void (*audio_interface_impl_add_logical_samples)(audio_ctx_t *ctx, int samples, int accepted_bytes);
+typedef int (*audio_interface_impl_get_and_clear_latency_delta)(audio_ctx_t *ctx);
 // Returns the current AudioTrack presented frame position and sample rate.
 // source: 1=getTimestamp (preferred), 2=getPlaybackHeadPosition (fallback).
 // age_ms: milliseconds since the frame position was last updated (0 for fresh).
@@ -112,6 +113,7 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_passthrough_playhead_advanced passthrough_playhead_advanced;
 	audio_interface_impl_invalidate_delay_cache invalidate_delay_cache;
 	audio_interface_impl_add_logical_samples add_logical_samples;
+	audio_interface_impl_get_and_clear_latency_delta get_and_clear_latency_delta;
 	audio_interface_impl_get_presented_frames get_presented_frames;
 	audio_interface_impl_get_written_frames get_written_frames;
 } audio_interface_impl_t;
@@ -137,6 +139,7 @@ int audio_interface_is_startup_hold_active(audio_ctx_t *ctx);
 int audio_interface_passthrough_playhead_advanced(audio_ctx_t *ctx);
 void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx);
 void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples, int accepted_bytes);
+int  audio_interface_get_and_clear_latency_delta(audio_ctx_t *ctx);
 int  audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh);
 int  audio_interface_get_written_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate);
 void audio_interface_flush_output(audio_ctx_t *ctx);

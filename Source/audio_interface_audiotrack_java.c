@@ -172,6 +172,7 @@ struct audio_ctx {
 	uint64_t mode2_latency_bytes_accum;       // paired cumulative compressed bytes written
 	uint64_t mode2_latency_samples_accum;     // paired cumulative logical samples
 	int mode2_latency_corrected;
+	int mode2_latency_correction_delta_ms;
 	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
 };
 
@@ -985,6 +986,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->mode2_latency_bytes_accum = 0;
 	at->mode2_latency_samples_accum = 0;
 	at->mode2_latency_corrected = 0;
+	at->mode2_latency_correction_delta_ms = 0;
 	channels = output_channels;
 	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
 		rate, output_channels, frame_size, track_format, track_chanmask, same_config, at->passthrough);
@@ -1751,9 +1753,13 @@ static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples, int acc
 			if (at->mode2_latency_samples_accum >= threshold_samples) {
 				JNIEnv *env = attach_thread_current_vm();
 				if (env) {
+					uint32_t old_latency = at->pipeline_latency;
 					// Latch the correction flag only if the VM update executes successfully
 					if (audiotrack_update_latency(at, env)) {
 						at->mode2_latency_corrected = 1;
+						int delta_ms = (int)old_latency - (int)at->pipeline_latency;
+						at->mode2_latency_correction_delta_ms += delta_ms;
+						LOG("mode2_latency_latch: old_latency=%u new_latency=%u delta=%d", old_latency, at->pipeline_latency, delta_ms);
 					}
 				}
 			}
@@ -2703,6 +2709,7 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->mode2_latency_bytes_accum = 0;
 	at->mode2_latency_samples_accum = 0;
 	at->mode2_latency_corrected = 0;
+	at->mode2_latency_correction_delta_ms = 0;
 	at->mode2_audit_last_ms = 0;
 }
 
@@ -2947,6 +2954,14 @@ static int audiotrack_get_written_frames(audio_ctx_t *at, uint64_t *frames, int 
 	return 1;
 }
 
+static int audiotrack_get_and_clear_latency_delta(audio_ctx_t *at)
+{
+	if (!at) return 0;
+	int delta = at->mode2_latency_correction_delta_ms;
+	at->mode2_latency_correction_delta_ms = 0;
+	return delta;
+}
+
 void libavos_set_dynamic_audio_delay(int enable)
 {
 	DBG serprintf("audio_interface_audiotrack_java:libavos_set_dynamic_audio_delay enable=%d\n", enable);
@@ -2981,6 +2996,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.passthrough_playhead_advanced = audiotrack_passthrough_playhead_advanced,
 	.invalidate_delay_cache = audiotrack_invalidate_delay_cache,
 	.add_logical_samples = audiotrack_add_logical_samples,
+	.get_and_clear_latency_delta = audiotrack_get_and_clear_latency_delta,
 	.get_presented_frames = audiotrack_get_presented_frames,
 	.get_written_frames = audiotrack_get_written_frames,
 };

@@ -259,6 +259,14 @@ void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples, int acce
 	}
 }
 
+int audio_interface_get_and_clear_latency_delta(audio_ctx_t *ctx)
+{
+	if (impl && impl->get_and_clear_latency_delta) {
+		return impl->get_and_clear_latency_delta(ctx);
+	}
+	return 0;
+}
+
 int audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh)
 {
 	if (!impl || !impl->get_presented_frames) return 0;

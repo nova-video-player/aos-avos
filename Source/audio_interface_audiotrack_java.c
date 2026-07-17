@@ -97,6 +97,7 @@ struct audio_ctx {
 	uint32_t system_latency;    // diagnostic: AudioSystem.getOutputLatency()
 	uint32_t app_latency;       // local buffer geometry: buf_size / (frame_size * rate * speed)
 	uint32_t pipeline_latency;  // max(track, system+app): selected static delay for mode2; write-gate timeout for mode1
+	uint32_t fixed_latency;     // downstream part of pipeline_latency, excluding mode2 compressed-buffer capacity
 	int passthrough;
 	int ac3_recode;                // latched at output config; do not read global recode state in timing code
 	int ac3_mode2_plain_policy;    // latched with the clock policy for this playback
@@ -641,6 +642,7 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	// for mode2 passthrough (audiotrack_get_latency returns this for mode2) and as the
 	// write-gate stall timeout for mode1 passthrough.
 	uint32_t pipeline_latency = system_latency + app_latency;
+	uint32_t fixed_latency = system_latency;
 	if (track_latency > pipeline_latency) {
 		pipeline_latency = track_latency;
 	}
@@ -668,8 +670,10 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 			residual_ms = track_latency - reported_buffer_latency;
 		}
 		uint32_t corrected_pipeline = residual_ms + capacity_ms;
+		fixed_latency = residual_ms;
 		if (system_latency + capacity_ms > corrected_pipeline) {
 			corrected_pipeline = system_latency + capacity_ms;
+			fixed_latency = system_latency;
 		}
 
 		// No empirical cap. A former 1000ms ceiling truncated the selected delay for
@@ -694,6 +698,7 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	at->system_latency = system_latency;
 	at->app_latency = app_latency;
 	at->pipeline_latency = pipeline_latency;
+	at->fixed_latency = fixed_latency;
 
 	DBG LOG("audiotrack_update_latency: scheduler=%u app=%u system=%u track=%u pipeline=%u",
 		scheduler_latency, app_latency, system_latency, track_latency, pipeline_latency);
@@ -1538,9 +1543,7 @@ ERR		LOG("track not valid, error");
 		return -1;
 	}
 	// Flush buffered audio before stop. flush() is only valid on a paused or
-	// stopped track, and passthrough tracks are deliberately left PLAYING across
-	// stream_pause() to keep the sink codec lock, so pause here first (the track
-	// is being torn down, losing the lock no longer matters).
+	// stopped track, so pause here first.
 	// Without the flush, AudioTrack.stop() starts a drain into the HAL pipeline;
 	// when release() is called immediately after, residual HAL audio from the old
 	// file can overlap the startup of the next playback and corrupt its timing window.
@@ -2954,6 +2957,11 @@ static int audiotrack_get_written_frames(audio_ctx_t *at, uint64_t *frames, int 
 	return 1;
 }
 
+static int audiotrack_get_fixed_latency(audio_ctx_t *at)
+{
+	return at ? (int)at->fixed_latency : 0;
+}
+
 static int audiotrack_get_and_clear_latency_delta(audio_ctx_t *at)
 {
 	if (!at) return 0;
@@ -2983,6 +2991,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.set_output_params = audiotrack_set_output_params,
 	.get_delay = audiotrack_get_delay,
 	.get_latency = audiotrack_get_latency,
+	.get_fixed_latency = audiotrack_get_fixed_latency,
 	.flush_output = audiotrack_flush_output,
 	.preload = audiotrack_preload,
 	.get_session_id = audiotrack_get_session_id,

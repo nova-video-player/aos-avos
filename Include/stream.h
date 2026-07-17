@@ -776,6 +776,7 @@ typedef struct STREAM {
 	int		mode2_heard_interp_raw_ts;	// latest submitted heard endpoint
 	int		mode2_heard_interp_delay_ms;	// selected delay used for the current epoch
 	int		mode2_heard_interp_last_log_ms;
+	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
 	int		mode2_heard_frontier_seed_pending;	// passthrough sink was recreated mid-playback (empty buffer): seed heard interp at the frontier
 	int		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
 	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
@@ -790,6 +791,7 @@ typedef struct STREAM {
 	int		seek_audio_drop;
 	int		seek_video_target_ts;
 	int		seek_video_drop;
+	volatile int	seek_video_target_pending;	// audio waits until video preroll reaches the seek target
 	int		seek_force_video_drop;
 	int		seek_skip_initial_play;
 	int		seek_use_target_sync;

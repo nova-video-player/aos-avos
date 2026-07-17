@@ -3177,6 +3177,11 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 			DBG serprintf("VIDEO_SEEK_DROP: frame=%d target=%d\n", frame->time, s->seek_video_target_ts);
 			goto Discard;
 		}
+		if( s->seek_video_target_pending ) {
+			s->seek_video_target_pending = 0;
+			DBG serprintf("VIDEO_SEEK_TARGET_READY: frame=%d target=%d epoch=%d\n",
+				frame->time, s->seek_video_target_ts, s->seek_epoch);
+		}
 		// Async decoders can deliver older preroll frames after a frame at or
 		// beyond the target.  Keep the target floor armed for the whole seek
 		// epoch; _seek_init() clears it when the next seek begins.
@@ -4592,6 +4597,7 @@ static void _seek_init( STREAM *s )
 
 	s->seek_audio_drop = 0;
 	s->seek_video_drop = 0;
+	s->seek_video_target_pending = 0;
 	s->seek_audio_target_ts = 0;
 	s->seek_video_target_ts = 0;
 
@@ -4780,12 +4786,15 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int last_good_delay_valid = s->last_good_delay_valid;
 	int old_audio_time = s->audio_time;
 	int old_sink_ref_time = s->sink_ref_time;
+	int inherited_mode2_frontier = s->mode2_heard_frontier_seed_pending;
 	int first_start = (old_time < 0 && s->seek_epoch == 0);
 	// A non-negative video timestamp does not prove playback was established:
 	// initial track selection can decode/preview frame zero and then issue another
 	// seek-to-zero before audio has ever anchored. Capture actual epoch ownership
-	// before pause/seek/reset operations mutate these fields.
+	// before pause/seek/reset operations mutate these fields. A pending frontier
+	// carries that ownership across rapid seeks where audio has not restarted yet.
 	int had_audio_epoch = old_audio_time >= 0 && old_sink_ref_time >= 0;
+	int preserve_mode2_frontier = had_audio_epoch || inherited_mode2_frontier;
 
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
@@ -4834,10 +4843,11 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 		// Preserve the submitted timeline only for a genuine in-playback
 		// restart. Initial playback must include the selected pipeline delay,
 		// so its Mode 2 heard clock starts at audio_time - selected_delay.
-		if( had_audio_epoch ) {
+		if( preserve_mode2_frontier ) {
 			s->mode2_heard_frontier_seed_pending = 1;
-			DBG serprintf("mode2_frontier_arm: cause=seek seek_epoch=%d old_time=%d audio_epoch=1\n",
-				s->seek_epoch, old_time);
+			DBG serprintf("mode2_frontier_arm: cause=%s seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
+				inherited_mode2_frontier ? "seek_chain" : "seek",
+				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);
 		} else {
 			DBG serprintf("mode2_frontier_skip: cause=no_audio_epoch seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
 				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);
@@ -4950,6 +4960,7 @@ serprintf("STUFF_ZERO!\n");
 		}
 		if( s->video && s->video->valid ) {
 			s->seek_video_drop = 1;
+			s->seek_video_target_pending = s->seek_video_target_ts > 0;
 			DBG serprintf("SEEK_VIDEO_DROP_ARMED: target_ts=%d\n", s->seek_video_target_ts);
 		}
 	}
@@ -5000,6 +5011,7 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 		}
 		if( !(s->seek_use_target_sync && s->seek_video_target_ts > 0) ) {
 			s->seek_video_drop = 0;
+			s->seek_video_target_pending = 0;
 			s->seek_video_target_ts = 0;
 		}
 	}
@@ -5042,6 +5054,7 @@ int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir
 	}
 	s->seek_audio_drop = 1;
 	s->seek_video_drop = 1;
+	s->seek_video_target_pending = s->seek_video_target_ts > 0;
 	s->seek_force_video_drop = 1;
 	_stream_play_n_frames( s, 10, target_ts, 0 );
 	s->seek_force_video_drop = 0;

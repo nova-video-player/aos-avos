@@ -623,6 +623,7 @@ void stream_audio_flush( STREAM *s )
 	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_heard_interp_delay_ms = -1;
 	s->mode2_heard_interp_last_log_ms = 0;
+	s->mode2_heard_prevideo_phase_active = 0;
 	// Discard any stale frontier seed; the paths that empty the sink buffer
 	// (sink flush in the seek paths, passthrough sink reopen on format change)
 	// re-arm it after this flush runs.
@@ -697,6 +698,7 @@ DBG	serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d) ac3_recode=
 	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_heard_interp_delay_ms = -1;
 	s->mode2_heard_interp_last_log_ms = 0;
+	s->mode2_heard_prevideo_phase_active = 0;
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
@@ -1018,6 +1020,22 @@ DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 				}
 				if( s->seek_audio_drop && cdata.time != STREAM_NO_PTS_VALUE &&
 					cdata.time >= s->seek_audio_target_ts ) {
+					int wait_epoch = s->seek_epoch;
+					int wait_target = s->seek_audio_target_ts;
+					int wait_start_ms = atime();
+					while( s->seek_video_target_pending && s->seek_epoch == wait_epoch &&
+						s->seek_audio_target_ts == wait_target &&
+						!s->video_end && !_abort( s ) && atime() - wait_start_ms < 5000 ) {
+						msec_sleep( 2 );
+					}
+					if( s->seek_epoch != wait_epoch || s->seek_audio_target_ts != wait_target ) {
+						DBG serprintf("AUDIO_SEEK_TARGET_WAIT_ABORT: stale_epoch=%d current=%d old_target=%d current_target=%d time=%d\n",
+							wait_epoch, s->seek_epoch, wait_target, s->seek_audio_target_ts, cdata.time);
+						continue;
+					}
+					DBG serprintf("AUDIO_SEEK_TARGET_READY: time=%d target=%d wait_ms=%d video_pending=%d video_end=%d epoch=%d\n",
+						cdata.time, s->seek_audio_target_ts, atime() - wait_start_ms,
+						s->seek_video_target_pending, s->video_end, wait_epoch);
 					DBG serprintf("AUDIO_SEEK_HIT: time=%d target=%d\n",
 						cdata.time, s->seek_audio_target_ts);
 					s->seek_audio_drop = 0;
@@ -2204,6 +2222,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								pt_bytes = ac3_samples;
 							} else if (passthrough_active && passthrough != 1 && audio_frame.fakeSize > 0) {
 								pt_bytes = audio_frame.fakeSize;
+								if( size_written > 0 && audio_frame.size > 0 &&
+									size_written < audio_frame.size ) {
+									pt_bytes = (int)(((int64_t)audio_frame.fakeSize * size_written) /
+										audio_frame.size);
+								}
 							}
 							s->audio_samples += ac3_recoding ? pt_bytes : pt_bytes / bpf;
 							// Use actual source sample rate for sync when passthrough is inactive.

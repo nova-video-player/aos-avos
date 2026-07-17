@@ -147,6 +147,7 @@ typedef struct priv {
 	int64_t target_offset_ns;
 	int pending_reanchor;
 	int last_seek_epoch;
+	int last_audio_resume_pending;
 	STREAM_DEC_VIDEO *dec;
 	STREAM *s;
 	int64_t render_offset_ns;
@@ -515,11 +516,16 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// Detect seek epoch changes to force reanchor
 	int epoch_changed = 0;
+	int resume_started = 0;
 	if (p->s) {
 		if (p->s->seek_epoch != p->last_seek_epoch) {
 			epoch_changed = 1;
 			p->last_seek_epoch = p->s->seek_epoch;
 		}
+		if (p->s->audio_resume_pending && !p->last_audio_resume_pending) {
+			resume_started = 1;
+		}
+		p->last_audio_resume_pending = p->s->audio_resume_pending;
 	}
 
 	int expected = p->venc_put_time + dr;
@@ -589,12 +595,14 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
 	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
-	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor || epoch_changed;
-	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor && !epoch_changed ) {
+	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor ||
+		epoch_changed || resume_started;
+	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor &&
+		!epoch_changed && !resume_started ) {
 		allow_reanchor = 0;
 	}
 	DBGSI serprintf(
-		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d thresh=%d streak=%d speed=%.3f speed_changed=%d disc=%d reanchor_disc=%d grace=%d no_sched=%d allow_reanchor=%d\n",
+		"put_time_calc: req=%d now=%d old_put=%d old_ref=%d dt=%d dr=%d expected=%d diff=%d abs=%d thresh=%d streak=%d speed=%.3f speed_changed=%d disc=%d reanchor_disc=%d grace=%d no_sched=%d resume=%d allow_reanchor=%d\n",
 		time,
 		now_ms,
 		p->venc_put_time,
@@ -612,6 +620,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		reanchor_discontinuity,
 		in_grace,
 		no_sched_anchor,
+		resume_started,
 		allow_reanchor);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
@@ -623,10 +632,11 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->sched_last_mono_ns  = p->sched_start_mono_ns;
 		p->sched_late          = 0;
 		p->sched_debt_ns       = 0;
-		p->render_offset_ns    = -1; // Force immediate step re-anchor on hard discontinuity/speed change!
+		p->render_offset_ns    = -1; // Force immediate re-anchor on seek/resume/discontinuity/speed change.
+		p->render_offset_from_audio = 0;
 		p->pending_reanchor    = 1;
-		DBGSI serprintf("videosink_put_time: reset sched and render anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d)\n",
-			time, diff, speed_changed, discontinuity, no_sched_anchor);
+		DBGSI serprintf("videosink_put_time: reset sched and render anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d resume=%d)\n",
+			time, diff, speed_changed, discontinuity, no_sched_anchor, resume_started);
 		pthread_mutex_unlock(&p->locked.mtx);
 	}
 
@@ -1409,6 +1419,7 @@ retry_decoder_open:
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
+	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
@@ -1585,6 +1596,7 @@ DBGCV	CLOG();
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
+	p->last_audio_resume_pending = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
@@ -1708,6 +1720,7 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->last_seek_epoch = 0;
+	p->last_audio_resume_pending = 0;
 	p->grace_until_ms = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;

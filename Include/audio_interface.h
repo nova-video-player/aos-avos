@@ -48,6 +48,7 @@ typedef int (*audio_interface_impl_write)(audio_ctx_t *ctx, unsigned char *data,
 typedef int (*audio_interface_impl_set_output_params)(audio_ctx_t *ctx, int freq, int channels, int bits, int format);
 typedef int (*audio_interface_impl_get_delay)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_get_latency)(audio_ctx_t *ctx);
+typedef int (*audio_interface_impl_get_fixed_latency)(audio_ctx_t *ctx);
 typedef void (*audio_interface_impl_flush_output)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_preload)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_mute)(audio_ctx_t *ctx, BOOL fade);
@@ -96,6 +97,7 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_set_output_params set_output_params;
 	audio_interface_impl_get_delay get_delay;
 	audio_interface_impl_get_latency get_latency;
+	audio_interface_impl_get_fixed_latency get_fixed_latency;
 	audio_interface_impl_flush_output flush_output;
 	audio_interface_impl_preload preload;
 	audio_interface_impl_mute mute;
@@ -131,6 +133,8 @@ int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length
 int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format);
 int audio_interface_get_delay(audio_ctx_t *ctx);
 int audio_interface_get_latency(audio_ctx_t *ctx);
+// Fixed downstream portion of the selected latency, excluding sink buffer capacity.
+int audio_interface_get_fixed_latency(audio_ctx_t *ctx);
 int audio_interface_is_delay_valid(audio_ctx_t *ctx);
 const char *audio_interface_get_delay_source(audio_ctx_t *ctx);
 // Returns the number of consecutive valid-delay samples (0 if unsupported).

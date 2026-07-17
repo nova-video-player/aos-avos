@@ -3177,6 +3177,11 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 			DBG serprintf("VIDEO_SEEK_DROP: frame=%d target=%d\n", frame->time, s->seek_video_target_ts);
 			goto Discard;
 		}
+		if( frame->epoch != s->seek_epoch ) {
+			DBG serprintf("VIDEO_SEEK_STALE_DROP: frame=%d target=%d frame_epoch=%d seek_epoch=%d\n",
+				frame->time, s->seek_video_target_ts, frame->epoch, s->seek_epoch);
+			goto Discard;
+		}
 		if( s->seek_video_target_pending ) {
 			s->seek_video_target_pending = 0;
 			DBG serprintf("VIDEO_SEEK_TARGET_READY: frame=%d target=%d epoch=%d\n",
@@ -3950,7 +3955,6 @@ static int output_frames( STREAM *s )
 	
 DBGQ serprintf("UNQ[%2d|%2d] ", output_frame->index, frame_q_count( &s->disp_q ) );
 DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), frame_q_count( &s->disp_q ));
-		output_frame->epoch = s->seek_epoch;
 		s->output_frame_fn( s, output_frame, &output_frame );
 		ret = 1;
 		
@@ -4122,6 +4126,7 @@ cdata_time  = s->cdata_now.time;
 	//  Call the Decoder (non-blocking)    
 	//-----------------------------------   
 	s->decode_frame->time       = s->cdata_now.time;
+	s->decode_frame->epoch      = s->seek_epoch;
 	s->decode_frame->user_ID    = s->cdata_now.user_ID;
 	s->decode_frame->type       = s->cdata_now.frm_type;
 	s->decode_frame->audio_skip = s->cdata_now.audio_skip;
@@ -4404,6 +4409,7 @@ t_show = m_time - t_showtime;
 t_showtime = m_time;
 		// feed it to the decoder
 		VIDEO_FRAME *in_frame  = s->decode_frame;
+		in_frame->epoch = s->seek_epoch;
 		ret = s->video_dec->put_out( s->video_dec, &s->decode_frame );
 DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 	} else {

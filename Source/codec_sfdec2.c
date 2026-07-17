@@ -777,12 +777,14 @@ static void *videosink_thread(void *ctx)
 			if( s && s->audio_ctx ) {
 				int delta_ms = audio_interface_get_and_clear_latency_delta( s->audio_ctx );
 				if( delta_ms != 0 ) {
-					if( p->render_offset_ns != -1 ) {
-						p->render_offset_ns -= (int64_t)delta_ms * 1000000LL;
-						p->target_offset_ns = p->render_offset_ns;
-						DBGSI serprintf("android_sync: applied mode2 latency correction delta=%d ms -> new offset=%lld\n",
-							delta_ms, (long long)p->render_offset_ns);
-					}
+					// The centralized heard clock already owns normalization phase:
+					// initial_latency adopts the corrected raw phase, while a
+					// mid-restart delay_monotonic latch preserves the empty-buffer
+					// phase. Moving render_offset here applies the same correction a
+					// second time and makes the result depend on whether the renderer
+					// anchor existed when this notification was consumed.
+					DBGSI serprintf("android_sync: observed mode2 latency correction delta=%d ms (heard clock owns phase)\n",
+						delta_ms);
 				}
 			}
 

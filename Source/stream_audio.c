@@ -1514,6 +1514,10 @@ serprintf(" ae! ");
 				}
 
 				if( audio_frame.size > 0 && need_reconfigure ) {
+					// Capture epoch ownership before stop/close/reset operations. Initial
+					// passthrough setup has no established submitted/audio anchor and must
+					// use the latency-compensated raw Mode 2 seed.
+					int had_audio_epoch = s->audio_time >= 0 && s->sink_ref_time >= 0;
 					DBG serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink (passthrough=%d, ac3=%d)\n",
 						original_format, audio_frame.format, passthrough, ac3_recoding);
 					// Always update audio_format_configured when reconfiguring sink to prevent
@@ -1587,18 +1591,18 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										s->audio_sink_open = 0;
 									}
 								}
-								// The recreated track starts with an EMPTY buffer: the HAL
-								// consumes the first write immediately, so the first frame's
-								// physical presentation begins at write time, not
-								// selected_delay later. Tell the mode2 heard interpolator to
-								// seed its next epoch at the frontier (audio_time) instead of
-								// audio_time - selected_delay. It cannot infer this itself:
-								// audio_time is continuous across a mid-playback track change,
-								// so the raw heard endpoint does not jump backward (avos-446:
-								// raw-seeded epochs made the sync gate hold video against a
-								// phantom deficit that the wall-anchored blit schedule then
-								// kept forever, ~380-1050ms added per track change).
-								s->mode2_heard_frontier_seed_pending = 1;
+								// A recreated mid-playback track starts empty, so preserve its
+								// established timeline by seeding at the submitted frontier.
+								// Initial sink configuration has no prior timeline and must retain
+								// the selected pipeline delay (avos-21).
+								if( had_audio_epoch ) {
+									s->mode2_heard_frontier_seed_pending = 1;
+									DBG serprintf("mode2_frontier_arm: cause=format audio=%d sink_ref=%d seek_epoch=%d\n",
+										s->audio_time, s->sink_ref_time, s->seek_epoch);
+								} else {
+									DBG serprintf("mode2_frontier_skip: cause=initial_format audio=%d sink_ref=%d seek_epoch=%d\n",
+										s->audio_time, s->sink_ref_time, s->seek_epoch);
+								}
 							} else if( !is_ac3_recoding &&
 							           (format_changed || channels_changed || samplerate_changed || bits_changed) &&
 							           s->audio_sink->close && s->audio_sink->open ) {

@@ -466,6 +466,44 @@ int stream_sync_restart( STREAM *s )
 	return 0;
 }
 
+// Pause keeps the compressed AudioTrack and its buffered media intact. Preserve
+// the interpolated heard phase, but move its wall epoch to now so paused wall
+// time is not credited as audio progress. Seeks and sink recreation continue to
+// use stream_sync_restart(), which deliberately starts a new Mode 2 epoch.
+int stream_sync_restart_after_pause( STREAM *s )
+{
+	int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough) ?
+		s->audio_sink->get_passthrough( s ) : 0;
+	int keep_mode2_phase;
+	int interp_ts;
+	int interp_raw_ts;
+	int interp_delay_ms;
+	int interp_last_log_ms;
+
+	pthread_mutex_lock( &mode2_heard_interp_lock );
+	keep_mode2_phase = passthrough_mode >= 2 &&
+		!libavos_get_ac3_recoding_enabled() && s->mode2_heard_interp_valid;
+	interp_ts = s->mode2_heard_interp_ts;
+	interp_raw_ts = s->mode2_heard_interp_raw_ts;
+	interp_delay_ms = s->mode2_heard_interp_delay_ms;
+	interp_last_log_ms = s->mode2_heard_interp_last_log_ms;
+
+	stream_sync_restart( s );
+	if( keep_mode2_phase ) {
+		s->mode2_heard_interp_valid = 1;
+		s->mode2_heard_interp_ts = interp_ts;
+		s->mode2_heard_interp_wall_ms = atime();
+		s->mode2_heard_interp_raw_ts = interp_raw_ts;
+		s->mode2_heard_interp_delay_ms = interp_delay_ms;
+		s->mode2_heard_interp_last_log_ms = interp_last_log_ms;
+		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d audio=%d video=%d\n",
+			interp_ts, interp_raw_ts, interp_delay_ms, s->audio_time, s->video_time);
+	}
+	pthread_mutex_unlock( &mode2_heard_interp_lock );
+
+	return 0;
+}
+
 // Returns 1 if a tag from audio_interface_get_delay_source() represents a
 // dynamic-derived measurement that can be used to refresh last_good.
 // Only "dynamic*" (direct HW measurement) and exactly "cached(throttle)"
@@ -831,25 +869,43 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		//    monotonic. Seeding at the new raw would snap the frontier-seeded
 		//    clock back down mid-refill and reintroduce the deficit of case 2.
 		int first_start = !s->mode2_heard_interp_valid;
-		int frontier_restart = s->mode2_heard_frontier_seed_pending ||
-			(!first_start && raw_heard_ts < s->mode2_heard_interp_raw_ts);
-		int delay_change = !first_start && !frontier_restart &&
+		int delay_change = !first_start &&
 			heard_delay != s->mode2_heard_interp_delay_ms;
+		// A larger normalized latency moves raw heard time backward without
+		// emptying the sink. Do not let that expected clock recalculation take
+		// the legacy backward-raw restart path and seed at audio_time.
+		int frontier_restart = s->mode2_heard_frontier_seed_pending ||
+			(!first_start && !delay_change &&
+			 raw_heard_ts < s->mode2_heard_interp_raw_ts);
 		int reset_interp = first_start || frontier_restart || delay_change;
 		s->mode2_heard_frontier_seed_pending = 0;
 
 		if( reset_interp ) {
 			int seed;
+			const char *seed_cause;
 			if( frontier_restart ) {
 				seed = raw_heard_ts + heard_delay;	// = audio_time, empty-buffer frontier
+				seed_cause = "restart_frontier";
+			} else if( delay_change && s->sink_ref_time < 0 ) {
+				// Initial normalization replaces a provisional latency before an
+				// authoritative playback epoch exists. Adopt its physical phase;
+				// preserving the provisional phase would retain the full delta.
+				seed = raw_heard_ts;
+				seed_cause = "initial_latency";
 			} else if( delay_change && s->mode2_heard_interp_ts > raw_heard_ts ) {
 				seed = s->mode2_heard_interp_ts;	// keep phase, stay monotonic
+				seed_cause = "delay_monotonic";
 			} else {
 				seed = raw_heard_ts;
+				seed_cause = first_start ? "initial_raw" :
+					(delay_change ? "delay_raw" : "raw_discontinuity");
 			}
 			s->mode2_heard_interp_valid = 1;
 			s->mode2_heard_interp_ts = seed;
 			s->mode2_heard_interp_wall_ms = wall_now;
+			DBG serprintf("mode2_epoch_seed: cause=%s audio=%d raw=%d seed=%d delay=%d sink_ref=%d seek_epoch=%d\n",
+				seed_cause, s->audio_time, raw_heard_ts, seed, heard_delay,
+				s->sink_ref_time, s->seek_epoch);
 		} else {
 			if( s->paused || s->paused_internal ) {
 				// Playback is paused: physical presentation is frozen, so hold the

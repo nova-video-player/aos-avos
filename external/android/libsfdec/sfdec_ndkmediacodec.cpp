@@ -454,6 +454,11 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
 static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns)
 {
     media_status_t err;
+	if (!sfdec || !sfdec->mCodec || !sfbuf) {
+		LOG("sfdec_buf_render: invalid argument sfdec=%p codec=%p sfbuf=%p",
+			sfdec, sfdec ? sfdec->mCodec : NULL, sfbuf);
+		return -1;
+	}
     if( render ) {
         int64_t now_ns = get_monotonic_ns();
         DBG LOG("sfdec_render: index=%zu ts_us=%lld render=%d asap=%d render_ts_ns=%lld start_off_ns=%lld start_mono_ns=%lld last_off_ns=%lld last_mono_ns=%lld now_ns=%lld reset_age_ms=%lld",

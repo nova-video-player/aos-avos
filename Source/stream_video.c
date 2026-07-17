@@ -2847,13 +2847,17 @@ DBGS serprintf("stream_un_pause\r\n");
 				stream_sync_audio( s, s->audio_time );
 			}
 		} else {
-			// Normal 1x resume: _stream_resync clears last_good via _stream_pcm_delay_memory_reset.
+			// Normal 1x resume resets scheduler state, but the AudioTrack and its
+			// buffered compressed media survive pause. Preserve the Mode 2 heard
+			// phase instead of snapping back to audio_time - static latency.
 			// Snapshot and restore so the one-shot reanchor in Commit B can prefer last_good
 			// over static latency on the first audio write after resume.
 			int last_good_delay_ms = s->last_good_delay_ms;
 			int last_good_delay_valid = s->last_good_delay_valid;
 			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
-			_stream_resync( s );
+			DBG serprintf("WALLCLOCK_RESET: by pause resume\n");
+			s->sink_ref_time = -1;
+			stream_sync_restart_after_pause( s );
 			s->last_good_delay_ms = last_good_delay_ms;
 			s->last_good_delay_valid = last_good_delay_valid;
 			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
@@ -2863,8 +2867,22 @@ DBGS serprintf("stream_un_pause\r\n");
 		// so that we are back to the same a2v sync as before
 		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
 			s->audio_sink->get_passthrough( s ) : 0;
+		int requested_passthrough = 0;
+#ifdef CONFIG_SPDIF
+		if( s->audio && s->audio->valid ) {
+			requested_passthrough = spdif_is_passthrough_on();
+			if( requested_passthrough &&
+			    !spdif_format_passthrough_supported( s->audio->format ) ) {
+				requested_passthrough = 0;
+			}
+		}
+#endif
+		int compressed_resume = passthrough > 0 || requested_passthrough > 0;
 		int do_audio_preload = stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL &&
-			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f && passthrough == 0;
+			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f && !compressed_resume;
+		DBG serprintf("audio_resume_route: active_passthrough=%d requested_passthrough=%d compressed=%d preload=%d ctx=%d sink_open=%d\n",
+			passthrough, requested_passthrough, compressed_resume, do_audio_preload,
+			s->audio_ctx != NULL, s->audio_sink_open);
 		if ( do_audio_preload ) {
 			s->audio_preload = 1;
 		} else {
@@ -2879,7 +2897,10 @@ DBGS serprintf("stream_un_pause\r\n");
 			stream_audio_unmute( s );
 		}
 
-		if ( !do_audio_preload && s->audio_ctx && s->audio_sink_open ) {
+		// stream_pause() paused every open AudioTrack. Passthrough cannot use the
+		// PCM zero-preload path, and its sink-open flag may lag the live AudioTrack
+		// across format setup. Always issue play() for a live compressed route.
+		if ( s->audio_ctx && (compressed_resume || (!do_audio_preload && s->audio_sink_open)) ) {
 			audio_interface_unpause( s->audio_ctx );
 		}
 
@@ -3227,7 +3248,11 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 		goto Discard;
 	}
 
-	while( qframe && !_engine_abort( s ) && stream_sync_video( s, frame->time ) ) {
+	// Seek preview runs while audio is deliberately idle. Waiting for the audio
+	// clock here consumes _stream_play_n_frames()'s entire one-second deadline.
+	while( qframe && !_engine_abort( s ) &&
+	       !s->seek_paused && s->play_n_video_frames <= 0 &&
+	       stream_sync_video( s, frame->time ) ) {
 		if( _frame_stale_after_seek( s, frame ) ) {
 			goto Discard;
 		}
@@ -4753,7 +4778,14 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int old_time = s->video_time;
 	int last_good_delay_ms = s->last_good_delay_ms;
 	int last_good_delay_valid = s->last_good_delay_valid;
+	int old_audio_time = s->audio_time;
+	int old_sink_ref_time = s->sink_ref_time;
 	int first_start = (old_time < 0 && s->seek_epoch == 0);
+	// A non-negative video timestamp does not prove playback was established:
+	// initial track selection can decode/preview frame zero and then issue another
+	// seek-to-zero before audio has ever anchored. Capture actual epoch ownership
+	// before pause/seek/reset operations mutate these fields.
+	int had_audio_epoch = old_audio_time >= 0 && old_sink_ref_time >= 0;
 
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
@@ -4799,10 +4831,17 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 	stream_audio_flush( s );
 	if( s->audio_sink ) {
 		s->audio_sink->flush( s );
-		// Sink buffer now empty: arm the mode2 frontier seed (see the
-		// stream_seek_loop site for the full rationale, avos-446/447).
-		// Must be set after stream_audio_flush, which clears it.
-		s->mode2_heard_frontier_seed_pending = 1;
+		// Preserve the submitted timeline only for a genuine in-playback
+		// restart. Initial playback must include the selected pipeline delay,
+		// so its Mode 2 heard clock starts at audio_time - selected_delay.
+		if( had_audio_epoch ) {
+			s->mode2_heard_frontier_seed_pending = 1;
+			DBG serprintf("mode2_frontier_arm: cause=seek seek_epoch=%d old_time=%d audio_epoch=1\n",
+				s->seek_epoch, old_time);
+		} else {
+			DBG serprintf("mode2_frontier_skip: cause=no_audio_epoch seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
+				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);
+		}
 	}
 	if( err ) {
 		stream_sync_init( s, sc.time );

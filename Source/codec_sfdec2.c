@@ -785,8 +785,16 @@ static void *videosink_thread(void *ctx)
 				s->audio_sink->get_passthrough( s ) : 0;
 			int hold_passthrough = 0;
 
-			// Passthrough mode 2 startup hold
+			// Passthrough mode 2 startup hold. Seek preview has no audio producer;
+			// holding here would outlive _stream_play_n_frames()'s deadline.
+			int seek_preview = s && (s->seek_paused || s->play_n_video_frames > 0);
+			if (seek_preview) {
+				p->hold_audio_until_ms = 0;
+				p->hold_audio_start_ms = 0;
+				p->hold_audio_applied_ms = 0;
+			}
 			if (passthrough == 2 && s && s->audio && s->audio->valid &&
+			    !seek_preview &&
 			    (s->audio_time < 0 || p->hold_audio_until_ms != 0)) {
 				if (p->hold_audio_until_ms == 0) {
 					int anchor_delay_ms = stream_get_anchor_delay_ms(s, 1);
@@ -804,7 +812,11 @@ static void *videosink_thread(void *ctx)
 					timespec_add_ms(&ts_wait, 10);
 					pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
 				}
-				if (s->audio_time >= 0) {
+				if (!p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
+					// f was only peeked and still belongs to venc_q.
+					f = NULL;
+					goto endloop;
+				} else if (s->audio_time >= 0) {
 					int hold_end_ms = atime();
 					if (p->hold_audio_start_ms > 0 && hold_end_ms > p->hold_audio_start_ms) {
 						p->hold_audio_applied_ms = hold_end_ms - p->hold_audio_start_ms;
@@ -828,7 +840,13 @@ static void *videosink_thread(void *ctx)
 				// Startup hold timeout: drop this frame immediately to avoid blocking composition queue
 				f = frame_q_get(&p->locked.venc_q);
 				consumed = 1;
+				if (!f || !f->android_handle) {
+					goto endloop;
+				}
 				p->dropped++;
+				// Keep flush from invalidating the MediaCodec buffer while the
+				// timeout path releases it outside the queue lock.
+				add_state_l(p, THREAD_STATE_RENDERING);
 				pthread_mutex_unlock(&p->locked.mtx);
 				sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 				pthread_mutex_lock(&p->locked.mtx);
@@ -839,18 +857,17 @@ static void *videosink_thread(void *ctx)
 				// Anchor Initialization
 				if (passthrough == 2 && have_audio_time) {
 					int delay_for_pt = stream_get_anchor_delay_ms(s, 1);
-					if (p->hold_audio_applied_ms > 0) {
-						// Avoid double-counting startup hold + static latency.
-						delay_for_pt -= p->hold_audio_applied_ms;
-						if (delay_for_pt < 0) {
-							delay_for_pt = 0;
-						}
-					}
 					int max_forward_lead_ms = delay_for_pt + 300;
 					if (max_forward_lead_ms < 500) {
 						max_forward_lead_ms = 500;
 					}
-					int64_t heard_ts = (int64_t)s->audio_time - (int64_t)delay_for_pt;
+					int used_put_time = 0;
+					int put_age_ms = 0;
+					// Mode 2 writes arrive in bursts, so audio_time-delay is only the
+					// accepted-buffer frontier. Use the centralized heard clock (and
+					// preferably its fresh audio-thread put_time sample) to account for
+					// drain time since the last accepted burst.
+					int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
 					if (s && s->seek_epoch > 0 && s->video_time > 0 && heard_ts > f->time) {
 						// Backward seek: avoid anchoring behind the current video frame.
 						heard_ts = f->time;
@@ -865,8 +882,10 @@ static void *videosink_thread(void *ctx)
 					}
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					p->render_offset_from_audio = 1;
-					DBGSI serprintf("android_sync: init render_offset from audio_time=%d delay=%d passthrough=2 offset=%lld\n",
-						s->audio_time, delay_for_pt, (long long)p->render_offset_ns);
+					DBGSI serprintf("android_sync: init render_offset from audio_time=%d heard_ts=%lld src=%s put_age=%d delay=%d passthrough=2 offset=%lld\n",
+						s->audio_time, (long long)heard_ts,
+						used_put_time ? "put_time" : "interpolated",
+						put_age_ms, delay_for_pt, (long long)p->render_offset_ns);
 				} else if (have_audio_time) {
 					int used_put_time = 0;
 					int put_age_ms = 0;

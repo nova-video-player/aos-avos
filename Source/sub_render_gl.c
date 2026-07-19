@@ -189,7 +189,7 @@ static void* egl_render_thread(void* arg) {
         pthread_mutex_lock(&r->lock);
         if (new_frame != NULL) {
             if (r->current_frame) {
-                sub_engine_free_frame((SUB_FRAME*)r->current_frame);
+                sub_engine_release_frame((SUB_ENGINE*)r->engine, (SUB_FRAME*)r->current_frame);
             }
             r->current_frame = new_frame;
         }
@@ -301,8 +301,19 @@ void sub_render_gl_destroy(SUB_RENDERER *r) {
     if (!r) return;
     pthread_mutex_lock(&r->lock);
     r->running = 0;
+    // Grab and null any frame that poll_frame() may have installed between
+    // the last sub_render_gl_clear() call and now. The render thread is still
+    // running at this point (pthread_join not called yet), so we must hold
+    // the lock while stealing the pointer. After join the thread is dead and
+    // cannot install a new frame, so no further lock is needed for the free.
+    SUB_FRAME *leftover = (SUB_FRAME *)r->current_frame;
+    r->current_frame = NULL;
     pthread_mutex_unlock(&r->lock);
     pthread_join(r->thread, NULL);
+    // The engine is already destroyed by this point (sub_engine_destroy calls
+    // close_track then destroy_renderer), so use the bare global free —
+    // no backend vtable to route through.
+    if (leftover) sub_engine_free_frame(leftover);
     pthread_mutex_destroy(&r->lock);
     free(r);
 }
@@ -345,7 +356,7 @@ void sub_render_gl_clear(SUB_RENDERER *r) {
     pthread_mutex_unlock(&r->lock);
 
     if (to_free) {
-        sub_engine_free_frame(to_free);
+        sub_engine_release_frame((SUB_ENGINE*)r->engine, to_free);
     }
 }
 

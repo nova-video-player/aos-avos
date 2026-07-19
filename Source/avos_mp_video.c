@@ -141,10 +141,12 @@ static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
 	// ALL subtitle formats (Text and Bitmap) are now handled natively by the GPU compositor.
 	// Explicitly abort sending any JNI payload to the legacy Java SubtitleManager.
 	int fmt = video->s->av.sub[video->s->av.subs].format;
-	if (fmt == SUB_FORMAT_SSA ||
-		fmt == SUB_FORMAT_TEXT ||
-		fmt == SUB_FORMAT_DVD_GFX ||
-		fmt == SUB_FORMAT_PGS) {
+	if (fmt == SUB_FORMAT_SSA      ||  // raw text -> C engine
+		fmt == SUB_FORMAT_TEXT     ||  // raw text -> C engine
+		fmt == SUB_FORMAT_WEBVTT   ||  // ffdec text -> C engine
+		fmt == SUB_FORMAT_MOV_TEXT ||  // ffdec text -> C engine
+		fmt == SUB_FORMAT_DVD_GFX  ||  // ffdec bitmap -> C engine
+		fmt == SUB_FORMAT_PGS) {       // ffdec bitmap -> C engine
 		return;
 	}
 	sub_frame = stream_get_current_subtitle(video->s);

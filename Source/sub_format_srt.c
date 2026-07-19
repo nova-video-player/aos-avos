@@ -48,9 +48,20 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
 
 static int srt_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params) {
     SRT_BACKEND *ctx = calloc(1, sizeof(SRT_BACKEND));
+    if (!ctx) return -1;
+
     ctx->ssa_backend = sub_format_ssa_create();
+    if (!ctx->ssa_backend) {
+        free(ctx);
+        return -1;
+    }
 
     char *synthetic_header = generate_dynamic_ass_header(params->user_style, params->video_w, params->video_h);
+    if (!synthetic_header) {
+        free(ctx->ssa_backend);
+        free(ctx);
+        return -1;
+    }
 
     SUB_FORMAT_OPEN_PARAMS ssa_params = *params;
     ssa_params.codec_private = (const uint8_t*)synthetic_header;
@@ -58,8 +69,20 @@ static int srt_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
 
     int ret = ctx->ssa_backend->open(ctx->ssa_backend, &ssa_params);
     free(synthetic_header);
+
+    if (ret != 0) {
+        // ssa_open failed — it may have partially constructed its ctx.
+        // Call close() to drain whatever was allocated before freeing the shell.
+        // We do NOT set be->priv so if sub_engine_open_track calls our srt_close
+        // via its failure path, the NULL ctx guard below makes it a safe no-op.
+        if (ctx->ssa_backend->close) ctx->ssa_backend->close(ctx->ssa_backend);
+        free(ctx->ssa_backend);
+        free(ctx);
+        return ret;
+    }
+
     be->priv = ctx;
-    return ret;
+    return 0;
 }
 
 static int srt_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms) {
@@ -100,8 +123,11 @@ static int srt_resize(SUB_FORMAT_BACKEND *be, int video_w, int video_h) { return
 static int srt_flush(SUB_FORMAT_BACKEND *be) { return ((SRT_BACKEND *)be->priv)->ssa_backend->flush(((SRT_BACKEND *)be->priv)->ssa_backend); }
 static int srt_close(SUB_FORMAT_BACKEND *be) {
     SRT_BACKEND *ctx = (SRT_BACKEND *)be->priv;
-    ctx->ssa_backend->close(ctx->ssa_backend);
-    free(ctx->ssa_backend);
+    if (!ctx) return 0; // srt_open failed before setting be->priv — safe no-op
+    if (ctx->ssa_backend) {
+        ctx->ssa_backend->close(ctx->ssa_backend);
+        free(ctx->ssa_backend);
+    }
     free(ctx);
     return 0;
 }

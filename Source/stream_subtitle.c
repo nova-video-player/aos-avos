@@ -22,7 +22,6 @@
 #include "atime.h"
 #include "util.h"
 #include "sub_engine.h"
-// extern SUB_ENGINE *g_sub_engine;
 // NOTE: the subtitle engine clock is registered once in avos_mp_video_open()
 // (engine_clock_cb -> stream_get_current_time) and lives for the whole stream
 // session. This file no longer owns or re-registers a clock -- see the removed
@@ -32,6 +31,41 @@
 #define DBG  if(Debug[DBG_SUB])
 
 #ifdef CONFIG_STREAM
+
+// -----------------------------------------------------------------------------
+// Format classification helpers
+//
+// Three distinct cases in the pipeline:
+//
+//   CASE 1 — RAW PASSTHROUGH (SRT/TEXT, SSA/ASS):
+//     Demuxed packet is already clean text. Feed directly to sub_engine.
+//     No sub_dec needed.
+//
+//   CASE 2 — FFDEC-THEN-ENGINE (WEBVTT, MOV_TEXT):
+//     Packet is binary-wrapped (wvtt box / tx3g atom). codec_ffsub decodes it
+//     to plain text first, then that text is fed to sub_engine.
+//     sub_dec IS opened, but output goes to engine not Java.
+//
+//   CASE 3 — FFDEC-THEN-ENGINE-BITMAP (PGS, VobSub):
+//     Packet is a compressed bitmap. codec_ffsub decodes to BGRA pixels, then
+//     sub_engine_feed_bitmap uploads them as an OpenGL texture.
+//     sub_dec IS opened, output goes to engine bitmap path.
+// -----------------------------------------------------------------------------
+
+static inline int _is_raw_text(int fmt) {
+    return (fmt == SUB_FORMAT_SSA  ||
+            fmt == SUB_FORMAT_TEXT);
+}
+
+static inline int _is_ffdec_text(int fmt) {
+    return (fmt == SUB_FORMAT_WEBVTT  ||
+            fmt == SUB_FORMAT_MOV_TEXT);
+}
+
+static inline int _is_ffdec_bitmap(int fmt) {
+    return (fmt == SUB_FORMAT_PGS     ||
+            fmt == SUB_FORMAT_DVD_GFX);
+}
 
 // *****************************************************************************
 //
@@ -99,41 +133,48 @@ static void alloc_sub_frame( STREAM *s )
 {
 	if( !s->subtitle_frame ) {
 		int cs = AV_IMAGE_BGRA_32;
-		if( s->subtitle->gfx ) {
+		if( _is_ffdec_bitmap(s->subtitle->format) ) {
 			int w = MAX( 720, s->video->width  );
 			int h = MAX( 576, s->video->height );
 DBG serprintf("stream_subtitle: alloc_sub_frame: %dx%d\n", w, h);
 			s->subtitle_frame = frame_alloc_with_cs_and_mem( w, h, cs, STREAM_MEM_NRM, 0);
 		} else {
-			// this is for text subs, so just allocate a large enuf buffer
+			// Text formats (raw or ffdec): just need a large enough text buffer
 			s->subtitle_frame = frame_alloc_with_cs_and_mem( 128, 8, cs, STREAM_MEM_NRM, 1);
 		}
 	}					 
 }
 
-static void _output_sub( STREAM *s, VIDEO_FRAME *f, uint64_t pos )
+// *****************************************************************************
+//
+//	_feed_bitmap_to_engine
+//
+//	Bridges a decoded BGRA VIDEO_FRAME from codec_ffsub into the C engine's
+//	bitmap path (sub_format_gfx.c -> OpenGL texture upload).
+//
+// *****************************************************************************
+static void _feed_bitmap_to_engine( STREAM *s, VIDEO_FRAME *f )
 {
-	// do we need to get a user time stamp from the parser?
-	if( pos && s->parser->get_time_for_pos ) {
-		int t = s->parser->get_time_for_pos( s, pos );
-		if( t != -1 ) {
-DBG serprintf("[diff %4d]  ", f->time - t );
-			f->time = t;
-		}
-	}
-	
-	// we need to adjust the time the users sees for the delay:
+	if( !s->sub_engine || !f ) return;
+
+	// Apply subtitle offset to the decoded frame time
 	f->time += RST_TO_TS_DELTA(s->subtitle_offset, int);
-	
-	if( s->subtitle->gfx ) {
-DBG serprintf("sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", s->video_time, f->time, f->duration, f->window.width, f->window.height );
-	} else {
-DBG serprintf("new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_time, f->time, f->duration, f->data );
-	}
-	// tell the user
-	if( s->message_cb ) {
-		s->message_cb( s, STREAM_SUBTITLE_CHANGED );
-	}
+
+DBG serprintf("sub int GFX->engine: video %8d  start %8d  dur %8d  [%dx%d]\r\n",
+              s->video_time, f->time, f->duration, f->window.width, f->window.height);
+
+	sub_engine_feed_bitmap(
+		(SUB_ENGINE*)s->sub_engine,
+		f->data[0],
+		f->window.width,
+		f->window.height,
+		f->linestep[0],
+		f->colorspace,
+		f->window.x,
+		f->window.y,
+		f->time,
+		f->duration
+	);
 }
 
 // *****************************************************************************
@@ -144,28 +185,50 @@ DBG serprintf("new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_t
 static void _get_next_int_sub( STREAM *s, int time )
 {
 	if( !s->seek ) {
-		// Initialize once per track!
+		int fmt = s->subtitle->format;
+
+		// Initialize once per track
 		if( !s->sub_dec && !s->subtitle_frame ) {
 
-			if (!s->subtitle->gfx) {
-				// IT IS TEXT: Initialize the OpenGL C-Engine!
+			if( _is_raw_text(fmt) ) {
+				// CASE 1: Raw passthrough — open C engine, no sub_dec needed
 				if (s->sub_engine) {
-					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
-					sub_engine_open_track((SUB_ENGINE*)s->sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
+					int engine_fmt = (fmt == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
+					sub_engine_open_track(
+						(SUB_ENGINE*)s->sub_engine,
+						engine_fmt,
+						s->video ? s->video->width  : 0,
+						s->video ? s->video->height : 0,
+						s->subtitle->extraData2,
+						s->subtitle->extraDataSize2);
 					// NOTE: do NOT call sub_engine_start() here. avos_mp_video_open() already
 					// registered the engine clock once (engine_clock_cb -> stream_get_current_time),
 					// and that registration stays valid for the stream's entire lifetime, including
-					// across track (re)opens. Re-registering here with engine_clock/g_player_time
-					// silently swapped the clock source to a static variable that only updates while
-					// this function is actively being pumped -- if the sub-decode thread was ever
-					// idled (e.g. during stream_check_subtitles()/stream_set_subtitle_stream()'s
-					// THREAD_IDLE transitions), g_player_time would freeze while playback continued,
-					// desyncing subtitle timing until the thread resumed.
+					// across track (re)opens.
 				}
-				// Notice: We completely bypass s->sub_dec for Text!
-			} else {
-				// IT IS A PICTURE (VobSub/PGS): Initialize the legacy decoder!
-				s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
+				// No sub_dec for raw text formats
+
+			} else if( _is_ffdec_text(fmt) ) {
+				// CASE 2: FFmpeg-decode-then-engine — open BOTH sub_dec AND C engine
+				s->sub_dec = stream_get_new_dec_sub( fmt );
+				if( s->sub_dec && stream_open_sub_dec( s ) ) {
+					stream_drop_subtitles( s );
+					return;
+				}
+				if (s->sub_engine) {
+					// All ffdec text formats funnel through the SRT wrapper in the engine
+					sub_engine_open_track(
+						(SUB_ENGINE*)s->sub_engine,
+						SUB_FMT_SRT,
+						s->video ? s->video->width  : 0,
+						s->video ? s->video->height : 0,
+						NULL, 0);
+				}
+
+			} else if( _is_ffdec_bitmap(fmt) ) {
+				// CASE 3: FFmpeg-decode-then-engine-bitmap — open sub_dec, engine already
+				// open (SUB_FMT_GFX track is opened by codec_ffsub's _open() directly)
+				s->sub_dec = stream_get_new_dec_sub( fmt );
 				if( s->sub_dec && stream_open_sub_dec( s ) ) {
 					stream_drop_subtitles( s );
 					return;
@@ -198,8 +261,8 @@ serprintf("cannot allocate subtitle frame!\r\n");
 
 			if( s->cdata_sub.time == -1 || s->cdata_sub.time <= time ) {
 
-				if (!s->subtitle->gfx) {
-					// FAST LANE: Pure Text straight from the demuxer to OpenGL!
+				if( _is_raw_text(fmt) ) {
+					// CASE 1: Feed raw demuxed packet straight to engine
 					if (s->sub_engine) {
 						int duration = 0;
 						uint8_t *payload = s->sub_buffer.data;
@@ -212,13 +275,26 @@ serprintf("cannot allocate subtitle frame!\r\n");
 						}
 						sub_engine_feed((SUB_ENGINE*)s->sub_engine, payload, payload_size, s->cdata_sub.time, duration);
 					}
-					s->cdata_sub.valid = 0; // Packet consumed!
-				} else {
-					// LEGACY PICTURE LANE: Decode Bitmap and send to Java!
+					s->cdata_sub.valid = 0;
+
+				} else if( _is_ffdec_text(fmt) ) {
+					// CASE 2: Decode binary packet to plain text, then feed engine
 					VIDEO_FRAME *f = s->subtitle_frame;
 					s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f );
 					s->cdata_sub.valid = 0;
-					if( f ) _output_sub( s, f, s->cdata_sub.pos );
+					if( f && f->data[0] && s->sub_engine ) {
+						int text_len = strlen((char*)f->data[0]);
+						if( text_len > 0 ) {
+							sub_engine_feed((SUB_ENGINE*)s->sub_engine, f->data[0], text_len, f->time, f->duration);
+						}
+					}
+
+				} else if( _is_ffdec_bitmap(fmt) ) {
+					// CASE 3: Decode bitmap packet, upload to engine as OpenGL texture
+					VIDEO_FRAME *f = s->subtitle_frame;
+					s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f );
+					s->cdata_sub.valid = 0;
+					if( f ) _feed_bitmap_to_engine( s, f );
 				}
 			}
 		}

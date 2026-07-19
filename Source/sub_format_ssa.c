@@ -204,22 +204,42 @@ static void ass_msg_cb(int level, const char *fmt, va_list va, void *data) {
 
 static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params) {
     SSA_BACKEND *ctx = calloc(1, sizeof(SSA_BACKEND));
+    if (!ctx) return -1;
     pthread_mutex_init(&ctx->lock, NULL);
 
     ctx->video_w = params->video_w;
     ctx->video_h = params->video_h;
 
     ctx->library = ass_library_init();
+    if (!ctx->library) {
+        pthread_mutex_destroy(&ctx->lock);
+        free(ctx);
+        return -1;
+    }
     ass_set_message_cb(ctx->library, ass_msg_cb, NULL);
     ass_set_extract_fonts(ctx->library, 1);
 
     ctx->renderer = ass_renderer_init(ctx->library);
+    if (!ctx->renderer) {
+        ass_library_done(ctx->library);
+        pthread_mutex_destroy(&ctx->lock);
+        free(ctx);
+        return -1;
+    }
+
     int final_w = ctx->video_w > 0 ? ctx->video_w : 1920;
     int final_h = ctx->video_h > 0 ? ctx->video_h : 1080;
     LOGD("SUB_SURFACE: Configured libass renderer frame size: %d x %d", final_w, final_h);
     ass_set_frame_size(ctx->renderer, final_w, final_h);
 
     ctx->track = ass_new_track(ctx->library);
+    if (!ctx->track) {
+        ass_renderer_done(ctx->renderer);
+        ass_library_done(ctx->library);
+        pthread_mutex_destroy(&ctx->lock);
+        free(ctx);
+        return -1;
+    }
 
     if (params->codec_private && params->codec_private_size > 0) {
         ass_process_codec_private(ctx->track, (char *)params->codec_private, params->codec_private_size);

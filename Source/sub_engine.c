@@ -126,6 +126,11 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w,
 
     int rc = backend->open(backend, &params);
     if (rc != 0) {
+        // backend->open() may have partially constructed a private ctx (e.g.
+        // calloc'd SSA_BACKEND and initialised the mutex before failing on
+        // ass_renderer_init). Call close() first so the backend can drain
+        // whatever it managed to allocate before we free the shell itself.
+        if (backend->close) backend->close(backend);
         free(backend);
         return rc;
     }
@@ -288,6 +293,25 @@ void sub_engine_free_frame(SUB_FRAME *frame) {
         ev = next;
     }
     free(frame);
+}
+
+// sub_engine_release_frame
+//
+// Backend-aware frame release. sub_render_gl.c must call this instead of the
+// bare sub_engine_free_frame() so that backends which pool or reuse memory
+// (e.g. a future hardware-buffer backend) can override the teardown path via
+// their own free_frame() vtable entry.
+//
+// Falls back to sub_engine_free_frame() when the engine or backend is gone
+// (e.g. called during teardown after close_track).
+void sub_engine_release_frame(SUB_ENGINE *eng, SUB_FRAME *frame) {
+    if (!frame) return;
+    if (eng && eng->active_backend && eng->active_backend->free_frame) {
+        eng->active_backend->free_frame(eng->active_backend, frame);
+    } else {
+        // Backend already closed or never set — fall back to global free
+        sub_engine_free_frame(frame);
+    }
 }
 
 int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms) {

@@ -37,7 +37,8 @@ typedef struct {
 void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out);
 
 SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng);
-void sub_engine_free_frame(SUB_FRAME *frame);
+void sub_engine_free_frame(SUB_FRAME *frame);                          // static global free — for internal use only
+void sub_engine_release_frame(SUB_ENGINE *eng, SUB_FRAME *frame);      // backend-aware release — use this in sub_render_gl.c
 int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms);
 
 void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode);

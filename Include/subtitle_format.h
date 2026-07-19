@@ -28,7 +28,7 @@
 //it should fill this field in info_XXX function
 
 //This struct is acquired when determining which files may
-//contain valid subtitles for videofile 
+//contain valid subtitles for videofile
 //and is passed to parse_XXX function
 
 typedef struct sub_coding_style
@@ -55,7 +55,7 @@ typedef struct subt_orig_t
         unsigned int lan_count;
         char *language_name;
 	char *default_language; //This must contain the internal describer
-                                //   'ENCC' 'FINCC' etc or zero if not 
+                                //   'ENCC' 'FINCC' etc or zero if not
 				// supported by subtitle format
 	sub_coding_style **title_langs;
 
@@ -97,6 +97,9 @@ typedef struct uni_sub_t
         char *identifier;
 	sub_line *first;
 	sub_line *last;
+	int   is_ssa;
+	char *raw_data;
+	int   raw_size;
 } uni_sub;
 
 typedef struct converted_subs_t

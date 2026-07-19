@@ -54,7 +54,9 @@
 
 static inline int _is_raw_text(int fmt) {
     return (fmt == SUB_FORMAT_SSA  ||
-            fmt == SUB_FORMAT_TEXT);
+            fmt == SUB_FORMAT_TEXT ||
+            fmt == SUB_FORMAT_EXT); // external text tracks (SRT/VTT/SMI/SUB/MPL2)
+                                    // SSA external tracks use fmt==SUB_FORMAT_SSA
 }
 
 static inline int _is_ffdec_text(int fmt) {
@@ -305,75 +307,94 @@ serprintf("cannot allocate subtitle frame!\r\n");
 //
 //    _get_next_ext_sub
 //
+//    Unified external subtitle pipeline — mirrors the internal embedded path.
+//
+//    TEXT (SRT/VTT/SMI/SUB/MPL2/ASS/SSA):
+//      All cues are bulk-fed into the C engine ONCE at track open via
+//      stream_sub_ext_feed_engine(). After that this function does nothing
+//      for text tracks — the engine owns the timeline and renders on its
+//      own render thread exactly like internal embedded tracks.
+//
+//    BITMAP (external VobSub IDX/SUB):
+//      Still uses sub_dec + frame-by-frame gfx lookup, same as before, but
+//      feeds _feed_bitmap_to_engine() instead of Java.
+//
 // *****************************************************************************
 static void _get_next_ext_sub( STREAM *s, int time )
 {
-	if( !s->seek ) {
+	if( s->seek ) return;
 
-		if( !s->sub_dec && !s->subtitle_frame ) {
-			if (!s->subtitle->gfx) {
-				// IT IS EXTERNAL TEXT: Initialize OpenGL C-Engine!
-				if (s->sub_engine) {
-					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
-					sub_engine_open_track((SUB_ENGINE*)s->sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
-					// NOTE: see matching comment in _get_next_int_sub() above -- the engine
-					// clock is registered once in avos_mp_video_open() and must not be
-					// re-registered here.
-				}
-			} else {
-				// IT IS AN EXTERNAL PICTURE (IDX/SUB)
-				s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
-				if( s->sub_dec && stream_open_sub_dec( s ) ) {
-					stream_drop_subtitles( s );
-					return;
-				}
-			}
+	int fmt = s->subtitle->format;
 
-			alloc_sub_frame( s );
+	// --- INIT BLOCK: runs once per track open ---
+	if( !s->sub_dec && !s->subtitle_frame ) {
 
-			if( !s->subtitle_frame ) {
-				serprintf("cannot allocate subtitle frame!\r\n");
-				stream_close_sub_dec( s );
+		if( _is_ffdec_bitmap(fmt) ) {
+			// EXTERNAL BITMAP: open sub_dec for VobSub decode
+			s->sub_dec = stream_get_new_dec_sub( fmt );
+			if( s->sub_dec && stream_open_sub_dec( s ) ) {
 				stream_drop_subtitles( s );
 				return;
 			}
+		} else {
+			// EXTERNAL TEXT (SRT/VTT/SMI/SUB/MPL2/ASS/SSA):
+			// Open the engine track first, then bulk-feed the entire cue list.
+			// engine_fmt comes from SUB_PRIV->engine_fmt[track] set at parse time.
+			if( s->sub_engine ) {
+				int engine_fmt = stream_sub_ext_get_engine_fmt( s );
+				if( engine_fmt < 0 ) engine_fmt = SUB_FMT_SRT; // safe default
+
+				sub_engine_open_track(
+					(SUB_ENGINE*)s->sub_engine,
+					engine_fmt,
+					s->video ? s->video->width  : 0,
+					s->video ? s->video->height : 0,
+					NULL, 0); // no codec_private for external files
+
+				// Bulk-feed the full parsed cue list (or raw ASS buffer) right now.
+				// After this call the engine has everything — no per-frame polling needed.
+				stream_sub_ext_feed_engine( s );
+			}
+			// No sub_dec for external text — engine owns the timeline.
 		}
 
-		if( time == -1 ) return;
+		alloc_sub_frame( s );
 
-		if( s->subtitle->gfx ) {
-			// EXTERNAL PICTURE LANE
-			if ( !s->sub_dec ) return;
-			VIDEO_FRAME f_;
-			VIDEO_FRAME *f = &f_;
-			UCHAR data[SUBTITLE_CHUNK];
-			f->data[0] = data;
-			f->size = sizeof( data );
+		if( !s->subtitle_frame ) {
+			serprintf("cannot allocate subtitle frame!\r\n");
+			stream_close_sub_dec( s );
+			stream_drop_subtitles( s );
+			return;
+		}
+	}
 
-			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
+	if( time == -1 ) return;
 
-			if( f && f->valid ) {
-				VIDEO_FRAME *f2 = s->subtitle_frame;
-				s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 );
-				if( f2 ) {
-					f2->time = f->time;
-					_output_sub( s, f2, 0 );
-				}
-			}
-		} else {
-			// EXTERNAL TEXT FAST LANE
-			// The file parser puts the text directly into f->data[0]!
-			VIDEO_FRAME *f = s->subtitle_frame;
-			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
+	// --- PER-FRAME BLOCK ---
+	// Text tracks: nothing to do — the engine render thread drives display.
+	// Bitmap tracks: decode the current gfx cue and feed the engine.
+	if( _is_ffdec_bitmap(fmt) ) {
+		if( !s->sub_dec ) return;
 
-			if( f && f->data[0] ) {
-				if (s->sub_engine) {
-					int text_len = strlen((char*)f->data[0]);
-					sub_engine_feed((SUB_ENGINE*)s->sub_engine, f->data[0], text_len, f->time, f->duration);
-				}
+		VIDEO_FRAME f_;
+		VIDEO_FRAME *f = &f_;
+		UCHAR data[SUBTITLE_CHUNK];
+		f->data[0] = data;
+		f->size = sizeof( data );
+
+		// Use the retained gfx lookup (linear scan, bitmap-only)
+		if( stream_sub_ext_get_gfx_data( s, &f, time ) ) return;
+
+		if( f && f->valid ) {
+			VIDEO_FRAME *f2 = s->subtitle_frame;
+			s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 );
+			if( f2 ) {
+				f2->time = f->time;
+				_feed_bitmap_to_engine( s, f2 );
 			}
 		}
 	}
+	// Text: no per-frame work needed.
 }
 
 // ************************************************************

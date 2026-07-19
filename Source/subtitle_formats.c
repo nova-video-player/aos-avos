@@ -52,7 +52,7 @@ int subtitle_register_format( SUBTITLE_REG_FORMAT *reg )
 		SUBTITLE_REG_FORMAT *head = _reg;
 		while( head->next ) {
 			head = head->next;
-		} 
+		}
 		head->next = reg;
 	}
 	reg->next = NULL;
@@ -92,7 +92,7 @@ serprintf("\t[%s]\r\n", f->format->name );
 serprintf("\r\n");
 }
 
-DECLARE_DEBUG_COMMAND_VOID( "subd", _dump_formats ); 
+DECLARE_DEBUG_COMMAND_VOID( "subd", _dump_formats );
 #endif
 
 /*************
@@ -112,13 +112,13 @@ static subt_orig *subtitle_parse_file( const char *filename, const char *org_nam
 		serprintf( "part file: %s\n", filename );
 		return 0;
 	}
-		
+
 	FILE *file = fopen( filename, "r" );
 	if ( !file ) {
 		DBG serprintf( "could not open file! %s\n", filename );
 		return NULL;
 	}
-	
+
 	SUBTITLE_FORMAT *ff = subtitle_find_format( file );
 	if ( ff != NULL ) {
 		new_title = acalloc(1, sizeof( subt_orig ) );
@@ -128,13 +128,13 @@ static subt_orig *subtitle_parse_file( const char *filename, const char *org_nam
 		strcpy( new_title->org_name, org_name );
 		strcpy( new_title->ext,  ext );
 		strcpy( new_title->lang, lang );
-		
+
 		new_title->format    = ff;
 		new_title->utf8      = utf8;
 		new_title->delete    = delete;
 		new_title->next      = 0;
 		new_title->lan_count = 0;
-		
+
 		//Only some titles have metadata
 		//try to extract different languages from headers
 		if( ff->info ) {
@@ -173,7 +173,7 @@ converted_subs *subtitle_get_converted( subtitle_files *sub_files, int clean_tag
 		}
 		title = title->next;
 	}
-	
+
 	//reserve space for every title file & lang
 	converted_subs *sub_array = acalloc(1, sizeof( converted_subs ) );
 	if ( !sub_array ) {
@@ -183,7 +183,7 @@ DBG serprintf( "subtitles: cannot alloc sub_array\n" );
 
 	sub_array->converted = acalloc( count, sizeof( uni_sub* ) );
 	sub_array->cnt = count;
-	
+
 	title = sub_files->files;
 	count = 0;
 	while ( title ) {
@@ -200,7 +200,7 @@ DBG serprintf( "subtitles: cannot alloc sub_array\n" );
 				continue;
 			}
 
-			// if there is a . separated part before the extension, treat it as a 
+			// if there is a . separated part before the extension, treat it as a
 			// language code and try to map a proper language name to it!
 			if( title->ext[0] ) {
 				const char *code;
@@ -217,7 +217,7 @@ DBG serprintf( "subtitles: cannot alloc sub_array\n" );
 			} else {
 				sub_array->converted[count]->identifier = astrdup( "Unknown" );
 			}
-DBG serprintf("ext [%s]  lang [%s] -> [%s]\n", title->ext, title->lang, sub_array->converted[count]->identifier );			
+DBG serprintf("ext [%s]  lang [%s] -> [%s]\n", title->ext, title->lang, sub_array->converted[count]->identifier );
 			count++;
 		} else {
 			// languages specified in this file
@@ -244,7 +244,7 @@ DBG serprintf("ext [%s]  lang [%s] -> [%s]\n", title->ext, title->lang, sub_arra
 			count += i;
 		}
 		if( title->delete ) {
-DBG serprintf("sub: delete %s\n", title->filename );		
+DBG serprintf("sub: delete %s\n", title->filename );
 			file_remove( title->filename );
 		}
 		title = title->next;
@@ -260,14 +260,14 @@ DBG {
 	int i;
 	for( i = 0; i < sub_array->cnt; i++ ) {
 		serprintf("subs for %d [%s]\n", i, sub_array->converted[i]->identifier );
-DBG2 {		
+DBG2 {
 		sub_line* tt = sub_array->converted[i]->first;
 		while(tt){
 			serprintf("%8d/%8d [%s][%s]\n",tt->start,tt->end, tt->top, tt->bottom);
 			tt = tt->next;
 		}
 }
-	} 
+	}
 }
 	return sub_array;
 }
@@ -332,7 +332,7 @@ char *subtitle_clean_formatter( char *line, int clean_tags )
 		}
 		i++;
 	}
-	newli[b] = '\0'; //make sure the string ends 
+	newli[b] = '\0'; //make sure the string ends
 	return (newli);
 }
 
@@ -382,7 +382,7 @@ static int convert_to_utf8( char **filename, int *delete )
 		return 0;
 	}
 	*delete = 0;
-	
+
 	// check for BOM
 	unsigned short bom = 0;
 	fread( &bom, 2, 1, file );
@@ -423,7 +423,7 @@ DBG serprintf("sub: UTF-16!\n");
 	chmod(template, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP);
 #else
 	char template[] = TMP_FILE;
-	
+
 	tmp_fd = mkstemp(template);
 #endif
 
@@ -452,10 +452,10 @@ DBG serprintf("sub: tmpfile: %s\n", template );
 			swap16_buf( (unsigned char*)utf16, utf16_len * 2 );
 		}
 		int utf8_len  = unicode_utf16_to_utf8( utf8, utf16, utf16_len );
-//serprintf("in %3d out %3d  %s\n", utf16_len, utf8_len, utf8 );	
+//serprintf("in %3d out %3d  %s\n", utf16_len, utf8_len, utf8 );
 		fwrite( utf8, 1, utf8_len, tmp_file );
 	}
-	
+
 	afree( *filename );
 	*filename = astrdup( template );
 	*delete   = 1;
@@ -476,9 +476,9 @@ static char **subtitle_get_files( char **sub_files, const char *full_path, const
 		DBG serprintf( "subtitle_get_files: path or filename error\n" );
 		return NULL;
 	}
-	
+
 	int sub_n = *count;
-	
+
 	// trickster. Compare only name not the ending in name.end
 	char *path = astrdup( full_path );
 	char *name = astrdup( file_name );
@@ -487,7 +487,7 @@ static char **subtitle_get_files( char **sub_files, const char *full_path, const
 		*( tmp /*+ 1*/ ) = '\0';	// allow for substrings by terminating before the "."
 	}
 	// dig the names from current directory
-	// use the name of parameter to find out subtitle files. Only ending should 
+	// use the name of parameter to find out subtitle files. Only ending should
 	// be different
 	DIR *dp = dir_open( path );
 	if ( !dp ) {		//path could point directly to file. Remove everything after last /
@@ -530,7 +530,7 @@ DBG serprintf("%d: %s\r\n", sub_n, sub_files[sub_n] );
 			//next file
 			ep = dir_read( dp );
 		}
-		
+
 		dir_close( dp );
 	} else {
 		DBG serprintf( "subtitle_get_files:Error opening directory:%s\n", path );
@@ -558,9 +558,9 @@ ERROREXIT:
 }
 
 /******************
- * Browses through given PATH and searches for files 
+ * Browses through given PATH and searches for files
  * that have same name as filename, but different ending
- * send those files to be detected and groups detected files 
+ * send those files to be detected and groups detected files
  * into one array in subtitle_files*
  *  * ***************/
 subtitle_files *subtitle_check_files( const char **path, const char *filename )
@@ -573,10 +573,10 @@ DBG serprintf("checking path: %s\n", *path );
 		sub_files = subtitle_get_files( sub_files, *path, filename, &count );
 		path++;
 	}
-	
+
 	subt_orig *subtitle_file     = NULL;
 	subtitle_files *usable_files = NULL;
-	
+
 	// for every found file, run detection routines to find out if they are
 	// in some recognised format
 	int i;
@@ -607,14 +607,14 @@ DBG serprintf("sub: check: %s\r\n", sub_files[i] );
 			usable_files->count++;
 		} else {
 			if( delete ) {
-DBG serprintf("sub: delete %s\n", sub_files[i] );		
+DBG serprintf("sub: delete %s\n", sub_files[i] );
 				file_remove( sub_files[i] );
 			}
 		}
 		afree( sub_files[i] );
 	}
 	afree( sub_files );
-	
+
 	return usable_files;
 }
 
@@ -659,7 +659,7 @@ static void free_subs( subt_orig * fd )
 	}
 }
 
-// cleans the struct that contains all the files that contain subtitles 
+// cleans the struct that contains all the files that contain subtitles
 // for played videofile
 void subtitle_free_files( subtitle_files *files )
 {
@@ -699,6 +699,9 @@ void subtitle_free_converted( converted_subs *subs )
 		}
 		free_subline( subs->converted[i]->first );
 		afree(subs->converted[i]->identifier);
+		if (subs->converted[i]->raw_data) {
+			afree(subs->converted[i]->raw_data);
+		}
 		afree( subs->converted[i] );
 	}
 	afree( subs->converted );

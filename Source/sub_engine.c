@@ -336,3 +336,26 @@ int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stri
     if (!eng || !eng->renderer) return 0;
     return sub_render_gl_fill_bitmap(eng->renderer, pixels, w, h, stride);
 }
+
+// sub_engine_feed_raw
+//
+// Feeds a complete raw ASS/SSA script buffer directly to the active backend.
+// Used by stream_sub_ext_feed_engine() for external .ass/.ssa files — the
+// entire file contents go in one call so Libass processes the full [Script
+// Info], [V4+ Styles], and all [Events] in one shot, identical to how
+// internal embedded SSA tracks are handled via ass_process_codec_private +
+// ass_process_data in ssa_open / ssa_feed.
+//
+// pts_ms and duration_ms are 0: the timing is encoded inside the ASS data.
+int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size) {
+    if (!eng || !data || size <= 0) return 0;
+    pthread_mutex_lock(&eng->lock);
+    SUB_FORMAT_BACKEND *backend = eng->active_backend;
+    int ret = 0;
+    if (backend && backend->feed) {
+        // Pass pts_ms=0, duration_ms=0 — timing is embedded in the ASS data
+        ret = backend->feed(backend, data, size, 0, 0);
+    }
+    pthread_mutex_unlock(&eng->lock);
+    return ret;
+}

@@ -23,6 +23,9 @@ int  stream_sub_ext_has_new( STREAM *s );
 int  stream_sub_ext_check( STREAM *s );
 void stream_sub_ext_close( STREAM *s );
 int  stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **frame, int time );
+int  stream_sub_ext_feed_engine(STREAM *s);
+int  stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time );
+int  stream_sub_ext_get_engine_fmt( STREAM *s );
 
 //int stream_get_num_subtitle( STREAM *s );
 //SUB_PROPERTIES *stream_get_subtitle_props( STREAM *s, int num );

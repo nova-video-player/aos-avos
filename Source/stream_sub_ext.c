@@ -24,6 +24,7 @@
 #include "util.h"
 #include "file.h"
 #include "browse.h"
+#include "sub_engine.h"
 
 #include <ctype.h>		// for isspace
 #include <unistd.h>
@@ -41,10 +42,11 @@ typedef struct SUB_PRIV {
 	subtitle_files *files;
 	converted_subs *subs;
 	int stream;
-	sub_line *sub;
-	sub_line *out;
-	int sub_time;
 	int prev_max;
+	// engine_fmt: SUB_FMT_SSA for ASS/SSA tracks, SUB_FMT_SRT for all other
+	// text tracks, SUB_FMT_GFX for bitmap tracks. Set per-track in
+	// stream_sub_ext_check() and read by stream_subtitle.c at track open.
+	int engine_fmt[SUB_TRACK_MAX];
 } SUB_PRIV;
 
 static int _get_time_from_frame(VIDEO_PROPERTIES *video, int frame)
@@ -201,18 +203,30 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 				
 		SUB_PROPERTIES *sub = s->av.sub + s->av.subs_max;
 	
-		sub->format         = p->subs->converted[i]->vobsub ? SUB_FORMAT_DVD_GFX : SUB_FORMAT_EXT;
-		sub->gfx            = p->subs->converted[i]->vobsub ? 1 : 0;
+		// Determine format and engine target for this track
+		if ( p->subs->converted[i]->vobsub ) {
+			sub->format        = SUB_FORMAT_DVD_GFX;
+			sub->gfx           = 1;
+			p->engine_fmt[s->av.subs_max] = SUB_FMT_GFX;
+		} else if ( p->subs->converted[i]->is_ssa ) {
+			sub->format        = SUB_FORMAT_SSA;
+			sub->gfx           = 0;
+			p->engine_fmt[s->av.subs_max] = SUB_FMT_SSA;
+		} else {
+			sub->format        = SUB_FORMAT_EXT;
+			sub->gfx           = 0;
+			p->engine_fmt[s->av.subs_max] = SUB_FMT_SRT;
+		}
 		sub->ext            = 1;
 		sub->stream         = i;
 		sub->valid          = 1;
 		if(p->subs->converted[i]->has_palette) {
 DBGS serprintf("has palette!\n");
 			sub->extraDataSize = sizeof( p->subs->converted[i]->palette );
-			memcpy( sub->extraData, p->subs->converted[i]->palette, sub->extraDataSize ); 
+			memcpy( sub->extraData, p->subs->converted[i]->palette, sub->extraDataSize );
 		}
 		s->av.subs_max ++;
-			
+
 		strnZcpy( sub->name, p->subs->converted[i]->identifier, AV_NAME_LEN );
 		if (sub_files) {
 			if (sub_files->filename) {
@@ -223,9 +237,6 @@ DBGS serprintf("has palette!\n");
 	}
 
 	p->stream = -1;
-	p->sub    = NULL;
-	p->out    = NULL;
-	p->sub_time = -1;
 	
 	return 0;
 
@@ -261,114 +272,118 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 
 // *************************
 //
-// stream_sub_ext_get_subtitle_data
+// stream_sub_ext_feed_engine
 //
+// Called ONCE at track open from _get_next_ext_sub() in stream_subtitle.c.
+// Feeds the entire parsed subtitle track into the C engine in one pass so
+// Libass owns the full timeline — identical to how internal embedded tracks
+// work. No cursor, no frame-by-frame polling, no ordering constraints.
+//
+// Returns: engine format (SUB_FMT_SSA / SUB_FMT_SRT / SUB_FMT_GFX)
+//          so stream_subtitle.c knows which backend was opened.
+//          Returns -1 on error.
 // *************************
-int stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **pframe, int time )
+int stream_sub_ext_feed_engine( STREAM *s )
+{
+	SUB_PRIV *p = s->subtitle_priv;
+	if( !p || !p->subs ) return -1;
+
+	int stream = s->subtitle->stream;
+	if( stream < 0 || stream >= p->subs->cnt ) return -1;
+
+	uni_sub *subs = p->subs->converted[stream];
+	if( !subs ) return -1;
+
+	int engine_fmt = p->engine_fmt[s->av.subs];
+
+DBG serprintf("sub_ext_feed_engine: stream %d  engine_fmt %d  is_ssa %d\r\n",
+              stream, engine_fmt, subs->is_ssa);
+
+	if( engine_fmt == SUB_FMT_SSA && subs->is_ssa ) {
+		// ASS/SSA: feed raw file buffer directly — Libass handles everything
+		if( subs->raw_data && subs->raw_size > 0 && s->sub_engine ) {
+			sub_engine_feed_raw( (SUB_ENGINE*)s->sub_engine,
+			                     (const uint8_t*)subs->raw_data,
+			                     subs->raw_size );
+		}
+
+	} else if( engine_fmt == SUB_FMT_SRT ) {
+		// SRT/VTT/SMI/SUB/MPL2: walk the cue list and bulk-feed every node
+		sub_line *node = subs->first;
+		while( node ) {
+			char merged[LINE_LEN * 2 + 4];
+			if( node->top && node->bottom ) {
+				snprintf( merged, sizeof(merged), "%s\\N%s", node->top, node->bottom );
+			} else {
+				snprintf( merged, sizeof(merged), "%s", node->top ? node->top : "" );
+			}
+			if( merged[0] && s->sub_engine ) {
+				int duration = scale_time( s, node->end ) - scale_time( s, node->start );
+				sub_engine_feed( (SUB_ENGINE*)s->sub_engine,
+				                 (uint8_t*)merged, strlen(merged),
+				                 scale_time( s, node->start ),
+				                 duration );
+			}
+			node = node->next;
+		}
+	}
+	// SUB_FMT_GFX (VobSub bitmap) is handled by the existing
+	// _is_ffdec_bitmap path in stream_subtitle.c — not bulk-fed here.
+
+	return engine_fmt;
+}
+
+// stream_sub_ext_get_gfx_data — retained for the external VobSub bitmap
+// path only. Called from stream_subtitle.c _get_next_ext_sub when
+// _is_ffdec_bitmap() is true.
+int stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 {
 	int rst_time = TS_TO_RST_TIME(time, int);
 	SUB_PRIV *p = s->subtitle_priv;
-	if( s->subtitle->stream != p->stream ) {
-		p->stream = s->subtitle->stream;
-		p->sub = NULL;
-		p->out = NULL;
-DBG serprintf("sub: stream now %d\r\n", p->stream );
-	}
-	
-	// over the end, give up
-	if( rst_time > scale_time( s, p->subs->converted[p->stream]->last->end ) ) {
-		return 1;
-	} else if( p->sub_time == -1 || time < p->sub_time ) {
-		p->sub = NULL;
-		p->out = NULL;
+	if( !p ) return 1;
+
+	int stream = s->subtitle->stream;
+	if( stream != p->stream ) {
+		p->stream = stream;
+DBG serprintf("sub_ext_gfx: stream now %d\r\n", p->stream);
 	}
 
-	p->sub_time = time;
-	
-	if( !p->sub ) {
-DBG serprintf("sub: rewind at %d\r\n", time);
-		// start from 1st sub
-		p->sub = p->subs->converted[p->stream]->first;
-		if( !p->sub ) {
-DBG serprintf("sub: no 1st\r\n");
-			return 1;
-		}
-	}
-	
-	if( !p->sub ) {
-		return 1;
-	}
-	
-	// no current or current is done?
-	if( !p->out || scale_time( s, p->out->end ) < rst_time ) {
-		int start = scale_time( s, p->sub->start );
-		int end   = scale_time( s, p->sub->end );
-		
-		// drop all subs in the past
-		while( p->sub ) {
-			if( end > rst_time ) {
-				break;
-			}
-DBG3 serprintf("sub: skip [%8d] %8d -> %8d [%s][%s]\r\n", time, start, end, p->sub->top, p->sub->bottom );
-			p->sub = p->sub->next;
-			if( !p->sub ) {
-				break;
-			}
-			start = scale_time( s, p->sub->start );
-			end = scale_time( s, p->sub->end );
-		}
-		if( !p->sub ) {
-			return 1;
-		}		
-	
-		// check if this one is due?
-		if( start > rst_time ) {
-DBG3 serprintf("sub: wait [%8d] %8d -> %8d [%s][%s]\r\n", time, start, end, p->sub->top, p->sub->bottom );
-			return 1;
-		}	
-		
-		// output this one:
-		p->out = p->sub;
-DBG2 serprintf("sub: out  [%8d] %8d -> %8d TOP[%s] BOT[%s]\r\n", time, start, end, p->out->top, p->out->bottom );
-		
-		VIDEO_FRAME *frame = *pframe;
-		if( s->subtitle->gfx ) {
+	uni_sub *subs = p->subs->converted[stream];
+	if( !subs || !subs->first ) return 1;
+
+	// Walk to find the cue that covers rst_time
+	sub_line *node = subs->first;
+	while( node ) {
+		int start = scale_time( s, node->start );
+		int end   = scale_time( s, node->end );
+		if( end > rst_time && start <= rst_time ) {
+			VIDEO_FRAME *frame = *pframe;
 			frame->valid = frame->size;
-			subtitle_get_gfx( p->subs->converted[p->stream], p->out->pos, frame->data[0], &frame->valid );
-		} else {
-			int   max = frame->size - 1;
-			char *src = p->out->top;
-			char *dst = frame->data[0];
-			// check if p->out->top is not NULL
-			if( !src ) {
-				src = "";
-			}
-			while( *src && max-- ) {
-				*dst++ = *src++;
-			}
-			if( p->out->bottom && max > 2 ) {
-				*dst++ = '\\';
-				*dst++ = 'n';
-				// check if p->out->bottom is not NULL
-				if( !p->out->bottom ) {
-					p->out->bottom = "";
-				}
-				char *src = p->out->bottom;
-				while( *src && max-- ) {
-					*dst++ = *src++;
-				}
-			}
-			*dst = '\0';
+			subtitle_get_gfx( subs, node->pos, frame->data[0], &frame->valid );
+			frame->time     = RST_TO_TS_TIME(start, int);
+			frame->duration = RST_TO_TS_DELTA(end - start, int);
+			return 0;
 		}
-			
-		frame->time      = RST_TO_TS_TIME(start, int);
-		frame->duration  = RST_TO_TS_DELTA(end - start, int);
-
-		p->sub = p->sub->next;
-		return 0;
+		node = node->next;
 	}
-
 	return 1;
 }
+// *************************
+//
+// stream_sub_ext_get_engine_fmt
+//
+// Returns the engine format (SUB_FMT_SSA / SUB_FMT_SRT / SUB_FMT_GFX)
+// for the currently active subtitle track. Called from stream_subtitle.c
+// _get_next_ext_sub() at track open time.
+// *************************
+int stream_sub_ext_get_engine_fmt( STREAM *s )
+{
+	SUB_PRIV *p = s->subtitle_priv;
+	if( !p ) return -1;
+	int track_idx = s->av.subs;
+	if( track_idx < 0 || track_idx >= SUB_TRACK_MAX ) return -1;
+	return p->engine_fmt[track_idx];
+}
+
 #endif	// CONFIG_SUBTITLES
 #endif  // CONFIG_STREAM

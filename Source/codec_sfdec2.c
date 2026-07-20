@@ -146,6 +146,9 @@ typedef struct priv {
 	int slew_active;
 	int mode2_dynamic_slew;
 	int last_mode2_dynamic_active;
+	const void *mode2_slew_frame_handle;
+	int mode2_slew_frame_time;
+	int mode2_slew_frame_epoch;
 	int64_t target_offset_ns;
 	int pending_reanchor;
 	int pending_seek_reanchor;
@@ -202,14 +205,16 @@ static INT64 _snap_timestamp_ns(priv_t *p, int frame_time)
 	return timestamp_us * 1000LL;
 }
 
-static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int *used_put_time, int *put_age_ms)
+static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int allow_put_time,
+	int *used_put_time, int *put_age_ms)
 {
 	const int k_put_time_fresh_ms = 100;
 	int use_put = 0;
 	int age_ms = 0;
 	int64_t heard_ts = 0;
 
-	if (p && s && s->audio_time > 0 && p->venc_put_time > 0 && p->venc_ref_time > 0) {
+	if (allow_put_time && p && s && s->audio_time > 0 &&
+		p->venc_put_time > 0 && p->venc_ref_time > 0) {
 		age_ms = atime() - p->venc_ref_time;
 		if (age_ms >= 0 && age_ms <= k_put_time_fresh_ms) {
 			heard_ts = p->venc_put_time;
@@ -829,9 +834,16 @@ static void *videosink_thread(void *ctx)
 				p->last_mode2_dynamic_active = mode2_dynamic_active;
 				p->pending_reanchor = 1;
 				p->mode2_dynamic_slew = 1;
+				p->mode2_slew_frame_handle = NULL;
+				p->mode2_slew_frame_time = INT_MIN;
+				p->mode2_slew_frame_epoch = INT_MIN;
 				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d\n",
 					mode2_dynamic_active);
 			}
+			int mode2_new_slew_frame = p->mode2_dynamic_slew &&
+				(f->android_handle != p->mode2_slew_frame_handle ||
+				 f->time != p->mode2_slew_frame_time ||
+				 f->epoch != p->mode2_slew_frame_epoch);
 			int hold_passthrough = 0;
 
 			// Passthrough mode 2 startup hold. Seek preview has no audio producer;
@@ -913,10 +925,11 @@ static void *videosink_thread(void *ctx)
 					int used_put_time = 0;
 					int put_age_ms = 0;
 					// Mode 2 writes arrive in bursts, so audio_time-delay is only the
-					// accepted-buffer frontier. Use the centralized heard clock (and
-					// preferably its fresh audio-thread put_time sample) to account for
-					// drain time since the last accepted burst.
-					int64_t heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
+					// accepted-buffer frontier. Before dynamic evidence is trusted, a
+					// fresh audio-thread put_time remains the best startup phase. Once
+					// dynamic, use the continuous centralized heard clock instead.
+					int64_t heard_ts = _get_render_heard_ts(p, s,
+						!mode2_dynamic_active, &used_put_time, &put_age_ms);
 					if (p->pending_seek_reanchor && s && s->video_time > 0 && heard_ts > f->time) {
 						// Backward seek: avoid anchoring behind the current video frame.
 						heard_ts = f->time;
@@ -939,7 +952,8 @@ static void *videosink_thread(void *ctx)
 				} else if (have_audio_time) {
 					int used_put_time = 0;
 					int put_age_ms = 0;
-					INT64 heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
+					INT64 heard_ts = _get_render_heard_ts(p, s, 1,
+						&used_put_time, &put_age_ms);
 					if (p->pending_seek_reanchor && s && s->video_time > 0 && heard_ts > f->time) {
 						// Backward seek: avoid anchoring behind the current video frame.
 						heard_ts = f->time;
@@ -964,6 +978,10 @@ static void *videosink_thread(void *ctx)
 				p->target_offset_ns = p->render_offset_ns;
 				p->slew_active = 0;
 				p->mode2_dynamic_slew = mode2_dynamic_active;
+				p->mode2_slew_frame_handle = mode2_dynamic_active ?
+					f->android_handle : NULL;
+				p->mode2_slew_frame_time = mode2_dynamic_active ? f->time : INT_MIN;
+				p->mode2_slew_frame_epoch = mode2_dynamic_active ? f->epoch : INT_MIN;
 				p->pending_reanchor = 0;
 				// A static fallback has not consumed the seek-specific audio
 				// clamp; preserve it for the later audio-based reanchor.
@@ -974,7 +992,8 @@ static void *videosink_thread(void *ctx)
 				// Audio time became valid after static init: re-anchor once to heard audio.
 				int used_put_time = 0;
 				int put_age_ms = 0;
-				INT64 heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
+				INT64 heard_ts = _get_render_heard_ts(p, s,
+					!mode2_dynamic_active, &used_put_time, &put_age_ms);
 				if (p->pending_seek_reanchor && s && s->video_time > 0 && heard_ts > f->time) {
 					heard_ts = f->time;
 				}
@@ -994,10 +1013,14 @@ static void *videosink_thread(void *ctx)
 			} else if (have_audio_time &&
 				(passthrough != 2 || mode2_dynamic_active || mode2_dynamic_changed)) {
 				// Slew toward a new anchor only on explicit events (seek/resume/speed/discontinuity)
-				if (p->pending_reanchor || mode2_dynamic_active) {
+				if (p->pending_reanchor ||
+					(mode2_dynamic_active && mode2_new_slew_frame)) {
 					int used_put_time = 0;
 					int put_age_ms = 0;
-					INT64 heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
+					// Dynamic presentation is continuous; the cached put_time remains
+					// quantized to compressed writes and would make this target oscillate.
+					INT64 heard_ts = _get_render_heard_ts(p, s,
+						!mode2_dynamic_active, &used_put_time, &put_age_ms);
 					if (p->pending_seek_reanchor && s && s->video_time > 0 && heard_ts > f->time) {
 						heard_ts = f->time;
 					}
@@ -1017,7 +1040,8 @@ static void *videosink_thread(void *ctx)
 				}
 			}
 
-			if (p->slew_active) {
+			if (p->slew_active &&
+				(!p->mode2_dynamic_slew || mode2_new_slew_frame)) {
 				INT64 delta = p->target_offset_ns - p->render_offset_ns;
 				// A validated Mode 2 clock can correct hundreds of milliseconds.
 				// Move the renderer by at most 5ms per frame so the phase converges
@@ -1034,8 +1058,16 @@ static void *videosink_thread(void *ctx)
 					p->slew_active = 0;
 					if( !mode2_dynamic_active ) {
 						p->mode2_dynamic_slew = 0;
+						p->mode2_slew_frame_handle = NULL;
+						p->mode2_slew_frame_time = INT_MIN;
+						p->mode2_slew_frame_epoch = INT_MIN;
 					}
 				}
+			}
+			if( p->mode2_dynamic_slew && mode2_new_slew_frame ) {
+				p->mode2_slew_frame_handle = f->android_handle;
+				p->mode2_slew_frame_time = f->time;
+				p->mode2_slew_frame_epoch = f->epoch;
 			}
 
 			INT64 av_delay_ns = (INT64)RST_TO_TS_DELTA(p->effective_av_delay_ms, int) * 1000000LL;
@@ -1471,6 +1503,9 @@ retry_decoder_open:
 	p->pause_armed = 0;
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
+	p->mode2_slew_frame_handle = NULL;
+	p->mode2_slew_frame_time = INT_MIN;
+	p->mode2_slew_frame_epoch = INT_MIN;
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->pending_seek_reanchor = 0;
@@ -1649,6 +1684,9 @@ DBGCV	CLOG();
 	pthread_mutex_lock(&p->locked.mtx);
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
+	p->mode2_slew_frame_handle = NULL;
+	p->mode2_slew_frame_time = INT_MIN;
+	p->mode2_slew_frame_epoch = INT_MIN;
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->pending_seek_reanchor = 0;
@@ -1774,6 +1812,9 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->render_offset_ns = -1;
 	p->render_offset_from_audio = 0;
 	p->slew_active = 0;
+	p->mode2_slew_frame_handle = NULL;
+	p->mode2_slew_frame_time = INT_MIN;
+	p->mode2_slew_frame_epoch = INT_MIN;
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->pending_seek_reanchor = 1;

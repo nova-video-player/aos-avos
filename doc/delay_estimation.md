@@ -143,6 +143,18 @@ the ledger and grants a 750ms remapping grace period. Any other evidence loss
 slews back to the continuously maintained static clock. Playback-head, encoded-
 byte, and frame-size interpretations remain diagnostic-only.
 
+The sfdec2 renderer reads the continuous centralized heard clock while dynamic
+evidence is active; it does not retarget from the write-quantized `put_time`
+cache. Target calculation and the bounded 5ms convergence step occur at most
+once per distinct video frame, so renderer-loop wakeups cannot accelerate or
+oscillate the correction.
+
+Mode 1 uses the same observer strictly in shadow mode. A candidate is credible
+when `mode1_iec_occupancy_shadow` reports `pt=1`, IEC framing, timestamp source,
+ADVANCING state, a stable rate near the configured carrier rate, and convergent
+`direct_ms`/`frame_ms` values across lifecycle transitions. Until those criteria
+are confirmed on target hardware, Mode 1 keeps its static passthrough delay.
+
 State Machine Summary
 ---------------------
 1) Startup (no valid dynamic yet)

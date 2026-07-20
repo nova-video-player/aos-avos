@@ -52,6 +52,8 @@ void stream_audio_samplerate_changed( STREAM *s );
 static int zero_time = 200;
 static int stream_audio_chunk = 4096;
 static int stream_audio_pcm_accum_ms = 40;
+static int stream_audio_pcm_normal_accum_ms = 20;
+static int stream_audio_pcm_normal_max_frame_ms = 5;
 static int ac3_sink_configured = 0;  // Track if sink is configured for AC3 passthrough
 static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when AC3 recoding starts
 static int ac3_force_mode2 = 0;  // Debug A/B: force raw AC3 AudioTrack mode2 for recoding
@@ -758,7 +760,7 @@ serprintf("_audio_abort!\r\n");
 	return 1;
 }
 
-static int _pcm_accum_target_bytes(const AUDIO_FRAME *frame)
+static int _pcm_bytes_per_sec(const AUDIO_FRAME *frame)
 {
 	if( !frame || !frame->channels || !frame->bits || !frame->samplesPerSec ) {
 		return 0;
@@ -767,8 +769,23 @@ static int _pcm_accum_target_bytes(const AUDIO_FRAME *frame)
 	if( bytes_per_sample <= 0 ) {
 		return 0;
 	}
-	int bytes_per_sec = frame->samplesPerSec * frame->channels * bytes_per_sample;
-	int target = (bytes_per_sec * stream_audio_pcm_accum_ms) / 1000;
+	return frame->samplesPerSec * frame->channels * bytes_per_sample;
+}
+
+static int _pcm_frame_is_shorter_than(const AUDIO_FRAME *frame, int duration_ms)
+{
+	int bytes_per_sec = _pcm_bytes_per_sec( frame );
+	return bytes_per_sec > 0 && frame->size > 0 &&
+		(int64_t)frame->size * 1000 < (int64_t)bytes_per_sec * duration_ms;
+}
+
+static int _pcm_accum_target_bytes(const AUDIO_FRAME *frame, int target_ms)
+{
+	int bytes_per_sec = _pcm_bytes_per_sec( frame );
+	if( bytes_per_sec <= 0 ) {
+		return 0;
+	}
+	int target = (bytes_per_sec * target_ms) / 1000;
 	// Keep a practical lower bound even for low-rate content.
 	if( target < 4096 ) {
 		target = 4096;
@@ -1357,20 +1374,22 @@ serprintf(" ae! ");
 			resume_seen_pending = 0;
 		}
 
-		// Pre-filter PCM accumulation: only when atempo is active AND speed != 1.0x.
-		// Coalesces tiny decoder output so atempo WSOLA runs on larger batches.
-		// At exactly 1.0x atempo is a passthrough; accumulating a larger batch
-		// only increases the write quantum and the A/V diff oscillation amplitude.
+		// Pre-filter PCM accumulation. At non-1.0x, coalesce PCM so atempo WSOLA
+		// runs on larger batches. At 1.0x, only coalesce unusually small decoder
+		// output to avoid excessive filter/JNI/AudioTrack calls without changing
+		// the write cadence of codecs that already produce practical blocks.
 		// atempo_filter_enabled: whether the filter will actually run this frame.
-		// atempo_accum_enabled:  whether pre-accumulation should coalesce frames
-		//                        (disabled at 1.0x to halve the write burst size).
 		int atempo_filter_enabled = (s->audio_filter_atempo != NULL &&
 			audio_interface_is_audio_speed_enabled() &&
 			audio_interface_is_using_atempo() &&
 			passthrough != 1 && passthrough != 2);
 		int atempo_accum_enabled = atempo_filter_enabled &&
 			fabsf(audio_interface_get_audio_speed() - 1.0f) > 1e-6f;
-		int pcm_eligible = (atempo_accum_enabled &&
+		int normal_speed_accum_enabled =
+			fabsf(audio_interface_get_audio_speed() - 1.0f) <= 1e-6f &&
+			_pcm_frame_is_shorter_than( &audio_frame,
+				stream_audio_pcm_normal_max_frame_ms );
+		int pcm_eligible = ((atempo_accum_enabled || normal_speed_accum_enabled) &&
 			!passthrough_active &&
 			!ac3_recoding &&
 			!audio_frame.error &&
@@ -1414,7 +1433,9 @@ serprintf(" ae! ");
 				memcpy( s->pcm_accum_data + s->pcm_accum_size, audio_frame.data, audio_frame.size );
 				s->pcm_accum_size += audio_frame.size;
 
-				int pcm_accum_target = _pcm_accum_target_bytes( &audio_frame );
+				int pcm_accum_target = _pcm_accum_target_bytes( &audio_frame,
+					normal_speed_accum_enabled ? stream_audio_pcm_normal_accum_ms :
+					stream_audio_pcm_accum_ms );
 				if( s->pcm_accum_size < pcm_accum_target ) {
 					// Keep decoding in this call to avoid thread-loop overhead
 					// and produce a steady batch cadence for tiny-frame codecs.

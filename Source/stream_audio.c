@@ -2032,6 +2032,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					int ledger_reserved_frames = 0;
 					int ledger_bpf = 0;
 					int size_written = 0;
+					int compressed_transaction_locked = 0;
 					compressed_write_result_t compressed_result = COMPRESSED_WRITE_COMPLETE;
 					if( compressed_unit ) {
 						// Arm before the transaction, but publish/reanchor only after every
@@ -2049,12 +2050,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							(passthrough >= 2 && device_get_android_api() >= 23);
 						if( serialize_transaction ) {
 							pthread_mutex_lock( &s->audio_sink_mutex );
+							compressed_transaction_locked = 1;
 						}
 						compressed_result = _stream_write_compressed_unit(
 							s, &audio_frame, &size_written );
-						if( serialize_transaction ) {
-							pthread_mutex_unlock( &s->audio_sink_mutex );
-						}
 					} else {
 						DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
 						int can_write_retries = 0;
@@ -2116,6 +2115,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								passthrough_active, ac3_recoding, compressed_result);
 							s->video_hold_for_resume_audio = 0;
 						}
+						if( compressed_transaction_locked ) {
+							pthread_mutex_unlock( &s->audio_sink_mutex );
+							compressed_transaction_locked = 0;
+						}
 						if( compressed_result == COMPRESSED_WRITE_ABORTED ) {
 							return;
 						}
@@ -2170,6 +2173,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							DBG serprintf("stream_audio: releasing video hold on write failure (pt=%d recode=%d)\n",
 								passthrough_active, ac3_recoding);
 							s->video_hold_for_resume_audio = 0;
+						}
+						if( compressed_transaction_locked ) {
+							pthread_mutex_unlock( &s->audio_sink_mutex );
+							compressed_transaction_locked = 0;
 						}
 						size = 0;
 						break;
@@ -2238,7 +2245,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// must be done via audio_time here (PCM uses startup_audio_hold instead).
 						// Restores android_sync=0 behavior removed during refactoring.
 						if( s->put_time_mode && passthrough_active && s->video_time >= 0 && anchor_delay > 0 ) {
-							start_time = s->video_time + anchor_delay;
+							int anchor_video_time = s->video_time;
+							// A coarse seek may land well after the requested timestamp. Mode 1
+							// must anchor to the first admitted current-epoch frame, otherwise
+							// video waits for audio to traverse the keyframe gap in real time.
+							if( passthrough == 1 && s->seek_video_drop &&
+								s->seek_video_ready_ts != STREAM_NO_PTS_VALUE ) {
+								anchor_video_time = s->seek_video_ready_ts;
+							}
+							start_time = anchor_video_time + anchor_delay;
 							sfdec2_refresh_sched_anchor( s );
 						}
 
@@ -2410,6 +2425,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// recode assigns the next unit's value at the top of the loop.
 							audio_frame.fakeSize = 0;
 						}
+					}
+					// A completed compressed unit and its public clock advance form one
+					// transaction. Pause must not observe accepted bytes before their
+					// duration has been committed to the heard-time source.
+					if( compressed_transaction_locked ) {
+						pthread_mutex_unlock( &s->audio_sink_mutex );
+						compressed_transaction_locked = 0;
 					}
 
 					size             -= size_written;

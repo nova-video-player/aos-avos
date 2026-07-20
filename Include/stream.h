@@ -794,6 +794,7 @@ typedef struct STREAM {
 	int		seek_video_target_ts;
 	int		seek_video_drop;
 	volatile int	seek_video_target_pending;	// audio waits until video preroll reaches the seek target
+	volatile int	seek_video_ready_ts;	// first current-epoch video frame admitted after seek
 	int		seek_force_video_drop;
 	int		seek_skip_initial_play;
 	int		seek_use_target_sync;

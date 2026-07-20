@@ -3215,6 +3215,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 			goto Discard;
 		}
 		if( s->seek_video_target_pending ) {
+			s->seek_video_ready_ts = frame->time;
 			s->seek_video_target_pending = 0;
 			DBG serprintf("VIDEO_SEEK_TARGET_READY: frame=%d target=%d epoch=%d\n",
 				frame->time, s->seek_video_target_ts, s->seek_epoch);
@@ -4638,6 +4639,7 @@ static void _seek_init( STREAM *s )
 	s->seek_video_target_pending = 0;
 	s->seek_audio_target_ts = 0;
 	s->seek_video_target_ts = 0;
+	s->seek_video_ready_ts = STREAM_NO_PTS_VALUE;
 
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;

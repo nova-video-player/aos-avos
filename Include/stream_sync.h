@@ -20,6 +20,9 @@
 int  stream_sync_init( STREAM *s, int time );
 int  stream_sync_restart( STREAM *s );
 int  stream_sync_restart_after_pause( STREAM *s );
+void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier );
+void stream_sync_mode2_heard_frontier_arm( STREAM *s );
+int  stream_sync_mode2_heard_frontier_pending( STREAM *s );
 int  stream_sync_av_delay( STREAM *s );
 int  stream_get_atempo_delay( STREAM *s );
 void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active );

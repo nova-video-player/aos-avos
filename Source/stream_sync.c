@@ -54,9 +54,6 @@ extern int stream_bdrop_threshold;
 extern int stream_pdrop_threshold;
 
 static volatile int	stream_dbg_delay = 0;
-// Guards s->mode2_heard_interp_* read-modify-write. stream_get_heard_audio_ts()
-// is called from both the audio producer and the video scheduler threads.
-static pthread_mutex_t mode2_heard_interp_lock = PTHREAD_MUTEX_INITIALIZER;
 static int atempo_delay_log_count = 0;
 int stream_get_atempo_delay( STREAM *s );
 static int sync_diag_count = 0;
@@ -441,7 +438,55 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 //	stream_sync_restart
 //
 // ************************************************************
-int stream_sync_restart( STREAM *s )
+static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier )
+{
+	s->mode2_heard_epoch++;
+	s->mode2_heard_interp_valid = 0;
+	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_heard_interp_wall_ms = 0;
+	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_heard_interp_delay_ms = -1;
+	s->mode2_heard_interp_last_log_ms = 0;
+	s->mode2_heard_prevideo_phase_active = 0;
+	if( clear_frontier ) {
+		s->mode2_heard_frontier_seed_pending = 0;
+	}
+}
+
+void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier )
+{
+	if( !s ) {
+		return;
+	}
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	_stream_sync_mode2_heard_reset_locked( s, clear_frontier );
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+}
+
+void stream_sync_mode2_heard_frontier_arm( STREAM *s )
+{
+	if( !s ) {
+		return;
+	}
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	s->mode2_heard_frontier_seed_pending = 1;
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+}
+
+int stream_sync_mode2_heard_frontier_pending( STREAM *s )
+{
+	int pending;
+	if( !s ) {
+		return 0;
+	}
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	pending = s->mode2_heard_frontier_seed_pending;
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	return pending;
+}
+
+// Caller owns s->mode2_heard_mutex so Mode 2 capture/reset/restore can be atomic.
+static int _stream_sync_restart_locked( STREAM *s )
 {
 	s->delay         = 0;
 	_stream_pcm_delay_memory_reset( s );
@@ -454,17 +499,20 @@ int stream_sync_restart( STREAM *s )
 	s->vid_ref_time = -1;
 	s->sync_v_time = -1;
 	s->sync_a_time = -1;
-	s->mode2_heard_interp_valid = 0;
-	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_wall_ms = 0;
-	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_delay_ms = -1;
-	s->mode2_heard_interp_last_log_ms = 0;
-	s->mode2_heard_prevideo_phase_active = 0;
+	_stream_sync_mode2_heard_reset_locked( s, 0 );
 
 	_sync_diag_reset();
 
 	return 0;
+}
+
+int stream_sync_restart( STREAM *s )
+{
+	int ret;
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	ret = _stream_sync_restart_locked( s );
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	return ret;
 }
 
 // Pause keeps the compressed AudioTrack and its buffered media intact. Preserve
@@ -481,7 +529,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	int interp_delay_ms;
 	int interp_last_log_ms;
 
-	pthread_mutex_lock( &mode2_heard_interp_lock );
+	pthread_mutex_lock( &s->mode2_heard_mutex );
 	keep_mode2_phase = passthrough_mode >= 2 &&
 		!libavos_get_ac3_recoding_enabled() && s->mode2_heard_interp_valid;
 	interp_ts = s->mode2_heard_interp_ts;
@@ -489,7 +537,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	interp_delay_ms = s->mode2_heard_interp_delay_ms;
 	interp_last_log_ms = s->mode2_heard_interp_last_log_ms;
 
-	stream_sync_restart( s );
+	_stream_sync_restart_locked( s );
 	if( keep_mode2_phase ) {
 		s->mode2_heard_interp_valid = 1;
 		s->mode2_heard_interp_ts = interp_ts;
@@ -501,7 +549,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d audio=%d video=%d\n",
 			interp_ts, interp_raw_ts, interp_delay_ms, s->audio_time, s->video_time);
 	}
-	pthread_mutex_unlock( &mode2_heard_interp_lock );
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
 
 	return 0;
 }
@@ -838,150 +886,152 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	// clock. Interpolate heard time from CLOCK_MONOTONIC between accepted batches
 	// and clamp it to that endpoint. AC3 recode is excluded because its dedicated
 	// wall-clock burst pacer already supplies smooth write timing.
-	if( passthrough_mode >= 2 && !ac3_recoding &&
-		(s->sync_v_time >= 0 || s->mode2_heard_prevideo_phase_active ||
-		 s->mode2_heard_frontier_seed_pending) ) {
+	if( passthrough_mode >= 2 && !ac3_recoding ) {
 		int raw_heard_ts = heard_ts;
-		int fixed_latency = s->audio_ctx ?
-			audio_interface_get_fixed_latency( s->audio_ctx ) : 0;
-		if( fixed_latency < 0 || fixed_latency > heard_delay ) {
-			fixed_latency = 0;
-		}
-
-		pthread_mutex_lock( &mode2_heard_interp_lock );
-
-		// Epoch resets. Each cause needs a different seed because the buffer
-		// fill state differs (avos-444: seeding every reset at raw pushed video
-		// back ~360ms per mid-playback track change, accumulating):
-		//
-		// 1. First start (!valid): seed at raw. heard <= 0 then gates video
-		//    until audio becomes audible; the pre-audible phase is discarded by
-		//    the delay-change reset once the normalized latency freezes
-		//    (avos-429 showed a permanent ~270ms deficit when it was carried).
-		// 2. Mid-playback sink recreation (track change): the track was torn
-		//    down and reopened, so its compressed buffer is EMPTY. Remove that
-		//    capacity from the seed, but retain the fixed downstream route delay:
-		//    the first accepted frame still traverses AudioFlinger/HAL/HDMI before
-		//    it is heard. Raw assumes a full buffer and understates presentation
-		//    by the capacity during refill, making the sync gate hold video against
-		//    a phantom deficit and push it permanently late. Raw races up under
-		//    the frozen-phase clock as blocking writes refill; the normal
-		//    envelope resumes once it catches up. This case is signaled
-		//    explicitly by the reconfigure path (frontier_seed_pending): it is
-		//    not inferable here, because audio_time is continuous across a
-		//    track change so raw does not jump backward (avos-446). The
-		//    backward-raw check remains as a fallback for flush paths that
-		//    do rewind the timeline.
-		// 3. Selected-delay change with a continuous frontier (normalized
-		//    latency freezing shortly after a restart): keep the clock
-		//    monotonic. Seeding at the new raw would snap the frontier-seeded
-		//    clock back down mid-refill and reintroduce the deficit of case 2.
-		int first_start = !s->mode2_heard_interp_valid;
-		int delay_change = !first_start &&
-			heard_delay != s->mode2_heard_interp_delay_ms;
-		// A larger normalized latency moves raw heard time backward without
-		// emptying the sink. Do not let that expected clock recalculation take
-		// the legacy backward-raw restart path and seed at audio_time.
-		int frontier_restart = s->mode2_heard_frontier_seed_pending ||
-			(!first_start && !delay_change &&
-			 raw_heard_ts < s->mode2_heard_interp_raw_ts);
-		int reset_interp = first_start || frontier_restart || delay_change;
-		s->mode2_heard_frontier_seed_pending = 0;
-
-		if( reset_interp ) {
-			int seed;
-			const char *seed_cause;
-			if( frontier_restart ) {
-				seed = raw_heard_ts + heard_delay - fixed_latency;
-				seed_cause = "restart_frontier";
-			} else if( delay_change && s->sink_ref_time < 0 ) {
-				// Initial normalization replaces a provisional latency before an
-				// authoritative playback epoch exists. Adopt its physical phase;
-				// preserving the provisional phase would retain the full delta.
-				seed = raw_heard_ts;
-				seed_cause = "initial_latency";
-			} else if( delay_change && s->mode2_heard_interp_ts > raw_heard_ts ) {
-				seed = s->mode2_heard_interp_ts;	// keep phase, stay monotonic
-				seed_cause = "delay_monotonic";
-			} else {
-				seed = raw_heard_ts;
-				seed_cause = first_start ? "initial_raw" :
-					(delay_change ? "delay_raw" : "raw_discontinuity");
-			}
-			s->mode2_heard_interp_valid = 1;
-			s->mode2_heard_interp_ts = seed;
-			s->mode2_heard_interp_wall_ms = wall_now;
-			if( frontier_restart && s->sync_v_time < 0 ) {
-				// A seek/reopen can deliver audio before the first video sync sample.
-				// Keep the empty-buffer phase authoritative instead of falling back
-				// to raw audio_time-delay on the following audio-side calls.
-				s->mode2_heard_prevideo_phase_active = 1;
-			}
-			DBG serprintf("mode2_epoch_seed: cause=%s audio=%d raw=%d seed=%d delay=%d fixed=%d sink_ref=%d seek_epoch=%d\n",
-				seed_cause, s->audio_time, raw_heard_ts, seed, heard_delay,
-				fixed_latency, s->sink_ref_time, s->seek_epoch);
-		} else {
-			if( s->paused || s->paused_internal ) {
-				// Playback is paused: physical presentation is frozen, so hold the
-				// interpolated phase and keep the wall epoch current so resume does
-				// not credit the pause duration as elapsed audio.
-				s->mode2_heard_interp_wall_ms = wall_now;
-			} else {
-				int elapsed_ms = wall_now - s->mode2_heard_interp_wall_ms;
-				if( elapsed_ms < 0 ) {
-					// atime() wrap or an invalid epoch: preserve phase and restart.
-					elapsed_ms = 0;
-				}
-				int candidate = s->mode2_heard_interp_ts + elapsed_ms;
-				// Free-run ahead of the frontier: between accepted batches the
-				// buffer drains while playback continues, so physical presentation
-				// legitimately exceeds raw. The physical bound is the buffered
-				// amount itself (selected delay minus fixed route latency): presentation can never
-				// be more than one full buffer ahead of the full-buffer model.
-				// This also keeps the empty-buffer frontier seed (raw + delay,
-				// track-change restart) inside the envelope during refill.
-				// MAX_LEAD_MS remains a floor for routes whose HAL batch quantum
-				// exceeds a small capacity; the cap only bounds true starvation.
-				int capacity_lead = heard_delay - fixed_latency;
-				int max_lead = capacity_lead > STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS ?
-					capacity_lead : STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS;
-				if( candidate > raw_heard_ts + max_lead ) {
-					candidate = raw_heard_ts + max_lead;
-				}
-				if( candidate > s->mode2_heard_interp_ts ) {
-					s->mode2_heard_interp_ts = candidate;
-				}
-				s->mode2_heard_interp_wall_ms = wall_now;
-			}
-			// Frontier re-anchor: when a write batch is accepted, the buffer has
-			// just refilled to capacity, so at that instant physical presentation
-			// equals audio_time - selected_delay exactly. If the frontier heard
-			// point jumps above the interpolated clock (buffer fill after
-			// start/seek/track change, or HAL batch jitter), snap up to it. This
-			// restores the raw clock's self-correction during buffer fill instead
-			// of carrying a permanent heard deficit (avos-432 track-change desync).
-			if( raw_heard_ts > s->mode2_heard_interp_ts ) {
-				s->mode2_heard_interp_ts = raw_heard_ts;
-			}
-		}
-
-		s->mode2_heard_interp_raw_ts = raw_heard_ts;
-		s->mode2_heard_interp_delay_ms = heard_delay;
-		heard_ts = s->mode2_heard_interp_ts;
-		// Audio can publish put_time before the video thread establishes its new
-		// sync sample. Keep using the explicit pause/seek phase during that window;
-		// once video is live, the ordinary sync_v_time condition owns continuity.
-		if( s->sync_v_time >= 0 ) {
-			s->mode2_heard_prevideo_phase_active = 0;
-		}
-
+		int reset_interp = 0;
 		int do_log = 0;
-		if( wall_now - s->mode2_heard_interp_last_log_ms >= 500 ) {
-			s->mode2_heard_interp_last_log_ms = wall_now;
-			do_log = 1;
+
+		pthread_mutex_lock( &s->mode2_heard_mutex );
+		if( s->sync_v_time >= 0 || s->mode2_heard_prevideo_phase_active ||
+			s->mode2_heard_frontier_seed_pending ) {
+			int fixed_latency = s->audio_ctx ?
+				audio_interface_get_fixed_latency( s->audio_ctx ) : 0;
+			if( fixed_latency < 0 || fixed_latency > heard_delay ) {
+				fixed_latency = 0;
+			}
+
+			// Epoch resets. Each cause needs a different seed because the buffer
+			// fill state differs (avos-444: seeding every reset at raw pushed video
+			// back ~360ms per mid-playback track change, accumulating):
+			//
+			// 1. First start (!valid): seed at raw. heard <= 0 then gates video
+			//    until audio becomes audible; the pre-audible phase is discarded by
+			//    the delay-change reset once the normalized latency freezes
+			//    (avos-429 showed a permanent ~270ms deficit when it was carried).
+			// 2. Mid-playback sink recreation (track change): the track was torn
+			//    down and reopened, so its compressed buffer is EMPTY. Remove that
+			//    capacity from the seed, but retain the fixed downstream route delay:
+			//    the first accepted frame still traverses AudioFlinger/HAL/HDMI before
+			//    it is heard. Raw assumes a full buffer and understates presentation
+			//    by the capacity during refill, making the sync gate hold video against
+			//    a phantom deficit and push it permanently late. Raw races up under
+			//    the frozen-phase clock as blocking writes refill; the normal
+			//    envelope resumes once it catches up. This case is signaled
+			//    explicitly by the reconfigure path (frontier_seed_pending): it is
+			//    not inferable here, because audio_time is continuous across a
+			//    track change so raw does not jump backward (avos-446). The
+			//    backward-raw check remains as a fallback for flush paths that
+			//    do rewind the timeline.
+			// 3. Selected-delay change with a continuous frontier (normalized
+			//    latency freezing shortly after a restart): keep the clock
+			//    monotonic. Seeding at the new raw would snap the frontier-seeded
+			//    clock back down mid-refill and reintroduce the deficit of case 2.
+			int first_start = !s->mode2_heard_interp_valid;
+			int delay_change = !first_start &&
+				heard_delay != s->mode2_heard_interp_delay_ms;
+			// A larger normalized latency moves raw heard time backward without
+			// emptying the sink. Do not let that expected clock recalculation take
+			// the legacy backward-raw restart path and seed at audio_time.
+			int frontier_restart = s->mode2_heard_frontier_seed_pending ||
+				(!first_start && !delay_change &&
+				 raw_heard_ts < s->mode2_heard_interp_raw_ts);
+			reset_interp = first_start || frontier_restart || delay_change;
+			s->mode2_heard_frontier_seed_pending = 0;
+
+			if( reset_interp ) {
+				int seed;
+				const char *seed_cause;
+				if( frontier_restart ) {
+					seed = raw_heard_ts + heard_delay - fixed_latency;
+					seed_cause = "restart_frontier";
+				} else if( delay_change && s->sink_ref_time < 0 ) {
+					// Initial normalization replaces a provisional latency before an
+					// authoritative playback epoch exists. Adopt its physical phase;
+					// preserving the provisional phase would retain the full delta.
+					seed = raw_heard_ts;
+					seed_cause = "initial_latency";
+				} else if( delay_change && s->mode2_heard_interp_ts > raw_heard_ts ) {
+					seed = s->mode2_heard_interp_ts;	// keep phase, stay monotonic
+					seed_cause = "delay_monotonic";
+				} else {
+					seed = raw_heard_ts;
+					seed_cause = first_start ? "initial_raw" :
+						(delay_change ? "delay_raw" : "raw_discontinuity");
+				}
+				s->mode2_heard_interp_valid = 1;
+				s->mode2_heard_interp_ts = seed;
+				s->mode2_heard_interp_wall_ms = wall_now;
+				if( frontier_restart && s->sync_v_time < 0 ) {
+					// A seek/reopen can deliver audio before the first video sync sample.
+					// Keep the empty-buffer phase authoritative instead of falling back
+					// to raw audio_time-delay on the following audio-side calls.
+					s->mode2_heard_prevideo_phase_active = 1;
+				}
+				DBG serprintf("mode2_epoch_seed: cause=%s audio=%d raw=%d seed=%d delay=%d fixed=%d sink_ref=%d seek_epoch=%d\n",
+					seed_cause, s->audio_time, raw_heard_ts, seed, heard_delay,
+					fixed_latency, s->sink_ref_time, s->seek_epoch);
+			} else {
+				if( s->paused || s->paused_internal ) {
+					// Playback is paused: physical presentation is frozen, so hold the
+					// interpolated phase and keep the wall epoch current so resume does
+					// not credit the pause duration as elapsed audio.
+					s->mode2_heard_interp_wall_ms = wall_now;
+				} else {
+					int elapsed_ms = wall_now - s->mode2_heard_interp_wall_ms;
+					if( elapsed_ms < 0 ) {
+						// atime() wrap or an invalid epoch: preserve phase and restart.
+						elapsed_ms = 0;
+					}
+					int candidate = s->mode2_heard_interp_ts + elapsed_ms;
+					// Free-run ahead of the frontier: between accepted batches the
+					// buffer drains while playback continues, so physical presentation
+					// legitimately exceeds raw. The physical bound is the buffered
+					// amount itself (selected delay minus fixed route latency): presentation can never
+					// be more than one full buffer ahead of the full-buffer model.
+					// This also keeps the empty-buffer frontier seed (raw + delay,
+					// track-change restart) inside the envelope during refill.
+					// MAX_LEAD_MS remains a floor for routes whose HAL batch quantum
+					// exceeds a small capacity; the cap only bounds true starvation.
+					int capacity_lead = heard_delay - fixed_latency;
+					int max_lead = capacity_lead > STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS ?
+						capacity_lead : STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS;
+					if( candidate > raw_heard_ts + max_lead ) {
+						candidate = raw_heard_ts + max_lead;
+					}
+					if( candidate > s->mode2_heard_interp_ts ) {
+						s->mode2_heard_interp_ts = candidate;
+					}
+					s->mode2_heard_interp_wall_ms = wall_now;
+				}
+				// Frontier re-anchor: when a write batch is accepted, the buffer has
+				// just refilled to capacity, so at that instant physical presentation
+				// equals audio_time - selected_delay exactly. If the frontier heard
+				// point jumps above the interpolated clock (buffer fill after
+				// start/seek/track change, or HAL batch jitter), snap up to it. This
+				// restores the raw clock's self-correction during buffer fill instead
+				// of carrying a permanent heard deficit (avos-432 track-change desync).
+				if( raw_heard_ts > s->mode2_heard_interp_ts ) {
+					s->mode2_heard_interp_ts = raw_heard_ts;
+				}
+			}
+
+			s->mode2_heard_interp_raw_ts = raw_heard_ts;
+			s->mode2_heard_interp_delay_ms = heard_delay;
+			heard_ts = s->mode2_heard_interp_ts;
+			// Audio can publish put_time before the video thread establishes its new
+			// sync sample. Keep using the explicit pause/seek phase during that window;
+			// once video is live, the ordinary sync_v_time condition owns continuity.
+			if( s->sync_v_time >= 0 ) {
+				s->mode2_heard_prevideo_phase_active = 0;
+			}
+
+			if( wall_now - s->mode2_heard_interp_last_log_ms >= 500 ) {
+				s->mode2_heard_interp_last_log_ms = wall_now;
+				do_log = 1;
+			}
 		}
 
-		pthread_mutex_unlock( &mode2_heard_interp_lock );
+		pthread_mutex_unlock( &s->mode2_heard_mutex );
 
 		if( do_log ) {
 			DBG serprintf("mode2_heard_interp: wall=%d raw=%d interp=%d ceiling_gap=%d audio=%d delay=%d reset=%d paused=%d\n",
@@ -1192,13 +1242,6 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pending = 0;
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_valid = 0;
-	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_wall_ms = 0;
-	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_delay_ms = -1;
-	s->mode2_heard_interp_last_log_ms = 0;
-	s->mode2_heard_prevideo_phase_active = 0;
 	_stream_pcm_delay_memory_reset( s );
 	s->warmup_video_frames = 0;
 

@@ -4730,7 +4730,7 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 		// sync gate hold video against a phantom deficit that the wall-anchored
 		// blit schedule then keeps forever (avos-446/447: ~380-1050ms added per
 		// track change). Must be set after stream_audio_flush, which clears it.
-		s->mode2_heard_frontier_seed_pending = 1;
+		stream_sync_mode2_heard_frontier_arm( s );
 	}
 
 	if( s->video_dec) {
@@ -4792,7 +4792,7 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int last_good_delay_valid = s->last_good_delay_valid;
 	int old_audio_time = s->audio_time;
 	int old_sink_ref_time = s->sink_ref_time;
-	int inherited_mode2_frontier = s->mode2_heard_frontier_seed_pending;
+	int inherited_mode2_frontier = stream_sync_mode2_heard_frontier_pending( s );
 	int first_start = (old_time < 0 && s->seek_epoch == 0);
 	// A non-negative video timestamp does not prove playback was established:
 	// initial track selection can decode/preview frame zero and then issue another
@@ -4850,7 +4850,7 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 		// restart. Initial playback must include the selected pipeline delay,
 		// so its Mode 2 heard clock starts at audio_time - selected_delay.
 		if( preserve_mode2_frontier ) {
-			s->mode2_heard_frontier_seed_pending = 1;
+			stream_sync_mode2_heard_frontier_arm( s );
 			DBG serprintf("mode2_frontier_arm: cause=%s seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
 				inherited_mode2_frontier ? "seek_chain" : "seek",
 				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);

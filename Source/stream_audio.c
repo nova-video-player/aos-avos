@@ -617,17 +617,10 @@ void stream_audio_flush( STREAM *s )
 	s->audio_end = 0;
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
-	s->mode2_heard_interp_valid = 0;
-	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_wall_ms = 0;
-	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_delay_ms = -1;
-	s->mode2_heard_interp_last_log_ms = 0;
-	s->mode2_heard_prevideo_phase_active = 0;
 	// Discard any stale frontier seed; the paths that empty the sink buffer
 	// (sink flush in the seek paths, passthrough sink reopen on format change)
 	// re-arm it after this flush runs.
-	s->mode2_heard_frontier_seed_pending = 0;
+	stream_sync_mode2_heard_reset( s, 1 );
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
@@ -692,13 +685,7 @@ DBG	serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d) ac3_recode=
 	s->audio_start_pts        = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
 	s->audio_time_remainder_us = 0;
-	s->mode2_heard_interp_valid = 0;
-	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_wall_ms = 0;
-	s->mode2_heard_interp_raw_ts = STREAM_NO_PTS_VALUE;
-	s->mode2_heard_interp_delay_ms = -1;
-	s->mode2_heard_interp_last_log_ms = 0;
-	s->mode2_heard_prevideo_phase_active = 0;
+	stream_sync_mode2_heard_reset( s, 0 );
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
@@ -1614,7 +1601,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								// Initial sink configuration has no prior timeline and must retain
 								// the selected pipeline delay (avos-21).
 								if( had_audio_epoch ) {
-									s->mode2_heard_frontier_seed_pending = 1;
+									stream_sync_mode2_heard_frontier_arm( s );
 									DBG serprintf("mode2_frontier_arm: cause=format audio=%d sink_ref=%d seek_epoch=%d\n",
 										s->audio_time, s->sink_ref_time, s->seek_epoch);
 								} else {

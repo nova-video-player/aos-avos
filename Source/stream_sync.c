@@ -86,6 +86,7 @@ static int stream_use_xbmc_smoothing = 1;
 #define STREAM_MODE2_DIRECT_FRESH_MS          250
 #define STREAM_MODE2_DIRECT_GRACE_MS          750
 #define STREAM_MODE2_DIRECT_MAX_DELAY_MS     5000
+static int stream_mode2_dynamic_all = 1;
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 // Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
 // delta <= COMMIT_DELTA: direct commit (normal slow drift).
@@ -1384,16 +1385,19 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			s->mode2_heard_interp_delay_ms = heard_delay;
 			heard_ts = s->mode2_heard_interp_ts;
 
-			// Promote only the format/rate profile validated by avos-57/58.
+			// Promote only the format/rate profile validated by avos-57/58 unless
+			// the debug-only broad-profile device test is explicitly enabled.
 			// The timestamp must independently prove both its frame-rate domain and
 			// stable submitted-minus-presented occupancy before it can bound heard
 			// time. Adoption never moves heard time backward: the clock holds until
 			// the measured presentation frontier catches its current phase.
 			STREAM_PRESENTATION_OBSERVATION *observation =
 				&s->presentation_observation;
+			int validated_profile = observation->format == WAVE_FORMAT_AC3 &&
+				observation->rate == 44100;
 			int direct_valid = observation->epoch == s->mode2_heard_epoch &&
 				observation->direct_trusted &&
-				observation->format == WAVE_FORMAT_AC3 && observation->rate == 44100 &&
+				(validated_profile || stream_mode2_dynamic_all) &&
 				observation->direct_delay_ms >= 0 &&
 				wall_now - observation->observed_wall_ms >= 0 &&
 				wall_now - observation->observed_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
@@ -1404,11 +1408,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				s->mode2_dynamic_clock_ts = heard_ts;
 				s->mode2_dynamic_clock_wall_ms = wall_now;
 				s->mode2_dynamic_clock_grace_until_wall_ms = 0;
-				DBG serprintf("mode2_dynamic_clock_enter: epoch=%llu heard=%d target=%d delay=%d rate_streak=%d stable_streak=%d\n",
+				DBG serprintf("mode2_dynamic_clock_enter: epoch=%llu heard=%d target=%d delay=%d rate_streak=%d stable_streak=%d fmt=%04X rate=%d forced=%d\n",
 					(unsigned long long)s->mode2_heard_epoch, heard_ts,
 					s->audio_time - observation->direct_delay_ms,
 					observation->direct_delay_ms, observation->direct_rate_streak,
-					observation->direct_stable_streak);
+					observation->direct_stable_streak, observation->format,
+					observation->rate, !validated_profile);
 			}
 			if( s->mode2_dynamic_clock_active ) {
 				int elapsed_ms = wall_now - s->mode2_dynamic_clock_wall_ms;
@@ -2817,6 +2822,7 @@ serprintf("dbg_delay %5d\n", stream_dbg_delay );
 DECLARE_DEBUG_COMMAND("sep", 	_stream_delay_plus   );
 DECLARE_DEBUG_COMMAND("sem", 	_stream_delay_minus  );
 DECLARE_DEBUG_COMMAND("ses", 	_stream_delay_set    );
+DECLARE_DEBUG_PARAM("mode2_dynamic_all", stream_mode2_dynamic_all );
 
 static void _stream_toggle_xbmc( int argc, char *argv[] )
 {

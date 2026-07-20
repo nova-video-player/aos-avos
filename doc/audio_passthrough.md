@@ -196,10 +196,11 @@ buffer, and truncating that capacity caused a persistent phase error after track
   passthrough / AC3 recoding sync or speed-anchor calculations.
 - Mode 2 uses platform latency as an input to the normalized route baseline. A
   generation-scoped asynchronous observer now compares complete submitted units with
-  Android presentation progress. Production promotion is deliberately limited to the
-  direct logical-frame `AudioTimestamp` mapping validated for raw AC3 at 44.1 kHz;
-  other codecs, rates, playback-head mappings, and byte/frame interpretations retain
-  the normalized static clock. See [`mode2.md`](../mode2.md).
+  Android presentation progress. Mode 2 production promotion can be enabled for all
+  direct compressed profiles with `mode2_dynamic_all` (currently on for device
+  validation); disabling it restores the raw AC3/44.1 kHz allowlist. Mode 1 remains
+  shadow-only, and playback-head, byte, and alternate frame interpretations remain
+  diagnostic. See [`mode2.md`](../mode2.md).
 
 ### Mode-2 heard-time interpolation
 

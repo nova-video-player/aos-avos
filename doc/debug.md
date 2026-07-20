@@ -140,6 +140,7 @@ avsh <name> [args...]
 | `at_underrun`       | param | 0       | Log AudioTrack underrun events |
 | `at_disable_recovery` | param | 1     | Disable automatic AudioTrack error recovery |
 | `at_mode2_audit`    | param | 0       | Enable mode2 playhead audit (JNI, every 2s) |
+| `mode2_dynamic_all` | param | 1       | Test-only: allow trusted direct timestamps to drive every direct Mode 2 compressed profile |
 
 #### at_mode2_audit
 
@@ -206,6 +207,22 @@ remain diagnostic. Only trusted direct `AudioTimestamp` evidence for the validat
 raw AC3/44.1 kHz profile can enter the production dynamic clock; other profiles
 continue to use the write-derived fallback. `at_mode2_audit` still controls the
 older synchronous playhead audit and is not required by the asynchronous observer.
+
+The current test worktree enables other direct Mode 2 codecs and sample rates by
+default. To enable it explicitly:
+
+```sh
+avsh mode2_dynamic_all 1
+```
+
+This removes only the codec/rate allowlist. Timestamp source, advancement, rate,
+freshness, stability, epoch, submitted-frontier, underrun, and physical-delay
+checks remain mandatory. It does not enable the dynamic clock for Mode 1 IEC,
+PCM decode, or AC3 recode. Restore the route-gated production policy with:
+
+```sh
+avsh mode2_dynamic_all 0
+```
 
 To enable:
 

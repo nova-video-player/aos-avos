@@ -79,11 +79,12 @@ wall-clock interpolator advances heard time between coarse compressed write
 batches and clamps it to the physical buffer envelope. It does not redefine
 `audio_time` and it is not a measured occupancy clock.
 
-For the explicitly validated raw AC3/44.1 kHz Mode 2 profile, a trusted
-`AudioTimestamp` provides a dynamic submitted-minus-presented delay. The
-centralized heard clock adopts that evidence monotonically while keeping the
-normalized capacity clock alive as fallback. Other Mode 2 codecs and sample
-rates remain entirely on the static normalized/interpolated model.
+For Mode 2, a trusted `AudioTimestamp` can provide a dynamic
+submitted-minus-presented delay. The centralized heard clock adopts that
+evidence monotonically while keeping the normalized capacity clock alive as
+fallback. The broad `mode2_dynamic_all` test switch is currently enabled;
+disabling it restores the raw AC3/44.1 kHz production allowlist. Mode 1 IEC
+timestamps are collected only as shadow evidence and cannot alter heard time.
 
 Exception: during plain PCM AudioTrack PlaybackParams speed epochs, the
 AudioTrack playhead is used as a temporary checkpoint clock. At the speed
@@ -134,8 +135,7 @@ after a complete compressed unit is accepted. The sync layer rejects stale, rese
 implausible, or non-advancing counters before comparing them with the submitted
 ledger.
 
-Only direct logical-frame `AudioTimestamp` evidence for raw AC3 at 44.1 kHz is
-currently eligible for production. It must prove the configured rate over an
+Mode 2 direct logical-frame evidence must prove the configured rate over an
 advancing streak and then provide three stable delay samples. On entry, heard
 time never moves backward: it holds until physical presentation catches the
 existing phase, then follows the measured frontier. A non-flushing pause retains

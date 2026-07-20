@@ -2147,17 +2147,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						break;
 					}
 
-					// Publish Mode 2 logical duration only after the complete compressed
-					// unit has been accepted. fakeSize uses 2ch 16-bit PCM-equivalent bytes.
-					if( compressed_unit && passthrough >= 2 && audio_frame.fakeSize > 0 ) {
-						audio_interface_add_logical_samples( s->audio_ctx,
-							audio_frame.fakeSize / 4, size_written );
-					}
-
 					// For A/V sync scaling, we need the PCM-equivalent duration of written data.
 					// Mode 2 / AC3 recoding: fakeSize carries the PCM-equivalent payload size.
 					// Mode 1 (IEC): each completed transaction is one full carrier burst.
-					// the container rate (e.g. 32ms for 48kHz EAC3).
+					// Its duration follows the container rate (e.g. 32ms for 48kHz EAC3).
 					int64_t effective_chunk_size = size_written;
 					if ((passthrough_active && passthrough != 1) || ac3_recoding) {
 						if (audio_frame.fakeSize > 0) {
@@ -2470,11 +2463,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 					if( compressed_unit ) {
+						// Pair the AudioTrack presentation frontier with the exact same
+						// complete unit committed to the stream ledger. Mode 1 uses IEC
+						// carrier frames; Mode 2 uses fakeSize-derived media samples.
+						audio_interface_add_logical_samples( s->audio_ctx,
+							compressed_logical_samples, size_written );
 						stream_sync_compressed_unit_commit( s, size_written,
 							compressed_logical_samples, compressed_logical_rate,
 							audio_frame.format, compressed_framing );
-						if( passthrough >= 2 ) {
-							stream_sync_mode2_shadow_observe( s );
+						if( passthrough >= 1 ) {
+							stream_sync_compressed_shadow_observe( s );
 						}
 					}
 					// A completed compressed unit and its public clock advance form one

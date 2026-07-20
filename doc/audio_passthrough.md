@@ -184,6 +184,13 @@ buffer, and truncating that capacity caused a persistent phase error after track
 - In mode 2 with **no parser** (AC3 recoding path): bypass IEC wrapping and send raw AC3 syncframes directly (`PT_MODE2_NOPARSER` path)
 - Mode 1 keeps static passthrough delay. Mode 2 uses the normalized compressed-buffer
   latency as its selected delay after the evidence window.
+- The asynchronous presentation observer also samples Mode 1 IEC tracks in shadow
+  mode. Completed IEC bursts publish carrier frames at the configured container rate,
+  paired with the exact accepted byte frontier. `mode1_iec_occupancy_shadow` compares
+  that submitted frontier with an advancing `AudioTimestamp`, but does not yet change
+  Mode 1 heard time or video scheduling. Promotion requires device evidence that the
+  timestamp advances in the IEC carrier-frame domain and remains stable across start,
+  seek, pause/resume, and track recreation.
 - `atempo` may still be instantiated for later non-passthrough speed changes,
   but no samples flow through it in passthrough and its delay is not counted in
   passthrough / AC3 recoding sync or speed-anchor calculations.

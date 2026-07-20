@@ -581,7 +581,7 @@ static int _stream_sync_ledger_bytes_to_samples_locked(
 	return encoded_position <= ledger->total_encoded_bytes;
 }
 
-void stream_sync_mode2_shadow_observe( STREAM *s )
+void stream_sync_compressed_shadow_observe( STREAM *s )
 {
 	AUDIO_PRESENTATION_SNAPSHOT sample;
 	STREAM_COMPRESSED_LEDGER *ledger;
@@ -617,6 +617,7 @@ void stream_sync_mode2_shadow_observe( STREAM *s )
 	int old_direct_stable_streak;
 	int new_sample;
 	int direct_plausible;
+	int framing;
 	INT64 timestamp_age_ns;
 	struct timespec monotonic_now;
 
@@ -625,7 +626,7 @@ void stream_sync_mode2_shadow_observe( STREAM *s )
 		return;
 	}
 	now_ms = atime();
-	if( sample.passthrough < 2 || sample.rate <= 0 ||
+	if( sample.passthrough < 1 || sample.rate <= 0 ||
 		now_ms - sample.observed_wall_ms > 500 ) {
 		return;
 	}
@@ -689,6 +690,9 @@ void stream_sync_mode2_shadow_observe( STREAM *s )
 	logical_rate = ledger->count > 0 ?
 		(int)ledger->entries[(ledger->head + ledger->count - 1) %
 			STREAM_COMPRESSED_LEDGER_SIZE].logical_sample_rate : sample.rate;
+	framing = ledger->count > 0 ?
+		ledger->entries[(ledger->head + ledger->count - 1) %
+			STREAM_COMPRESSED_LEDGER_SIZE].framing : STREAM_COMPRESSED_FRAMING_UNKNOWN;
 	direct_ms = -1;
 	byte_ms = -1;
 	frame_ms = -1;
@@ -770,11 +774,15 @@ void stream_sync_mode2_shadow_observe( STREAM *s )
 		observation->direct_stable_streak >= STREAM_MODE2_DIRECT_STABLE_STREAK;
 
 	if( now_ms - s->mode2_shadow_last_log_ms >= 500 ) {
+		const char *tag = sample.passthrough == 1 ?
+			"mode1_iec_occupancy_shadow" : "mode2_occupancy_shadow";
 		s->mode2_shadow_last_log_ms = now_ms;
-		DBG serprintf("mode2_occupancy_shadow: epoch=%llu generation=%llu state=%d src=%d age=%d ts_age=%d advance_age=%d counter_advancing=%d rate_hz=%d rate_streak=%d stable_streak=%d trusted=%d fmt=%04X track_rate=%d logical_rate=%d frame_size=%d buffer=%d ledger_count=%d logical=%llu encoded=%llu presented=%llu direct_ms=%d byte_ms=%d frame_ms=%d capacity_ms=%d direct_minus_capacity=%d byte_minus_capacity=%d frame_minus_capacity=%d direct_minus_selected=%d byte_minus_selected=%d frame_minus_selected=%d static_residual_ms=%d candidate_residual_ms=%d selected_latency=%d selected_heard=%d direct_heard=%d byte_heard=%d frame_heard=%d underruns=%d\n",
+		DBG serprintf("%s: epoch=%llu generation=%llu pt=%d framing=%d state=%d src=%d age=%d ts_age=%d advance_age=%d counter_advancing=%d rate_hz=%d rate_streak=%d stable_streak=%d trusted=%d fmt=%04X track_rate=%d logical_rate=%d frame_size=%d buffer=%d ledger_count=%d logical=%llu encoded=%llu presented=%llu direct_ms=%d byte_ms=%d frame_ms=%d capacity_ms=%d direct_minus_capacity=%d byte_minus_capacity=%d frame_minus_capacity=%d direct_minus_selected=%d byte_minus_selected=%d frame_minus_selected=%d static_residual_ms=%d candidate_residual_ms=%d selected_latency=%d selected_heard=%d direct_heard=%d byte_heard=%d frame_heard=%d underruns=%d\n",
+			tag,
 			(unsigned long long)s->mode2_heard_epoch,
 			(unsigned long long)sample.generation,
-			observation->state, sample.source, now_ms - sample.observed_wall_ms,
+			sample.passthrough, framing, observation->state, sample.source,
+			now_ms - sample.observed_wall_ms,
 			timestamp_age_ns >= 0 ? (int)(timestamp_age_ns / 1000000LL) : -1,
 			sample.last_advance_wall_ms > 0 ? now_ms - sample.last_advance_wall_ms : -1,
 			counter_advancing, sample.direct_rate_hz, sample.direct_rate_streak,
@@ -1669,7 +1677,7 @@ int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 	// Consume only the observer's cached sample. This keeps JNI off the
 	// scheduler thread and lets shadow diagnostics continue while the compressed
 	// writer is idle or paused.
-	stream_sync_mode2_shadow_observe( s );
+	stream_sync_compressed_shadow_observe( s );
 	return heard_ts;
 }
 

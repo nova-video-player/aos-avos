@@ -128,8 +128,11 @@ continuous across a track recreation.
 Complete compressed units are also recorded in an epoch-owned logical-sample and
 encoded-byte ledger. A low-rate AudioTrack worker polls `AudioTimestamp`, playback
 head, and underrun state outside the writer and scheduler threads, then publishes
-generation-scoped snapshots. The sync layer rejects stale, reset, implausible, or
-non-advancing counters before comparing them with the submitted ledger.
+generation-scoped snapshots. Mode 2 records media samples; Mode 1 records IEC
+carrier frames at the AudioTrack container rate. Both counters are published only
+after a complete compressed unit is accepted. The sync layer rejects stale, reset,
+implausible, or non-advancing counters before comparing them with the submitted
+ledger.
 
 Only direct logical-frame `AudioTimestamp` evidence for raw AC3 at 44.1 kHz is
 currently eligible for production. It must prove the configured rate over an

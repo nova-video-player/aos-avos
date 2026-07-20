@@ -170,13 +170,13 @@ struct audio_ctx {
 	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
 	int track_paused;                        // AudioTrack.pause() called; a blocking write() racing it returns 0 (full paused buffer), which is not a dead track
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
-	uint64_t mode2_logical_samples;          // fakeSize/bpf samples accumulated per write, for playhead audit
+	uint64_t compressed_logical_samples;     // complete-unit media/carrier samples accumulated per write
 	uint64_t mode2_latency_bytes_accum;       // paired cumulative compressed bytes written
 	uint64_t mode2_latency_samples_accum;     // paired cumulative logical samples
 	int mode2_latency_corrected;
 	int mode2_latency_correction_delta_ms;
 	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
-	uint64_t mode2_encoded_bytes;            // all complete mode2 bytes, independent of latency warmup
+	uint64_t compressed_encoded_bytes;       // all complete compressed bytes, independent of latency warmup
 	pthread_t presentation_thread;
 	pthread_mutex_t presentation_mutex;
 	int presentation_thread_started;
@@ -1793,12 +1793,12 @@ static void *audiotrack_presentation_thread(void *arg)
 		sample.buffer_size = at->presentation_buffer_size;
 		sample.format = at->presentation_format;
 		sample.passthrough = at->presentation_passthrough;
-		sample.logical_samples = at->mode2_logical_samples;
-		sample.encoded_bytes = at->mode2_encoded_bytes;
+		sample.logical_samples = at->compressed_logical_samples;
+		sample.encoded_bytes = at->compressed_encoded_bytes;
 		sample.latency_ms = at->presentation_latency_ms;
 		sample.fixed_latency_ms = at->presentation_fixed_latency_ms;
 		epoch_offset = at->presentation_epoch_offset;
-		if (env && at->init && sample.passthrough >= 2 && at->obj) {
+		if (env && at->init && sample.passthrough >= 1 && at->obj) {
 			track = (*env)->NewGlobalRef(env, at->obj);
 		}
 		pthread_mutex_unlock(&at->presentation_mutex);
@@ -1871,8 +1871,8 @@ static void *audiotrack_presentation_thread(void *arg)
 			// Pair the presentation query with the most recent complete-unit
 			// frontier. These counters are protected by the same mutex and the
 			// generation check prevents a lifecycle reset from crossing the poll.
-			sample.logical_samples = at->mode2_logical_samples;
-			sample.encoded_bytes = at->mode2_encoded_bytes;
+			sample.logical_samples = at->compressed_logical_samples;
+			sample.encoded_bytes = at->compressed_encoded_bytes;
 			maximum_plausible_counter = MAX(sample.logical_samples,
 				sample.encoded_bytes) + MAX((uint64_t)sample.rate * 2,
 				(uint64_t)MAX(sample.buffer_size, 0) * 4);
@@ -1966,11 +1966,11 @@ static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 	int derived_playhead_ms = INT_MIN;
 	if (at->rate > 0) {
 		if (ts_frames > 0) {
-			int64_t delta_ts = (int64_t)at->mode2_logical_samples - ts_frames;
+			int64_t delta_ts = (int64_t)at->compressed_logical_samples - ts_frames;
 			derived_logical_ms = (int)(delta_ts * 1000 / at->rate);
 		}
 		if (playhead > 0) {
-			int64_t delta_playhead = (int64_t)at->mode2_logical_samples - (int64_t)playhead;
+			int64_t delta_playhead = (int64_t)at->compressed_logical_samples - (int64_t)playhead;
 			derived_playhead_ms = (int)(delta_playhead * 1000 / at->rate);
 		}
 	}
@@ -1979,7 +1979,7 @@ static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 		"ts_frames=%lld ts_ns=%lld derived_logical=%d derived_playhead=%d "
 		"selected=%d pipeline=%u app=%u",
 		at->format,
-		(unsigned long long)at->mode2_logical_samples,
+		(unsigned long long)at->compressed_logical_samples,
 		(unsigned long long)at->i_samples_written,
 		(int)playhead,
 		(long long)ts_frames,
@@ -1991,7 +1991,8 @@ static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 		at->app_latency);
 }
 
-// Accumulate fakeSize-derived logical samples for mode2 playhead audit.
+// Accumulate complete compressed-unit samples for presentation observation.
+// Mode 1 publishes IEC carrier frames; Mode 2 publishes logical media samples.
 // stream_audio publishes only complete accepted compressed units, keeping
 // accepted_bytes and samples paired across any physical short-write retries.
 // Triggers the periodic audit after updating so each log reflects current state.
@@ -1999,9 +2000,9 @@ static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples, int acc
 {
 	if (!at || samples <= 0) return;
 	pthread_mutex_lock(&at->presentation_mutex);
-	at->mode2_logical_samples += (uint64_t)samples;
+	at->compressed_logical_samples += (uint64_t)samples;
 	if (accepted_bytes > 0) {
-		at->mode2_encoded_bytes += (uint64_t)accepted_bytes;
+		at->compressed_encoded_bytes += (uint64_t)accepted_bytes;
 	}
 	pthread_mutex_unlock(&at->presentation_mutex);
 
@@ -2997,13 +2998,13 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->passthrough_can_write_blind = 0;
 	at->passthrough_restart_after_flush = 0;
 	at->passthrough_playhead_ever_advanced = 0;
-	at->mode2_logical_samples = 0;
+	at->compressed_logical_samples = 0;
 	at->mode2_latency_bytes_accum = 0;
 	at->mode2_latency_samples_accum = 0;
 	at->mode2_latency_corrected = 0;
 	at->mode2_latency_correction_delta_ms = 0;
 	at->mode2_audit_last_ms = 0;
-	at->mode2_encoded_bytes = 0;
+	at->compressed_encoded_bytes = 0;
 	pthread_mutex_unlock(&at->presentation_mutex);
 }
 

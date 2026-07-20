@@ -24,6 +24,10 @@ int  stream_sync_restart_after_pause( STREAM *s );
 void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier );
 void stream_sync_mode2_heard_frontier_arm( STREAM *s );
 int  stream_sync_mode2_heard_frontier_pending( STREAM *s );
+void stream_sync_compressed_unit_commit( STREAM *s, int encoded_bytes,
+	int logical_samples, int logical_sample_rate, int codec, int framing );
+void stream_sync_mode2_shadow_observe( STREAM *s );
+int  stream_sync_mode2_dynamic_active( STREAM *s );
 int  stream_sync_av_delay( STREAM *s );
 int  stream_get_atempo_delay( STREAM *s );
 void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active );

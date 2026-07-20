@@ -73,6 +73,78 @@ typedef enum
 	STREAM_PCM_REANCHOR_EXPIRED,
 } STREAM_PCM_REANCHOR_STATE;
 
+typedef enum
+{
+	STREAM_COMPRESSED_FRAMING_UNKNOWN = 0,
+	STREAM_COMPRESSED_FRAMING_IEC61937,
+	STREAM_COMPRESSED_FRAMING_ANDROID_RAW,
+} STREAM_COMPRESSED_FRAMING;
+
+typedef enum
+{
+	STREAM_PRESENTATION_UNOBSERVED = 0,
+	STREAM_PRESENTATION_INITIALIZING,
+	STREAM_PRESENTATION_OBSERVED,
+	STREAM_PRESENTATION_ADVANCING,
+	STREAM_PRESENTATION_UNAVAILABLE,
+	STREAM_PRESENTATION_REJECTED,
+} STREAM_PRESENTATION_STATE;
+
+#define STREAM_COMPRESSED_LEDGER_SIZE 256
+typedef struct STREAM_COMPRESSED_LEDGER_ENTRY {
+	UINT64	epoch;
+	UINT64	sequence;
+	UINT64	encoded_byte_start;
+	UINT64	logical_sample_start;
+	UINT32	encoded_bytes;
+	UINT32	logical_samples;
+	UINT32	logical_sample_rate;
+	int	codec;
+	int	framing;
+	int	submitted_wall_ms;
+} STREAM_COMPRESSED_LEDGER_ENTRY;
+
+typedef struct STREAM_COMPRESSED_LEDGER {
+	STREAM_COMPRESSED_LEDGER_ENTRY entries[STREAM_COMPRESSED_LEDGER_SIZE];
+	UINT64	epoch;
+	UINT64	next_sequence;
+	UINT64	total_encoded_bytes;
+	UINT64	total_logical_samples;
+	UINT64	discarded_encoded_bytes;
+	UINT64	discarded_logical_samples;
+	int	head;
+	int	count;
+} STREAM_COMPRESSED_LEDGER;
+
+// Raw platform counters stay separate from the logical submission ledger until
+// an observer has proved their unit and epoch relationship.
+typedef struct STREAM_PRESENTATION_OBSERVATION {
+	UINT64	epoch;
+	UINT64	generation;
+	int	state;
+	UINT64	timestamp_frames;
+	INT64	timestamp_ns;
+	UINT64	playback_head_frames;
+	int	source;
+	int	rate;
+	int	frame_size;
+	int	buffer_size;
+	int	format;
+	UINT64	logical_samples;
+	UINT64	encoded_bytes;
+	int	latency_ms;
+	int	fixed_latency_ms;
+	int	underrun_count;
+	int	observed_wall_ms;
+	int	last_advance_wall_ms;
+	int	direct_rate_hz;
+	int	direct_rate_streak;
+	int	direct_delay_ms;
+	int	direct_stable_streak;
+	int	direct_trusted;
+	int	direct_last_sample_wall_ms;
+} STREAM_PRESENTATION_OBSERVATION;
+
 typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
 	UINT64	output_frames_start;
 	int	block_ts_start;
@@ -780,6 +852,15 @@ typedef struct STREAM {
 	int		mode2_heard_interp_last_log_ms;
 	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
 	int		mode2_heard_frontier_seed_pending;	// passthrough sink was recreated mid-playback (empty buffer): seed heard interp at the frontier
+	STREAM_COMPRESSED_LEDGER compressed_ledger;	// complete compressed units submitted in this clock epoch
+	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence
+	int		mode2_shadow_last_log_ms;
+	int		mode2_dynamic_clock_active;	// trusted AudioTimestamp currently bounds the heard clock
+	int		mode2_dynamic_clock_ts;
+	int		mode2_dynamic_clock_wall_ms;
+	int		mode2_dynamic_clock_last_delay_ms;
+	int		mode2_dynamic_clock_grace_until_wall_ms;
+	int		mode2_dynamic_clock_last_log_ms;
 	int		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
 	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
 	int		ac3_recode_pacer_max_lead_ms;	// bounded write-ahead reservoir to subtract from heard time

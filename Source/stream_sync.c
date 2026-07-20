@@ -24,6 +24,8 @@
 
 #include <string.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <time.h>
 
 #ifdef CONFIG_AUDIO_AC3
 extern int libavos_get_ac3_recoding_enabled(void);
@@ -78,6 +80,12 @@ static int stream_use_xbmc_smoothing = 1;
 // bounds true starvation, where the producer stops and the interpolator must
 // not extrapolate past drained coverage.
 #define STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS 800
+#define STREAM_MODE2_DIRECT_RATE_STREAK        3
+#define STREAM_MODE2_DIRECT_STABLE_STREAK      3
+#define STREAM_MODE2_DIRECT_STABLE_BAND_MS   100
+#define STREAM_MODE2_DIRECT_FRESH_MS          250
+#define STREAM_MODE2_DIRECT_GRACE_MS          750
+#define STREAM_MODE2_DIRECT_MAX_DELAY_MS     5000
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 // Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
 // delta <= COMMIT_DELTA: direct commit (normal slow drift).
@@ -438,9 +446,18 @@ static void _sync_diag_log_state(STREAM *s, const char *origin, const stream_del
 //	stream_sync_restart
 //
 // ************************************************************
-static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier )
+static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier,
+	int reset_compressed_ledger )
 {
 	s->mode2_heard_epoch++;
+	if( reset_compressed_ledger ) {
+		memset( &s->compressed_ledger, 0, sizeof(s->compressed_ledger) );
+		s->compressed_ledger.epoch = s->mode2_heard_epoch;
+	}
+	memset( &s->presentation_observation, 0, sizeof(s->presentation_observation) );
+	s->presentation_observation.epoch = s->mode2_heard_epoch;
+	s->presentation_observation.state = STREAM_PRESENTATION_UNOBSERVED;
+	s->mode2_shadow_last_log_ms = 0;
 	s->mode2_heard_interp_valid = 0;
 	s->mode2_heard_interp_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_heard_interp_wall_ms = 0;
@@ -448,6 +465,12 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_heard_interp_delay_ms = -1;
 	s->mode2_heard_interp_last_log_ms = 0;
 	s->mode2_heard_prevideo_phase_active = 0;
+	s->mode2_dynamic_clock_active = 0;
+	s->mode2_dynamic_clock_ts = STREAM_NO_PTS_VALUE;
+	s->mode2_dynamic_clock_wall_ms = 0;
+	s->mode2_dynamic_clock_last_delay_ms = -1;
+	s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+	s->mode2_dynamic_clock_last_log_ms = 0;
 	if( clear_frontier ) {
 		s->mode2_heard_frontier_seed_pending = 0;
 	}
@@ -459,7 +482,7 @@ void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier )
 		return;
 	}
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	_stream_sync_mode2_heard_reset_locked( s, clear_frontier );
+	_stream_sync_mode2_heard_reset_locked( s, clear_frontier, 1 );
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 }
 
@@ -485,8 +508,307 @@ int stream_sync_mode2_heard_frontier_pending( STREAM *s )
 	return pending;
 }
 
+void stream_sync_compressed_unit_commit( STREAM *s, int encoded_bytes,
+	int logical_samples, int logical_sample_rate, int codec, int framing )
+{
+	STREAM_COMPRESSED_LEDGER *ledger;
+	STREAM_COMPRESSED_LEDGER_ENTRY *entry;
+	int index;
+
+	if( !s || encoded_bytes <= 0 || logical_samples <= 0 || logical_sample_rate <= 0 ) {
+		return;
+	}
+
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	ledger = &s->compressed_ledger;
+	if( ledger->count == STREAM_COMPRESSED_LEDGER_SIZE ) {
+		entry = &ledger->entries[ledger->head];
+		ledger->discarded_encoded_bytes += entry->encoded_bytes;
+		ledger->discarded_logical_samples += entry->logical_samples;
+		ledger->head = (ledger->head + 1) % STREAM_COMPRESSED_LEDGER_SIZE;
+		ledger->count--;
+	}
+	index = (ledger->head + ledger->count) % STREAM_COMPRESSED_LEDGER_SIZE;
+	entry = &ledger->entries[index];
+	entry->epoch = ledger->epoch;
+	entry->sequence = ledger->next_sequence++;
+	entry->encoded_byte_start = ledger->total_encoded_bytes;
+	entry->logical_sample_start = ledger->total_logical_samples;
+	entry->encoded_bytes = encoded_bytes;
+	entry->logical_samples = logical_samples;
+	entry->logical_sample_rate = logical_sample_rate;
+	entry->codec = codec;
+	entry->framing = framing;
+	entry->submitted_wall_ms = atime();
+	ledger->total_encoded_bytes += encoded_bytes;
+	ledger->total_logical_samples += logical_samples;
+	ledger->count++;
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+}
+
+// Map an encoded-byte position through complete ledger units. A position inside
+// the current unit is interpolated only for shadow diagnostics; no partial unit
+// is ever published to the production clock.
+static int _stream_sync_ledger_bytes_to_samples_locked(
+	const STREAM_COMPRESSED_LEDGER *ledger, UINT64 encoded_position,
+	UINT64 *logical_position )
+{
+	UINT64 logical;
+	int i;
+
+	if( !ledger || !logical_position ||
+		encoded_position < ledger->discarded_encoded_bytes ) {
+		return 0;
+	}
+	logical = ledger->discarded_logical_samples;
+	for( i = 0; i < ledger->count; i++ ) {
+		const STREAM_COMPRESSED_LEDGER_ENTRY *entry =
+			&ledger->entries[(ledger->head + i) % STREAM_COMPRESSED_LEDGER_SIZE];
+		UINT64 entry_end = entry->encoded_byte_start + entry->encoded_bytes;
+		if( encoded_position >= entry_end ) {
+			logical = entry->logical_sample_start + entry->logical_samples;
+			continue;
+		}
+		if( encoded_position > entry->encoded_byte_start ) {
+			logical = entry->logical_sample_start +
+				(UINT64)((double)(encoded_position - entry->encoded_byte_start) *
+				(double)entry->logical_samples / (double)entry->encoded_bytes);
+		}
+		*logical_position = logical;
+		return 1;
+	}
+	*logical_position = logical;
+	return encoded_position <= ledger->total_encoded_bytes;
+}
+
+void stream_sync_mode2_shadow_observe( STREAM *s )
+{
+	AUDIO_PRESENTATION_SNAPSHOT sample;
+	STREAM_COMPRESSED_LEDGER *ledger;
+	STREAM_PRESENTATION_OBSERVATION *observation;
+	UINT64 presented;
+	INT64 direct_remaining;
+	INT64 byte_remaining;
+	INT64 frame_remaining;
+	UINT64 byte_presented_samples;
+	UINT64 frame_presented_samples;
+	int direct_ms;
+	int byte_ms;
+	int frame_ms;
+	int capacity_ms;
+	int direct_capacity_delta;
+	int byte_capacity_delta;
+	int frame_capacity_delta;
+	int direct_selected_delta;
+	int byte_selected_delta;
+	int frame_selected_delta;
+	int candidate_residual_ms;
+	int selected_heard;
+	int direct_heard;
+	int byte_heard;
+	int frame_heard;
+	int counter_advancing;
+	int logical_rate;
+	int now_ms;
+	UINT64 old_generation;
+	int old_underrun_count;
+	int old_sample_wall_ms;
+	int old_direct_delay_ms;
+	int old_direct_stable_streak;
+	int new_sample;
+	int direct_plausible;
+	INT64 timestamp_age_ns;
+	struct timespec monotonic_now;
+
+	if( !s || !s->audio_ctx ||
+		!audio_interface_get_presentation_snapshot( s->audio_ctx, &sample ) ) {
+		return;
+	}
+	now_ms = atime();
+	if( sample.passthrough < 2 || sample.rate <= 0 ||
+		now_ms - sample.observed_wall_ms > 500 ) {
+		return;
+	}
+
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	ledger = &s->compressed_ledger;
+	observation = &s->presentation_observation;
+	old_generation = observation->generation;
+	old_underrun_count = observation->underrun_count;
+	old_sample_wall_ms = observation->direct_last_sample_wall_ms;
+	old_direct_delay_ms = observation->direct_delay_ms;
+	old_direct_stable_streak = observation->direct_stable_streak;
+	observation->epoch = s->mode2_heard_epoch;
+	observation->generation = sample.generation;
+	observation->state = sample.state;
+	observation->timestamp_frames = sample.timestamp_frames;
+	observation->timestamp_ns = sample.timestamp_ns;
+	observation->playback_head_frames = sample.playback_head_frames;
+	observation->source = sample.source;
+	observation->rate = sample.rate;
+	observation->frame_size = sample.frame_size;
+	observation->buffer_size = sample.buffer_size;
+	observation->format = sample.format;
+	observation->logical_samples = sample.logical_samples;
+	observation->encoded_bytes = sample.encoded_bytes;
+	observation->latency_ms = sample.latency_ms;
+	observation->fixed_latency_ms = sample.fixed_latency_ms;
+	observation->underrun_count = sample.underrun_count;
+	observation->observed_wall_ms = sample.observed_wall_ms;
+	observation->last_advance_wall_ms = sample.last_advance_wall_ms;
+	observation->direct_rate_hz = sample.direct_rate_hz;
+	observation->direct_rate_streak = sample.direct_rate_streak;
+
+	// A stream reset and AudioTrack reset can be observed on adjacent polls.
+	// Do not compare counters until both submission domains describe the same
+	// complete-unit frontier.
+	if( sample.logical_samples > ledger->total_logical_samples ||
+		sample.encoded_bytes > ledger->total_encoded_bytes ) {
+		observation->state = STREAM_PRESENTATION_REJECTED;
+		observation->direct_delay_ms = -1;
+		observation->direct_stable_streak = 0;
+		observation->direct_trusted = 0;
+		pthread_mutex_unlock( &s->mode2_heard_mutex );
+		return;
+	}
+
+	presented = sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP ?
+		sample.timestamp_frames : sample.playback_head_frames;
+	timestamp_age_ns = -1;
+	if( sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP && sample.timestamp_ns > 0 &&
+		clock_gettime( CLOCK_MONOTONIC, &monotonic_now ) == 0 ) {
+		INT64 now_ns = (INT64)monotonic_now.tv_sec * 1000000000LL +
+			(INT64)monotonic_now.tv_nsec;
+		timestamp_age_ns = now_ns - sample.timestamp_ns;
+		if( timestamp_age_ns >= 0 &&
+			timestamp_age_ns <= STREAM_MODE2_DIRECT_FRESH_MS * 1000000LL ) {
+			presented += (UINT64)(timestamp_age_ns * sample.rate / 1000000000LL);
+		}
+	}
+	counter_advancing = sample.state == AT_PRESENTATION_ADVANCING && presented > 0;
+	logical_rate = ledger->count > 0 ?
+		(int)ledger->entries[(ledger->head + ledger->count - 1) %
+			STREAM_COMPRESSED_LEDGER_SIZE].logical_sample_rate : sample.rate;
+	direct_ms = -1;
+	byte_ms = -1;
+	frame_ms = -1;
+	if( counter_advancing ) {
+		direct_remaining = (INT64)ledger->total_logical_samples -
+			(INT64)((double)presented * (double)logical_rate / (double)sample.rate);
+		byte_remaining = -1;
+		frame_remaining = -1;
+		if( _stream_sync_ledger_bytes_to_samples_locked( ledger, presented,
+			&byte_presented_samples ) ) {
+			byte_remaining = (INT64)ledger->total_logical_samples -
+				(INT64)byte_presented_samples;
+		}
+		if( _stream_sync_ledger_bytes_to_samples_locked( ledger,
+			presented * (UINT64)MAX(sample.frame_size, 1),
+			&frame_presented_samples ) ) {
+			frame_remaining = (INT64)ledger->total_logical_samples -
+				(INT64)frame_presented_samples;
+		}
+		direct_ms = (int)(direct_remaining * 1000 / logical_rate);
+		byte_ms = byte_remaining >= 0 ?
+			(int)(byte_remaining * 1000 / logical_rate) : -1;
+		frame_ms = frame_remaining >= 0 ?
+			(int)(frame_remaining * 1000 / logical_rate) : -1;
+	}
+	capacity_ms = -1;
+	if( sample.buffer_size > 0 && sample.encoded_bytes > 0 ) {
+		capacity_ms = (int)((double)sample.buffer_size *
+			(double)sample.logical_samples * 1000.0 /
+			((double)sample.encoded_bytes * (double)logical_rate));
+	}
+	direct_capacity_delta = direct_ms >= 0 && capacity_ms >= 0 ?
+		direct_ms - capacity_ms : -1;
+	byte_capacity_delta = byte_ms >= 0 && capacity_ms >= 0 ?
+		byte_ms - capacity_ms : -1;
+	frame_capacity_delta = frame_ms >= 0 && capacity_ms >= 0 ?
+		frame_ms - capacity_ms : -1;
+	direct_selected_delta = direct_ms >= 0 ? direct_ms - sample.latency_ms : -1;
+	byte_selected_delta = byte_ms >= 0 ? byte_ms - sample.latency_ms : -1;
+	frame_selected_delta = frame_ms >= 0 ? frame_ms - sample.latency_ms : -1;
+	// AudioTimestamp is the platform presentation position, so submitted minus
+	// timestamp already contains Android-visible queue and output-pipeline delay.
+	// Playback head stops earlier and still needs the static residual fallback.
+	candidate_residual_ms = sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP ?
+		0 : sample.fixed_latency_ms;
+	selected_heard = s->audio_time - sample.latency_ms;
+	direct_heard = direct_ms >= 0 ?
+		s->audio_time - direct_ms - candidate_residual_ms : STREAM_NO_PTS_VALUE;
+	byte_heard = byte_ms >= 0 ?
+		s->audio_time - byte_ms - candidate_residual_ms : STREAM_NO_PTS_VALUE;
+	frame_heard = frame_ms >= 0 ?
+		s->audio_time - frame_ms - candidate_residual_ms : STREAM_NO_PTS_VALUE;
+
+	new_sample = sample.observed_wall_ms != old_sample_wall_ms;
+	direct_plausible = sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP &&
+		sample.state == AT_PRESENTATION_ADVANCING &&
+		sample.direct_rate_streak >= STREAM_MODE2_DIRECT_RATE_STREAK &&
+		sample.rate == logical_rate && timestamp_age_ns >= 0 &&
+		timestamp_age_ns <= STREAM_MODE2_DIRECT_FRESH_MS * 1000000LL &&
+		direct_ms >= 0 && direct_ms <= STREAM_MODE2_DIRECT_MAX_DELAY_MS &&
+		presented <= ledger->total_logical_samples &&
+		!(old_generation == sample.generation && old_underrun_count >= 0 &&
+			sample.underrun_count > old_underrun_count);
+	if( new_sample ) {
+		if( direct_plausible ) {
+			if( old_generation == sample.generation && old_direct_delay_ms >= 0 &&
+				abs(direct_ms - old_direct_delay_ms) <= STREAM_MODE2_DIRECT_STABLE_BAND_MS ) {
+				observation->direct_stable_streak = old_direct_stable_streak + 1;
+			} else {
+				observation->direct_stable_streak = 1;
+			}
+		} else {
+			observation->direct_stable_streak = 0;
+		}
+		observation->direct_last_sample_wall_ms = sample.observed_wall_ms;
+	}
+	observation->direct_delay_ms = direct_plausible ? direct_ms : -1;
+	observation->direct_trusted = direct_plausible &&
+		observation->direct_stable_streak >= STREAM_MODE2_DIRECT_STABLE_STREAK;
+
+	if( now_ms - s->mode2_shadow_last_log_ms >= 500 ) {
+		s->mode2_shadow_last_log_ms = now_ms;
+		DBG serprintf("mode2_occupancy_shadow: epoch=%llu generation=%llu state=%d src=%d age=%d ts_age=%d advance_age=%d counter_advancing=%d rate_hz=%d rate_streak=%d stable_streak=%d trusted=%d fmt=%04X track_rate=%d logical_rate=%d frame_size=%d buffer=%d ledger_count=%d logical=%llu encoded=%llu presented=%llu direct_ms=%d byte_ms=%d frame_ms=%d capacity_ms=%d direct_minus_capacity=%d byte_minus_capacity=%d frame_minus_capacity=%d direct_minus_selected=%d byte_minus_selected=%d frame_minus_selected=%d static_residual_ms=%d candidate_residual_ms=%d selected_latency=%d selected_heard=%d direct_heard=%d byte_heard=%d frame_heard=%d underruns=%d\n",
+			(unsigned long long)s->mode2_heard_epoch,
+			(unsigned long long)sample.generation,
+			observation->state, sample.source, now_ms - sample.observed_wall_ms,
+			timestamp_age_ns >= 0 ? (int)(timestamp_age_ns / 1000000LL) : -1,
+			sample.last_advance_wall_ms > 0 ? now_ms - sample.last_advance_wall_ms : -1,
+			counter_advancing, sample.direct_rate_hz, sample.direct_rate_streak,
+			observation->direct_stable_streak, observation->direct_trusted,
+			sample.format, sample.rate, logical_rate, sample.frame_size,
+			sample.buffer_size, ledger->count,
+			(unsigned long long)ledger->total_logical_samples,
+			(unsigned long long)ledger->total_encoded_bytes,
+			(unsigned long long)presented,
+			direct_ms, byte_ms, frame_ms, capacity_ms,
+			direct_capacity_delta, byte_capacity_delta, frame_capacity_delta,
+			direct_selected_delta, byte_selected_delta, frame_selected_delta,
+			sample.fixed_latency_ms, candidate_residual_ms,
+			sample.latency_ms, selected_heard,
+			direct_heard, byte_heard, frame_heard,
+			sample.underrun_count);
+	}
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+}
+
+int stream_sync_mode2_dynamic_active( STREAM *s )
+{
+	int active;
+	if( !s ) {
+		return 0;
+	}
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	active = s->mode2_dynamic_clock_active;
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	return active;
+}
+
 // Caller owns s->mode2_heard_mutex so Mode 2 capture/reset/restore can be atomic.
-static int _stream_sync_restart_locked( STREAM *s )
+static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger )
 {
 	s->delay         = 0;
 	_stream_pcm_delay_memory_reset( s );
@@ -499,7 +821,7 @@ static int _stream_sync_restart_locked( STREAM *s )
 	s->vid_ref_time = -1;
 	s->sync_v_time = -1;
 	s->sync_a_time = -1;
-	_stream_sync_mode2_heard_reset_locked( s, 0 );
+	_stream_sync_mode2_heard_reset_locked( s, 0, reset_compressed_ledger );
 
 	_sync_diag_reset();
 
@@ -510,7 +832,7 @@ int stream_sync_restart( STREAM *s )
 {
 	int ret;
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	ret = _stream_sync_restart_locked( s );
+	ret = _stream_sync_restart_locked( s, 1 );
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	return ret;
 }
@@ -519,7 +841,7 @@ int stream_sync_restart_with_mode2_frontier( STREAM *s )
 {
 	int ret;
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	ret = _stream_sync_restart_locked( s );
+	ret = _stream_sync_restart_locked( s, 1 );
 	s->mode2_heard_frontier_seed_pending = 1;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	return ret;
@@ -538,6 +860,10 @@ int stream_sync_restart_after_pause( STREAM *s )
 	int interp_raw_ts;
 	int interp_delay_ms;
 	int interp_last_log_ms;
+	int dynamic_active;
+	int dynamic_ts;
+	int dynamic_last_delay_ms;
+	int dynamic_last_log_ms;
 
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	keep_mode2_phase = passthrough_mode >= 2 &&
@@ -546,8 +872,15 @@ int stream_sync_restart_after_pause( STREAM *s )
 	interp_raw_ts = s->mode2_heard_interp_raw_ts;
 	interp_delay_ms = s->mode2_heard_interp_delay_ms;
 	interp_last_log_ms = s->mode2_heard_interp_last_log_ms;
+	dynamic_active = s->mode2_dynamic_clock_active;
+	dynamic_ts = s->mode2_dynamic_clock_ts;
+	dynamic_last_delay_ms = s->mode2_dynamic_clock_last_delay_ms;
+	dynamic_last_log_ms = s->mode2_dynamic_clock_last_log_ms;
 
-	_stream_sync_restart_locked( s );
+	// AudioTrack.pause() preserves compressed queue occupancy. Start a new
+	// presentation-observation epoch, but retain the submitted-unit ledger so
+	// the next observer can remap the still-buffered media after resume.
+	_stream_sync_restart_locked( s, 0 );
 	if( keep_mode2_phase ) {
 		s->mode2_heard_interp_valid = 1;
 		s->mode2_heard_interp_ts = interp_ts;
@@ -556,8 +889,18 @@ int stream_sync_restart_after_pause( STREAM *s )
 		s->mode2_heard_interp_delay_ms = interp_delay_ms;
 		s->mode2_heard_interp_last_log_ms = interp_last_log_ms;
 		s->mode2_heard_prevideo_phase_active = 1;
-		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d audio=%d video=%d\n",
-			interp_ts, interp_raw_ts, interp_delay_ms, s->audio_time, s->video_time);
+		if( dynamic_active ) {
+			s->mode2_dynamic_clock_active = 1;
+			s->mode2_dynamic_clock_ts = dynamic_ts;
+			s->mode2_dynamic_clock_wall_ms = atime();
+			s->mode2_dynamic_clock_last_delay_ms = dynamic_last_delay_ms;
+			s->mode2_dynamic_clock_grace_until_wall_ms = atime() +
+				STREAM_MODE2_DIRECT_GRACE_MS;
+			s->mode2_dynamic_clock_last_log_ms = dynamic_last_log_ms;
+		}
+		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d dynamic=%d dynamic_ts=%d audio=%d video=%d\n",
+			interp_ts, interp_raw_ts, interp_delay_ms, dynamic_active, dynamic_ts,
+			s->audio_time, s->video_time);
 	}
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 
@@ -900,6 +1243,10 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		int raw_heard_ts = heard_ts;
 		int reset_interp = 0;
 		int do_log = 0;
+		int do_dynamic_log = 0;
+		int dynamic_source = 0;
+		int dynamic_target = STREAM_NO_PTS_VALUE;
+		int dynamic_delay = -1;
 
 		pthread_mutex_lock( &s->mode2_heard_mutex );
 		if( s->sync_v_time >= 0 || s->mode2_heard_prevideo_phase_active ||
@@ -1028,6 +1375,86 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			s->mode2_heard_interp_raw_ts = raw_heard_ts;
 			s->mode2_heard_interp_delay_ms = heard_delay;
 			heard_ts = s->mode2_heard_interp_ts;
+
+			// Promote only the format/rate profile validated by avos-57/58.
+			// The timestamp must independently prove both its frame-rate domain and
+			// stable submitted-minus-presented occupancy before it can bound heard
+			// time. Adoption never moves heard time backward: the clock holds until
+			// the measured presentation frontier catches its current phase.
+			STREAM_PRESENTATION_OBSERVATION *observation =
+				&s->presentation_observation;
+			int direct_valid = observation->epoch == s->mode2_heard_epoch &&
+				observation->direct_trusted &&
+				observation->format == WAVE_FORMAT_AC3 && observation->rate == 44100 &&
+				observation->direct_delay_ms >= 0 &&
+				wall_now - observation->observed_wall_ms >= 0 &&
+				wall_now - observation->observed_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
+				wall_now - observation->last_advance_wall_ms >= 0 &&
+				wall_now - observation->last_advance_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS;
+			if( direct_valid && !s->mode2_dynamic_clock_active ) {
+				s->mode2_dynamic_clock_active = 1;
+				s->mode2_dynamic_clock_ts = heard_ts;
+				s->mode2_dynamic_clock_wall_ms = wall_now;
+				s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+				DBG serprintf("mode2_dynamic_clock_enter: epoch=%llu heard=%d target=%d delay=%d rate_streak=%d stable_streak=%d\n",
+					(unsigned long long)s->mode2_heard_epoch, heard_ts,
+					s->audio_time - observation->direct_delay_ms,
+					observation->direct_delay_ms, observation->direct_rate_streak,
+					observation->direct_stable_streak);
+			}
+			if( s->mode2_dynamic_clock_active ) {
+				int elapsed_ms = wall_now - s->mode2_dynamic_clock_wall_ms;
+				if( elapsed_ms < 0 ) {
+					elapsed_ms = 0;
+				}
+				if( direct_valid ) {
+					dynamic_source = 1;
+					dynamic_delay = observation->direct_delay_ms;
+					dynamic_target = s->audio_time - dynamic_delay;
+					s->mode2_dynamic_clock_last_delay_ms = dynamic_delay;
+					s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+				} else if( s->mode2_dynamic_clock_last_delay_ms >= 0 &&
+					s->mode2_dynamic_clock_grace_until_wall_ms > 0 &&
+					wall_now <= s->mode2_dynamic_clock_grace_until_wall_ms ) {
+					// Only a non-flushing pause gets a grace window while the observer
+					// re-establishes confidence over the preserved AudioTrack queue.
+					dynamic_source = 2;
+					dynamic_delay = s->mode2_dynamic_clock_last_delay_ms;
+					dynamic_target = s->audio_time - dynamic_delay;
+				} else {
+					// Static fallback remains live in parallel. Catch it with a 25%
+					// slew so loss of evidence cannot create a visible forward jump.
+					dynamic_source = 3;
+					dynamic_target = heard_ts;
+					s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+				}
+
+				if( s->paused || s->paused_internal ) {
+					s->mode2_dynamic_clock_wall_ms = wall_now;
+				} else if( dynamic_target > s->mode2_dynamic_clock_ts ) {
+					int extra_ms = dynamic_source == 3 ? MAX(elapsed_ms / 4, 1) : 25;
+					int maximum_advance = elapsed_ms + extra_ms;
+					int gap = dynamic_target - s->mode2_dynamic_clock_ts;
+					s->mode2_dynamic_clock_ts += MIN(gap, maximum_advance);
+					s->mode2_dynamic_clock_wall_ms = wall_now;
+				} else {
+					// A larger measured delay would move heard time backward. Hold the
+					// current phase and let physical presentation catch up instead.
+					s->mode2_dynamic_clock_wall_ms = wall_now;
+				}
+
+				heard_ts = s->mode2_dynamic_clock_ts;
+				if( dynamic_source == 3 && heard_ts == dynamic_target ) {
+					s->mode2_dynamic_clock_active = 0;
+					heard_ts = dynamic_target;
+					DBG serprintf("mode2_dynamic_clock_fallback: epoch=%llu heard=%d static=%d\n",
+						(unsigned long long)s->mode2_heard_epoch, heard_ts, dynamic_target);
+				}
+				if( wall_now - s->mode2_dynamic_clock_last_log_ms >= 500 ) {
+					s->mode2_dynamic_clock_last_log_ms = wall_now;
+					do_dynamic_log = 1;
+				}
+			}
 			// Audio can publish put_time before the video thread establishes its new
 			// sync sample. Keep using the explicit pause/seek phase during that window;
 			// once video is live, the ordinary sync_v_time condition owns continuity.
@@ -1047,6 +1474,13 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			DBG serprintf("mode2_heard_interp: wall=%d raw=%d interp=%d ceiling_gap=%d audio=%d delay=%d reset=%d paused=%d\n",
 				wall_now, raw_heard_ts, heard_ts, raw_heard_ts - heard_ts,
 				s->audio_time, heard_delay, reset_interp,
+				s->paused || s->paused_internal);
+		}
+		if( do_dynamic_log ) {
+			DBG serprintf("mode2_dynamic_clock: wall=%d source=%d target=%d heard=%d gap=%d delay=%d static=%d audio=%d paused=%d\n",
+				wall_now, dynamic_source, dynamic_target, heard_ts,
+				dynamic_target == STREAM_NO_PTS_VALUE ? 0 : dynamic_target - heard_ts,
+				dynamic_delay, raw_heard_ts, s->audio_time,
 				s->paused || s->paused_internal);
 		}
 	}
@@ -1231,7 +1665,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 {
-	return _stream_get_heard_audio_ts_internal( s, fallback_ts );
+	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts );
+	// Consume only the observer's cached sample. This keeps JNI off the
+	// scheduler thread and lets shadow diagnostics continue while the compressed
+	// writer is idle or paused.
+	stream_sync_mode2_shadow_observe( s );
+	return heard_ts;
 }
 
 // ************************************************************

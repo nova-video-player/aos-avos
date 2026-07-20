@@ -2143,6 +2143,28 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							effective_chunk_size = audio_frame.fakeSize;
 						}
 					}
+					int compressed_logical_samples = 0;
+					int compressed_logical_rate = 0;
+					int compressed_framing = STREAM_COMPRESSED_FRAMING_UNKNOWN;
+					if( compressed_unit ) {
+						AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
+						int sink_bpf = sink_props && sink_props->bytesPerFrame > 0 ?
+							sink_props->bytesPerFrame : 4;
+						compressed_framing = passthrough == 1 ?
+							STREAM_COMPRESSED_FRAMING_IEC61937 :
+							STREAM_COMPRESSED_FRAMING_ANDROID_RAW;
+						if( ac3_recoding ) {
+							compressed_logical_samples = AC3_RECODE_FRAME_SAMPLES;
+							compressed_logical_rate = AC3_RECODE_SAMPLE_RATE;
+						} else if( passthrough == 1 ) {
+							compressed_logical_samples = size_written / sink_bpf;
+							compressed_logical_rate = audio_frame.samplesPerSec > 0 ?
+								audio_frame.samplesPerSec : sample_rate;
+						} else if( audio_frame.fakeSize > 0 ) {
+							compressed_logical_samples = audio_frame.fakeSize / sink_bpf;
+							compressed_logical_rate = sample_rate;
+						}
+					}
 
 					loop_write_count++;
 					if( _stream_audio_speed_diag_active( s ) ) {
@@ -2424,6 +2446,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// fakeSize belongs to this completed output unit; packetized AC3
 							// recode assigns the next unit's value at the top of the loop.
 							audio_frame.fakeSize = 0;
+						}
+					}
+					if( compressed_unit ) {
+						stream_sync_compressed_unit_commit( s, size_written,
+							compressed_logical_samples, compressed_logical_rate,
+							audio_frame.format, compressed_framing );
+						if( passthrough >= 2 ) {
+							stream_sync_mode2_shadow_observe( s );
 						}
 					}
 					// A completed compressed unit and its public clock advance form one

@@ -76,10 +76,42 @@ typedef int (*audio_interface_impl_get_and_clear_latency_delta)(audio_ctx_t *ctx
 // Returns 1 if valid, 0 if not available.
 #define AT_PRESENTED_FRAMES_SRC_TIMESTAMP 1
 #define AT_PRESENTED_FRAMES_SRC_PLAYHEAD  2
+enum {
+	AT_PRESENTATION_UNOBSERVED = 0,
+	AT_PRESENTATION_INITIALIZING,
+	AT_PRESENTATION_OBSERVED,
+	AT_PRESENTATION_ADVANCING,
+	AT_PRESENTATION_UNAVAILABLE,
+	AT_PRESENTATION_REJECTED,
+};
+typedef struct AUDIO_PRESENTATION_SNAPSHOT {
+	uint64_t generation;
+	int state;
+	uint64_t timestamp_frames;
+	int64_t timestamp_ns;
+	uint64_t playback_head_frames;
+	int source;
+	int rate;
+	int frame_size;
+	int buffer_size;
+	int format;
+	int passthrough;
+	uint64_t logical_samples;
+	uint64_t encoded_bytes;
+	int latency_ms;
+	int fixed_latency_ms;
+	int underrun_count;
+	int observed_wall_ms;
+	int last_advance_wall_ms;
+	int direct_rate_hz;
+	int direct_rate_streak;
+} AUDIO_PRESENTATION_SNAPSHOT;
 typedef int (*audio_interface_impl_get_presented_frames)(
     audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh);
 typedef int (*audio_interface_impl_get_written_frames)(
     audio_ctx_t *ctx, uint64_t *frames, int *rate);
+typedef int (*audio_interface_impl_get_presentation_snapshot)(
+	audio_ctx_t *ctx, AUDIO_PRESENTATION_SNAPSHOT *snapshot);
 
 
 typedef struct audio_interface_impl {
@@ -118,6 +150,7 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_get_and_clear_latency_delta get_and_clear_latency_delta;
 	audio_interface_impl_get_presented_frames get_presented_frames;
 	audio_interface_impl_get_written_frames get_written_frames;
+	audio_interface_impl_get_presentation_snapshot get_presentation_snapshot;
 } audio_interface_impl_t;
 
 int audio_interface_init(void);
@@ -146,6 +179,8 @@ void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples, int acce
 int  audio_interface_get_and_clear_latency_delta(audio_ctx_t *ctx);
 int  audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh);
 int  audio_interface_get_written_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate);
+int  audio_interface_get_presentation_snapshot(audio_ctx_t *ctx,
+	AUDIO_PRESENTATION_SNAPSHOT *snapshot);
 void audio_interface_flush_output(audio_ctx_t *ctx);
 int audio_interface_preload(audio_ctx_t *ctx);
 int audio_interface_mute(audio_ctx_t *ctx, BOOL fade);

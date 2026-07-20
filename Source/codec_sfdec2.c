@@ -144,6 +144,8 @@ typedef struct priv {
 	int pause_start_ms;
 	int pause_armed;
 	int slew_active;
+	int mode2_dynamic_slew;
+	int last_mode2_dynamic_active;
 	int64_t target_offset_ns;
 	int pending_reanchor;
 	int pending_seek_reanchor;
@@ -596,10 +598,17 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
 	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
+	// sfdec2_android_sync_on_pause() already shifts a valid Mode 2 render
+	// offset by the paused wall duration. Reanchoring it again from the
+	// submitted-frontier heard clock can discard the established device/route
+	// phase when that frontier is ahead of physical presentation. Missing
+	// anchors and real discontinuities still take the normal reanchor path.
+	int resume_reanchor = resume_started &&
+		(passthrough_mode < 2 || p->render_offset_ns == -1);
 	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor ||
-		epoch_changed || resume_started;
+		epoch_changed || resume_reanchor;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor &&
-		!epoch_changed && !resume_started ) {
+		!epoch_changed && !resume_reanchor ) {
 		allow_reanchor = 0;
 	}
 	DBGSI serprintf(
@@ -812,6 +821,17 @@ static void *videosink_thread(void *ctx)
 			int have_audio_time = (s && s->audio_time >= 0);
 			int passthrough = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 				s->audio_sink->get_passthrough( s ) : 0;
+			int mode2_dynamic_active = passthrough == 2 ?
+				stream_sync_mode2_dynamic_active( s ) : 0;
+			int mode2_dynamic_changed = mode2_dynamic_active !=
+				p->last_mode2_dynamic_active;
+			if( mode2_dynamic_changed ) {
+				p->last_mode2_dynamic_active = mode2_dynamic_active;
+				p->pending_reanchor = 1;
+				p->mode2_dynamic_slew = 1;
+				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d\n",
+					mode2_dynamic_active);
+			}
 			int hold_passthrough = 0;
 
 			// Passthrough mode 2 startup hold. Seek preview has no audio producer;
@@ -943,6 +963,7 @@ static void *videosink_thread(void *ctx)
 				}
 				p->target_offset_ns = p->render_offset_ns;
 				p->slew_active = 0;
+				p->mode2_dynamic_slew = mode2_dynamic_active;
 				p->pending_reanchor = 0;
 				// A static fallback has not consumed the seek-specific audio
 				// clamp; preserve it for the later audio-based reanchor.
@@ -970,9 +991,10 @@ static void *videosink_thread(void *ctx)
 					s ? stream_sync_av_delay(s) : -1, (long long)p->render_offset_ns);
 				DBGSI serprintf("android_sync: reanchor from audio_time=%d heard_ts=%lld offset=%lld\n",
 					s->audio_time, (long long)heard_ts, (long long)p->render_offset_ns);
-			} else if (have_audio_time && passthrough != 2) {
+			} else if (have_audio_time &&
+				(passthrough != 2 || mode2_dynamic_active || mode2_dynamic_changed)) {
 				// Slew toward a new anchor only on explicit events (seek/resume/speed/discontinuity)
-				if (p->pending_reanchor) {
+				if (p->pending_reanchor || mode2_dynamic_active) {
 					int used_put_time = 0;
 					int put_age_ms = 0;
 					INT64 heard_ts = _get_render_heard_ts(p, s, &used_put_time, &put_age_ms);
@@ -997,7 +1019,10 @@ static void *videosink_thread(void *ctx)
 
 			if (p->slew_active) {
 				INT64 delta = p->target_offset_ns - p->render_offset_ns;
-				INT64 step = 200000; // 0.2ms slew correction per frame
+				// A validated Mode 2 clock can correct hundreds of milliseconds.
+				// Move the renderer by at most 5ms per frame so the phase converges
+				// without a visible one-frame jump; other reanchors retain 0.2ms.
+				INT64 step = p->mode2_dynamic_slew ? 5000000 : 200000;
 				if (delta > step) {
 					delta = step;
 				} else if (delta < -step) {
@@ -1007,6 +1032,9 @@ static void *videosink_thread(void *ctx)
 				if (llabs(p->target_offset_ns - p->render_offset_ns) <= step) {
 					p->render_offset_ns = p->target_offset_ns;
 					p->slew_active = 0;
+					if( !mode2_dynamic_active ) {
+						p->mode2_dynamic_slew = 0;
+					}
 				}
 			}
 

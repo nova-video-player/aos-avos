@@ -176,6 +176,21 @@ struct audio_ctx {
 	int mode2_latency_corrected;
 	int mode2_latency_correction_delta_ms;
 	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
+	uint64_t mode2_encoded_bytes;            // all complete mode2 bytes, independent of latency warmup
+	pthread_t presentation_thread;
+	pthread_mutex_t presentation_mutex;
+	int presentation_thread_started;
+	int presentation_run;
+	uint64_t presentation_generation;
+	int presentation_rate;
+	int presentation_frame_size;
+	int presentation_buffer_size;
+	int presentation_format;
+	int presentation_passthrough;
+	int presentation_latency_ms;
+	int presentation_fixed_latency_ms;
+	uint64_t presentation_epoch_offset;
+	AUDIO_PRESENTATION_SNAPSHOT presentation_snapshot;
 };
 
 static int audiotrack_log_underruns = 0;
@@ -194,6 +209,8 @@ static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_loca
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
 static int audiotrack_get_latency(audio_ctx_t *at);
 static void audiotrack_reset_timing(audio_ctx_t *at);
+static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64_t raw_frames);
+static void *audiotrack_presentation_thread(void *arg);
 
 static char * AUDIOTRACK_CLASS_NAME = "android/media/AudioTrack";
 static char * AUDIOSYSTEM_CLASS_NAME = "android/media/AudioSystem";
@@ -485,6 +502,11 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->delay_diag_last_valid = -1;
 	at->delay_diag_last_fallback = -1;
 	at->delay_diag_last_ts_use = -1;
+	pthread_mutex_init(&at->presentation_mutex, NULL);
+	at->presentation_run = 1;
+	at->presentation_generation = 1;
+	at->presentation_snapshot.generation = at->presentation_generation;
+	at->presentation_snapshot.state = AT_PRESENTATION_UNOBSERVED;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -493,7 +515,9 @@ static audio_ctx_t *audiotrack_open(int mode)
 		DBG2 LOG("Thread not attached to JVM, attaching now");
 		if(((*myVm)->AttachCurrentThread(myVm, &(at->env), NULL)) != 0 ) {
 			ERR LOG("ERROR: Attach to JVM failed");
-			return 0;
+			pthread_mutex_destroy(&at->presentation_mutex);
+			free(at);
+			return NULL;
 		}
 		else {
 			at->willDetach = 1;
@@ -552,6 +576,14 @@ static audio_ctx_t *audiotrack_open(int mode)
 		}
 	}
 
+	if (pthread_create(&at->presentation_thread, NULL,
+		audiotrack_presentation_thread, at) == 0) {
+		at->presentation_thread_started = 1;
+	} else {
+		at->presentation_run = 0;
+		ERR LOG("failed to start presentation observer");
+	}
+
 	return at;
 }
 
@@ -559,6 +591,13 @@ static int audiotrack_close(audio_ctx_t **pat)
 {
 	if (!pat || !*pat) return 0;
 	audio_ctx_t *at = *pat;
+	pthread_mutex_lock(&at->presentation_mutex);
+	at->presentation_run = 0;
+	pthread_mutex_unlock(&at->presentation_mutex);
+	if (at->presentation_thread_started) {
+		pthread_join(at->presentation_thread, NULL);
+		at->presentation_thread_started = 0;
+	}
 
 	if (at->init) {
 		// Attach close thread to JVM if not already attached.
@@ -571,6 +610,7 @@ static int audiotrack_close(audio_ctx_t **pat)
 			} else {
 				ERR LOG("audiotrack_close: AttachCurrentThread failed, skipping JNI cleanup");
 				at->init = 0;
+				pthread_mutex_destroy(&at->presentation_mutex);
 				free(at);
 				*pat = NULL;
 				return -1;
@@ -615,6 +655,7 @@ static int audiotrack_close(audio_ctx_t **pat)
 
 		at->init = 0;
 	}
+	pthread_mutex_destroy(&at->presentation_mutex);
 	free(at);
 	*pat = NULL;
 	return 0;
@@ -701,6 +742,10 @@ static int audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	at->app_latency = app_latency;
 	at->pipeline_latency = pipeline_latency;
 	at->fixed_latency = fixed_latency;
+	pthread_mutex_lock(&at->presentation_mutex);
+	at->presentation_latency_ms = (int)pipeline_latency;
+	at->presentation_fixed_latency_ms = (int)fixed_latency;
+	pthread_mutex_unlock(&at->presentation_mutex);
 
 	DBG LOG("audiotrack_update_latency: scheduler=%u app=%u system=%u track=%u pipeline=%u",
 		scheduler_latency, app_latency, system_latency, track_latency, pipeline_latency);
@@ -1048,6 +1093,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int reinit = 0;
 	if( at->init ) {
 		DBG LOG( "deleting track" );
+		pthread_mutex_lock(&at->presentation_mutex);
+		at->presentation_generation++;
+		memset(&at->presentation_snapshot, 0, sizeof(at->presentation_snapshot));
+		at->presentation_snapshot.generation = at->presentation_generation;
+		at->presentation_snapshot.state = AT_PRESENTATION_UNAVAILABLE;
 		call_void_method( at, "release", "()V" );
 		( *at->env )->DeleteGlobalRef( at->env, at->obj );
 		jthrowable exception = ( *at->env )->ExceptionOccurred( at->env );
@@ -1058,6 +1108,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 		at->obj = NULL;
 		at->init = 0;
+		pthread_mutex_unlock(&at->presentation_mutex);
 		at->applied_passthrough = -1;
 		at->applied_spatialization_behavior = -1;
 		reinit = 1;
@@ -1325,6 +1376,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	}
 
 	if (!failed) {
+		pthread_mutex_lock(&at->presentation_mutex);
 		at->obj = (*at->env)->NewGlobalRef(at->env, audioTrack);
 
 		status = call_int_method(at, "getState", "()I");
@@ -1335,6 +1387,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				(*at->env)->DeleteGlobalRef(at->env, at->obj);
 				at->obj = NULL;
 			}
+			pthread_mutex_unlock(&at->presentation_mutex);
 			if (at->format == WAVE_FORMAT_AC3 && track_format == 5 &&
 			    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3)) {
 				DBG LOG("audiotrack_set_output_params: AC3 AudioTrack failed, retrying as EAC3 compatibility layer");
@@ -1362,6 +1415,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				return audiotrack_set_output_params(at, rate, 2, 16, WAVE_FORMAT_EAC3);
 			}
 			msec_sleep(100); // give AudioFlinger more time to recover before re-entering
+		} else {
+			pthread_mutex_unlock(&at->presentation_mutex);
 		}
 
 		// Diagnostic: compare requested compressed config vs actual AudioTrack config.
@@ -1400,7 +1455,15 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	audiotrack_reset_timing(at);
 	audiotrack_update_latency(at, at->env);
 
+	pthread_mutex_lock(&at->presentation_mutex);
+	at->presentation_rate = at->rate;
+	at->presentation_frame_size = (int)at->frame_size;
+	at->presentation_buffer_size = (int)at->buf_size;
+	at->presentation_format = at->format;
+	at->presentation_passthrough = at->passthrough;
+	at->presentation_epoch_offset = at->playhead_epoch_offset;
 	at->init = 1;
+	pthread_mutex_unlock(&at->presentation_mutex);
 	at->applied_passthrough = at->passthrough;
 	at->applied_spatialization_behavior = applied_spatialization_behavior;
 	DBG LOG("track created");
@@ -1674,6 +1737,198 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	return can_write;
 }
 
+static void *audiotrack_presentation_thread(void *arg)
+{
+	audio_ctx_t *at = (audio_ctx_t *)arg;
+	JNIEnv *env = attach_thread_current_vm();
+	jmethodID get_playhead = NULL;
+	jmethodID get_underruns = NULL;
+	jobject timestamp = NULL;
+	uint64_t playhead_generation = 0;
+	uint64_t playhead_wrap_base = 0;
+	uint32_t playhead_last_raw = 0;
+
+	if (env) {
+		get_playhead = (*env)->GetMethodID(env, at->audiotrackClass,
+			"getPlaybackHeadPosition", "()I");
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionClear(env);
+			get_playhead = NULL;
+		}
+		get_underruns = (*env)->GetMethodID(env, at->audiotrackClass,
+			"getUnderrunCount", "()I");
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionClear(env);
+			get_underruns = NULL;
+		}
+		if (at->audioTimestampClass) {
+			jmethodID ctor = (*env)->GetMethodID(env, at->audioTimestampClass,
+				"<init>", "()V");
+			if (ctor) {
+				timestamp = (*env)->NewObject(env, at->audioTimestampClass, ctor);
+			}
+			if ((*env)->ExceptionCheck(env)) {
+				(*env)->ExceptionClear(env);
+				timestamp = NULL;
+			}
+		}
+	}
+
+	for (;;) {
+		jobject track = NULL;
+		uint64_t generation = 0;
+		uint64_t epoch_offset = 0;
+		AUDIO_PRESENTATION_SNAPSHOT sample = { 0 };
+
+		msec_sleep(100);
+		pthread_mutex_lock(&at->presentation_mutex);
+		if (!at->presentation_run) {
+			pthread_mutex_unlock(&at->presentation_mutex);
+			break;
+		}
+		generation = at->presentation_generation;
+		sample.generation = generation;
+		sample.rate = at->presentation_rate;
+		sample.frame_size = at->presentation_frame_size;
+		sample.buffer_size = at->presentation_buffer_size;
+		sample.format = at->presentation_format;
+		sample.passthrough = at->presentation_passthrough;
+		sample.logical_samples = at->mode2_logical_samples;
+		sample.encoded_bytes = at->mode2_encoded_bytes;
+		sample.latency_ms = at->presentation_latency_ms;
+		sample.fixed_latency_ms = at->presentation_fixed_latency_ms;
+		epoch_offset = at->presentation_epoch_offset;
+		if (env && at->init && sample.passthrough >= 2 && at->obj) {
+			track = (*env)->NewGlobalRef(env, at->obj);
+		}
+		pthread_mutex_unlock(&at->presentation_mutex);
+
+		if (!track) {
+			continue;
+		}
+
+		jint raw_playhead = get_playhead ?
+			(*env)->CallIntMethod(env, track, get_playhead) : 0;
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionClear(env);
+			raw_playhead = 0;
+		}
+		uint32_t playhead_raw = (uint32_t)raw_playhead;
+		if (playhead_generation != generation) {
+			playhead_generation = generation;
+			playhead_wrap_base = 0;
+			playhead_last_raw = playhead_raw;
+		} else if (playhead_raw < playhead_last_raw &&
+			playhead_last_raw - playhead_raw > UINT32_MAX / 2) {
+			playhead_wrap_base += (UINT64)UINT32_MAX + 1;
+		}
+		playhead_last_raw = playhead_raw;
+		sample.playback_head_frames = playhead_wrap_base + playhead_raw;
+		if (sample.playback_head_frames >= epoch_offset) {
+			sample.playback_head_frames -= epoch_offset;
+		}
+
+		if (timestamp && at->getTimestampMethodID &&
+			at->framePositionFieldID && at->nanoTimeFieldID) {
+			jboolean ok = (*env)->CallBooleanMethod(env, track,
+					at->getTimestampMethodID, timestamp);
+			if (!(*env)->ExceptionCheck(env) && ok) {
+				jlong timestamp_position = (*env)->GetLongField(env,
+						timestamp, at->framePositionFieldID);
+				sample.timestamp_frames = timestamp_position > 0 ?
+					(uint64_t)timestamp_position : 0;
+				sample.timestamp_ns = (int64_t)(*env)->GetLongField(env,
+					timestamp, at->nanoTimeFieldID);
+				if (sample.timestamp_frames >= epoch_offset) {
+					sample.timestamp_frames -= epoch_offset;
+				}
+			} else if ((*env)->ExceptionCheck(env)) {
+				(*env)->ExceptionClear(env);
+			}
+		}
+		if (get_underruns) {
+			sample.underrun_count = (*env)->CallIntMethod(env, track, get_underruns);
+			if ((*env)->ExceptionCheck(env)) {
+				(*env)->ExceptionClear(env);
+				sample.underrun_count = -1;
+			}
+		}
+		(*env)->DeleteGlobalRef(env, track);
+
+		sample.observed_wall_ms = atime();
+		sample.source = sample.timestamp_frames > 0 ?
+			AT_PRESENTED_FRAMES_SRC_TIMESTAMP :
+			(sample.playback_head_frames > 0 ? AT_PRESENTED_FRAMES_SRC_PLAYHEAD : 0);
+
+		pthread_mutex_lock(&at->presentation_mutex);
+		if (generation == at->presentation_generation && at->presentation_run) {
+			AUDIO_PRESENTATION_SNAPSHOT *previous = &at->presentation_snapshot;
+			uint64_t counter = sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP ?
+				sample.timestamp_frames : sample.playback_head_frames;
+			uint64_t previous_counter = sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP ?
+				previous->timestamp_frames : previous->playback_head_frames;
+			uint64_t maximum_plausible_counter;
+			// Pair the presentation query with the most recent complete-unit
+			// frontier. These counters are protected by the same mutex and the
+			// generation check prevents a lifecycle reset from crossing the poll.
+			sample.logical_samples = at->mode2_logical_samples;
+			sample.encoded_bytes = at->mode2_encoded_bytes;
+			maximum_plausible_counter = MAX(sample.logical_samples,
+				sample.encoded_bytes) + MAX((uint64_t)sample.rate * 2,
+				(uint64_t)MAX(sample.buffer_size, 0) * 4);
+			if (!sample.source) {
+				sample.state = AT_PRESENTATION_INITIALIZING;
+			} else if (previous->generation != generation || !previous->source ||
+				previous->source != sample.source ||
+				previous->state == AT_PRESENTATION_REJECTED ||
+				previous->state == AT_PRESENTATION_UNAVAILABLE) {
+				sample.state = AT_PRESENTATION_OBSERVED;
+			} else if (counter < previous_counter ||
+				counter > maximum_plausible_counter) {
+				sample.state = AT_PRESENTATION_REJECTED;
+			} else if (counter > previous_counter) {
+				sample.state = AT_PRESENTATION_ADVANCING;
+				sample.last_advance_wall_ms = sample.observed_wall_ms;
+				if (sample.source == AT_PRESENTED_FRAMES_SRC_TIMESTAMP &&
+					previous->source == sample.source &&
+					sample.timestamp_ns > previous->timestamp_ns) {
+					uint64_t delta_frames = sample.timestamp_frames -
+						previous->timestamp_frames;
+					int64_t delta_ns = sample.timestamp_ns - previous->timestamp_ns;
+					int64_t measured_rate = delta_ns > 0 ?
+						(int64_t)(delta_frames * 1000000000ULL / (uint64_t)delta_ns) : 0;
+					sample.direct_rate_hz = measured_rate > INT_MAX ?
+						INT_MAX : (int)measured_rate;
+					if (delta_ns >= 20000000LL && delta_ns <= 1000000000LL &&
+						sample.rate > 0 && measured_rate >= sample.rate * 85 / 100 &&
+						measured_rate <= sample.rate * 115 / 100) {
+						sample.direct_rate_streak = previous->direct_rate_streak + 1;
+					} else {
+						sample.direct_rate_streak = 0;
+					}
+				}
+			} else {
+				sample.last_advance_wall_ms = previous->last_advance_wall_ms;
+				sample.direct_rate_hz = previous->direct_rate_hz;
+				sample.direct_rate_streak = previous->direct_rate_streak;
+				sample.state = sample.last_advance_wall_ms > 0 &&
+					sample.observed_wall_ms - sample.last_advance_wall_ms <= 500 ?
+					AT_PRESENTATION_ADVANCING : AT_PRESENTATION_OBSERVED;
+			}
+			at->presentation_snapshot = sample;
+		}
+		pthread_mutex_unlock(&at->presentation_mutex);
+	}
+
+	if (env && timestamp) {
+		(*env)->DeleteLocalRef(env, timestamp);
+	}
+	if (env) {
+		(*myVm)->DetachCurrentThread(myVm);
+	}
+	return NULL;
+}
+
 // Periodic diagnostic: log playhead, timestamp, and derived delay for mode2.
 // Logs once every 2s after logical samples are updated. No behavior change.
 // Called from audiotrack_add_logical_samples() while the thread is attached.
@@ -1743,7 +1998,12 @@ static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples, int accepted_bytes)
 {
 	if (!at || samples <= 0) return;
+	pthread_mutex_lock(&at->presentation_mutex);
 	at->mode2_logical_samples += (uint64_t)samples;
+	if (accepted_bytes > 0) {
+		at->mode2_encoded_bytes += (uint64_t)accepted_bytes;
+	}
+	pthread_mutex_unlock(&at->presentation_mutex);
 
 	if (at->passthrough == 2) {
 		if (!at->mode2_latency_corrected) {
@@ -2436,6 +2696,13 @@ ERR		LOG("track not valid, error");
 		at->playhead_epoch_offset = 0;
 		DBG LOG("audiotrack_flush_output: playhead_epoch_offset unavailable (%d)", flush_playhead);
 	}
+	pthread_mutex_lock(&at->presentation_mutex);
+	at->presentation_generation++;
+	memset(&at->presentation_snapshot, 0, sizeof(at->presentation_snapshot));
+	at->presentation_snapshot.generation = at->presentation_generation;
+	at->presentation_snapshot.state = AT_PRESENTATION_INITIALIZING;
+	at->presentation_epoch_offset = at->playhead_epoch_offset;
+	pthread_mutex_unlock(&at->presentation_mutex);
 	if (at->passthrough) {
 		DBG LOG("audiotrack_flush_output: scheduling passthrough restart after flush");
 		at->passthrough_restart_after_flush = 1;
@@ -2697,10 +2964,16 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	if (!at) {
 		return;
 	}
+	pthread_mutex_lock(&at->presentation_mutex);
+	at->presentation_generation++;
+	memset(&at->presentation_snapshot, 0, sizeof(at->presentation_snapshot));
+	at->presentation_snapshot.generation = at->presentation_generation;
+	at->presentation_snapshot.state = AT_PRESENTATION_INITIALIZING;
 	at->last_timestamp_ns = 0;
 	at->last_timestamp_frames = 0;
 	at->timestamp_written_offset = 0;
 	at->playhead_epoch_offset = 0;
+	at->presentation_epoch_offset = 0;
 	at->ts_success_streak = 0;
 	at->ts_use_timestamp = 0;
 	at->ts_last_query_ms = 0;
@@ -2730,6 +3003,8 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->mode2_latency_corrected = 0;
 	at->mode2_latency_correction_delta_ms = 0;
 	at->mode2_audit_last_ms = 0;
+	at->mode2_encoded_bytes = 0;
+	pthread_mutex_unlock(&at->presentation_mutex);
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
@@ -2973,6 +3248,16 @@ static int audiotrack_get_written_frames(audio_ctx_t *at, uint64_t *frames, int 
 	return 1;
 }
 
+static int audiotrack_get_presentation_snapshot(audio_ctx_t *at,
+	AUDIO_PRESENTATION_SNAPSHOT *snapshot)
+{
+	if (!at || !snapshot) return 0;
+	pthread_mutex_lock(&at->presentation_mutex);
+	*snapshot = at->presentation_snapshot;
+	pthread_mutex_unlock(&at->presentation_mutex);
+	return snapshot->observed_wall_ms > 0;
+}
+
 static int audiotrack_get_fixed_latency(audio_ctx_t *at)
 {
 	return at ? (int)at->fixed_latency : 0;
@@ -3024,6 +3309,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.get_and_clear_latency_delta = audiotrack_get_and_clear_latency_delta,
 	.get_presented_frames = audiotrack_get_presented_frames,
 	.get_written_frames = audiotrack_get_written_frames,
+	.get_presentation_snapshot = audiotrack_get_presentation_snapshot,
 };
 
 #ifdef DEBUG_MSG

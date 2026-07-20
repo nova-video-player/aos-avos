@@ -97,12 +97,12 @@ separate correctness-neutral change.
 
 ### A/V Synchronization and Video Pacing
 
-Audio is the master clock. Video synchronization is achieved through a clever pacing mechanism inside the video sink (`stream_sink_video_android.c`).
-
--   The video sink's rendering thread maintains its own wall-clock timer, `venc_time`, which tracks elapsed `wc` time since the last flush.
--   When a video frame is ready to be displayed, its `blit_time` (which is a `ts` value) is compared against the sink's `venc_time` (`wc` value).
--   `blit_duration = frame->blit_time - venc_time;`
--   This subtraction between two different time domains is intentional. The resulting `blit_duration` is not a true duration, but a pacing value used in a feedback loop to adjust the sleep time between frames, ensuring the rate of `venc_time` (`wc`) matches the rate of `blit_time` (`ts`).
+Audio is the master clock. The current `sfdec2` video sink maps the centralized
+heard-audio TS onto `CLOCK_MONOTONIC` with `render_offset_ns`. It snaps each
+frame TS at the effective frame rate, adds the render offset and user video
+delay, and submits the resulting `render_ts_ns` to MediaCodec. The video thread
+limits queueing to a 200ms lookahead and drops frames that are already more than
+200ms late. It does not use the former `blit_duration` feedback loop.
 
 ### Seeking (`_stream_seek_real`)
 
@@ -175,18 +175,33 @@ A key aspect of the architecture is the numerical equivalence between `ts` (Time
 2.  By definition of the parser's scaling, the Time-Scaled duration for a given Real Stream Time duration is: `Δts = Δrst / audio_speed`.
 3.  Therefore, it is unequivocally true that **`Δts = Δwc`**.
 
-This equivalence is crucial. It means that a duration of 100ms in `ts` is numerically equal to a duration of 100ms in `wc`. This confirms that the video sink's clock estimator logic is mathematically sound:
+This equivalence is crucial. It means that a duration of 100ms in `ts` is
+numerically equal to a duration of 100ms in `wc`. The current video sink uses
+that property to map an audio-owned heard TS onto monotonic time:
 
-`venc_time = venc_put_time + (atime() - venc_ref_time)`
+`render_offset_ns = monotonic_now_ns - heard_ts * 1e6`
 
-This correctly estimates the current `ts` by adding the elapsed `wc` duration to the last reference `ts` timestamp. The error calculation `blit_duration = frame->blit_time - venc_time` is also sound, as it compares two values in the same, correct `ts` domain.
+Adding that offset to a future frame TS produces its MediaCodec presentation
+deadline. The former `venc_time`/`blit_duration` feedback loop used the same
+duration equivalence but is no longer the active `sfdec2` pacing path.
 
-#### The `android_sync = 1` Strategy
+#### Current Platform-Timed Release Strategy
 
-When the `android_sync` flag is enabled, the synchronization strategy changes completely, bypassing the sink's internal wait/drop logic and delegating frame pacing directly to the Android `MediaCodec` framework.
+The current `sfdec2` path always uses the restored platform-timed release engine
+(historically `android_sync=1`); it is not selected by a runtime flag.
 
-1.  **Delegation:** The `videosink_thread` bypasses local wait/drop pacing and delegates scheduling to `sfdec`/`MediaCodec`.
+1. **TS/WC mapping:** `videosink_put_time()` maintains the audio-owned TS anchor
+   and its monotonic reference. Speed, seek, resume, and hard discontinuity
+   events explicitly reset the scheduler mapping.
+2. **Deadline calculation:** `codec_sfdec2.c` snaps each frame TS at the current
+   effective frame rate, then adds `render_offset_ns` and user video delay to
+   produce `render_ts_ns`.
+3. **Bounded local queueing:** the video thread waits only until a frame enters
+   the 200ms MediaCodec lookahead window. A frame already more than 200ms late is
+   released without rendering.
+4. **Platform presentation:** frames inside the window are passed to
+   `sfdec_buf_render()` with the non-zero deadline; MediaCodec owns final timed
+   presentation.
 
-2.  **`sfdec` Timestamp Calculation:** The `sfdec` layer computes `render_ts_ns` for `AMediaCodec_releaseOutputBufferAtTime()`. The render time is derived from the current TS anchor and a wall‑clock reference so MediaCodec can pace frames in wall clock while respecting the TS timeline (including audio speed).
-
-3.  **Irrelevant `blit_time`:** In this mode, the sink’s `blit_duration` pacing is intentionally bypassed; the MediaCodec render timestamps are the authoritative schedule.
+The TS/WC duration equivalence above remains the mathematical basis for this
+mapping, but the old `blit_duration` wait/drop loop is not the current path.

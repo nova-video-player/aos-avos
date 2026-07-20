@@ -164,32 +164,59 @@ compressed buffer:
 capacity_ms = buf_size * logical_samples * 1000
               / (compressed_bytes * sample_rate * speed)
 residual_ms = max(0, track_latency - buf_size * 1000 / sample_rate)
-selected_ms = min(1000,
-                  max(residual_ms + capacity_ms,
-                      system_latency + capacity_ms))
+selected_ms = max(residual_ms + capacity_ms,
+                  system_latency + capacity_ms)
 ```
 
 The resulting value becomes the selected mode-2 latency for AC3 recode, direct
-AC3/EAC3/JOC, TrueHD, and the DTS family. Until the evidence window completes—or if
-valid paired evidence is unavailable—the existing codec-aware app/pipeline selection is
-retained as a startup fallback. The 1000ms ceiling is an empirical safety bound, not a
-claim about maximum physical HDMI/ARC latency.
+AC3/EAC3/JOC, TrueHD, and the DTS family. Until the evidence window completes, or if
+valid paired evidence is unavailable, the existing codec-aware app/pipeline selection is
+retained as a startup fallback. There is no production ceiling: low-bitrate streams can
+legitimately represent more than one second of media in the configured compressed
+buffer, and truncating that capacity caused a persistent phase error after track changes.
 
 `audio_spdif.c` mode-2 handling for recoding:
 
 - In mode 2 with parser output: send raw codec frames (`ENCODING_AC3` path) and keep timing via `fakeSize`
 - In mode 2 with **no parser** (AC3 recoding path): bypass IEC wrapping and send raw AC3 syncframes directly (`PT_MODE2_NOPARSER` path)
 - Mode 1 keeps static passthrough delay. Mode 2 uses the normalized compressed-buffer
-  latency as its baseline after the evidence window, and may add a bounded positive dynamic
-  residual when `enable_dynamic_audio_delay` and `stream_mode2_dynamic_delay`
-  are enabled.
+  latency as its selected delay after the evidence window.
 - `atempo` may still be instantiated for later non-passthrough speed changes,
   but no samples flow through it in passthrough and its delay is not counted in
   passthrough / AC3 recoding sync or speed-anchor calculations.
-- Mode 2 uses platform latency only as an input to the normalized route baseline. Any
-  dynamic residual is conservative:
-  it is capped, slewed, positive-only, and ignores stream-level last-good state
-  as fresh sink evidence.
+- Mode 2 uses platform latency only as an input to the normalized route baseline. The
+  production heard clock does not consume synchronous playhead/timestamp evidence as a
+  live correction. That evidence remains diagnostic until the asynchronous occupancy
+  estimator described in [`mode2.md`](../mode2.md) is implemented and validated.
+
+### Mode-2 heard-time interpolation
+
+Direct mode 2 advances `audio_time` when complete compressed writes are accepted. Those
+writes arrive in coarse batches, so `audio_time - selected_delay` is a submitted frontier,
+not a continuous presentation clock. `stream_get_heard_audio_ts()` maintains a separate
+wall-clock interpolator for direct mode 2:
+
+```
+raw_frontier = audio_time - selected_delay
+interpolated = previous_interpolated + monotonic_elapsed
+```
+
+The interpolated value is monotonic, snaps forward when a new raw frontier overtakes it,
+and may lead the full-buffer frontier only by the encoded-capacity portion of the selected
+delay (with a small starvation floor). AC3 recode is excluded because its dedicated burst
+pacer already provides continuous write timing.
+
+Epoch seeding depends on why the clock changed:
+
+- First playback starts from the raw full-buffer frontier.
+- A recreated or flushed mid-playback track starts empty, so
+  `mode2_heard_frontier_seed_pending` seeds at `audio_time - fixed_latency`, retaining only
+  downstream route delay while the new compressed buffer refills.
+- A normalized-latency change preserves monotonic phase once an authoritative playback
+  epoch exists; initial normalization before that epoch adopts the new raw phase.
+- Pause/resume preserves the interpolated phase and resets its wall epoch so paused time is
+  never counted as audio progress. A seek starts a new sync epoch but carries explicit
+  empty-track ownership when playback had already been established.
 
 ## State Diagram
 
@@ -230,7 +257,7 @@ claim about maximum physical HDMI/ARC latency.
 
 ### `startup_anchor_commit`
 
-On the first write after seek/resume, passthrough (mode 1 and mode 2)
+On the first write after seek/resume, mode 1 passthrough
 sets `audio_time = video_time + anchor_delay` and calls
 `sfdec2_refresh_sched_anchor()` in `stream_audio.c`:
 
@@ -249,30 +276,21 @@ hundreds of milliseconds before releasing in a burst.
 PCM is excluded: it uses `startup_audio_hold` to achieve alignment by
 holding writes, not by adjusting `audio_time`.
 
-Plain mode 2 (and AC3-recode mode 2 under `ac3_mode2_plain_policy`) is also excluded:
-it enters `STREAM_SYNC_SAMPLES` and counts decoded samples from the first PTS, so no
-`startup_anchor_commit` fires. The presence/absence of this commit in the log is the
-quickest way to tell which timing policy a given playback used.
+Plain mode 2 and AC3-recode mode 2 under `ac3_mode2_plain_policy` are excluded. They enter
+`STREAM_SYNC_SAMPLES`, count logical samples from the first PTS, and use the Mode-2 epoch
+and interpolator rules above. The presence or absence of this commit in the log is the
+quickest way to distinguish the mode-1 anchor policy from the mode-2 samples clock.
 
 ### Pre-commit negative anchor guard
 
-Before `startup_anchor_commit` fires, `heard_ts` for passthrough equals
-`first_audio_pts - static_latency` — e.g. 64 - 871 = -807ms for EAC3
-on Streamer 4K. Previously, `stream_sync_audio` would call
-`put_time(-807)` with `no_sched_anchor=1`, locking the sfdec2 scheduler
-at a phantom reference. The subsequent correct `put_time` could not
-override it: the jump (842ms) fell below the mode-2
-hard-discontinuity threshold (1500ms) so `reanchor_disc=0`. This caused
-a systematic ~46ms pre-convergence audio lead on every startup and seek.
+Before a valid playback epoch exists, the selected delay can exceed the first
+audio PTS and make the centralized heard timestamp negative. Publishing that
+value as `put_time` with no scheduler anchor would establish a phantom reference.
 
-Fix: `stream_sync_audio` skips `put_time` when
-`passthrough_mode && anchor_ts < 0`. `sink_ref_time` stays `-1`, so
-after `startup_anchor_commit` the next `stream_sync_audio` call has
-`no_sched_anchor=1` and seeds the scheduler at the correct value.
-
-Expected residual error after fix: ~16ms pre-convergence (sub-frame at
-30fps, imperceptible), and ~15ms post-convergence from
-`_snap_timestamp_ns` half-frame rounding — also imperceptible.
+Current rule: `stream_sync_audio()` publishes `put_time` only when the final
+centralized anchor is non-negative. `sink_ref_time` remains `-1` until mode 1
+commits its startup anchor or direct mode 2 advances its interpolated heard epoch
+to an audible value.
 
 ## Manual A/V Delay
 
@@ -286,9 +304,9 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
   inserting PCM silence on the audio path. On passthrough AVOS does not own
   decoded samples, and on-device testing showed timestamp/anchor-only schemes
   cannot realize it: the video pacer is anchored to physical audio progression,
-  and mode 2's heard clock is synthetic (`heard = audio_time - static_latency`),
-  so shifting anchors only makes the internal clocks agree without physically
-  delaying the audio the receiver hears. A real compressed-audio hold (IEC
+  and mode 2's heard clock is a write-derived bounded estimate rather than a
+  controllable decoded-audio queue. Shifting timestamps only makes the internal
+  clocks agree without physically delaying the audio the receiver hears. A real compressed-audio hold (IEC
   pause/null bursts, codec-specific silent frames, or an AudioTrack pause/gap)
   would be required and carries high AVR-mute / decoder-relock / drift risk.
 - **Guarding**: Nova's UI prevents selecting a negative passthrough delay (live
@@ -312,9 +330,10 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
   advancement; FLAC can use sample sync because decoded sample count is the
   stable clock. Mode 1 IEC passthrough and AC3 recoding must be validated
   independently before inheriting the mode-2 policy.
-- **Mode 2 heard-time baseline**: mode 2 uses submitted compressed packet duration to advance `audio_time`, then subtracts the normalized compressed-buffer latency to estimate heard time. The estimate is frozen after a 250ms paired byte/sample evidence window. Existing codec-aware app/pipeline selection remains only as the startup fallback. The old synthetic fill-window and sawtooth interpolation experiments are not part of the current code path.
+- **Mode 2 heard-time baseline**: mode 2 uses submitted compressed packet duration to advance `audio_time`, then subtracts the normalized compressed-buffer latency to form the raw heard frontier. The latency estimate freezes after a 250ms paired byte/sample evidence window. Existing codec-aware app/pipeline selection remains only as the startup fallback.
+- **Mode 2 continuous clock**: direct mode 2 wall-clock-interpolates between accepted compressed batches, bounded by the raw frontier plus encoded capacity. This is not the former synthetic fill-window experiment and does not measure actual AudioTrack occupancy.
 - **Latency terminology**: geometry/app latency is the PCM-style local AudioTrack buffer calculation and is not a reliable duration for compressed bytes. Raw pipeline latency is the platform maximum of AudioTrack-reported track latency and output/system latency plus app geometry. Normalized mode-2 latency replaces the platform's nominal compressed-buffer component with the duration derived from accepted compressed bytes and logical samples.
-- **Mode 2 dynamic residual**: when dynamic delay is enabled, mode 2 can add a small measured residual above the static baseline. The residual is capped by `stream_mode2_dynamic_max_ms`, slewed by `stream_mode2_dynamic_slew_ms`, requires a stability streak, and is positive-only so it cannot pull playback earlier than the static latency baseline.
+- **Mode 2 dynamic evidence**: the synchronous playhead/timestamp audit is diagnostic-only. It does not change selected latency, interpolator phase, or scheduler anchors.
 - **Physical Route Latency Limit**: AudioTrack latency APIs stop at the Android output boundary. Unreported downstream latency added by a soundbar or AVR after HDMI/ARC still requires a route/user offset outside the scheduler model.
 
 ## Debug Tips
@@ -325,8 +344,14 @@ Expected residual error after fix: ~16ms pre-convergence (sub-frame at
   enabled, logs `mode2_playhead_audit` every ~2s with logical samples written
   from `fakeSize`, AudioTrack playhead/timestamp frames, derived
   playhead/timestamp delays, selected delay, pipeline latency, and app
-  latency. This is diagnostic-only: it must not update `selected_delay` or
-  reanchor audio/video clocks.
+  latency. This invokes JNI from the writer path and has previously perturbed
+  timing, so it must remain off during normal playback. It is diagnostic-only:
+  it must not update `selected_delay` or reanchor audio/video clocks.
+- `mode2_epoch_seed`: records interpolator epoch ownership and the seed cause
+  (`initial_raw`, `restart_frontier`, `initial_latency`, `delay_monotonic`,
+  `delay_raw`, or `raw_discontinuity`).
+- `mode2_heard_interp`: records the raw submitted frontier, interpolated heard
+  time, frontier gap, selected delay, reset state, and pause state.
 - `mode2_normalized_latency`: a production record emitted when the normalized
   estimate is calculated (normally once per mode-2 AudioTrack configuration),
   showing format, raw track/system/app values, paired evidence, calculated

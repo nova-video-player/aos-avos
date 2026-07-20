@@ -46,7 +46,9 @@ treated as interchangeable:
 - Normalized mode-2 latency: after at least 250ms of paired accepted compressed
   bytes and logical samples, AVOS derives the compressed duration represented by
   the AudioTrack buffer. It combines that capacity with the residual platform
-  latency and freezes the result, capped at 1000ms.
+  latency and freezes the result. It is not capped: low-bitrate compressed
+  streams can legitimately place more than one second of media in the configured
+  buffer.
 - Static latency: a fallback selected delay used when stable dynamic evidence
   is unavailable. Static latency is not always the raw AudioTrack
   `getLatency()` value. Mode2 uses the normalized latency once its evidence
@@ -55,8 +57,9 @@ treated as interchangeable:
   or when valid paired evidence is unavailable. See
   [audio_passthrough.md](audio_passthrough.md).
 - `selected_delay`: the delay actually subtracted from `audio_time` to derive
-  heard time. It may come from dynamic AudioTrack evidence, last-good cache,
-  geometry latency, or pipeline latency depending on path and stability.
+  the raw heard frontier. For PCM it may come from dynamic AudioTrack evidence,
+  last-good cache, or static geometry. Mode 1 uses its static passthrough delay;
+  Mode 2 uses its normalized latency after the evidence window.
 - `mode2_playhead_audit`: diagnostic comparison between mode2 `fakeSize`
   logical writes and AudioTrack playhead/timestamp counters. The result is
   evidence only, not a live delay provider.
@@ -68,8 +71,13 @@ The core scheduler rule remains:
 
   heard_ts = audio_time - selected_delay
 
-Measured evidence may update `selected_delay`, but must not become a separate
-clock that continuously redefines `audio_time`.
+For direct Mode 2 this expression is the raw submitted frontier. A monotonic
+wall-clock interpolator advances heard time between coarse compressed write
+batches and clamps it to the physical buffer envelope. It does not redefine
+`audio_time` and it is not a measured occupancy clock.
+
+Mode 2 does not currently use AudioTimestamp/playhead evidence to change
+`selected_delay`. The synchronous `mode2_playhead_audit` is diagnostic-only.
 
 Exception: during plain PCM AudioTrack PlaybackParams speed epochs, the
 AudioTrack playhead is used as a temporary checkpoint clock. At the speed
@@ -87,6 +95,33 @@ Notes:
   to compute delay in AudioTrack during normal playback. The PlaybackParams
   speed-epoch checkpoint above is the explicit exception.
 - video_delay is only included when timestamps are sampled before the video sink.
+
+Mode 2 Interpolator and Epochs
+------------------------------
+For direct codec-specific AudioTrack output (`passthrough >= 2`, excluding AC3
+recode), accepted compressed writes update a logical submitted endpoint:
+
+  raw_heard = audio_time - selected_delay
+
+`stream_get_heard_audio_ts()` advances `mode2_heard_interp_ts` from monotonic
+wall time between write batches. It snaps forward when `raw_heard` overtakes it
+and limits free-running lead to:
+
+  max(selected_delay - fixed_latency, STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS)
+
+The selected delay is decomposed into compressed capacity plus `fixed_latency`,
+the downstream platform/route component. This lets an empty replacement track
+seed at `audio_time - fixed_latency` while its buffer refills.
+
+`stream_sync_restart_after_pause()` preserves the interpolated phase but resets
+the wall epoch. Full sync restart clears it. Seek and mid-playback track changes
+carry explicit empty-track ownership through `mode2_heard_frontier_seed_pending`;
+the condition is not inferred from timestamps because `audio_time` can remain
+continuous across a track recreation.
+
+The future asynchronous occupancy estimator will publish independently validated
+submitted-versus-presented evidence. Until then, the interpolator remains bounded
+write-side estimation with normalized static latency as its fallback baseline.
 
 State Machine Summary
 ---------------------
@@ -210,23 +245,19 @@ Notes
   for diff alignment (no heard_ts substitution in the diff path).
 - Manual A/V delay is a user offset, not part of the core delay-estimation
   equations.
-  - `android_sync=1`: applied at final presentation scheduling in
-    `codec_sfdec2.c` when building `render_ts_ns` for MediaCodec. The user
-    target delay is slewed through an effective delay state (bounded per-frame
-    step) to avoid fast-render bursts on large UI changes.
-  - `android_sync=0`: keep sink anchors physical (`put_time` unchanged).
-    The sync diff includes `s->av_delay`; negative delay (video earlier)
-    is implemented as audio-side hold (silence insertion) in
-    `stream_audio.c`.
+  - Positive delay is applied at final presentation scheduling in
+    `codec_sfdec2.c` when building `render_ts_ns` for MediaCodec. The user target
+    is slewed through an effective delay state to avoid fast-render bursts.
+  - Negative delay is implemented as an audio-side PCM hold. It is unsupported
+    for compressed passthrough because AVOS cannot insert decoded silence there.
 - When timing is invalid and atempo is actively changing speed, heard_ts uses
   the atempo chain delay to keep speed-change anchoring latency-aware. This is
   separate from the hot-filter topology rule: atempo may remain in the PCM path
   at neutral 1.0x for seamless speed changes without forcing its synthetic
   neutral-speed delay into every heard-time estimate.
-- For android_sync=0, if timing becomes invalid during steady playback,
-  last-good delay is held for anchoring to avoid dropping latency
-  compensation. For android_sync=1, stale delay is not used for anchoring
-  to avoid visible catch-up bursts.
+- On the current platform-timed path, stale delay is not used as a fresh
+  reanchor source because doing so can cause visible catch-up bursts. PCM may
+  retain last-good delay as a heard-time fallback under the state rules below.
 
 Full State Machine (Delay + Anchoring)
 --------------------------------------
@@ -249,16 +280,11 @@ Rules:
    - Else if `static_latency` > 0, use static.
 
 2) Anchor delay selection:
-   - android_sync=0:
-     - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
-     - If `delay_valid` becomes false during steady playback and last_good exists,
-       hold `last_good_delay` as anchor_delay (prevents latency drop).
-     - If no usable delay exists, anchor_delay = 0.
-   - android_sync=1:
-     - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
-     - If `delay_valid` is false, do NOT anchor on last_good/static (avoid catch-up bursts).
-     - In sfdec2 reanchor windows, prefer fresh sink `put_time` (`venc_put_time`)
-       as authoritative heard anchor; fallback to recomputed heard-time when stale.
+   - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
+   - If dynamic evidence is unavailable, use the path-specific static/last-good
+     fallback for heard-time estimation, but do not present it as fresh evidence.
+   - In sfdec2 reanchor windows, prefer fresh sink `put_time` (`venc_put_time`)
+     as the authoritative heard anchor; recompute heard time when it is stale.
 
 3) Heard delay selection (heard_ts):
    - If `delay_valid`, heard_delay = anchor_delay (smoothed/dynamic).
@@ -276,13 +302,11 @@ Rules:
 
 4) Mapping on speed change:
    - Default: anchor at `heard_audio_ts`.
-   - android_sync=1 + invalid delay: map using `current_time_ts` instead and
+   - With invalid delay, map using `current_time_ts` instead and
      defer sink re-anchoring (avoid fast catch-up).
 
 5) Resume:
-   - android_sync=0: if delay invalid on first audio after resume, rebase to
-     static latency; when delay becomes valid (streak), rebase to measured delay.
-   - android_sync=1 PCM: free-run while delay invalid; when delay becomes valid
+   - PCM free-runs while delay is invalid; when delay becomes valid
      (streak), a one-time rebase aligns to measured delay.
    - On the first resumed PCM write, AVOS may perform an invalid-delay rebase
      using static latency to avoid a large offset while AudioTrack timing warms
@@ -298,11 +322,8 @@ Rules:
   - Passthrough mode 2 (raw): playhead/timestamp evidence is treated
     conservatively. The scheduler uses normalized compressed-buffer latency as
     its baseline after the 250ms evidence window, with the platform/app policy
-    retained for startup fallback.
-    When `enable_dynamic_audio_delay` and `stream_mode2_dynamic_delay` are
-    enabled, stable AudioTrack evidence may add a capped, slewed, positive-only
-    residual above static latency. Stream-level last-good fallback is not
-    considered fresh sink evidence for this residual.
+    retained for startup fallback. Current playhead/timestamp comparisons are
+    diagnostic-only and do not change the selected Mode 2 delay or heard clock.
 - Cached/throttled AudioTrack delay reads preserve validity when the last
   trusted source was playhead-based (`last_good_dynamic_valid`), so
   `cached(throttle)` does not immediately invalidate a newly trusted delay.

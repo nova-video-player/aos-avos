@@ -9,7 +9,7 @@ AudioTrack PlaybackParams, the atempo filter is part of the steady PCM audio
 pipeline even at exactly 1.0x. Keeping the neutral filter hot avoids a pipeline
 discontinuity when the user changes speed while playback is running.
 
-## Current State (2026-06-14)
+## Current State (2026-07-20)
 
 The current implementation uses the atempo path as a software speed backend with
 three separate clocks/anchors:
@@ -305,29 +305,26 @@ if (s->sync_mode != STREAM_SYNC_SAMPLES) {
 }
 ```
 
-#### Path B: SAMPLES Sync Mode (`stream_audio.c:541-563`)
+#### Path B: SAMPLES Sync Mode
 
-For sample-count-based sync (used with EAC3/AC3 passthrough):
+For sample-count-based sync, advance from logical media samples represented by
+the committed output. This is used by direct Mode 2 compressed passthrough and
+other paths where logical duration is more trustworthy than packet PTS. Mode 1
+IEC uses its carrier-byte/container-rate accounting instead. Compressed
+passthrough does not run through atempo.
 
 ```c
 if (s->sync_mode == STREAM_SYNC_SAMPLES && s->audio_ref_time != -1) {
-    if (s->audio->samplesPerSec) {
-        // Accumulate samples written to AudioTrack
-        s->audio_samples += size_written / s->audio->bytesPerFrame;
-        int delta = (1000 * s->audio_samples) / s->audio->samplesPerSec;
-
-        // Check if atempo is active
-        int using_atempo = (s->audio_filter_atempo != NULL);
-        if (using_atempo) {
-            // atempo output = physical samples @ 1.0x = TS domain, no scaling
-            _set_audio_time(s, s->audio_ref_time + delta);
-        } else {
-            // Normal: samples in RST domain need RST→TS conversion
-            _set_audio_time(s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int));
-        }
-    }
+    logical_samples = logical_samples_for_committed_output(frame, size_written);
+    s->audio_samples += logical_samples;
+    delta_ms = 1000 * s->audio_samples / logical_sample_rate;
+    _set_audio_time(s, s->audio_ref_time + RST_TO_TS_DELTA(delta_ms, int));
 }
 ```
+
+For direct Mode 2, the same committed logical duration also feeds the paired
+compressed-byte/logical-sample latency normalization. It must not be inferred
+from AudioTrack compressed byte/frame counters.
 
 **Critical fix:** This second path (SAMPLES mode) was the source of A/V desync. The `size_written` value is the FILTERED output size (after atempo), which represents physical playback time. Applying `RST_TO_TS_DELTA` caused **double-scaling**.
 
@@ -493,30 +490,25 @@ atempo delay when `speed != 1.0x`.
 
 ### Video Sink Pacing (`codec_sfdec2.c`)
 
-Audio is the master clock. Video sync uses feedback control:
+Audio remains the master clock, but current `sfdec2` pacing is platform-timed
+rather than the former `blit_duration` feedback loop:
 
 ```c
-// venc_time tracks wall clock elapsed since last flush
-venc_time = venc_put_time + (atime() - venc_ref_time);
-
-// blit_time is the frame's TS timestamp
-// This comparison is valid because Δts = Δwc
-blit_duration = frame->blit_time - venc_time;
-
-if (blit_duration > 0) {
-    // Frame is early, wait
-    stream_sync_sleep_ms(blit_duration);
-} else if (blit_duration < -MAX_DROP_THRESHOLD) {
-    // Frame is late, drop
-    return DROP_FRAME;
-}
+heard_ts = fresh_put_time_or_stream_get_heard_audio_ts();
+render_offset_ns = monotonic_now_ns - heard_ts * 1000000;
+render_ts_ns = snap(frame_ts) + render_offset_ns + user_video_delay_ns;
 ```
 
 **Why this works:**
-- `venc_time` is in WC domain
-- `blit_time` is in TS domain
-- But `Δts = Δwc`, so numerical comparison is valid
-- Result: video pacing matches audio timeline
+- `heard_ts` and frame timestamps are in TS.
+- `render_offset_ns` maps that TS timeline onto `CLOCK_MONOTONIC`.
+- Because `Δts = Δwc`, the offset remains valid at the active playback speed.
+- The video thread holds frames outside a 200ms submission lookahead and drops
+  frames already more than 200ms late; MediaCodec performs final presentation at
+  `render_ts_ns`.
+- At speed changes, the audio playhead/atempo ledger supplies the audible media
+  boundary and the scheduler reanchors explicitly rather than chasing each
+  write burst.
 
 ## Seeking, Reset, and Speed Changes
 
@@ -664,7 +656,7 @@ atempo_rst_anchor: speed=1.500 anchor_rst_proj=... anchor_rst_ledger=... state=0
 ---
 
 **Document Version:** 2.0
-**Last Updated:** 2026-06-14
+**Last Updated:** 2026-07-20
 **Implementation:** Timeline mapping + playhead-gated atempo commit + Option B production media map with Option A fallback
 **FFmpeg Version:** N7.1
 **Android API:** All versions supported

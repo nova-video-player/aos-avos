@@ -143,8 +143,10 @@ avsh <name> [args...]
 
 #### at_mode2_audit
 
-Enables periodic logging of the mode2 compressed-audio pipeline queue depth.
-Off by default to avoid JNI overhead during normal playback.
+Enables periodic comparison of Mode 2 logical writes with AudioTrack playhead
+and timestamp counters. Off by default because it performs JNI calls from the
+audio writer path and has previously changed the timing it was intended to
+observe. Do not enable it during sync qualification runs.
 
 When enabled, every 2 seconds during active mode2 passthrough writes:
 
@@ -158,7 +160,7 @@ mode2_playhead_audit: fmt=<hex> logical=<samples> i_written=<bytes>
 - `logical` — PCM-equivalent samples accumulated from fakeSize writes (audio duration written)
 - `playhead` — `getPlaybackHeadPosition()` frames (frames played out)
 - `ts_frames` / `ts_ns` — `AudioTrack.getTimestamp()` position and wall-clock
-- `derived_playhead` — `(logical - playhead) * 1000 / rate` ms; real hardware queue depth
+- `derived_playhead` — `(logical - playhead) * 1000 / rate` ms; diagnostic candidate queue depth, not production occupancy evidence
 - `derived_logical` — same but against timestamp position
 - `selected` — delay value currently returned by `audiotrack_get_latency()` (heard_ts anchor)
 
@@ -174,6 +176,21 @@ mode2_normalized_latency: fmt=<hex> raw_track=<ms> system=<ms> app=<ms>
 This record applies to Dolby, AC3 recode, TrueHD, and DTS mode2 tracks. It is the
 preferred field diagnostic for the selected normalized baseline; `at_mode2_audit`
 adds periodic playhead/timestamp evidence when deeper investigation is needed.
+
+Normal direct Mode 2 playback also logs the write-side heard clock:
+
+```
+mode2_epoch_seed: cause=<cause> audio=<ts> raw=<ts> seed=<ts>
+    delay=<ms> fixed=<ms> sink_ref=<ts> seek_epoch=<n>
+mode2_heard_interp: wall=<ms> raw=<ts> interp=<ts> ceiling_gap=<ms>
+    audio=<ts> delay=<ms> reset=<0|1> paused=<0|1>
+```
+
+`mode2_epoch_seed` explains whether the clock started from the full-buffer raw
+frontier, an empty-track submitted frontier, or a latency/discontinuity reset.
+`mode2_heard_interp` shows interpolation between compressed write batches. These
+logs describe the production write-derived estimator; they are not evidence from
+the future asynchronous submitted-versus-presented occupancy estimator.
 
 To enable:
 

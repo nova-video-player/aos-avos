@@ -1,10 +1,16 @@
 Stutter Investigation Notes
 ===========================
 
+> Historical investigation note. This file records earlier stutter experiments
+> and is not the current synchronization specification. See
+> `sync_anchoring_rules.md`, `android_frame_timing.md`, `delay_estimation.md`, and
+> `audio_passthrough.md` for production behavior.
+
 Goal
 ----
 Reduce visible stutter on Android devices where AudioTrack timing is unreliable
 (e.g., Google Streamer 4K returning `framePosition=0` or sparse timestamps).
+
 Cover both android_sync=0 (sfdec2 pacing) and android_sync=1 (MediaCodec pacing).
 
 Key Symptoms Observed

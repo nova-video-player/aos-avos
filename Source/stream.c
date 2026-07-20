@@ -274,6 +274,7 @@ DBGS serprintf("stream_init\r\n" );
 
 	pthread_mutex_init( &s->codec_mutex,       NULL );
 	pthread_mutex_init( &s->video_done_mutex,  NULL );
+	pthread_mutex_init( &s->audio_sink_mutex,  NULL );
 	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
 	
 	ref_count ++;
@@ -334,6 +335,7 @@ DBGS serprintf("codec_thread joined\r\n");
 	
 	pthread_mutex_destroy( &s->codec_mutex  );
 	pthread_mutex_destroy( &s->video_done_mutex );
+	pthread_mutex_destroy( &s->audio_sink_mutex );
 	pthread_mutex_destroy( &s->mode2_heard_mutex );
 	
 	s->open = 0;

@@ -2799,15 +2799,33 @@ serprintf("PAU: not_open\r\n");
 
 	if ( !was_paused ) {
 DBGS serprintf("stream_pause\r\n");
+		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+			s->audio_sink->get_passthrough( s ) : 0;
+		int serialize_transaction = s->audio_ctx && s->audio_sink_open &&
+			(passthrough == 1 || (passthrough >= 2 && device_get_android_api() >= 23));
+		if( serialize_transaction ) {
+			// Keep IEC and raw access units intact across pause. API 23+ uses
+			// non-blocking writes, so a Mode 2 barrier waits only for the current
+			// unit's remaining capacity, never a long blocking Java call.
+			int barrier_start_ms = atime();
+			pthread_mutex_lock( &s->audio_sink_mutex );
+			int barrier_wait_ms = atime() - barrier_start_ms;
+			if( barrier_wait_ms > 0 ) {
+				DBG serprintf("stream_pause: audio transaction barrier waited %d ms\n",
+					barrier_wait_ms);
+			}
+		}
 		if ( s->parser && s->parser->pause ) {
 			s->parser->pause( s, 1 );
 		}
-
 		s->paused = 1;
 		sfdec2_android_sync_on_pause( s, 1 );
 		stream_audio_mute( s );
 		if ( s->audio_ctx && s->audio_sink_open ) {
 			audio_interface_pause( s->audio_ctx );
+		}
+		if( serialize_transaction ) {
+			pthread_mutex_unlock( &s->audio_sink_mutex );
 		}
 	}
 
@@ -2890,6 +2908,17 @@ DBGS serprintf("stream_un_pause\r\n");
 			s->audio_stuff_zero = 0;
 		}
 
+		// Keep paused=1 until play() completes so a compressed remainder cannot
+		// reach a paused Java track. API 23+ Mode 2 shares the transaction mutex;
+		// legacy Mode 2 retains an interrupted remainder in the audio thread.
+		int serialize_transaction = passthrough == 1 ||
+			(passthrough >= 2 && device_get_android_api() >= 23);
+		if( serialize_transaction ) {
+			pthread_mutex_lock( &s->audio_sink_mutex );
+		}
+		if ( s->audio_ctx && compressed_resume ) {
+			audio_interface_unpause( s->audio_ctx );
+		}
 		s->paused = 0;
 		sfdec2_android_sync_on_pause( s, 0 );
 
@@ -2900,8 +2929,11 @@ DBGS serprintf("stream_un_pause\r\n");
 		// stream_pause() paused every open AudioTrack. Passthrough cannot use the
 		// PCM zero-preload path, and its sink-open flag may lag the live AudioTrack
 		// across format setup. Always issue play() for a live compressed route.
-		if ( s->audio_ctx && (compressed_resume || (!do_audio_preload && s->audio_sink_open)) ) {
+		if ( s->audio_ctx && !compressed_resume && !do_audio_preload && s->audio_sink_open ) {
 			audio_interface_unpause( s->audio_ctx );
+		}
+		if( serialize_transaction ) {
+			pthread_mutex_unlock( &s->audio_sink_mutex );
 		}
 
 		if ( s->parser && s->parser->pause ) {

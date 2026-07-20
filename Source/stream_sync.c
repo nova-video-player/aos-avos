@@ -515,6 +515,16 @@ int stream_sync_restart( STREAM *s )
 	return ret;
 }
 
+int stream_sync_restart_with_mode2_frontier( STREAM *s )
+{
+	int ret;
+	pthread_mutex_lock( &s->mode2_heard_mutex );
+	ret = _stream_sync_restart_locked( s );
+	s->mode2_heard_frontier_seed_pending = 1;
+	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	return ret;
+}
+
 // Pause keeps the compressed AudioTrack and its buffered media intact. Preserve
 // the interpolated heard phase, but move its wall epoch to now so paused wall
 // time is not credited as audio progress. Seeks and sink recreation continue to

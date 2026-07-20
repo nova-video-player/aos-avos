@@ -80,6 +80,7 @@ extern int spdif_is_passthrough_on(void);
 typedef unsigned char bool;
 
 #define NO_ERROR 0
+#define AUDIOTRACK_WRITE_NON_BLOCKING 1
 
 extern JavaVM *myVm;
 extern jobject myClassLoader;
@@ -180,6 +181,7 @@ struct audio_ctx {
 static int audiotrack_log_underruns = 0;
 static int audiotrack_disable_recovery = 1;
 static int audiotrack_mode2_audit = 0;
+static int audiotrack_force_short_write_bytes = 0;
 // AC3-recode mode2 plain-policy gate (single source of truth in stream_audio.c). When on,
 // AC3 recode resolved to mode2 uses app_latency instead of pipeline_latency for the static
 // heard delay, paired atomically with the PTS-seeded sample clock in stream_audio.c. Only
@@ -1735,8 +1737,8 @@ static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 }
 
 // Accumulate fakeSize-derived logical samples for mode2 playhead audit.
-// Called from stream_sink_audio after each successful mode2 write.
-// samples = fakeSize * ret / frame->size / bpf (scaled for partial writes).
+// stream_audio publishes only complete accepted compressed units, keeping
+// accepted_bytes and samples paired across any physical short-write retries.
 // Triggers the periodic audit after updating so each log reflects current state.
 static void audiotrack_add_logical_samples(audio_ctx_t *at, int samples, int accepted_bytes)
 {
@@ -1799,8 +1801,22 @@ ERR		LOG("audiotrack_write: track not valid, error");
 
 	ssize_t ret = 0;
 	ssize_t len_to_write = MIN(at->buf_size, len);
+	int nonblocking_write = at->passthrough && device_get_android_api() >= 23;
+	if (at->passthrough && audiotrack_force_short_write_bytes > 0 &&
+		len_to_write > audiotrack_force_short_write_bytes) {
+		len_to_write = audiotrack_force_short_write_bytes;
+	}
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);
-	ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
+	if (nonblocking_write) {
+		ret = call_int_method(at, "write", "([BIII)I", at->jbuffer, 0,
+			len_to_write, AUDIOTRACK_WRITE_NON_BLOCKING);
+	} else {
+		ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
+	}
+	if (ret == 0 && nonblocking_write) {
+		DBG3 LOG("audiotrack_write: nonblocking passthrough backpressure");
+		return 0;
+	}
 DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d)",
 		ret, len_to_write, at->format, at->passthrough);
 
@@ -3014,4 +3030,5 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 DECLARE_DEBUG_PARAM("at_underrun", audiotrack_log_underruns );
 DECLARE_DEBUG_PARAM("at_disable_recovery", audiotrack_disable_recovery );
 DECLARE_DEBUG_PARAM("at_mode2_audit", audiotrack_mode2_audit );
+DECLARE_DEBUG_PARAM("at_short_write", audiotrack_force_short_write_bytes );
 #endif

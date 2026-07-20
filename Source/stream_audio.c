@@ -25,6 +25,7 @@
 #include "atime.h"
 #include "util.h"
 #include "file.h"
+#include "device_config.h"
 
 #include <string.h>
 #include <math.h>
@@ -798,6 +799,114 @@ static int64_t _stream_ac3_recode_written_duration_us(int size_written, int fram
 		return AC3_RECODE_FRAME_US;
 	}
 	return (AC3_RECODE_FRAME_US * size_written) / frame_size;
+}
+
+typedef enum {
+	COMPRESSED_WRITE_COMPLETE = 0,
+	COMPRESSED_WRITE_PAUSED,
+	COMPRESSED_WRITE_ABORTED,
+	COMPRESSED_WRITE_ERROR,
+} compressed_write_result_t;
+
+// AudioTrack may accept only a prefix even for a blocking compressed write.
+// Keep the access unit/burst as one clock transaction while continuing the byte
+// stream through as many sink writes as necessary.
+static compressed_write_result_t _stream_write_compressed_unit(
+	STREAM *s, const AUDIO_FRAME *frame, int *accepted_bytes )
+{
+	AUDIO_FRAME pending = *frame;
+	int can_write_retries = 0;
+	*accepted_bytes = 0;
+
+	while( pending.size > 0 ) {
+		// Legacy Mode 2, or the global debug pause, may interrupt a transaction
+		// between physical writes. An untouched unit can return to the outer
+		// paused loop; retain a positive prefix here until resume.
+		if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+			if( *accepted_bytes == 0 ) {
+				return COMPRESSED_WRITE_PAUSED;
+			}
+			while( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+				if( _abort( s ) ) {
+					return COMPRESSED_WRITE_ABORTED;
+				}
+				stream_yield_RT();
+			}
+		}
+
+		while( !s->audio_sink->can_write( s, pending.size ) ) {
+			can_write_retries++;
+			if( can_write_retries % 100 == 0 ) {
+				DBG serprintf("stream_audio: compressed can_write still false after %d attempts (remaining=%d)\n",
+					can_write_retries, pending.size);
+			}
+			if( _abort( s ) ) {
+				return COMPRESSED_WRITE_ABORTED;
+			}
+			if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+				if( *accepted_bytes == 0 ) {
+					return COMPRESSED_WRITE_PAUSED;
+				}
+				break;
+			}
+			stream_yield_RT();
+		}
+		if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+			continue;
+		}
+
+		if( _abort( s ) ) {
+			return COMPRESSED_WRITE_ABORTED;
+		}
+		int written = s->audio_sink->write( s, &pending );
+		if( written == 0 ) {
+			// API 23+ compressed AudioTrack writes are non-blocking. Zero is
+			// ordinary queue backpressure; retain the same unit and retry after
+			// yielding so pause can wait only for its remaining media duration.
+			stream_yield_RT();
+			continue;
+		}
+		if( written < 0 || written > pending.size ) {
+			if( written < 0 && (s->paused || stream_audio_paused) &&
+				!s->play_n_audio_frames ) {
+				if( *accepted_bytes == 0 ) {
+					return COMPRESSED_WRITE_PAUSED;
+				}
+				continue;
+			}
+			DBG serprintf("stream_audio: compressed write failed ret=%d remaining=%d accepted=%d fmt=%04X\n",
+				written, pending.size, *accepted_bytes, frame->format);
+			return COMPRESSED_WRITE_ERROR;
+		}
+
+		*accepted_bytes += written;
+		if( written < pending.size ) {
+			DBG serprintf("stream_audio: compressed short write %d/%d fmt=%04X, continuing unit at %d/%d\n",
+				written, pending.size, frame->format, *accepted_bytes, frame->size);
+		}
+		pending.data += written;
+		pending.size -= written;
+	}
+
+	return COMPRESSED_WRITE_COMPLETE;
+}
+
+static void _stream_abort_incomplete_compressed_unit(
+	STREAM *s, int accepted_bytes, int unit_size, int passthrough, int ac3_recoding )
+{
+	int had_audio_epoch = s->audio_time >= 0 && s->sink_ref_time >= 0;
+	DBG serprintf("stream_audio: aborting incomplete compressed unit accepted=%d/%d pt=%d recode=%d; flushing sink\n",
+		accepted_bytes, unit_size, passthrough, ac3_recoding);
+	if( s->audio_sink && s->audio_sink->flush ) {
+		s->audio_sink->flush( s );
+	}
+	s->sink_ref_time = -1;
+	if( passthrough >= 2 && !ac3_recoding && had_audio_epoch ) {
+		stream_sync_restart_with_mode2_frontier( s );
+	} else {
+		stream_sync_restart( s );
+	}
+	sfdec2_refresh_sched_anchor( s );
 }
 
 static int _wait( STREAM *s, int wait )
@@ -1772,6 +1881,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				int total_size = audio_frame.size;
 				int ac3_recode_packet_size = 0;
 				int ac3_recode_fake_per_packet = 0;
+				int compressed_unit = passthrough_active || ac3_recoding;
 				if( ac3_recoding && ac3_recode_output_frames > 0 &&
 				    total_size % ac3_recode_output_frames == 0 ) {
 					ac3_recode_packet_size = total_size / ac3_recode_output_frames;
@@ -1823,9 +1933,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 						}
 					}
-					// Do not split compressed passthrough bursts. IEC61937 / raw codec frames
-					// must reach AudioTrack atomically; chunking them into generic PCM-sized
-					// writes can break HAL parsing and lead to dead/broken passthrough tracks.
+					// Keep each IEC61937 burst / raw access unit as one logical transaction.
+					// AudioTrack may accept it through multiple physical writes, but the next
+					// unit is not submitted and no media duration is published until complete.
 					if( ac3_recoding && ac3_recode_packet_size > 0 ) {
 						// Preserve one raw AC3 frame / IEC burst per AudioTrack write.
 						audio_frame.size = MIN(ac3_recode_packet_size, size);
@@ -1918,51 +2028,73 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						}
 					}
 
-					// no error, output PCM
-					DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
-					int can_write_retries = 0;
-					while( !s->audio_sink->can_write( s, audio_frame.size ) ) {
-						can_write_retries++;
-						if (can_write_retries % 100 == 0) {
-							DBG serprintf("stream_audio: sink->can_write still returning false after %d attempts\n",
-								can_write_retries);
+					int ledger_reserved = 0;
+					int ledger_reserved_frames = 0;
+					int ledger_bpf = 0;
+					int size_written = 0;
+					compressed_write_result_t compressed_result = COMPRESSED_WRITE_COMPLETE;
+					if( compressed_unit ) {
+						// Arm before the transaction, but publish/reanchor only after every
+						// byte of the compressed unit has been accepted.
+						if( s->audio_resume_pending ) {
+							DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
+								s->audio_time, s->video_time, s->seek_epoch, atime());
+							stream_sync_pcm_reanchor_arm( s, passthrough_active );
+							s->audio_resume_pending = 0;
+						}
+						// API 23+ passthrough writes are non-blocking, so serialize the
+						// complete unit with pause/play without waiting behind a blocking
+						// Java call. This keeps raw and IEC framing intact at pause.
+						int serialize_transaction = passthrough == 1 ||
+							(passthrough >= 2 && device_get_android_api() >= 23);
+						if( serialize_transaction ) {
+							pthread_mutex_lock( &s->audio_sink_mutex );
+						}
+						compressed_result = _stream_write_compressed_unit(
+							s, &audio_frame, &size_written );
+						if( serialize_transaction ) {
+							pthread_mutex_unlock( &s->audio_sink_mutex );
+						}
+					} else {
+						DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
+						int can_write_retries = 0;
+						while( !s->audio_sink->can_write( s, audio_frame.size ) ) {
+							can_write_retries++;
+							if( can_write_retries % 100 == 0 ) {
+								DBG serprintf("stream_audio: sink->can_write still returning false after %d attempts\n",
+									can_write_retries);
+							}
+							if( _abort( s ) ) {
+								return;
+							}
+							stream_yield_RT();
 						}
 						if( _abort( s ) ) {
 							return;
 						}
-						stream_yield_RT();
+						if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+							DBG serprintf("stream_audio: pause raced before write, dropping pending audio frame (%d bytes)\n",
+								audio_frame.size);
+							size = 0;
+							break;
+						}
+						if( use_atempo && bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
+							ledger_bpf = bytes_per_sample * channels;
+							ledger_reserved_frames = ledger_bpf > 0 ? audio_frame.size / ledger_bpf : 0;
+							ledger_reserved = _stream_atempo_ledger_reserve(
+								s, ledger_reserved_frames, sample_rate );
+						}
+						// Arm the one-shot reanchor immediately before the first write.
+						if( s->audio_resume_pending ) {
+							DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
+								s->audio_time, s->video_time, s->seek_epoch, atime());
+							stream_sync_pcm_reanchor_arm( s, passthrough_active );
+							s->audio_resume_pending = 0;
+						}
+						DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
+							audio_frame.format, audio_frame.size);
+						size_written = s->audio_sink->write( s, &audio_frame );
 					}
-					if( _abort( s ) ) {
-						return;
-					}
-					if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
-						DBG serprintf("stream_audio: pause raced before write, dropping pending audio frame (%d bytes)\n",
-							audio_frame.size);
-						size = 0;
-						break;
-					}
-					DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
-						audio_frame.format, audio_frame.size);
-					int ledger_reserved = 0;
-					int ledger_reserved_frames = 0;
-					int ledger_bpf = 0;
-					if( use_atempo && !passthrough_active && !ac3_recoding &&
-						bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
-						ledger_bpf = bytes_per_sample * channels;
-						ledger_reserved_frames = ledger_bpf > 0 ? audio_frame.size / ledger_bpf : 0;
-						ledger_reserved = _stream_atempo_ledger_reserve(
-							s, ledger_reserved_frames, sample_rate );
-					}
-					// Arm the one-shot reanchor before the write so the latch is ready,
-					// but do not apply yet: audio_time must only be rebased after bytes
-					// are confirmed committed (size_written > 0).
-					if( s->audio_resume_pending ) {
-						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
-							s->audio_time, s->video_time, s->seek_epoch, atime());
-						stream_sync_pcm_reanchor_arm( s, passthrough_active );
-						s->audio_resume_pending = 0;
-					}
-					int size_written = s->audio_sink->write( s, &audio_frame );
 					DBG3 serprintf("stream_audio: sink->write returned %d\n", size_written);
 					if( ledger_reserved ) {
 						int written_frames = (size_written > 0 && ledger_bpf > 0) ?
@@ -1971,15 +2103,41 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							s, ledger_reserved_frames, written_frames, sample_rate );
 					}
 
+					if( compressed_result != COMPRESSED_WRITE_COMPLETE ) {
+						int pause_race = (s->paused || stream_audio_paused) &&
+							!s->play_n_audio_frames;
+						if( size_written > 0 ||
+							(compressed_result == COMPRESSED_WRITE_ERROR && !pause_race) ) {
+							_stream_abort_incomplete_compressed_unit( s, size_written,
+								audio_frame.size, passthrough, ac3_recoding );
+						}
+						if( s->video_hold_for_resume_audio ) {
+							DBG serprintf("stream_audio: releasing video hold on incomplete write (pt=%d recode=%d result=%d)\n",
+								passthrough_active, ac3_recoding, compressed_result);
+							s->video_hold_for_resume_audio = 0;
+						}
+						if( compressed_result == COMPRESSED_WRITE_ABORTED ) {
+							return;
+						}
+						size = 0;
+						break;
+					}
+
+					// Publish Mode 2 logical duration only after the complete compressed
+					// unit has been accepted. fakeSize uses 2ch 16-bit PCM-equivalent bytes.
+					if( compressed_unit && passthrough >= 2 && audio_frame.fakeSize > 0 ) {
+						audio_interface_add_logical_samples( s->audio_ctx,
+							audio_frame.fakeSize / 4, size_written );
+					}
+
 					// For A/V sync scaling, we need the PCM-equivalent duration of written data.
 					// Mode 2 / AC3 recoding: fakeSize carries the PCM-equivalent payload size.
-					// Mode 1 (IEC): each write IS one complete IEC burst whose duration equals
+					// Mode 1 (IEC): each completed transaction is one full carrier burst.
 					// the container rate (e.g. 32ms for 48kHz EAC3).
 					int64_t effective_chunk_size = size_written;
 					if ((passthrough_active && passthrough != 1) || ac3_recoding) {
 						if (audio_frame.fakeSize > 0) {
-							// Scaled proportional to actual write size to handle partial writes correctly
-							effective_chunk_size = (int64_t)(((int64_t)size_written * audio_frame.fakeSize) / audio_frame.size);
+							effective_chunk_size = audio_frame.fakeSize;
 						}
 					}
 
@@ -2003,7 +2161,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						startup_write_log_count++;
 					}
 
-					if( _abort( s ) ) {
+					if( !compressed_unit && _abort( s ) ) {
 						return;
 					}
 					if( size_written <= 0 ) {
@@ -2060,11 +2218,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						DBG serprintf("stream_audio: first resumed audio write committed (%d bytes, pt=%d recode=%d)\n",
 							size_written, passthrough_active, ac3_recoding);
 						s->video_hold_for_resume_audio = 0;
-					}
-					if( (passthrough_active || ac3_recoding) && size_written < audio_frame.size ) {
-						DBG serprintf("stream_audio: passthrough short write %d/%d fmt=%04X pt=%d recode=%d, dropping burst remainder\n",
-							size_written, audio_frame.size, audio_frame.format, passthrough_active, ac3_recoding);
-						size = 0;
 					}
 					if( s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
 						int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
@@ -2194,26 +2347,17 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									passthrough_active, audio_frame.fakeSize, size_written, bpf, s->audio->bytesPerFrame, s->audio->format);
 							}
 #endif
-							// Mode 1 IEC: the write IS the full IEC burst; use size_written so the
+							// Mode 1 IEC: the completed transaction covers the full carrier burst;
+							// use the full size_written so the
 							// clock advances by the complete burst duration (e.g. 20 ms for TrueHD,
 							// 32 ms for EAC3).  fakeSize is a per-subframe unit and under-counts by
 							// up to 96x.  Mode 2 uses fakeSize as the logical PCM-equivalent duration.
 							// AC3 recoding emits fixed AC3 encoder frames: 1536 samples at 48 kHz.
 							int pt_bytes = size_written;
 							if( ac3_recoding ) {
-								int ac3_samples = AC3_RECODE_FRAME_SAMPLES;
-								if( size_written > 0 && audio_frame.size > 0 && size_written < audio_frame.size ) {
-									ac3_samples = (int)(((int64_t)AC3_RECODE_FRAME_SAMPLES * size_written) /
-										audio_frame.size);
-								}
-								pt_bytes = ac3_samples;
+								pt_bytes = AC3_RECODE_FRAME_SAMPLES;
 							} else if (passthrough_active && passthrough != 1 && audio_frame.fakeSize > 0) {
 								pt_bytes = audio_frame.fakeSize;
-								if( size_written > 0 && audio_frame.size > 0 &&
-									size_written < audio_frame.size ) {
-									pt_bytes = (int)(((int64_t)audio_frame.fakeSize * size_written) /
-										audio_frame.size);
-								}
 							}
 							s->audio_samples += ac3_recoding ? pt_bytes : pt_bytes / bpf;
 							// Use actual source sample rate for sync when passthrough is inactive.
@@ -2262,7 +2406,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d sync_rate=%d configured_rate=%d\n",
 								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta, sync_rate, s->audio->samplesPerSec);
-							// if size_written < size, we don't want to go out of sync on passthrough
+							// fakeSize belongs to this completed output unit; packetized AC3
+							// recode assigns the next unit's value at the top of the loop.
 							audio_frame.fakeSize = 0;
 						}
 					}

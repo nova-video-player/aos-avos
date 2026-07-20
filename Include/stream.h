@@ -682,7 +682,7 @@ typedef struct STREAM {
 
 	STREAM_SINK_AUDIO *audio_sink;
 	int		audio_sink_open;
-	pthread_mutex_t audio_sink_mutex;
+	pthread_mutex_t audio_sink_mutex;	// orders compressed transactions with AudioTrack pause/play
 	int		audio_session_id;
 	
 	STREAM_DEC_VIDEO *video_dec;

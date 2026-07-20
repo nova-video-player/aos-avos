@@ -19,6 +19,7 @@
 
 int  stream_sync_init( STREAM *s, int time );
 int  stream_sync_restart( STREAM *s );
+int  stream_sync_restart_with_mode2_frontier( STREAM *s );
 int  stream_sync_restart_after_pause( STREAM *s );
 void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier );
 void stream_sync_mode2_heard_frontier_arm( STREAM *s );

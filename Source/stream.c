@@ -336,7 +336,9 @@ DBGS serprintf("codec_thread joined\r\n");
 	pthread_mutex_destroy( &s->codec_mutex  );
 	pthread_mutex_destroy( &s->video_done_mutex );
 	pthread_mutex_destroy( &s->audio_sink_mutex );
-	pthread_mutex_destroy( &s->mode2_heard_mutex );
+	// mode2_heard_mutex is also read by the asynchronous video renderer. Its
+	// lifetime therefore extends until stream_stop() has joined decoder/sink
+	// threads, not just the core stream threads joined above; destroy it there.
 	
 	s->open = 0;
 	

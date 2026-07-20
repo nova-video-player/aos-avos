@@ -2720,6 +2720,11 @@ serprintf("DROPPED: %d  B_DROPPED %d  DOUBLED %d \r\n", frames_dropped, frames_B
 serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_count * 1000 / took );
 		}
 	}
+
+	// stream_sync_mode2_dynamic_active() is queried by the sfdec2 render
+	// thread. Destroy its lock only after every component that can access stream
+	// timing state has been stopped and joined.
+	pthread_mutex_destroy( &s->mode2_heard_mutex );
 	
 	return 0;
 }

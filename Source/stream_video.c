@@ -4910,7 +4910,19 @@ serprintf("STUFF_ZERO!\n");
 		}
 	}
 	if( s->video_dec) {
-		s->video_flush = 1;
+		// A newly opened async decoder has no pre-seek frames to discard. Some
+		// MediaCodec implementations lose the first GOP when flushed before their
+		// first input (avos-66), while others tolerate the redundant flush
+		// (avos-68). Keep flushing every established seek and all sync decoders.
+		int fresh_sfdec2 = first_start && s->video_dec->async &&
+			s->video_dec->name && !strcmp( s->video_dec->name, "sfdec2" );
+		if( fresh_sfdec2 ) {
+			s->video_flush = 0;
+			DBG serprintf("VIDEO_INITIAL_FLUSH_SKIP: seek_epoch=%d target=%d achieved=%d\n",
+				s->seek_epoch, time, sc.time);
+		} else {
+			s->video_flush = 1;
+		}
 		if( s->video_dec->async ) {
 			// in async case we let the machine roll from here until we get the frame we want
 			s->seek = 0;

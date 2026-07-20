@@ -842,6 +842,7 @@ typedef struct STREAM {
 	int		audio_start_pending;
 	int		audio_start_pts;
 	int		audio_start_target_ts;
+	int		audio_start_gap_hold;	// Mode 1 first PTS is intentionally ahead; preserve it and delay the first IEC burst
 	pthread_mutex_t mode2_heard_mutex;	// owns the complete Mode 2 heard-clock epoch state below
 	UINT64		mode2_heard_epoch;	// increments whenever the Mode 2 heard-clock state is reset
 	int		mode2_heard_interp_valid;	// direct-mode2 continuous heard clock seeded from submitted frontier

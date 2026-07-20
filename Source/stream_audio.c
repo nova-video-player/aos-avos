@@ -687,6 +687,7 @@ DBG	serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d) ac3_recode=
 	s->audio_start_pending    = 0;
 	s->audio_start_pts        = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts  = STREAM_NO_PTS_VALUE;
+	s->audio_start_gap_hold   = 0;
 	s->audio_time_remainder_us = 0;
 	stream_sync_mode2_heard_reset( s, 0 );
 	s->ac3_recode_next_write_wall_ms = 0;
@@ -1199,9 +1200,10 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 							s->audio_start_pending = 1;
 							s->audio_start_pts = pts;
 							s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
+							s->audio_start_gap_hold = 0;
 							DBG serprintf("audio_start_pending: pts=%d video_time=%d\n",
 								s->audio_start_pts, s->video_time);
-						} else if( s->audio_time < 0 ) {
+						} else if( s->audio_time < 0 && !s->audio_start_pending ) {
 							_set_audio_time( s, pts );
 						}
 					}
@@ -1917,9 +1919,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 					// Startup A/V alignment: if audio is significantly ahead at the very
 					// beginning or after a seek, delay audio output briefly so video can catch up.
+					int mode1_gap_hold_supported = passthrough_active &&
+						passthrough == 1 && !ac3_recoding;
 					if( s->put_time_mode && s->video && s->video->valid &&
 						s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE &&
-						!passthrough_active ) {
+						(!passthrough_active || mode1_gap_hold_supported) ) {
 						if( s->audio_start_target_ts == STREAM_NO_PTS_VALUE ) {
 							int anchor_delay = stream_get_anchor_delay_ms( s, 1 );
 							int static_latency = s->audio_ctx ? audio_interface_get_latency( s->audio_ctx ) : 0;
@@ -1932,9 +1936,18 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							s->audio_start_target_ts = s->audio_start_pts - anchor_delay;
 							// Guard against underflow
 							if( s->audio_start_target_ts < 0 ) s->audio_start_target_ts = 0;
+							if( mode1_gap_hold_supported ) {
+								int first_video_ts = s->video_time;
+								if( s->seek_video_ready_ts != STREAM_NO_PTS_VALUE ) {
+									first_video_ts = s->seek_video_ready_ts;
+								}
+								s->audio_start_gap_hold =
+									s->audio_start_target_ts > first_video_ts + 32;
+							}
 
-							DBG serprintf("startup_anchor_target: pts=%d video=%d anchor=%d static=%d target=%d\n",
-								s->audio_start_pts, s->video_time, anchor_delay, static_latency, s->audio_start_target_ts);
+							DBG serprintf("startup_anchor_target: pts=%d video=%d anchor=%d static=%d target=%d mode1_gap=%d\n",
+								s->audio_start_pts, s->video_time, anchor_delay, static_latency,
+								s->audio_start_target_ts, s->audio_start_gap_hold);
 						}
 
 						// Only hold if we have a valid video time to compare against.
@@ -2277,10 +2290,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// so heard_ts aligns to video_time immediately. Also reset sched anchors so
 						// the next put_time sees no_sched=1 and reanchors correctly regardless of
 						// any earlier no_sched reanchor that fired before this commit.
-						// Passthrough frames are atomic bursts and cannot be held like PCM; alignment
-						// must be done via audio_time here (PCM uses startup_audio_hold instead).
-						// Restores android_sync=0 behavior removed during refactoring.
-						if( s->put_time_mode && passthrough_active && s->video_time >= 0 && anchor_delay > 0 ) {
+						// Ordinary passthrough startup retains the synthetic anchor. A detected
+						// Mode 1 content gap is different: its first complete IEC burst was held
+						// before the transaction, so preserve the demuxer PTS instead.
+						if( s->put_time_mode && passthrough_active && s->video_time >= 0 &&
+							anchor_delay > 0 && !(passthrough == 1 && s->audio_start_gap_hold) ) {
 							int anchor_video_time = s->video_time;
 							// A coarse seek may land well after the requested timestamp. Mode 1
 							// must anchor to the first admitted current-epoch frame, otherwise
@@ -2293,12 +2307,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							sfdec2_refresh_sched_anchor( s );
 						}
 
-						DBG serprintf("startup_anchor_commit: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d\n",
-							s->audio_start_pts, s->video_time, anchor_delay, static_latency, start_time, s->put_time_mode);
+						DBG serprintf("startup_anchor_commit: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d mode1_gap=%d\n",
+							s->audio_start_pts, s->video_time, anchor_delay, static_latency,
+							start_time, s->put_time_mode, s->audio_start_gap_hold);
 
 						_set_audio_time( s, start_time );
 						s->audio_start_pending = 0;
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
+						s->audio_start_gap_hold = 0;
 						DBG serprintf("audio_start_commit: audio_time=%d ref=%d samples=%d\n",
 							s->audio_time, s->audio_ref_time, s->audio_samples);
 					}

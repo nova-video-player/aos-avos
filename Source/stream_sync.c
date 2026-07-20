@@ -1704,6 +1704,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pending = 0;
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
+	s->audio_start_gap_hold = 0;
 	_stream_pcm_delay_memory_reset( s );
 	s->warmup_video_frames = 0;
 
@@ -2586,10 +2587,12 @@ DBGY serprintf("{SSV %d}} ", video_time );
 		// In put_time mode, compare against heard time to stay aligned with sink anchoring.
 		audio_time_for_diff = stream_get_heard_audio_ts( s, s->audio_time );
 	}
-	// PCM startup holds its first audio write until the rendered video position
-	// reaches audio_start_target_ts.  Admit the forward frame that closes that
-	// gap before requiring an audio clock, otherwise both threads wait forever.
-	if( s->put_time_mode && !passthrough_mode && s->audio_start_pending &&
+	// PCM and an explicitly delayed Mode 1 start hold their first audio write
+	// until video reaches audio_start_target_ts. Admit the forward frame that
+	// closes that gap before requiring an audio clock, otherwise both threads wait.
+	int startup_audio_gap_hold = !passthrough_mode ||
+		(passthrough_mode == 1 && s->audio_start_gap_hold);
+	if( s->put_time_mode && startup_audio_gap_hold && s->audio_start_pending &&
 		s->audio_start_target_ts != STREAM_NO_PTS_VALUE &&
 		s->video_time < s->audio_start_target_ts && video_time >= s->video_time ) {
 		return 0;

@@ -209,6 +209,15 @@ anchoring the scheduler at the wrong `heard_ts`. Zeroing the anchors
 ensures the post-commit `put_time` gets `no_sched_anchor=1` and
 reanchors at the correct value regardless of grace period.
 
+An intentional delayed Mode 1 audio start is the exception. When the first
+audio PTS is materially later than the first admitted video PTS plus the sink
+delay, AVOS holds the complete first IEC burst before its atomic transaction
+until video reaches `audio_start_pts - anchor_delay`. The commit then preserves
+the demuxer audio PTS instead of applying the synthetic anchor. Later packet
+PTS values cannot publish an audio clock while this startup state owns the
+epoch. Ordinary near-zero starts and coarse seek landings retain the legacy
+synthetic anchor.
+
 ### Pre-commit negative anchor guard
 
 Before a valid playback epoch exists, `heard_ts` can be deeply negative because

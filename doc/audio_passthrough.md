@@ -294,6 +294,13 @@ This restores the pre-refactoring startup alignment. Without it,
 deeply negative and causing the sfdec2 scheduler to stall video for
 hundreds of milliseconds before releasing in a burst.
 
+If the first Mode 1 audio PTS represents a real content gap, AVOS does not
+collapse it into that synthetic anchor. It holds the complete first IEC burst
+before writing until video approaches `audio_start_pts - anchor_delay`, then
+commits the original audio PTS. The exception is armed only when the first
+audio PTS is materially ahead of the first admitted video timestamp, so normal
+zero-start playback and coarse seek landings continue to use the legacy rule.
+
 PCM is excluded: it uses `startup_audio_hold` to achieve alignment by
 holding writes, not by adjusting `audio_time`.
 

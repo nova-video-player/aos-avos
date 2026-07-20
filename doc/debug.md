@@ -189,8 +189,23 @@ mode2_heard_interp: wall=<ms> raw=<ts> interp=<ts> ceiling_gap=<ms>
 `mode2_epoch_seed` explains whether the clock started from the full-buffer raw
 frontier, an empty-track submitted frontier, or a latency/discontinuity reset.
 `mode2_heard_interp` shows interpolation between compressed write batches. These
-logs describe the production write-derived estimator; they are not evidence from
-the future asynchronous submitted-versus-presented occupancy estimator.
+logs describe the universal write-derived fallback. The asynchronous presentation
+observer additionally emits:
+
+```
+mode2_occupancy_shadow: epoch=<n> generation=<n> state=<n> src=<n>
+    rate_streak=<n> stable_streak=<n> trusted=<0|1>
+    direct_ms=<ms> byte_ms=<ms> frame_ms=<ms> capacity_ms=<ms> ...
+mode2_dynamic_clock_enter: epoch=<n> heard=<ts> target=<ts> delay=<ms> ...
+mode2_dynamic_clock: source=<n> target=<ts> heard=<ts> gap=<ms> delay=<ms> ...
+```
+
+`mode2_occupancy_shadow` compares generation-scoped AudioTrack presentation
+counters with the complete-unit submission ledger. Byte and frame-size mappings
+remain diagnostic. Only trusted direct `AudioTimestamp` evidence for the validated
+raw AC3/44.1 kHz profile can enter the production dynamic clock; other profiles
+continue to use the write-derived fallback. `at_mode2_audit` still controls the
+older synchronous playhead audit and is not required by the asynchronous observer.
 
 To enable:
 

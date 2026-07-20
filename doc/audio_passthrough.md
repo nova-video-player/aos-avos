@@ -120,9 +120,12 @@ Native determines IEC support by inspecting codec flags set by Java:
 
 - Compressed passthrough bursts (direct passthrough and AC3-recoded output) are
   written as whole bursts, not PCM-sized sub-chunks.
-- If `AudioTrack.write()` accepts only part of a compressed burst, Nova drops
-  the remainder of that burst instead of retrying the tail as if it were PCM.
-  Retrying a tail fragment would corrupt IEC / compressed framing.
+- A positive short `AudioTrack.write()` is continued from the remaining byte
+  offset until the same compressed unit is complete. No following unit may be
+  submitted, and logical duration is published exactly once after completion.
+  Pause/play is serialized with this transaction so IEC and raw access units
+  cannot be split across a track pause. Destructive aborts flush the incomplete
+  stream and restart its timing epoch.
 - Passthrough `can_write()` may use exact capacity gating when playback-head
   accounting is usable, but falls back to the previous permissive behavior if
   the exact gate stalls on a given track instance.
@@ -184,10 +187,12 @@ buffer, and truncating that capacity caused a persistent phase error after track
 - `atempo` may still be instantiated for later non-passthrough speed changes,
   but no samples flow through it in passthrough and its delay is not counted in
   passthrough / AC3 recoding sync or speed-anchor calculations.
-- Mode 2 uses platform latency only as an input to the normalized route baseline. The
-  production heard clock does not consume synchronous playhead/timestamp evidence as a
-  live correction. That evidence remains diagnostic until the asynchronous occupancy
-  estimator described in [`mode2.md`](../mode2.md) is implemented and validated.
+- Mode 2 uses platform latency as an input to the normalized route baseline. A
+  generation-scoped asynchronous observer now compares complete submitted units with
+  Android presentation progress. Production promotion is deliberately limited to the
+  direct logical-frame `AudioTimestamp` mapping validated for raw AC3 at 44.1 kHz;
+  other codecs, rates, playback-head mappings, and byte/frame interpretations retain
+  the normalized static clock. See [`mode2.md`](../mode2.md).
 
 ### Mode-2 heard-time interpolation
 
@@ -217,6 +222,14 @@ Epoch seeding depends on why the clock changed:
 - Pause/resume preserves the interpolated phase and resets its wall epoch so paused time is
   never counted as audio progress. A seek starts a new sync epoch but carries explicit
   empty-track ownership when playback had already been established.
+
+For the validated raw AC3/44.1 kHz profile, the submitted-unit ledger and asynchronous
+`AudioTimestamp` observer add a dynamic presentation bound above this fallback. Entry
+requires advancing rate and stable occupancy streaks. Heard time holds instead of moving
+backward when the measured delay grows, and the MediaCodec render offset converges with a
+bounded 5ms-per-frame slew. A non-flushing pause retains ledger occupancy and permits a
+750ms observer-remapping grace period; other evidence loss returns gradually to the
+static interpolator.
 
 ## State Diagram
 

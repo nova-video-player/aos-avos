@@ -23,9 +23,10 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   `stream_get_heard_audio_ts()` only when `put_time` is stale. This avoids
   cross-thread heard-time skew at seek/resume boundaries.
 - For PCM and mode 1, the offset is **slewed** toward a new target only on
-  explicit events (seek/resume/speed/hard discontinuity). Direct mode 2 keeps
-  its render offset stable after initialization and supplies continuity through
-  the centralized heard-time interpolator instead.
+  explicit events (seek/resume/speed/hard discontinuity). Direct mode 2 normally
+  keeps its render offset stable after initialization. On entry to or exit from
+  the validated dynamic presentation clock, it slews toward the centralized
+  heard-time target by at most 5ms per frame.
 - Manual A/V delay (`s->av_delay`) is also slewed in the render path through
   `effective_av_delay` (bounded per-frame step) so large UI jumps do not create
   a burst of ASAP renders ("fast video" transient).
@@ -57,9 +58,15 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   preferably through a fresh `put_time`. Initial and seek reanchors clamp an
   implausible forward lead and prevent a backward seek from anchoring behind the
   current video frame.
-- Pause preserves the Mode 2 audio phase while moving its wall epoch. Seek and
-  mid-playback track recreation explicitly seed an empty compressed track at the
-  submitted frontier minus fixed downstream latency.
+- On the validated raw AC3/44.1 kHz route, trusted asynchronous `AudioTimestamp`
+  evidence dynamically bounds that interpolator. The renderer observes clock
+  entry/exit and slews its existing offset; it does not create a second audio
+  clock.
+- Pause preserves the Mode 2 audio phase and shifts an established render offset
+  by the paused wall duration. It retains the compressed ledger while resetting
+  the presentation-observation epoch. Seek and mid-playback track recreation
+  explicitly seed an empty compressed track at the submitted frontier minus
+  fixed downstream latency.
 - Audio seek preroll waits for the video decoder to reach the epoch-tagged seek
   target. Renderer reanchoring and this video-target handshake are separate from
   audio latency estimation.

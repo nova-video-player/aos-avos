@@ -59,10 +59,13 @@ treated as interchangeable:
 - `selected_delay`: the delay actually subtracted from `audio_time` to derive
   the raw heard frontier. For PCM it may come from dynamic AudioTrack evidence,
   last-good cache, or static geometry. Mode 1 uses its static passthrough delay;
-  Mode 2 uses its normalized latency after the evidence window.
-- `mode2_playhead_audit`: diagnostic comparison between mode2 `fakeSize`
-  logical writes and AudioTrack playhead/timestamp counters. The result is
-  evidence only, not a live delay provider.
+  Mode 2 uses its normalized latency after the evidence window as the static
+  fallback. A separately validated presentation clock may subsequently bound
+  heard time without rewriting `selected_delay`.
+- `mode2_playhead_audit`: the older synchronous comparison between mode2
+  `fakeSize` logical writes and AudioTrack playhead/timestamp counters. It is
+  diagnostic only. Production presentation evidence comes from the asynchronous
+  generation-scoped observer described below.
 - `mode2_normalized_latency`: production record emitted when the estimate is
   calculated, containing the raw platform values, paired evidence, calculated
   compressed-buffer capacity, residual, and selected normalized latency.
@@ -76,8 +79,11 @@ wall-clock interpolator advances heard time between coarse compressed write
 batches and clamps it to the physical buffer envelope. It does not redefine
 `audio_time` and it is not a measured occupancy clock.
 
-Mode 2 does not currently use AudioTimestamp/playhead evidence to change
-`selected_delay`. The synchronous `mode2_playhead_audit` is diagnostic-only.
+For the explicitly validated raw AC3/44.1 kHz Mode 2 profile, a trusted
+`AudioTimestamp` provides a dynamic submitted-minus-presented delay. The
+centralized heard clock adopts that evidence monotonically while keeping the
+normalized capacity clock alive as fallback. Other Mode 2 codecs and sample
+rates remain entirely on the static normalized/interpolated model.
 
 Exception: during plain PCM AudioTrack PlaybackParams speed epochs, the
 AudioTrack playhead is used as a temporary checkpoint clock. At the speed
@@ -119,9 +125,20 @@ carry explicit empty-track ownership through `mode2_heard_frontier_seed_pending`
 the condition is not inferred from timestamps because `audio_time` can remain
 continuous across a track recreation.
 
-The future asynchronous occupancy estimator will publish independently validated
-submitted-versus-presented evidence. Until then, the interpolator remains bounded
-write-side estimation with normalized static latency as its fallback baseline.
+Complete compressed units are also recorded in an epoch-owned logical-sample and
+encoded-byte ledger. A low-rate AudioTrack worker polls `AudioTimestamp`, playback
+head, and underrun state outside the writer and scheduler threads, then publishes
+generation-scoped snapshots. The sync layer rejects stale, reset, implausible, or
+non-advancing counters before comparing them with the submitted ledger.
+
+Only direct logical-frame `AudioTimestamp` evidence for raw AC3 at 44.1 kHz is
+currently eligible for production. It must prove the configured rate over an
+advancing streak and then provide three stable delay samples. On entry, heard
+time never moves backward: it holds until physical presentation catches the
+existing phase, then follows the measured frontier. A non-flushing pause retains
+the ledger and grants a 750ms remapping grace period. Any other evidence loss
+slews back to the continuously maintained static clock. Playback-head, encoded-
+byte, and frame-size interpretations remain diagnostic-only.
 
 State Machine Summary
 ---------------------

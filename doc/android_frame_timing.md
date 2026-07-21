@@ -72,3 +72,13 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   audio latency estimation.
 - Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
   incorrect snapping after a speed change, causing jitter in scheduled timestamps.
+- MediaCodec output-buffer indices belong to one codec generation. After a
+  successful `MediaCodec.flush()`, sfdec2 discards retained native wrappers
+  without calling `releaseOutputBuffer()` for their invalidated indices. Buffers
+  returned concurrently with the flush receive the same treatment. This applies
+  to seek and close teardown and prevents stale output callbacks from crossing a
+  codec generation.
+- Input submission, output dequeue, and timed output release belong to the same
+  flush ownership contract. NDK output dequeue uses a bounded wait, so seek and
+  close can wait for all three operations to finish before calling
+  `MediaCodec.flush()`. This avoids interrupting an in-flight vendor codec call.

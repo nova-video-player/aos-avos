@@ -391,6 +391,7 @@ static int sfdec_stop_input(sfdec_priv_t *sfdec)
 
 static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_out)
 {
+    static const int64_t DEQUEUE_TIMEOUT_US = 10000;
     ssize_t index;
 
     if (!read_out)
@@ -400,7 +401,10 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
 
     for (;;) {
         AMediaCodecBufferInfo info;
-        index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, -1);
+        // A bounded dequeue lets seek/close wait until no MediaCodec call is in
+        // flight before flushing. Some vendor implementations corrupt their
+        // output-port state when flush interrupts an indefinite dequeue.
+        index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, DEQUEUE_TIMEOUT_US);
 
         if (index >= 0) {
             err_count = 0;
@@ -590,6 +594,13 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
     return err == AMEDIA_OK ? 0 : -1;
 }
 
+static int sfdec_buf_discard(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
+{
+    (void)sfdec;
+    free(sfbuf);
+    return 0;
+}
+
 static int sfdec_reset_ts(sfdec_priv_t *sfdec)
 {
     sfdec->start_off = 0;
@@ -670,4 +681,5 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_pause,
     sfdec_resume,
     sfdec_seek_reset,
+    sfdec_buf_discard,
 };

@@ -85,6 +85,7 @@ enum {
 	THREAD_STATE_READING	= 0x01,
 	THREAD_STATE_RENDERING	= 0x02,
 	THREAD_STATE_FLUSHING	= 0x04,
+	THREAD_STATE_WRITING	= 0x08,
 };
 
 enum {
@@ -391,10 +392,11 @@ static inline void set_state_l(priv_t *p, int state, int mask)
 	p->locked.state = (p->locked.state&~mask) | (state&mask);
 
 	if (prev_state != p->locked.state) {
-		DBGCV3 CLOG("%s|%s|%s",
+		DBGCV3 CLOG("%s|%s|%s|%s",
 		    p->locked.state & THREAD_STATE_READING ? "reading" : "!reading",
 		    p->locked.state & THREAD_STATE_RENDERING ? "rendering" : "!rendering",
-		    p->locked.state & THREAD_STATE_FLUSHING ? "flushing" : "!flushing");
+		    p->locked.state & THREAD_STATE_FLUSHING ? "flushing" : "!flushing",
+		    p->locked.state & THREAD_STATE_WRITING ? "writing" : "!writing");
 		pthread_cond_broadcast(&p->locked.cond);
 	}
 }
@@ -750,6 +752,14 @@ DBGCV3 CLOG("release f(%d) %p ->", f->index, f->android_handle);
 		sfdec_buf_release(sfdec, (sfbuf_t *)f->android_handle);
 		f->android_handle = NULL;
 DBGCV3 CLOG("release <-");
+	}
+}
+
+static void frame_discard_after_flush(sfdec_t *sfdec, VIDEO_FRAME *f)
+{
+	if (f->android_handle) {
+		sfdec_buf_discard(sfdec, (sfbuf_t *)f->android_handle);
+		f->android_handle = NULL;
 	}
 }
 
@@ -1238,6 +1248,9 @@ DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.
 		}
 
 		if (!sfbuf || has_state_l(p, THREAD_STATE_FLUSHING)) {
+			if( sfbuf ) {
+				sfdec_buf_discard(p->sfdec, sfbuf);
+			}
 			frame_q_put_head(&p->locked.dec_q, f);
 			continue;
 		}
@@ -1574,19 +1587,28 @@ DBGCV CLOG("sfdec_stop_input");
 DBGCV CLOG("stop thread");
 		pthread_mutex_lock(&p->locked.mtx);
 		p->locked.run = 0;
+		add_state_l(p, THREAD_STATE_FLUSHING);
 
 		pthread_cond_broadcast(&p->locked.cond);
+		while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_WRITING|THREAD_STATE_RENDERING)) {
+			pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
+		}
 		pthread_mutex_unlock(&p->locked.mtx);
 
-		sfdec_flush(p->sfdec);
+		int codec_flushed = sfdec_flush(p->sfdec) == 0;
 
 		pthread_join(p->dec_thread, NULL);
 		pthread_join(p->sink_thread, NULL);
 
 DBGCV CLOG("stop thread done");
 
-		for (i = 0; i < p->num_frames; ++i)
-			frame_release(p->sfdec, p->frames[i]);
+		for (i = 0; i < p->num_frames; ++i) {
+			if( codec_flushed ) {
+				frame_discard_after_flush(p->sfdec, p->frames[i]);
+			} else {
+				frame_release(p->sfdec, p->frames[i]);
+			}
+		}
 
 		sfdec_stop(p->sfdec);
 
@@ -1629,17 +1651,25 @@ CLOG("error!");
 		return error;
 	}
 
+	pthread_mutex_lock(&p->locked.mtx);
+	if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING) ) {
+		pthread_mutex_unlock(&p->locked.mtx);
+		return 0;
+	}
+	add_state_l(p, THREAD_STATE_WRITING);
+	pthread_mutex_unlock(&p->locked.mtx);
+
 	ret = sfdec_send_input(p->sfdec, d->data[0], d->size, (int64_t)d->time * 1000, d->type == I_VOP ? 1 : 0, 0);
+	pthread_mutex_lock(&p->locked.mtx);
 	if( ret > 0 ) {
 DBGCV CLOG("%c %8d: %d/%d", frame_type(d->type), d->time, ret, d->size);
-		pthread_mutex_lock(&p->locked.mtx);
 		XDM_id_put( &p->XDM_ctx,  d->time, d->type, d->user_ID );
 		if( !p->reorder_pts ) {
 			XDM_ts_put( &p->XDM_ctx, d->time );
 		}
-
-		pthread_mutex_unlock(&p->locked.mtx);
 	}
+	rm_state_l(p, THREAD_STATE_WRITING);
+	pthread_mutex_unlock(&p->locked.mtx);
 	if (pdecoded) {
 		*pdecoded = ret > 0 ? ret : 0;
 	}
@@ -1705,19 +1735,23 @@ DBGCV	CLOG();
 	p->hold_audio_applied_ms = 0;
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
-
-	XDM_id_flush( &p->XDM_ctx );
-	XDM_ts_flush( &p->XDM_ctx );
-	sfdec_flush(p->sfdec);
-	sfdec_seek_reset( p->sfdec );
-DBGCV CLOG("MediaCodec seek reset");
-
-	while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_RENDERING)) {
+	while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_WRITING|THREAD_STATE_RENDERING)) {
 		pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
 	}
 
-	for (i = 0; i < p->num_frames; ++i)
-		frame_release(p->sfdec, p->frames[i]);
+	XDM_id_flush( &p->XDM_ctx );
+	XDM_ts_flush( &p->XDM_ctx );
+	int codec_flushed = sfdec_flush(p->sfdec) == 0;
+	sfdec_seek_reset( p->sfdec );
+DBGCV CLOG("MediaCodec seek reset");
+
+	for (i = 0; i < p->num_frames; ++i) {
+		if( codec_flushed ) {
+			frame_discard_after_flush(p->sfdec, p->frames[i]);
+		} else {
+			frame_release(p->sfdec, p->frames[i]);
+		}
+	}
 
 	rm_state_l(p, THREAD_STATE_FLUSHING);
 

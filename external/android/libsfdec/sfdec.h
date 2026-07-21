@@ -103,6 +103,7 @@ int		sfdec_stop_input(sfdec_t *sfdec);
 int		sfdec_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
 int		sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns);
 int		sfdec_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf);
+int		sfdec_buf_discard(sfdec_t *sfdec, sfbuf_t *sfbuf);
 int		sfdec_reset_ts(sfdec_t *sfdec);
 int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num);
 int sfdec_pause(sfdec_t *sfdec);

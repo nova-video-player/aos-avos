@@ -1503,7 +1503,7 @@ static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 
 	// Only recreate AudioTrack if we're in error recovery mode (flag set by audiotrack_write)
 	if (at->in_error_recovery) {
-		if (audiotrack_disable_recovery) {
+		if (audiotrack_disable_recovery && !at->force_recreate) {
 DBG			LOG("audiotrack_set_passthrough: recovery disabled, skipping recreate (passthrough=%d)", passthrough);
 			at->in_error_recovery = 0;
 			return 0;
@@ -1511,12 +1511,13 @@ DBG			LOG("audiotrack_set_passthrough: recovery disabled, skipping recreate (pas
 
 		// We're in error recovery mode, recreate the track
 		at->in_error_recovery = 0; // Reset the flag
+		at->force_recreate = 1;
 DBG		LOG("audiotrack_set_passthrough: recreating track for error recovery (passthrough=%d)", passthrough);
 
 		// Choose appropriate format for recovery
 		int recovery_format = at->format;
 
-		audiotrack_set_output_params(at, at->rate, at->channel_count,
+		return audiotrack_set_output_params(at, at->rate, at->channel_count,
 			(passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, recovery_format);
 	}
 
@@ -2121,9 +2122,15 @@ ERR			LOG("audiotrack_write: write returned 0 (AudioTrack dead/broken) -> recove
 		} else {
 ERR			LOG("audiotrack_write: ERROR_DEAD_OBJECT (-6) -> recovering track");
 		}
-		if (audiotrack_disable_recovery) {
+		if (audiotrack_disable_recovery && ret != -6) {
 ERR			LOG("audiotrack_write: recovery disabled, dropping write");
 			return -1;
+		}
+		if (ret == -6) {
+			// ERROR_DEAD_OBJECT is definitive: flushing or retrying the same Java
+			// object can never recover it. Force one real recreation even when the
+			// legacy recovery toggle suppresses ambiguous zero-write recovery.
+			at->force_recreate = 1;
 		}
 		// Set error recovery flag
 		at->in_error_recovery = 1;

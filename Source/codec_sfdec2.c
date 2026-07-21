@@ -171,7 +171,9 @@ typedef struct priv {
 	int hold_audio_applied_ms;	// ms held during passthrough startup
 } priv_t;
 
-static int _get_time( priv_t *p )
+// Caller must hold p->locked.mtx so venc_put_time/venc_ref_time are sampled
+// from the same published clock anchor.
+static int _get_time_l( priv_t *p )
 {
 	int diff = atime() - p->venc_ref_time;
 	return p->venc_put_time + diff;
@@ -457,6 +459,7 @@ static int videosink_delete(STREAM_SINK_VIDEO *sink)
 static int videosink_put(STREAM_SINK_VIDEO *sink, VIDEO_FRAME *frame)
 {
 	priv_t *p = (priv_t *) sink->priv;
+	int time;
 
 	if (!sink->is_open)
 		return 0;
@@ -464,10 +467,11 @@ static int videosink_put(STREAM_SINK_VIDEO *sink, VIDEO_FRAME *frame)
 	pthread_mutex_lock(&p->locked.mtx);
 	frame_q_put(&p->locked.venc_q, frame);
 	pthread_cond_broadcast(&p->locked.cond);
+	time = _get_time_l(p);
 	pthread_mutex_unlock(&p->locked.mtx);
 
 DBGSI2 CLOG("frame %2d/%8d handle %p", frame->index, frame->time, frame->android_handle);
-	return _get_time(p);
+	return time;
 }
 
 static int videosink_get(STREAM_SINK_VIDEO *sink, VIDEO_FRAME **pframe)
@@ -508,7 +512,22 @@ static VIDEO_FRAME *videosink_get_frame(STREAM_SINK_VIDEO *sink, int index)
 static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
-	if (!p->s && sink->ctx) p->s = (STREAM*)sink->ctx;
+	STREAM *s = (STREAM*)sink->ctx;
+	if( !s ) {
+		pthread_mutex_lock(&p->locked.mtx);
+		s = p->s;
+		pthread_mutex_unlock(&p->locked.mtx);
+	}
+
+	// Query other subsystems before taking the codec-private lock. The lock
+	// serializes this sink's clock/scheduler state only.
+	float current_speed = audio_interface_get_audio_speed();
+	int passthrough_mode = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
+		s->audio_sink->get_passthrough( s ) : 0;
+
+	pthread_mutex_lock(&p->locked.mtx);
+	if (!p->s && s)
+		p->s = s;
 
 	int now_ms = atime();
 	int dt = time    - p->venc_put_time;
@@ -516,7 +535,6 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// Detect speed change (explicit discontinuity)
 	int speed_changed = 0;
-	float current_speed = audio_interface_get_audio_speed();
 	if (fabsf(current_speed - p->last_av_speed) > 0.001f) {
 		speed_changed = 1;
 		p->last_av_speed = current_speed;
@@ -527,38 +545,36 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// Detect seek epoch changes to force reanchor
 	int epoch_changed = 0;
 	int resume_started = 0;
-	if (p->s) {
-		if (p->s->seek_epoch != p->last_seek_epoch) {
+	if (s) {
+		if (s->seek_epoch != p->last_seek_epoch) {
 			epoch_changed = 1;
-			p->last_seek_epoch = p->s->seek_epoch;
+			p->last_seek_epoch = s->seek_epoch;
 		}
-		if (p->s->audio_resume_pending && !p->last_audio_resume_pending) {
+		if (s->audio_resume_pending && !p->last_audio_resume_pending) {
 			resume_started = 1;
 		}
-		p->last_audio_resume_pending = p->s->audio_resume_pending;
+		p->last_audio_resume_pending = s->audio_resume_pending;
 	}
 
 	int expected = p->venc_put_time + dr;
 	int diff = time - expected;
 	int abs_diff = diff < 0 ? -diff : diff;
 	int drift_threshold_ms = 200;
-	int passthrough_mode = (p->s && p->s->audio_sink && p->s->audio_sink->get_passthrough) ?
-		p->s->audio_sink->get_passthrough( p->s ) : 0;
 	int manual_hold_ms = 0;
-	if( p->s && p->s->manual_audio_hold_pending_ms > 0 ) {
+	if( s && s->manual_audio_hold_pending_ms > 0 ) {
 		// A manual negative A/V delay just inserted an intentional audio hold
 		// (PCM silence). The next put_time sees that gap as grown dr; subtract it
 		// so the gap is not mistaken for clock drift and reanchored away, which
 		// would cancel the user delay.
-		manual_hold_ms = p->s->manual_audio_hold_pending_ms;
-		p->s->manual_audio_hold_pending_ms = 0;
+		manual_hold_ms = s->manual_audio_hold_pending_ms;
+		s->manual_audio_hold_pending_ms = 0;
 	}
 	int dr_for_sync = dr - manual_hold_ms;
 	if( dr_for_sync < 0 )
 		dr_for_sync = 0;
-	if( p->s && p->s->put_time_mode && !passthrough_mode ) {
-		int frame_ms = (p->s->video && p->s->video->msPerFrame > 0) ?
-			p->s->video->msPerFrame : 33;
+	if( s && s->put_time_mode && !passthrough_mode ) {
+		int frame_ms = (s->video && s->video->msPerFrame > 0) ?
+			s->video->msPerFrame : 33;
 		drift_threshold_ms = MAX( 160, frame_ms * 4 );
 	}
 	expected = p->venc_put_time + dr_for_sync;
@@ -566,11 +582,11 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	abs_diff = diff < 0 ? -diff : diff;
 	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
 	int reanchor_discontinuity = discontinuity;
-	int smooth_burst_mode = p->s && p->s->put_time_mode &&
+	int smooth_burst_mode = s && s->put_time_mode &&
 		(!passthrough_mode || passthrough_mode >= 2) && !speed_changed;
 	if( discontinuity && smooth_burst_mode ) {
-		int frame_ms = (p->s->video && p->s->video->msPerFrame > 0) ?
-			p->s->video->msPerFrame : 33;
+		int frame_ms = (s->video && s->video->msPerFrame > 0) ?
+			s->video->msPerFrame : 33;
 		int hard_drift_ms = (passthrough_mode >= 2) ?
 			MAX( 1500, frame_ms * 16 ) : MAX( 350, frame_ms * 8 );
 		if( !passthrough_mode ) {
@@ -642,7 +658,6 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 	if (allow_reanchor) {
-		pthread_mutex_lock(&p->locked.mtx);
 		if( epoch_changed ) {
 			p->pending_seek_reanchor = 1;
 		}
@@ -657,10 +672,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->pending_reanchor    = 1;
 		DBGSI serprintf("videosink_put_time: reset sched and render anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d resume=%d)\n",
 			time, diff, speed_changed, discontinuity, no_sched_anchor, resume_started);
-		pthread_mutex_unlock(&p->locked.mtx);
 	}
 
 DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
+	pthread_mutex_unlock(&p->locked.mtx);
 	return 0;
 }
 
@@ -674,6 +689,7 @@ void sfdec2_refresh_sched_anchor( STREAM *s )
 	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
 		return;
 	priv_t *p = (priv_t*) s->video_sink->priv;
+	pthread_mutex_lock(&p->locked.mtx);
 	p->s = (STREAM*)s->video_sink->ctx;
 	p->sched_start_off_ns  = 0;
 	p->sched_start_mono_ns = 0;
@@ -681,13 +697,18 @@ void sfdec2_refresh_sched_anchor( STREAM *s )
 	p->sched_last_mono_ns  = 0;
 	p->sched_late          = 0;
 	p->sched_debt_ns       = 0;
+	pthread_mutex_unlock(&p->locked.mtx);
 }
 
 static int videosink_get_time( STREAM_SINK_VIDEO *sink )
 {
 	priv_t *p = (priv_t *) sink->priv;
+	int time;
 
-	return _get_time( p );
+	pthread_mutex_lock(&p->locked.mtx);
+	time = _get_time_l( p );
+	pthread_mutex_unlock(&p->locked.mtx);
+	return time;
 }
 
 static int videosink_clear(STREAM_SINK_VIDEO *sink)

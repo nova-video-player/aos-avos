@@ -146,6 +146,8 @@ typedef struct priv {
 	int pause_armed;
 	int slew_active;
 	int mode2_dynamic_slew;
+	int mode2_dynamic_fast_slew;
+	int mode2_dynamic_settle_frames;
 	int last_mode2_dynamic_active;
 	const void *mode2_slew_frame_handle;
 	int mode2_slew_frame_time;
@@ -865,6 +867,8 @@ static void *videosink_thread(void *ctx)
 				p->last_mode2_dynamic_active = mode2_dynamic_active;
 				p->pending_reanchor = 1;
 				p->mode2_dynamic_slew = 1;
+				p->mode2_dynamic_fast_slew = mode2_dynamic_active;
+				p->mode2_dynamic_settle_frames = 0;
 				p->mode2_slew_frame_handle = NULL;
 				p->mode2_slew_frame_time = INT_MIN;
 				p->mode2_slew_frame_epoch = INT_MIN;
@@ -1009,6 +1013,8 @@ static void *videosink_thread(void *ctx)
 				p->target_offset_ns = p->render_offset_ns;
 				p->slew_active = 0;
 				p->mode2_dynamic_slew = mode2_dynamic_active;
+				p->mode2_dynamic_fast_slew = mode2_dynamic_active;
+				p->mode2_dynamic_settle_frames = 0;
 				p->mode2_slew_frame_handle = mode2_dynamic_active ?
 					f->android_handle : NULL;
 				p->mode2_slew_frame_time = mode2_dynamic_active ? f->time : INT_MIN;
@@ -1032,6 +1038,9 @@ static void *videosink_thread(void *ctx)
 				p->render_offset_from_audio = 1;
 				p->target_offset_ns = p->render_offset_ns;
 				p->slew_active = 0;
+				p->mode2_dynamic_slew = mode2_dynamic_active;
+				p->mode2_dynamic_fast_slew = mode2_dynamic_active;
+				p->mode2_dynamic_settle_frames = 0;
 				p->pending_seek_reanchor = 0;
 				DBGSI2 serprintf("android_sync anchor_diag(reanchor): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
 					s ? s->audio_time : -1, (long long)heard_ts,
@@ -1056,22 +1065,40 @@ static void *videosink_thread(void *ctx)
 						heard_ts = f->time;
 					}
 					p->target_offset_ns = now_ns - heard_ts * 1000000LL;
-					DBGSI2 serprintf("android_sync anchor_diag(slew_target): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld target=%lld\n",
+					DBGSI2 serprintf("android_sync anchor_diag(slew_target): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld target=%lld fast=%d settle=%d\n",
 						s ? s->audio_time : -1, (long long)heard_ts,
 						used_put_time ? "put_time" : "recompute",
 						p->venc_put_time, put_age_ms,
 						s ? stream_get_anchor_delay_ms(s, 1) : -1,
 						s ? stream_sync_av_delay(s) : -1,
-						(long long)p->render_offset_ns, (long long)p->target_offset_ns);
+						(long long)p->render_offset_ns, (long long)p->target_offset_ns,
+						p->mode2_dynamic_fast_slew,
+						p->mode2_dynamic_settle_frames);
 					// Timestamp sampling and millisecond clock quantization can leave
 					// a small phase error after convergence. Do not turn that noise
 					// into a recurring video cadence correction.
-					const INT64 mode2_deadband_ns = 8000000LL;
+					// Converge a real transition closely, then tolerate less than one
+					// compressed AC3 frame of steady-state phase noise. An 8ms steady
+					// threshold made the renderer correct 0.2ms on hundreds of frames
+					// after resume, producing a visible cadence beat every few seconds.
+					const INT64 mode2_deadband_ns =
+						p->mode2_dynamic_fast_slew ? 8000000LL : 24000000LL;
 					if (mode2_dynamic_active &&
 						llabs(p->target_offset_ns - p->render_offset_ns) <= mode2_deadband_ns) {
 						p->target_offset_ns = p->render_offset_ns;
 						p->slew_active = 0;
+						if (p->mode2_dynamic_fast_slew) {
+							// A single early timestamp can briefly look converged while
+							// the presentation clock is still settling. Require a short
+							// run of stable video samples before switching to the slow
+							// steady-state correction rate.
+							if (++p->mode2_dynamic_settle_frames >= 4) {
+								p->mode2_dynamic_fast_slew = 0;
+								p->mode2_dynamic_settle_frames = 0;
+							}
+						}
 					} else if (p->target_offset_ns != p->render_offset_ns) {
+						p->mode2_dynamic_settle_frames = 0;
 						p->slew_active = 1;
 					}
 					p->pending_reanchor = 0;
@@ -1082,10 +1109,12 @@ static void *videosink_thread(void *ctx)
 			if (p->slew_active &&
 				(!p->mode2_dynamic_slew || mode2_new_slew_frame)) {
 				INT64 delta = p->target_offset_ns - p->render_offset_ns;
-				// A validated Mode 2 clock can correct hundreds of milliseconds.
-				// Move the renderer by at most 5ms per frame so the phase converges
-				// without a visible one-frame jump; other reanchors retain 0.2ms.
-				INT64 step = p->mode2_dynamic_slew ? 5000000 : 200000;
+				// A Mode 2 clock transition can correct hundreds of milliseconds, so
+				// converge it at 5ms/frame. Once established, track ordinary clock
+				// drift at 0.2ms/frame: compressed presentation samples can move by a
+				// whole codec frame and then hold, and chasing that temporary phase at
+				// 5ms/frame produces visible cadence reversals on 60fps content.
+				INT64 step = p->mode2_dynamic_fast_slew ? 5000000 : 200000;
 				if (delta > step) {
 					delta = step;
 				} else if (delta < -step) {
@@ -1095,6 +1124,9 @@ static void *videosink_thread(void *ctx)
 				if (llabs(p->target_offset_ns - p->render_offset_ns) <= step) {
 					p->render_offset_ns = p->target_offset_ns;
 					p->slew_active = 0;
+					if (!p->mode2_dynamic_fast_slew) {
+						p->mode2_dynamic_settle_frames = 0;
+					}
 					if( !mode2_dynamic_active ) {
 						p->mode2_dynamic_slew = 0;
 						p->mode2_slew_frame_handle = NULL;
@@ -1556,6 +1588,8 @@ retry_decoder_open:
 	p->pause_armed = 0;
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
+	p->mode2_dynamic_fast_slew = 0;
+	p->mode2_dynamic_settle_frames = 0;
 	p->mode2_slew_frame_handle = NULL;
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
@@ -1754,6 +1788,8 @@ DBGCV	CLOG();
 	pthread_mutex_lock(&p->locked.mtx);
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
+	p->mode2_dynamic_fast_slew = 0;
+	p->mode2_dynamic_settle_frames = 0;
 	p->mode2_slew_frame_handle = NULL;
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
@@ -1886,6 +1922,8 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->render_offset_ns = -1;
 	p->render_offset_from_audio = 0;
 	p->slew_active = 0;
+	p->mode2_dynamic_fast_slew = 0;
+	p->mode2_dynamic_settle_frames = 0;
 	p->mode2_slew_frame_handle = NULL;
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
@@ -1959,6 +1997,18 @@ void sfdec2_android_sync_on_pause( STREAM *s, int paused )
 		int pause_ms = atime() - p->pause_start_ms;
 		if( pause_ms > 0 ) {
 			p->render_offset_ns += (int64_t)pause_ms * 1000000LL;
+			if( p->last_mode2_dynamic_active ) {
+				// The first compressed writes after play refill AudioTrack and can
+				// move heard time by tens of milliseconds. Finish that explicit
+				// resume transition promptly instead of leaving the steady 0.2ms
+				// path to modulate video cadence for several seconds.
+				p->mode2_dynamic_slew = 1;
+				p->mode2_dynamic_fast_slew = 1;
+				p->mode2_dynamic_settle_frames = 0;
+				p->mode2_slew_frame_handle = NULL;
+				p->mode2_slew_frame_time = INT_MIN;
+				p->mode2_slew_frame_epoch = INT_MIN;
+			}
 			DBGSI serprintf("android_sync: resume shift offset by %dms -> %lld\n",
 				pause_ms, p->render_offset_ns);
 		}

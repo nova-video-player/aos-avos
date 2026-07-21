@@ -860,6 +860,7 @@ typedef struct STREAM {
 	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence
 	int		mode2_shadow_last_log_ms;
 	int		mode2_dynamic_clock_active;	// trusted AudioTimestamp currently bounds the heard clock
+	int		mode2_dynamic_clock_ready;	// measured frontier caught the monotonic phase; renderer may reanchor
 	int		mode2_dynamic_clock_ts;
 	int		mode2_dynamic_clock_wall_ms;
 	int		mode2_dynamic_clock_last_delay_ms;

@@ -138,13 +138,16 @@ ledger.
 Mode 2 direct logical-frame evidence must prove the configured rate over an
 advancing streak and then provide three stable delay samples. On entry, heard
 time never moves backward: it holds until physical presentation catches the
-existing phase, then follows the measured frontier. A non-flushing pause retains
+existing phase, then follows the measured frontier. The renderer remains on its
+provisional anchor during that hold and performs one audio-based reanchor when
+the dynamic phase is ready, rather than stacking a render-offset slew on the
+same correction. A non-flushing pause retains
 the ledger and grants a 750ms remapping grace period. Any other evidence loss
 slews back to the continuously maintained static clock. Playback-head, encoded-
 byte, and frame-size interpretations remain diagnostic-only.
 
-The sfdec2 renderer reads the continuous centralized heard clock while dynamic
-evidence is active; it does not retarget from the write-quantized `put_time`
+The sfdec2 renderer reads the continuous centralized heard clock once dynamic
+evidence is phase-ready; it does not retarget from the write-quantized `put_time`
 cache. Target calculation and the bounded 5ms convergence step occur at most
 once per distinct video frame, so renderer-loop wakeups cannot accelerate or
 oscillate the correction. The dynamic clock extrapolates an atomically sampled

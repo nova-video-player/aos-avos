@@ -865,15 +865,30 @@ static void *videosink_thread(void *ctx)
 				p->last_mode2_dynamic_active;
 			if( mode2_dynamic_changed ) {
 				p->last_mode2_dynamic_active = mode2_dynamic_active;
-				p->pending_reanchor = 1;
+				if( mode2_dynamic_active ) {
+					// The heard clock has already completed its monotonic catch-up.
+					// Rebuild the audio-owned anchor once at this explicit boundary;
+					// slewing from the provisional static anchor would apply a second,
+					// multi-second correction to the same phase change.
+					p->render_offset_ns = -1;
+					p->render_offset_from_audio = 0;
+					p->target_offset_ns = -1;
+					p->slew_active = 0;
+					p->pending_reanchor = 0;
+				} else {
+					p->pending_reanchor = 1;
+				}
+				// Keep both entry and exit corrections limited to one step per
+				// distinct video frame. Entry immediately rebuilds its anchor below;
+				// exit still uses the slow bounded fallback slew.
 				p->mode2_dynamic_slew = 1;
-				p->mode2_dynamic_fast_slew = mode2_dynamic_active;
+				p->mode2_dynamic_fast_slew = 0;
 				p->mode2_dynamic_settle_frames = 0;
 				p->mode2_slew_frame_handle = NULL;
 				p->mode2_slew_frame_time = INT_MIN;
 				p->mode2_slew_frame_epoch = INT_MIN;
-				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d\n",
-					mode2_dynamic_active);
+				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d\n",
+					mode2_dynamic_active, mode2_dynamic_active);
 			}
 			int mode2_new_slew_frame = p->mode2_dynamic_slew &&
 				(f->android_handle != p->mode2_slew_frame_handle ||

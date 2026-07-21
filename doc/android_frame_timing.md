@@ -24,9 +24,11 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   cross-thread heard-time skew at seek/resume boundaries.
 - For PCM and mode 1, the offset is **slewed** toward a new target only on
   explicit events (seek/resume/speed/hard discontinuity). Direct mode 2 normally
-  keeps its render offset stable after initialization. On entry to or exit from
-  the validated dynamic presentation clock, it slews toward the centralized
-  heard-time target by at most 5ms per frame.
+  keeps its render offset stable after initialization. A newly trusted dynamic
+  clock first completes any monotonic heard-time hold while the renderer remains
+  on its provisional anchor. Once the dynamic phase is ready, the renderer makes
+  one explicit audio-based reanchor instead of stacking a second slew on that
+  correction. Later transition and resume corrections remain bounded per frame.
 - Manual A/V delay (`s->av_delay`) is also slewed in the render path through
   `effective_av_delay` (bounded per-frame step) so large UI jumps do not create
   a burst of ASAP renders ("fast video" transient).

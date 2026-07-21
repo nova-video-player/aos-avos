@@ -558,6 +558,7 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_heard_interp_last_log_ms = 0;
 	s->mode2_heard_prevideo_phase_active = 0;
 	s->mode2_dynamic_clock_active = 0;
+	s->mode2_dynamic_clock_ready = 0;
 	s->mode2_dynamic_clock_ts = STREAM_NO_PTS_VALUE;
 	s->mode2_dynamic_clock_wall_ms = 0;
 	s->mode2_dynamic_clock_last_delay_ms = -1;
@@ -905,7 +906,11 @@ int stream_sync_mode2_dynamic_active( STREAM *s )
 		return 0;
 	}
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	active = s->mode2_dynamic_clock_active;
+	// Do not expose a newly adopted presentation clock to the renderer while
+	// its monotonic phase is holding for a lower measured frontier. Retargeting
+	// MediaCodec during that hold stacks a moving render-offset correction on
+	// top of the heard-clock convergence and prolongs startup freezes.
+	active = s->mode2_dynamic_clock_active && s->mode2_dynamic_clock_ready;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	return active;
 }
@@ -969,6 +974,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	int interp_delay_ms;
 	int interp_last_log_ms;
 	int dynamic_active;
+	int dynamic_ready;
 	int dynamic_ts;
 	int dynamic_last_delay_ms;
 	int dynamic_last_log_ms;
@@ -982,6 +988,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	interp_delay_ms = s->mode2_heard_interp_delay_ms;
 	interp_last_log_ms = s->mode2_heard_interp_last_log_ms;
 	dynamic_active = s->mode2_dynamic_clock_active;
+	dynamic_ready = s->mode2_dynamic_clock_ready;
 	dynamic_ts = s->mode2_dynamic_clock_ts;
 	dynamic_last_delay_ms = s->mode2_dynamic_clock_last_delay_ms;
 	dynamic_last_log_ms = s->mode2_dynamic_clock_last_log_ms;
@@ -1000,6 +1007,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 		s->mode2_heard_prevideo_phase_active = 1;
 		if( dynamic_active ) {
 			s->mode2_dynamic_clock_active = 1;
+			s->mode2_dynamic_clock_ready = dynamic_ready;
 			s->mode2_dynamic_clock_ts = dynamic_ts;
 			s->mode2_dynamic_clock_wall_ms = atime();
 			s->mode2_dynamic_clock_last_delay_ms = dynamic_last_delay_ms;
@@ -1007,8 +1015,8 @@ int stream_sync_restart_after_pause( STREAM *s )
 				STREAM_MODE2_DIRECT_GRACE_MS;
 			s->mode2_dynamic_clock_last_log_ms = dynamic_last_log_ms;
 		}
-		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d dynamic=%d dynamic_ts=%d audio=%d video=%d\n",
-			interp_ts, interp_raw_ts, interp_delay_ms, dynamic_active, dynamic_ts,
+		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d dynamic=%d ready=%d dynamic_ts=%d audio=%d video=%d\n",
+			interp_ts, interp_raw_ts, interp_delay_ms, dynamic_active, dynamic_ready, dynamic_ts,
 			s->audio_time, s->video_time);
 	}
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
@@ -1509,6 +1517,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				wall_now - observation->last_advance_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS;
 			if( direct_valid && !s->mode2_dynamic_clock_active ) {
 				s->mode2_dynamic_clock_active = 1;
+				s->mode2_dynamic_clock_ready = 0;
 				s->mode2_dynamic_clock_ts = heard_ts;
 				s->mode2_dynamic_clock_wall_ms = wall_now;
 				s->mode2_dynamic_clock_grace_until_wall_ms = 0;
@@ -1564,10 +1573,18 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 					// current phase and let physical presentation catch up instead.
 					s->mode2_dynamic_clock_wall_ms = wall_now;
 				}
+				if( direct_valid && !s->mode2_dynamic_clock_ready &&
+					dynamic_target == s->mode2_dynamic_clock_ts ) {
+					s->mode2_dynamic_clock_ready = 1;
+					DBG serprintf("mode2_dynamic_clock_ready: epoch=%llu heard=%d target=%d delay=%d\n",
+						(unsigned long long)s->mode2_heard_epoch,
+						s->mode2_dynamic_clock_ts, dynamic_target, dynamic_delay);
+				}
 
 				heard_ts = s->mode2_dynamic_clock_ts;
 				if( dynamic_source == 3 && heard_ts == dynamic_target ) {
 					s->mode2_dynamic_clock_active = 0;
+					s->mode2_dynamic_clock_ready = 0;
 					heard_ts = dynamic_target;
 					DBG serprintf("mode2_dynamic_clock_fallback: epoch=%llu heard=%d static=%d\n",
 						(unsigned long long)s->mode2_heard_epoch, heard_ts, dynamic_target);

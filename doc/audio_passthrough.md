@@ -231,12 +231,14 @@ Epoch seeding depends on why the clock changed:
   never counted as audio progress. A seek starts a new sync epoch but carries explicit
   empty-track ownership when playback had already been established.
 
-For the validated raw AC3/44.1 kHz profile, the submitted-unit ledger and asynchronous
+For the enabled Mode 2 profile set, the submitted-unit ledger and asynchronous
 `AudioTimestamp` observer add a dynamic presentation bound above this fallback. Entry
 requires advancing rate and stable occupancy streaks. Heard time holds instead of moving
-backward when the measured delay grows, and the MediaCodec render offset converges with a
-bounded 5ms-per-frame slew. A non-flushing pause retains ledger occupancy and permits a
-750ms observer-remapping grace period; other evidence loss returns gradually to the
+backward when the measured delay grows. MediaCodec remains on its provisional anchor during
+that hold, then performs one audio-based reanchor when the dynamic phase becomes ready;
+later transition corrections use the bounded renderer slew. A non-flushing pause retains
+ledger occupancy and permits a 750ms observer-remapping grace period; other evidence
+loss returns gradually to the
 static interpolator.
 
 ## State Diagram

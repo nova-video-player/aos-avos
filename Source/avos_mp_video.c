@@ -388,10 +388,20 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	MPLOG();
 
+	// Capture the engine pointer BEFORE stream_delete() below frees/nulls
+	// video->s -- stream_delete(&video->s) invalidates video->s itself, so
+	// reading video->s->sub_engine after that call is either a no-op (if it
+	// nulls the pointer, silently skipping sub_engine_close_track() and
+	// leaking the active backend -- SSA's ass_track/ass_renderer/ass_library
+	// and its style backups, or GFX's cached current_frame) or a
+	// use-after-free (if it doesn't). Snapshotting it here removes the
+	// dependency on video->s surviving past stream_delete() entirely.
+	SUB_ENGINE *sub_engine = (video->s && video->s->sub_engine) ? (SUB_ENGINE*)video->s->sub_engine : NULL;
+
 	// Stop the subtitle engine clock FIRST: its clock_ctx is the raw STREAM*
 	// (video->s) that stream_delete() frees below, so the render thread must
 	// stop dereferencing it (via engine_clock_cb) before that happens.
-	if (video->s && video->s->sub_engine) sub_engine_stop((SUB_ENGINE*)video->s->sub_engine);
+	if (sub_engine) sub_engine_stop(sub_engine);
 	if (video->s) {
 		AV_set_state(AV_STOPPED, 0, 0, NULL, NULL);
 		stream_stop(video->s);
@@ -405,8 +415,10 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 	// with this video's own subtitle data, re-populating g_sub_engine's
 	// active track right after we'd just cleared it -- so the next video
 	// could still inherit stale state. Waiting until the stream (and its
-	// thread) is actually gone removes that window.
-	if (video->s && video->s->sub_engine) sub_engine_close_track((SUB_ENGINE*)video->s->sub_engine);
+	// thread) is actually gone removes that window. We use the snapshotted
+	// sub_engine pointer here (not video->s->sub_engine) since video->s is
+	// no longer valid at this point.
+	if (sub_engine) sub_engine_close_track(sub_engine);
 
 	return AVOS_ERR_OK;
 }
@@ -525,8 +537,11 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 	} else {
 		video->send_sub = 1;
 		*ret = stream_set_subtitle_stream(video->s, track) == 0 ? 1 : 0;
-		// DO NOT open or close the track here!
-		// stream_subtitle.c will natively open it when the first packet arrives.
+		// DO NOT open the track here! stream_subtitle.c will natively open it
+		// when the first packet arrives. (Closing the *previous* track is no
+		// longer deferred, though -- stream_set_subtitle_stream() now closes
+		// the old engine backend itself before returning, instead of leaving
+		// it active until the new track's first packet shows up.)
 	}
 	return AVOS_ERR_OK;
 }

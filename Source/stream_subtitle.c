@@ -570,6 +570,17 @@ serprintf("SsS: sub_stream already set\n");
 	frame_free( s->subtitle_frame );
 	s->subtitle_frame = NULL;
 
+	// Close the previous track's engine backend now, rather than leaving it
+	// active until the new track's first packet arrives. Both s->engine_tstate
+	// and s->sub_tstate are already idled above, so nothing can be mid-feed/
+	// mid-render on this engine right now -- same safe window already used by
+	// stream_close_sub_dec()/frame_free() just above. Without this, whatever
+	// track was previously showing (SSA/SRT text or a GFX bitmap) stays fully
+	// rendered until the new track's first packet opens a fresh one, which can
+	// be a noticeable delay for a slow-starting or different-format track.
+	if( s->sub_engine )
+		sub_engine_close_track( (SUB_ENGINE*)s->sub_engine );
+
 	s->av.subs  = sub_stream;
 	s->subtitle = s->av.sub + s->av.subs;
 	

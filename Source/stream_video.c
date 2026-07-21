@@ -25,6 +25,7 @@
 #include "stream_rc.h"
 #include "stream_parser.h"
 #include "stream_subtitle.h"
+#include "sub_engine.h"
 #include "stream_avg.h"
 #include "atime.h"
 #include "audio_interface.h"
@@ -4763,6 +4764,18 @@ static void _seek_init( STREAM *s )
 	// session even though later seeks resume parsing normally. audio_end has its
 	// own reset on every seek via stream_audio_flush() - mirror that here.
 	s->video_end = 0;
+	// Clear whatever the per-stream subtitle engine is currently holding
+	// (libass's pending events for SSA/SRT, or the cached bitmap frame for
+	// GFX) so a stale subtitle can't keep being rendered/evaluated at the
+	// new post-seek time. This is the engine-pipeline equivalent of the
+	// s->sub_dec->flush() call in _stream_seek_real() below, which only
+	// covers the ffdec/bitmap decoder -- s->sub_engine is a separate object
+	// (see stream.h) and needs its own flush. _seek_init() is the single
+	// entry point all seek/restart paths funnel through (user seek via
+	// _stream_seek_real(), seek-loop, codec-error retry, and next-part
+	// restart further up in this file), so one call here covers all of them.
+	if( s->sub_engine )
+		sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
 
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;

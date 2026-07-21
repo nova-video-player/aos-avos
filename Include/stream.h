@@ -628,6 +628,7 @@ typedef struct STREAM {
 	int		av_delay_history[3];
 	int		av_delay_history_count;
 
+	pthread_mutex_t anchor_mutex;	// owns sink_ref_time/vid_ref_time and sink anchor publication
 	int		sink_ref_time;
 	int		vid_ref_time;
 	int 		drop;

@@ -2721,9 +2721,9 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 		}
 	}
 
-	// stream_sync_mode2_dynamic_active() is queried by the sfdec2 render
-	// thread. Destroy its lock only after every component that can access stream
-	// timing state has been stopped and joined.
+	// The sfdec2 render thread can query stream timing state. Destroy these
+	// locks only after every decoder/sink component has stopped and joined.
+	pthread_mutex_destroy( &s->anchor_mutex );
 	pthread_mutex_destroy( &s->mode2_heard_mutex );
 	
 	return 0;
@@ -2737,7 +2737,7 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 void _stream_resync( STREAM *s ) 
 {
 	DBG serprintf("WALLCLOCK_RESET: by _stream_resync\n");
-	s->sink_ref_time = -1;
+	stream_sync_anchor_reset( s );
 	stream_sync_restart( s );
 }
 
@@ -2859,7 +2859,7 @@ DBGS serprintf("stream_un_pause\r\n");
 			int last_good_delay_ms = s->last_good_delay_ms;
 			int last_good_delay_valid = s->last_good_delay_valid;
 			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
-			s->sink_ref_time = -1;
+			stream_sync_anchor_reset( s );
 			stream_sync_restart( s );
 			// Pause/resume restarts the scheduler, not the audio device. Keep the
 			// last measured HW delay so a rapid resume can avoid static latency.
@@ -2879,7 +2879,7 @@ DBGS serprintf("stream_un_pause\r\n");
 			int last_good_delay_valid = s->last_good_delay_valid;
 			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
 			DBG serprintf("WALLCLOCK_RESET: by pause resume\n");
-			s->sink_ref_time = -1;
+			stream_sync_anchor_reset( s );
 			stream_sync_restart_after_pause( s );
 			s->last_good_delay_ms = last_good_delay_ms;
 			s->last_good_delay_valid = last_good_delay_valid;
@@ -2992,8 +2992,7 @@ static int _real_time( STREAM *s, int frame_time )
 	switch( s->speed ) {
 	case STREAM_SPEED_NORMAL: {
 		// For variable speed, we pass the TS value directly to the sink.
-		// `s->vid_ref_time + (frame_time - s->vid_ref_time)` simplifies to `frame_time`.
-		// return s->vid_ref_time + RST_TO_TS( frame_time - s->vid_ref_time, int );
+		// The legacy anchor expression simplifies to frame_time at normal speed.
 		return frame_time;
 	} break;
 
@@ -3007,7 +3006,8 @@ static int _real_time( STREAM *s, int frame_time )
 	}
 
 	// Legacy path for discrete speeds (not used with modern audio speed)
-	return s->vid_ref_time + (frame_time - s->vid_ref_time) * mul / div;
+	int vid_ref_time = stream_sync_anchor_get_video( s );
+	return vid_ref_time + (frame_time - vid_ref_time) * mul / div;
 }
 
 #if 1
@@ -3040,7 +3040,8 @@ serprintf("_engine_abort!\r\n");
 // ************************************************************
 static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 {
-	if( s->sink_ref_time == -1 ) {			
+	if( stream_sync_anchor_get_sink( s ) == -1 ) {
+		int published = 0;
 		// Seek-based approach: no frame rescaling needed
 
 		if( s->video_sink->put_time ) {
@@ -3061,25 +3062,28 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 					frame->time, anchor_ts, s->audio_start_pending, s->audio_resume_pending);
 				return;
 			}
-			s->sink_ref_time = anchor_ts;
-			s->vid_ref_time  = frame->time;
-			s->video_sink->put_time( s->video_sink, anchor_ts );
-
-			DBG serprintf(
-				"SINK_REF_ESTABLISHED: sink_ref_time=%d, vid_ref_time=%d, frame_time=%d, put_time=%d (put_time mode)\n",
-				s->sink_ref_time, s->vid_ref_time, frame->time, s->sink_ref_time );
-			DBGV2 serprintf( "  <NSR %d>", frame->time );
+			published = stream_sync_anchor_publish( s, anchor_ts, frame->time, 1, 0 );
+			if( published ) {
+				DBG serprintf(
+					"SINK_REF_ESTABLISHED: sink_ref_time=%d, vid_ref_time=%d, frame_time=%d, put_time=%d (put_time mode)\n",
+					anchor_ts, frame->time, frame->time, anchor_ts );
+				DBGV2 serprintf( "  <NSR %d>", frame->time );
+			}
 		} else {
-			s->vid_ref_time = frame->time;
-			int reftime = s->video_sink->get_time( s->video_sink );
-			s->sink_ref_time = reftime - s->vid_ref_time;
-			DBG serprintf("SINK_REF_ESTABLISHED: vid_ref=%d, sink_time=%d, sink_ref=%d (get_time mode)\n", 
-				s->vid_ref_time, reftime, s->sink_ref_time);
+			published = stream_sync_anchor_seed_from_sink( s, frame->time );
+			if( published ) {
+				int sink_ref_time = stream_sync_anchor_get_sink( s );
+				int reftime = sink_ref_time + frame->time;
+				DBG serprintf("SINK_REF_ESTABLISHED: vid_ref=%d, sink_time=%d, sink_ref=%d (get_time mode)\n",
+					frame->time, reftime, sink_ref_time);
 DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
+			}
 		}
 
-		DBG serprintf("NEW_REF_TIME: sink_ref_time established with frame=%d (video_time=%d)\n", 
-			frame->time, s->video_time);
+		if( published ) {
+			DBG serprintf("NEW_REF_TIME: sink_ref_time established with frame=%d (video_time=%d)\n",
+				frame->time, s->video_time);
+		}
 	}
 }
 
@@ -3094,12 +3098,13 @@ static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	int real_time_calc = _real_time( s, time ); // should be ts
 	int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
 	int total_audio_delay = stream_sync_av_delay( s );
+	int sink_ref_time = stream_sync_anchor_get_sink( s );
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
 		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
 	if( s->put_time_mode && s->audio_time >= 0 ) {
 		DBG serprintf("video_sync_diag: frame=%d video=%d audio=%d heard=%d diff=%d put_mode=%d sink_ref=%d sink_delay=%d audio_delay=%d speed=%.3f\n",
 			time, s->video_time, s->audio_time, heard_audio_ts,
-			time - heard_audio_ts, s->put_time_mode, s->sink_ref_time,
+			time - heard_audio_ts, s->put_time_mode, sink_ref_time,
 			s->sink_delay, total_audio_delay, audio_interface_get_audio_speed() );
 	}
 	if( s->video_sink->put_time ) {
@@ -3111,12 +3116,12 @@ static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 		// Legacy mode: WC conversion with preroll compensation
 		// we add "stream_sink_preroll" here because the sink might switch to it's next frame
 		// while we do the call!
-		frame->blit_time = real_time_calc + s->sink_ref_time + stream_sink_preroll;
+		frame->blit_time = real_time_calc + sink_ref_time + stream_sink_preroll;
 		DBG2 serprintf( "_put_frame_in_sink: frame_time=%d(RST), real_time=%d(WC), preroll=%d, blit_time=%d(WC)\n",
 						time, real_time_calc, stream_sink_preroll, frame->blit_time );
 	}
 
-//serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), s->sink_ref_time, frame->blit_time );
+//serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), sink_ref_time, frame->blit_time );
 	frame->time = time;
 	// a sink might want that info
 	frame->aspect_n = s->video->aspect_n,
@@ -3163,7 +3168,7 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 		if( s->sink_delay_count > 2 || s->sink_delay < (-1 * stream_sink_max_delay) ) {
 			DBG serprintf( "_check_sink_delay: wallclock reset delay=%d, count=%d\n",
 						   s->sink_delay, s->sink_delay_count );
-			s->sink_ref_time = -1;
+			stream_sync_anchor_reset( s );
 			s->sink_delay_count = 0;
 		}
 	} else {
@@ -3235,7 +3240,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 		int frame_minus_heard = frame->time - heard_audio_ts;
 		DBG serprintf("video_sched_diag: frame=%d video=%d audio=%d heard=%d frame_minus_heard=%d audio_delay=%d sink_ref=%d speed=%.3f seek_epoch=%d\n",
 			frame->time, s->video_time, s->audio_time, heard_audio_ts,
-			frame_minus_heard, total_audio_delay, s->sink_ref_time,
+			frame_minus_heard, total_audio_delay, stream_sync_anchor_get_sink( s ),
 			audio_interface_get_audio_speed(), s->seek_epoch );
 		// Track the realized A/V phase so stream_set_av_delay() can baseline it,
 		// and report the applied shift while a manual-delay window is open.
@@ -3342,10 +3347,11 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 			if( s->drop > 0 ) {
 				// drop one frame
 				s->drop --;
-				s->sink_ref_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
+				int sink_ref_time = stream_sync_anchor_adjust_sink( s,
+					-RST_TO_TS_DELTA(s->video->msPerFrame, int) );
 				frames_dropped ++;
 				DBG serprintf("FRAME_DROP: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
-					RST_TO_TS_DELTA(s->video->msPerFrame, int), audio_interface_get_audio_speed(), s->sink_ref_time);
+					RST_TO_TS_DELTA(s->video->msPerFrame, int), audio_interface_get_audio_speed(), sink_ref_time);
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
@@ -3354,10 +3360,11 @@ DBGY serprintf("[-%8d] ", frame->time );
 			} else if( s->drop < 0 ) {
 				// double one frame
 				s->drop ++;
-				s->sink_ref_time += RST_TO_TS_DELTA(s->video->msPerFrame, int);
+				int sink_ref_time = stream_sync_anchor_adjust_sink( s,
+					RST_TO_TS_DELTA(s->video->msPerFrame, int) );
 				frames_doubled ++;
 				DBG serprintf("FRAME_DOUBLE: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
-					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
+					s->video->msPerFrame, audio_interface_get_audio_speed(), sink_ref_time);
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
 					s->video_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
@@ -4119,7 +4126,7 @@ serprintf("really cannot get DECODE_FRAME!\r\n");
 			s->drop_P        = 0;
 			s->delay         = 0;
 			s->delay_valid   = 0;
-			s->sink_ref_time = -1;
+			stream_sync_anchor_reset( s );
 			s->video_flush   = 1;
 			if( s->cdata_now.valid ) {
 				cbe_skip( s->cbe, s->cdata_now.size );
@@ -4830,7 +4837,7 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int last_good_delay_ms = s->last_good_delay_ms;
 	int last_good_delay_valid = s->last_good_delay_valid;
 	int old_audio_time = s->audio_time;
-	int old_sink_ref_time = s->sink_ref_time;
+	int old_sink_ref_time = stream_sync_anchor_get_sink( s );
 	int inherited_mode2_frontier = stream_sync_mode2_heard_frontier_pending( s );
 	int first_start = (old_time < 0 && s->seek_epoch == 0);
 	// A non-negative video timestamp does not prove playback was established:
@@ -5603,7 +5610,7 @@ static int _stream_redraw( STREAM *s )
 		return 1;
 
 serprintf("stream_redraw\r\n");
-	s->sink_ref_time = -1;
+	stream_sync_anchor_reset( s );
 	s->drop          = 0;
 
 	if( s->use_sink_frames ) {

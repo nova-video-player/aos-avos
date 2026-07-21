@@ -67,6 +67,97 @@ static int sync_diag_last_reanchor_pending = -1;
 
 static int stream_use_xbmc_smoothing = 1;
 
+void stream_sync_anchor_reset( STREAM *s )
+{
+	if( !s )
+		return;
+	pthread_mutex_lock( &s->anchor_mutex );
+	__atomic_store_n( &s->sink_ref_time, -1, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->vid_ref_time, -1, __ATOMIC_RELEASE );
+	pthread_mutex_unlock( &s->anchor_mutex );
+}
+
+void stream_sync_anchor_snapshot( STREAM *s, int *sink_ref_time, int *vid_ref_time )
+{
+	int sink_ref = -1;
+	int vid_ref = -1;
+	if( s ) {
+		pthread_mutex_lock( &s->anchor_mutex );
+		sink_ref = __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE );
+		vid_ref = __atomic_load_n( &s->vid_ref_time, __ATOMIC_ACQUIRE );
+		pthread_mutex_unlock( &s->anchor_mutex );
+	}
+	if( sink_ref_time )
+		*sink_ref_time = sink_ref;
+	if( vid_ref_time )
+		*vid_ref_time = vid_ref;
+}
+
+int stream_sync_anchor_get_sink( STREAM *s )
+{
+	// sfdec2 can query heard time while holding its codec mutex. Keep this
+	// validity read atomic so that path never reverses anchor_mutex -> sfdec2.
+	return s ? __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) : -1;
+}
+
+int stream_sync_anchor_get_video( STREAM *s )
+{
+	int vid_ref_time;
+	stream_sync_anchor_snapshot( s, NULL, &vid_ref_time );
+	return vid_ref_time;
+}
+
+int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
+	int only_if_unset, int refresh_sink )
+{
+	if( !s )
+		return 0;
+
+	pthread_mutex_lock( &s->anchor_mutex );
+	if( only_if_unset &&
+		__atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) != -1 ) {
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
+	if( refresh_sink )
+		sfdec2_refresh_sched_anchor( s );
+	if( s->video_sink && s->video_sink->put_time )
+		s->video_sink->put_time( s->video_sink, sink_ref_time );
+	__atomic_store_n( &s->vid_ref_time, vid_ref_time, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->sink_ref_time, sink_ref_time, __ATOMIC_RELEASE );
+	pthread_mutex_unlock( &s->anchor_mutex );
+	return 1;
+}
+
+int stream_sync_anchor_seed_from_sink( STREAM *s, int vid_ref_time )
+{
+	if( !s || !s->video_sink || !s->video_sink->get_time )
+		return 0;
+
+	pthread_mutex_lock( &s->anchor_mutex );
+	if( __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) != -1 ) {
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
+	int sink_time = s->video_sink->get_time( s->video_sink );
+	__atomic_store_n( &s->vid_ref_time, vid_ref_time, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->sink_ref_time, sink_time - vid_ref_time, __ATOMIC_RELEASE );
+	pthread_mutex_unlock( &s->anchor_mutex );
+	return 1;
+}
+
+int stream_sync_anchor_adjust_sink( STREAM *s, int delta )
+{
+	int sink_ref_time = -1;
+	if( !s )
+		return sink_ref_time;
+	pthread_mutex_lock( &s->anchor_mutex );
+	sink_ref_time = __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) + delta;
+	__atomic_store_n( &s->sink_ref_time, sink_ref_time, __ATOMIC_RELEASE );
+	pthread_mutex_unlock( &s->anchor_mutex );
+	return sink_ref_time;
+}
+
 #define STREAM_MODE1_STARTUP_CLAMP_MS        50
 // Simple audio-lead gate threshold (Phase 1B baseline).
 // Phase 4 hysteresis constants removed in Commit C.
@@ -819,7 +910,8 @@ int stream_sync_mode2_dynamic_active( STREAM *s )
 	return active;
 }
 
-// Caller owns s->mode2_heard_mutex so Mode 2 capture/reset/restore can be atomic.
+// Caller owns anchor_mutex followed by mode2_heard_mutex so the renderer anchor
+// and Mode 2 heard-clock epoch reset as one transaction.
 static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger )
 {
 	s->delay         = 0;
@@ -829,8 +921,8 @@ static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger )
 	s->drop_P        = 0;
 	s->drop_B        = 0;
 	
-	s->sink_ref_time = -1;
-	s->vid_ref_time = -1;
+	__atomic_store_n( &s->sink_ref_time, -1, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->vid_ref_time, -1, __ATOMIC_RELEASE );
 	s->sync_v_time = -1;
 	s->sync_a_time = -1;
 	_stream_sync_mode2_heard_reset_locked( s, 0, reset_compressed_ledger );
@@ -843,19 +935,23 @@ static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger )
 int stream_sync_restart( STREAM *s )
 {
 	int ret;
+	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	ret = _stream_sync_restart_locked( s, 1 );
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	pthread_mutex_unlock( &s->anchor_mutex );
 	return ret;
 }
 
 int stream_sync_restart_with_mode2_frontier( STREAM *s )
 {
 	int ret;
+	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	ret = _stream_sync_restart_locked( s, 1 );
 	s->mode2_heard_frontier_seed_pending = 1;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	pthread_mutex_unlock( &s->anchor_mutex );
 	return ret;
 }
 
@@ -877,6 +973,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	int dynamic_last_delay_ms;
 	int dynamic_last_log_ms;
 
+	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	keep_mode2_phase = passthrough_mode >= 2 &&
 		!libavos_get_ac3_recoding_enabled() && s->mode2_heard_interp_valid;
@@ -915,6 +1012,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 			s->audio_time, s->video_time);
 	}
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
+	pthread_mutex_unlock( &s->anchor_mutex );
 
 	return 0;
 }
@@ -1313,7 +1411,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				if( frontier_restart ) {
 					seed = raw_heard_ts + heard_delay - fixed_latency;
 					seed_cause = "restart_frontier";
-				} else if( delay_change && s->sink_ref_time < 0 ) {
+				} else if( delay_change && stream_sync_anchor_get_sink( s ) < 0 ) {
 					// Initial normalization replaces a provisional latency before an
 					// authoritative playback epoch exists. Adopt its physical phase;
 					// preserving the provisional phase would retain the full delta.
@@ -1338,7 +1436,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				}
 				DBG serprintf("mode2_epoch_seed: cause=%s audio=%d raw=%d seed=%d delay=%d fixed=%d sink_ref=%d seek_epoch=%d\n",
 					seed_cause, s->audio_time, raw_heard_ts, seed, heard_delay,
-					fixed_latency, s->sink_ref_time, s->seek_epoch);
+					fixed_latency, stream_sync_anchor_get_sink( s ), s->seek_epoch);
 			} else {
 				if( s->paused || s->paused_internal ) {
 					// Playback is paused: physical presentation is frozen, so hold the
@@ -1510,7 +1608,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	}
 
 	// 3. STARTUP CLAMP (Non-Mode 2 only)
-	if( !is_mode2_sync && passthrough_mode && s->sink_ref_time == -1 &&
+	if( !is_mode2_sync && passthrough_mode && stream_sync_anchor_get_sink( s ) == -1 &&
 		heard_ts < s->audio_time - STREAM_MODE1_STARTUP_CLAMP_MS && s->audio_time > s->video_time ) {
 		int clamped = s->audio_time - STREAM_MODE1_STARTUP_CLAMP_MS;
 		DBG serprintf( "stream_get_heard_audio_ts: mode1 startup hold clamp: %d->%d (audio=%d video=%d)\n",
@@ -1521,7 +1619,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	// Preserves full physical delay offset for passthrough startup.
 	// For PCM in put_time mode, allow negative heard_ts during the buffer-fill phase
 	// (sink_ref_time <= 0) so sfdec2 can schedule frames relative to when audio is heard.
-	if( heard_ts < 0 && !passthrough_mode && s->sink_ref_time > 0 ) {
+	if( heard_ts < 0 && !passthrough_mode && stream_sync_anchor_get_sink( s ) > 0 ) {
 		heard_ts = 0;
 	}
 
@@ -2341,12 +2439,13 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	}
 	// Check if passthrough mode is active - static delay is immediately valid
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
+	int sink_ref_time = stream_sync_anchor_get_sink( s );
 	if( passthrough_mode == 1 ) {
 		DBG serprintf("pt_mode1_sync_audio: in=%d stored=%d sync_a=%d video=%d seek_epoch=%d anchor_valid=%d delay_valid=%d source=%s tag=%s anchor_delay=%d current_delay=%d sink_ref=%d\n",
 			audio_time, s->audio_time, s->sync_a_time, s->video_time, s->seek_epoch,
 			anchor_valid, delay_valid, _stream_delay_source_name(delay_status.source),
 			delay_status.source_tag ? delay_status.source_tag : "none",
-			anchor_delay, current_av_delay, s->sink_ref_time);
+			anchor_delay, current_av_delay, sink_ref_time);
 	}
 	
 	if( anchor_delay > 0 && _stream_is_sink_driven(s) && audio_time != -1 && !passthrough_mode ) {
@@ -2373,7 +2472,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				(passthrough_mode > 0) && 
 				s->video_sink &&
 				s->video_sink->put_time &&
-				(s->sink_ref_time == -1 || s->sync_a_time == -1);
+				(sink_ref_time == -1 || s->sync_a_time == -1);
 
 			if (diag_log) {
 				DBGY2 serprintf("anchor_ts: audio_time=%d current=%d source=%s tag=%s av_delay=%d anchor=%d\n",
@@ -2385,11 +2484,10 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			anchor_ts = _apply_user_av_delay_ts( s, anchor_ts );
 			anchor_ts -= RST_TO_TS_DELTA( stream_dbg_delay, int );
 
-			if( force_passthrough_reanchor && s->sink_ref_time != -1 ) {
+			if( force_passthrough_reanchor && sink_ref_time != -1 ) {
 				DBG serprintf("stream_sync_audio: passthrough explicit reanchor: old_sink=%d audio=%d video=%d seek_epoch=%d resume_pending=%d sync_a=%d\n",
-					s->sink_ref_time, audio_time, s->video_time, s->seek_epoch,
+					sink_ref_time, audio_time, s->video_time, s->seek_epoch,
 					s->audio_resume_pending, s->sync_a_time);
-				sfdec2_refresh_sched_anchor( s );
 			}
 			
 			// In put_time mode, audio writes own heard-time anchoring.  Keep
@@ -2401,9 +2499,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			// reanchor heuristics may not replace. Leave sink_ref_time=-1 until
 			// audible time reaches zero.
 			if( anchor_ts >= 0 ) {
-				s->video_sink->put_time( s->video_sink, anchor_ts );
-				s->sink_ref_time = anchor_ts;
-				s->vid_ref_time = s->video_time;
+				stream_sync_anchor_publish( s, anchor_ts, s->video_time, 0,
+					force_passthrough_reanchor && sink_ref_time != -1 );
 			} else {
 				DBG serprintf("stream_sync_audio: defer negative anchor audio=%d anchor=%d video=%d seek_epoch=%d pt=%d\n",
 					audio_time, anchor_ts, s->video_time, s->seek_epoch, passthrough_mode);

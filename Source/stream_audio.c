@@ -912,13 +912,13 @@ static compressed_write_result_t _stream_write_compressed_unit(
 static void _stream_abort_incomplete_compressed_unit(
 	STREAM *s, int accepted_bytes, int unit_size, int passthrough, int ac3_recoding )
 {
-	int had_audio_epoch = s->audio_time >= 0 && s->sink_ref_time >= 0;
+	int had_audio_epoch = s->audio_time >= 0 && stream_sync_anchor_get_sink( s ) >= 0;
 	DBG serprintf("stream_audio: aborting incomplete compressed unit accepted=%d/%d pt=%d recode=%d; flushing sink\n",
 		accepted_bytes, unit_size, passthrough, ac3_recoding);
 	if( s->audio_sink && s->audio_sink->flush ) {
 		s->audio_sink->flush( s );
 	}
-	s->sink_ref_time = -1;
+	stream_sync_anchor_reset( s );
 	if( passthrough >= 2 && !ac3_recoding && had_audio_epoch ) {
 		stream_sync_restart_with_mode2_frontier( s );
 	} else {
@@ -1654,7 +1654,8 @@ serprintf(" ae! ");
 					// Capture epoch ownership before stop/close/reset operations. Initial
 					// passthrough setup has no established submitted/audio anchor and must
 					// use the latency-compensated raw Mode 2 seed.
-					int had_audio_epoch = s->audio_time >= 0 && s->sink_ref_time >= 0;
+					int sink_ref_time = stream_sync_anchor_get_sink( s );
+					int had_audio_epoch = s->audio_time >= 0 && sink_ref_time >= 0;
 					DBG serprintf("audio format changed by filter: %04X -> %04X, reconfiguring sink (passthrough=%d, ac3=%d)\n",
 						original_format, audio_frame.format, passthrough, ac3_recoding);
 					// Always update audio_format_configured when reconfiguring sink to prevent
@@ -1735,10 +1736,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								if( had_audio_epoch ) {
 									stream_sync_mode2_heard_frontier_arm( s );
 									DBG serprintf("mode2_frontier_arm: cause=format audio=%d sink_ref=%d seek_epoch=%d\n",
-										s->audio_time, s->sink_ref_time, s->seek_epoch);
+										s->audio_time, sink_ref_time, s->seek_epoch);
 								} else {
 									DBG serprintf("mode2_frontier_skip: cause=initial_format audio=%d sink_ref=%d seek_epoch=%d\n",
-										s->audio_time, s->sink_ref_time, s->seek_epoch);
+										s->audio_time, sink_ref_time, s->seek_epoch);
 								}
 							} else if( !is_ac3_recoding &&
 							           (format_changed || channels_changed || samplerate_changed || bits_changed) &&

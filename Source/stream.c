@@ -275,6 +275,7 @@ DBGS serprintf("stream_init\r\n" );
 	pthread_mutex_init( &s->codec_mutex,       NULL );
 	pthread_mutex_init( &s->video_done_mutex,  NULL );
 	pthread_mutex_init( &s->audio_sink_mutex,  NULL );
+	pthread_mutex_init( &s->anchor_mutex,      NULL );
 	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
 	
 	ref_count ++;

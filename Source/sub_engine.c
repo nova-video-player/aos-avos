@@ -92,16 +92,28 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h, const uint8_t *codec_private, int codec_private_size) {
     if (!eng) return -1;
 
+    // Use the actual reported surface size when known, for every format. This used to branch
+    // per format_id (SRT/GFX got the surface size, SSA was locked to the raw video frame), but
+    // Java no longer special-cases any category when sizing mSubtitleView -- the use_sub_margins
+    // preference now applies uniformly (see SurfaceController.updateSurface()'s mSubtitleView
+    // sizing block), so eng->surface_w/h already reflects the correct canvas for every format,
+    // margins included.
+    //
+    // For SSA specifically: this does NOT distort the track's authored layout. PlayResX/
+    // PlayResY is a property of the track itself (parsed from [Script Info]), not of
+    // ass_set_frame_size() -- libass always scales that authored coordinate space to fit
+    // whatever physical frame size it's given. Handing it a taller frame (top/bottom bars
+    // included) just changes what physical canvas that same authored layout gets mapped onto,
+    // which is exactly the intended mpv-style "use the margins" behavior -- it does not change
+    // the proportions of anything the author actually authored.
+    //
+    // Falls back to the raw video_w/video_h when no surface size is known yet (e.g. before the
+    // first onSurfaceTextureAvailable/onSurfaceTextureSizeChanged callback has fired).
     int target_w, target_h;
-    if (format_id == SUB_FMT_SRT) {
-        pthread_mutex_lock(&eng->lock);
-        target_w = eng->surface_w > 0 ? eng->surface_w : video_w;
-        target_h = eng->surface_h > 0 ? eng->surface_h : video_h;
-        pthread_mutex_unlock(&eng->lock);
-    } else {
-        target_w = video_w;
-        target_h = video_h;
-    }
+    pthread_mutex_lock(&eng->lock);
+    target_w = eng->surface_w > 0 ? eng->surface_w : video_w;
+    target_h = eng->surface_h > 0 ? eng->surface_h : video_h;
+    pthread_mutex_unlock(&eng->lock);
 
     LOGD("SUB_SURFACE: Opening track (format=%d) with canvas dimensions: %d x %d (raw video dim: %d x %d)",
          format_id, target_w, target_h, video_w, video_h);

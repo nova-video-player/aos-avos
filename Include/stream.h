@@ -140,6 +140,8 @@ typedef struct STREAM_PRESENTATION_OBSERVATION {
 	int	direct_rate_hz;
 	int	direct_rate_streak;
 	int	direct_delay_ms;
+	int	direct_heard_ts;
+	int	direct_heard_wall_ms;
 	int	direct_stable_streak;
 	int	direct_trusted;
 	int	direct_last_sample_wall_ms;

@@ -771,6 +771,9 @@ void stream_sync_compressed_shadow_observe( STREAM *s )
 		observation->direct_last_sample_wall_ms = sample.observed_wall_ms;
 	}
 	observation->direct_delay_ms = direct_plausible ? direct_ms : -1;
+	observation->direct_heard_ts = direct_plausible ?
+		direct_heard : STREAM_NO_PTS_VALUE;
+	observation->direct_heard_wall_ms = direct_plausible ? now_ms : 0;
 	observation->direct_trusted = direct_plausible &&
 		observation->direct_stable_streak >= STREAM_MODE2_DIRECT_STABLE_STREAK;
 
@@ -1399,6 +1402,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				observation->direct_trusted &&
 				(validated_profile || stream_mode2_dynamic_all) &&
 				observation->direct_delay_ms >= 0 &&
+				observation->direct_heard_ts != STREAM_NO_PTS_VALUE &&
+				wall_now - observation->direct_heard_wall_ms >= 0 &&
+				wall_now - observation->direct_heard_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
 				wall_now - observation->observed_wall_ms >= 0 &&
 				wall_now - observation->observed_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
 				wall_now - observation->last_advance_wall_ms >= 0 &&
@@ -1410,7 +1416,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				s->mode2_dynamic_clock_grace_until_wall_ms = 0;
 				DBG serprintf("mode2_dynamic_clock_enter: epoch=%llu heard=%d target=%d delay=%d rate_streak=%d stable_streak=%d fmt=%04X rate=%d forced=%d\n",
 					(unsigned long long)s->mode2_heard_epoch, heard_ts,
-					s->audio_time - observation->direct_delay_ms,
+					observation->direct_heard_ts,
 					observation->direct_delay_ms, observation->direct_rate_streak,
 					observation->direct_stable_streak, observation->format,
 					observation->rate, !validated_profile);
@@ -1423,7 +1429,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				if( direct_valid ) {
 					dynamic_source = 1;
 					dynamic_delay = observation->direct_delay_ms;
-					dynamic_target = s->audio_time - dynamic_delay;
+					// The presentation frontier and its wall epoch are an atomic
+					// observation. Recombining a new submitted frontier with an old
+					// occupancy sample makes compressed write bursts appear as heard
+					// progress and produces a sawtooth renderer clock.
+					dynamic_target = observation->direct_heard_ts +
+						(wall_now - observation->direct_heard_wall_ms);
 					s->mode2_dynamic_clock_last_delay_ms = dynamic_delay;
 					s->mode2_dynamic_clock_grace_until_wall_ms = 0;
 				} else if( s->mode2_dynamic_clock_last_delay_ms >= 0 &&

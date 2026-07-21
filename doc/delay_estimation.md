@@ -147,7 +147,10 @@ The sfdec2 renderer reads the continuous centralized heard clock while dynamic
 evidence is active; it does not retarget from the write-quantized `put_time`
 cache. Target calculation and the bounded 5ms convergence step occur at most
 once per distinct video frame, so renderer-loop wakeups cannot accelerate or
-oscillate the correction.
+oscillate the correction. The dynamic clock extrapolates an atomically sampled
+presentation frontier rather than subtracting stale occupancy from a newer
+submitted frontier. An 8ms renderer deadband prevents timestamp quantization
+noise from becoming a recurring frame-cadence correction after convergence.
 
 Mode 1 uses the same observer strictly in shadow mode. A candidate is credible
 when `mode1_iec_occupancy_shadow` reports `pt=1`, IEC framing, timestamp source,

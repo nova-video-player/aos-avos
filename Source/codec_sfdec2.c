@@ -1032,7 +1032,15 @@ static void *videosink_thread(void *ctx)
 						s ? stream_get_anchor_delay_ms(s, 1) : -1,
 						s ? stream_sync_av_delay(s) : -1,
 						(long long)p->render_offset_ns, (long long)p->target_offset_ns);
-					if (p->target_offset_ns != p->render_offset_ns) {
+					// Timestamp sampling and millisecond clock quantization can leave
+					// a small phase error after convergence. Do not turn that noise
+					// into a recurring video cadence correction.
+					const INT64 mode2_deadband_ns = 8000000LL;
+					if (mode2_dynamic_active &&
+						llabs(p->target_offset_ns - p->render_offset_ns) <= mode2_deadband_ns) {
+						p->target_offset_ns = p->render_offset_ns;
+						p->slew_active = 0;
+					} else if (p->target_offset_ns != p->render_offset_ns) {
 						p->slew_active = 1;
 					}
 					p->pending_reanchor = 0;

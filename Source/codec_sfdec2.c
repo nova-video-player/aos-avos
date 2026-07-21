@@ -1198,7 +1198,18 @@ static void *videodec_thread(void *ctx)
 		VIDEO_FRAME *f = NULL;
 		// decode frame
 
-		while (has_state_l(p, THREAD_STATE_FLUSHING) || (p->locked.run && !p->locked.error &&!(f = frame_q_get(&p->locked.dec_q)))) {
+		// NOTE: run/error must gate the whole wait, not just the "no frame yet"
+		// branch: videodec_close() sets FLUSHING together with run=0 and never
+		// clears FLUSHING again before joining this thread. If this thread is
+		// parked here (e.g. stopped right away, before any frame arrived), a
+		// loop condition of the form "FLUSHING || (run && ...)" would keep
+		// waiting forever on FLUSHING alone, since nothing broadcasts the cond
+		// again once run drops to 0 - deadlocking videodec_close()'s
+		// pthread_join() forever (ANR). Requiring run/!error unconditionally
+		// lets the close path fall through here with f==NULL, be caught by the
+		// "!f" check below, and unwind via the outer run-checked loop.
+		while (p->locked.run && !p->locked.error &&
+		       (has_state_l(p, THREAD_STATE_FLUSHING) || !(f = frame_q_get(&p->locked.dec_q)))) {
 			rm_state_l(p, THREAD_STATE_READING);
 			pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
 		}

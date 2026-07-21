@@ -80,6 +80,7 @@ struct avos_mp {
 
 	metadata_buffer_t *metadata_buffer;
 	pthread_mutex_t metadata_mtx;
+	pthread_mutex_t close_mtx;
 	void *media;
 };
 
@@ -483,6 +484,7 @@ static avos_mp_t *avos_mp_create(avos_mp_event_cb_t event_cb)
 	mp->event_cb = event_cb;
 	mp->metadata_buffer = avos_metadata_create();
 	pthread_mutex_init(&mp->metadata_mtx, NULL);
+	pthread_mutex_init(&mp->close_mtx, NULL);
 	pthread_mutex_init(&mp->async.mtx, NULL);
 	pthread_cond_init(&mp->async.cond, NULL);
 	pthread_create(&mp->async.thread, NULL, async_thread, mp);
@@ -505,6 +507,7 @@ static int avos_mp_destroy(avos_mp_t *mp)
 	if (mp->metadata_buffer)
 		avos_metadata_destroy(&mp->metadata_buffer);
 	pthread_mutex_destroy(&mp->metadata_mtx);
+	pthread_mutex_destroy(&mp->close_mtx);
 	if (mp->fd != -1)
 		close(mp->fd);
 	afree(mp);
@@ -700,16 +703,45 @@ static int avos_mp_close(avos_mp_t *mp)
 
 	MPLOG();
 
-	if (!mp->media)
-		return AVOS_ERR_OK;
+	// Serialize the bodies of concurrent avos_mp_close() calls for the SAME
+	// avos_mp_t (e.g. nativeStop() and the close() that avos_mp_destroy() itself
+	// performs, racing on the same mp): without this, two threads could both pass
+	// the "mp->media" check below and both end up calling stream_stop()/
+	// stream_close() on the same STREAM*, joining an already-reaped pthread_t a
+	// second time and hanging forever (ANR). This only works while the caller
+	// guarantees mp itself stays alive for the duration of the call: close_mtx
+	// lives inside mp, so it cannot serialize against a concurrent destroy of mp
+	// itself. That remains a known, separate JNI-level gap.
+	pthread_mutex_lock(&mp->close_mtx);
 
-	AVOS_MP_COMMON(abort, mp);
+	if (!mp->media) {
+		pthread_mutex_unlock(&mp->close_mtx);
+		return AVOS_ERR_OK;
+	}
+
+	// Do not use AVOS_MP_COMMON() here: it can return directly on failure, which
+	// would leave close_mtx locked forever. Dispatch explicitly instead so every
+	// path goes through the common unlock below.
+	if (mp->type != TYPE_VID && mp->type != TYPE_AUD) {
+		pthread_mutex_unlock(&mp->close_mtx);
+		return AVOS_ERR_CRITICAL;
+	}
+	if (mp->type == TYPE_VID) {
+		ret = avos_mp_video_abort(mp, (avos_mp_video_t *)mp->media);
+	} else {
+		ret = avos_mp_audio_abort(mp, (avos_mp_audio_t *)mp->media);
+	}
+	if (ret != AVOS_ERR_OK) {
+		pthread_mutex_unlock(&mp->close_mtx);
+		return AVOS_ERR;
+	}
 
 	async_cmd_add(mp, ASYNC_CMD_WAIT, 0);
 	async_cmd_wait(mp);
 
 	if (!mp->media) {
 		// close can be called more than 1 time (from close/destroy): not an error
+		pthread_mutex_unlock(&mp->close_mtx);
 		return AVOS_ERR_OK;
 	}
 
@@ -722,6 +754,7 @@ static int avos_mp_close(avos_mp_t *mp)
 	} else {
 		ret = AVOS_ERR;
 	}
+	pthread_mutex_unlock(&mp->close_mtx);
 	return ret;
 }
 

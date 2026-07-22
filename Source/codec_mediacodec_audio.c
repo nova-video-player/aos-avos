@@ -357,7 +357,6 @@ static int mediacodec_audio_codec_close( AUDIO_PROPERTIES *audio )
 static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *avos_frame,
 										  int *_decoded, int *_time )
 {
-	DBGS serprintf("mediacodec_audio_codec_decode in\n");
 	if( _decoded ) {
 		*_decoded = 0;
 	}
@@ -522,7 +521,6 @@ out:
 		}
 	}
 
-	DBGS serprintf("mediacodec_audio_codec_decode out\n");
 	return avos_frame->error ? 1 : 0;
 }
 

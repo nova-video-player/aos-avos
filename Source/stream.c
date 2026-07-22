@@ -634,16 +634,35 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed audio speed disabled %f\n", av_speed );
 		return 0;
 	}
-
-	int using_atempo = (s->audio_filter_atempo != NULL);
 	int ac3_recoding = 0;
 	int passthrough = 0;
 #ifdef CONFIG_AUDIO_AC3
 	ac3_recoding = libavos_get_ac3_recoding_enabled();
 #endif
-	if( s && s->audio_sink ) {
+	if( s->audio_sink ) {
 		passthrough = s->audio_sink->get_passthrough( s );
 	}
+
+	// MediaCodec is an asynchronous vendor decoder and is not guaranteed to
+	// deliver PCM faster than real time. A faster consumer can then starve
+	// AudioTrack, regardless of whether atempo or PlaybackParams changes the
+	// speed. Keep this decoder strictly at 1x; callers may choose ffmpeg if
+	// variable-speed playback is required.
+	if( !passthrough && !ac3_recoding &&
+		fabsf( av_speed - 1.0f ) > 1e-6f && s->audio_dec &&
+		s->audio_dec->name && !strcmp( s->audio_dec->name, "MediaCodec" ) ) {
+		float current_speed = audio_interface_get_audio_speed();
+		if( fabsf( current_speed - 1.0f ) > 1e-6f &&
+			!audio_interface_is_using_atempo() && s->audio_ctx ) {
+			audio_interface_change_audio_speed( s->audio_ctx, 1.0f );
+		}
+		audio_interface_set_audio_speed( 1.0f );
+		serprintf("stream:stream_set_av_speed rejected %.3fx: variable speed is disabled with MediaCodec audio\n",
+			av_speed);
+		return 1;
+	}
+
+	int using_atempo = (s->audio_filter_atempo != NULL);
 	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
 		using_atempo = 0;
 	}

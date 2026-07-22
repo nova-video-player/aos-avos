@@ -63,7 +63,8 @@ typedef enum sfdec_flags {
 enum {
 	SFDEC_READ_INVALID = 0,
 	SFDEC_READ_BUF  = 0x01,
-	SFDEC_READ_SIZE = 0x02
+	SFDEC_READ_SIZE = 0x02,
+	SFDEC_READ_EOS  = 0x04
 };
 
 typedef struct sfdec_read_out {

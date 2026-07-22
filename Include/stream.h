@@ -280,11 +280,18 @@ typedef int (*DEC_AUDIO_OPEN )  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_RE_OPEN)( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_CLOSE)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_DECODE) ( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int *time );
+typedef int (*DEC_AUDIO_DRAIN)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_FLUSH)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_DELAY)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_GET_RC) ( AUDIO_PROPERTIES *audio, STREAM_RC *rc );
 typedef int (*DEC_AUDIO_DELETE) ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_IS_SUPPORTED) ( AUDIO_PROPERTIES *audio );
+
+enum {
+	STREAM_DEC_AUDIO_OK = 0,
+	STREAM_DEC_AUDIO_ERROR = 1,
+	STREAM_DEC_AUDIO_DRAINED = 2,
+};
 
 typedef struct STREAM_DEC_AUDIO {
 	const char	  *name;
@@ -293,6 +300,7 @@ typedef struct STREAM_DEC_AUDIO {
 	DEC_AUDIO_OPEN    re_open;
 	DEC_AUDIO_CLOSE   close;
 	DEC_AUDIO_DECODE  decode;
+	DEC_AUDIO_DRAIN   drain;
 	DEC_AUDIO_FLUSH   flush;
 	DEC_AUDIO_DELAY   delay;
 	DEC_AUDIO_GET_RC  get_rc;
@@ -707,6 +715,7 @@ typedef struct STREAM {
 		
 	int 		error;
 	int		audio_parse_end;	// parser has parsed complete file
+	int		audio_decoder_draining;
 	int		video_parse_end;	// parser has parsed complete file
 	int		video_end;		// video is at the end of file
 	int		stream_end;		// stream is at it's end

@@ -618,6 +618,7 @@ void stream_audio_flush( STREAM *s )
 {
 	s->audio_buffer_size = 0;
 	s->audio_end = 0;
+	s->audio_decoder_draining = 0;
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
 	// Discard any stale frontier seed; the paths that empty the sink buffer
@@ -746,11 +747,11 @@ static int _decode( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *fra
 {
 	STREAM *s = a->ctx;
 	int time;
-	s->audio_dec->decode( s->audio, data, size, frame, decoded, &time);
+	int ret = s->audio_dec->decode( s->audio, data, size, frame, decoded, &time);
 
 	stream_audio_debug( s, frame->size / s->audio->bytesPerFrame, *decoded, time );
 	
-	return 0;
+	return ret;
 }
 
 static int _abort( STREAM *s )
@@ -1068,6 +1069,25 @@ decode_next_chunk:
 			if ( s->parser->get_audio_cdata( s, &s->audio_now, &cdata  ) ) {
 				if ( s->audio_parse_end ) {
 					if( s->audio_end == 0 ) {
+						int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+							s->audio_sink->get_passthrough( s ) : 0;
+						int decoder_active = s->audio_dec &&
+							(!passthrough || libavos_get_ac3_recoding_enabled());
+						if( decoder_active && s->audio_dec->drain ) {
+							if( !s->audio_decoder_draining ) {
+								if( s->audio_dec->drain( s->audio ) ) {
+									serprintf("audio decoder drain failed\r\n");
+									s->video_error = VE_ERROR;
+									s->video_error_qualifier = VEQ_AUDIO_PROFILE_AND_LEVEL_UNSUPPORTED;
+									return;
+								}
+								s->audio_decoder_draining = 1;
+serprintf("audio drain\r\n");
+							}
+							s->audio_buffer = NULL;
+							s->audio_buffer_size = 0;
+							break;
+						}
 serprintf("audio end\r\n");
 						s->audio_end = 1;
 						if( s->audio->format == WAVE_FORMAT_MPEGLAYER3 || s->audio->format == WAVE_FORMAT_AAC ) {
@@ -1289,7 +1309,17 @@ DBGS serprintf("~");
 
 			// we need to pass the STREAM to the _decode() call!
 			s->audio->ctx = s;
-			_decode( s->audio, s->audio_buffer, s->audio_buffer_size, &audio_frame, &decoded );
+			int decode_ret = _decode( s->audio, s->audio_buffer, s->audio_buffer_size, &audio_frame, &decoded );
+			if( decode_ret == STREAM_DEC_AUDIO_DRAINED ) {
+				s->audio_decoder_draining = 0;
+				s->audio_end = 1;
+serprintf("audio drain complete\r\n");
+				if( s->audio_sink ) {
+					_pcm_accum_flush_to_sink( s );
+					s->audio_sink->end( s );
+				}
+				return;
+			}
 		
 			// did the sample rate change?
 			if( !audio_frame.error && audio_frame.size && audio_frame.samplesPerSec && audio_frame.samplesPerSec != s->audio->samplesPerSec ) {
@@ -1336,8 +1366,10 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 #endif
 
 //serprintf("(dec %d | %d )", decoded, audio_frame.size );
-		s->audio_buffer      += decoded;
-		s->audio_buffer_size -= decoded;
+		if( decoded ) {
+			s->audio_buffer      += decoded;
+			s->audio_buffer_size -= decoded;
+		}
 
 		if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 			if( audio_frame.error ) {

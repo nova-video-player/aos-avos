@@ -258,6 +258,24 @@ static int dec_audio_flush(sfdec_priv_t *sfdec)
 
 static int dec_audio_stop_input(sfdec_priv_t *sfdec)
 {
+    ssize_t index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, 5000ll);
+    if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
+        return 1;
+    if (index < 0) {
+        LOG("dequeueInputBuffer for EOS failed: %zd", index);
+        return -1;
+    }
+
+    media_status_t err = AMediaCodec_queueInputBuffer(sfdec->mCodec,
+            index,
+            0,
+            0,
+            0,
+            AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+    if (err != AMEDIA_OK) {
+        LOG("queueInputBuffer EOS failed: %d", err);
+        return -1;
+    }
     return 0;
 }
 
@@ -276,6 +294,7 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
         index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, INT64_C(100));
 
         if (index >= 0) {
+            bool eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
             size_t out_size = 0;
             uint8_t *out = AMediaCodec_getOutputBuffer(sfdec->mCodec, index, &out_size);
             if (info.offset < 0 || info.size < 0 ||
@@ -290,6 +309,8 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
 
             if (info.size == 0) {
                 media_status_t err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, index, false);
+                if (eos)
+                    read_out->flag |= SFDEC_READ_EOS;
                 return err == AMEDIA_OK ? 0 : -1;
             }
 
@@ -304,6 +325,8 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
             read_out->buf.out = out + info.offset;
             read_out->buf.out_size = info.size;
             read_out->flag |= SFDEC_READ_BUF;
+            if (eos)
+                read_out->flag |= SFDEC_READ_EOS;
             read_out->channels = sfdec->channels;
             read_out->samplesPerSec = sfdec->samplesPerSec;
             read_out->bitRate = sfdec->bitRate;

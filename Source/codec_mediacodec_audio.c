@@ -63,6 +63,9 @@ typedef struct PRIV {
 	struct AVCodecContext avctx;
 	UCHAR *pcm_buffer;
 	size_t pcm_buffer_capacity;
+	int draining;
+	int input_eos_queued;
+	int output_eos_pending;
 } PRIV;
 
 static int mediacodec_audio_ensure_pcm_capacity( PRIV *p, size_t size )
@@ -269,15 +272,32 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 		return 1;
 	}
 	int t1 = time_update_time();
-	ssize_t accepted = dec_audio_send_input( p->dec_audio, data, size,
-		input_time, 0, 1 );
-	if( accepted < 0 || accepted > size ) {
-		serprintf("mediacodec_audio_codec_decode: invalid input consumption %zd/%d\n",
-			accepted, size);
-		goto out;
+	if( p->output_eos_pending ) {
+		p->output_eos_pending = 0;
+		avos_frame->error = 0;
+		return STREAM_DEC_AUDIO_DRAINED;
 	}
-	if( _decoded ) {
-		*_decoded = (int)accepted;
+
+	if( p->draining ) {
+		if( !p->input_eos_queued ) {
+			int eos_ret = dec_audio_stop_input( p->dec_audio );
+			if( eos_ret < 0 ) {
+				serprintf("mediacodec_audio_codec_decode: failed to queue input EOS\n");
+				goto out;
+			}
+			p->input_eos_queued = eos_ret == 0;
+		}
+	} else {
+		ssize_t accepted = dec_audio_send_input( p->dec_audio, data, size,
+			input_time, 0, 1 );
+		if( accepted < 0 || accepted > size ) {
+			serprintf("mediacodec_audio_codec_decode: invalid input consumption %zd/%d\n",
+				accepted, size);
+			goto out;
+		}
+		if( _decoded ) {
+			*_decoded = (int)accepted;
+		}
 	}
 
 	sfdec_read_out_t read_out = { 0 };
@@ -333,6 +353,9 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 		if( read_out.channelMask ) {
 			audio->channelMask = read_out.channelMask;
 		}
+		if( read_out.flag & SFDEC_READ_EOS ) {
+			p->output_eos_pending = 1;
+		}
 	} else {
 		// MediaCodec commonly accepts input before producing the first PCM frame.
 		avos_frame->format = WAVE_FORMAT_PCM;
@@ -340,6 +363,9 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 		avos_frame->samplesPerSec = audio->samplesPerSec;
 		avos_frame->bits = 16;
 		avos_frame->error = 0;
+		if( read_out.flag & SFDEC_READ_EOS ) {
+			return STREAM_DEC_AUDIO_DRAINED;
+		}
 	}
 
 out:
@@ -354,6 +380,18 @@ out:
 	return avos_frame->error ? 1 : 0;
 }
 
+static int mediacodec_audio_codec_drain( AUDIO_PROPERTIES *audio )
+{
+	PRIV *p = (PRIV *)audio->priv;
+	if( !p || !p->dec_audio ) {
+		return 1;
+	}
+	p->draining = 1;
+	p->input_eos_queued = 0;
+	p->output_eos_pending = 0;
+	return 0;
+}
+
 static int mediacodec_audio_codec_flush( AUDIO_PROPERTIES *audio )
 {
 	DBGS serprintf("mediacodec_flush in\n");
@@ -361,6 +399,9 @@ static int mediacodec_audio_codec_flush( AUDIO_PROPERTIES *audio )
 	if( !p || !p->dec_audio ) {
 		return 0;
 	}
+	p->draining = 0;
+	p->input_eos_queued = 0;
+	p->output_eos_pending = 0;
 	int ret = dec_audio_flush( p->dec_audio );
 	DBGS serprintf("mediacodec_flush out ret=%d\n", ret);
 	return ret;
@@ -454,6 +495,7 @@ static STREAM_DEC_AUDIO stream_dec_audio_mediacodec = {
 	.open = mediacodec_audio_codec_open,
 	.close = mediacodec_audio_codec_close,
 	.decode = mediacodec_audio_codec_decode,
+	.drain = mediacodec_audio_codec_drain,
 	.flush = mediacodec_audio_codec_flush,
 	.delay = mediacodec_audio_codec_delay,
 	.get_rc = mediacodec_audio_codec_get_rc,

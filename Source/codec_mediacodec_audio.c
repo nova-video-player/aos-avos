@@ -61,6 +61,13 @@ typedef struct PRIV {
 	struct dec_audio *dec_audio;
 	AVCodecParserContext *aparser;
 	struct AVCodecContext avctx;
+	int parser_codec_id;
+	int parser_drained;
+	int64_t parser_last_input_time;
+	UCHAR *access_unit_buffer;
+	size_t access_unit_capacity;
+	int access_unit_size;
+	int64_t access_unit_time;
 	UCHAR *pcm_buffer;
 	size_t pcm_buffer_capacity;
 	int draining;
@@ -83,6 +90,24 @@ static int mediacodec_audio_ensure_pcm_capacity( PRIV *p, size_t size )
 	return 0;
 }
 
+static int mediacodec_audio_ensure_access_unit_capacity( PRIV *p, size_t size )
+{
+	if( size > MEDIACODEC_AUDIO_MAX_INPUT_SIZE ) {
+		return 1;
+	}
+	if( size <= p->access_unit_capacity ) {
+		return 0;
+	}
+
+	UCHAR *buffer = (UCHAR *)arealloc( p->access_unit_buffer, size );
+	if( !buffer ) {
+		return 1;
+	}
+	p->access_unit_buffer = buffer;
+	p->access_unit_capacity = size;
+	return 0;
+}
+
 static const char *mediacodec_capability_name( int capability_bit )
 {
 	switch( capability_bit ) {
@@ -99,31 +124,107 @@ static const char *mediacodec_capability_name( int capability_bit )
 	}
 }
 
-static int wave2libav_codecid( int codecid )
+static int wave2parser_codecid( int format )
 {
-	switch( codecid ) {
-	case WAVE_FORMAT_AC3:
-		return AV_CODEC_ID_AC3;
-	case WAVE_FORMAT_EAC3:
-	case WAVE_FORMAT_E_AC3_JOC:
-		return AV_CODEC_ID_EAC3;
-	case WAVE_FORMAT_DTS_HD_MA:
-	case WAVE_FORMAT_DTS_HD:
-	case WAVE_FORMAT_DTS:
-		return AV_CODEC_ID_DTS;
+	switch( format ) {
 	case WAVE_FORMAT_MPEG:
 	case WAVE_FORMAT_MPEGLAYER3:
 		return AV_CODEC_ID_MP3;
-	case WAVE_FORMAT_TRUEHD:
-		return AV_CODEC_ID_TRUEHD;
-	case WAVE_FORMAT_AAC:
 	case WAVE_FORMAT_AAC_LATM:
-		return AV_CODEC_ID_AAC;
-	case WAVE_FORMAT_OPUS:
-		return AV_CODEC_ID_OPUS;
+		return AV_CODEC_ID_AAC_LATM;
+	case WAVE_FORMAT_AC3:
+		return AV_CODEC_ID_AC3;
+	case WAVE_FORMAT_DTS:
+		return AV_CODEC_ID_DTS;
 	default:
+		return AV_CODEC_ID_NONE;
+	}
+}
+
+static int mediacodec_audio_parser_reset( PRIV *p )
+{
+	if( p->aparser ) {
+		av_parser_close( p->aparser );
+		p->aparser = NULL;
+	}
+	memset( &p->avctx, 0, sizeof( p->avctx ) );
+	p->avctx.codec_type = AVMEDIA_TYPE_AUDIO;
+	p->avctx.codec_id = p->parser_codec_id;
+	p->parser_drained = 0;
+	p->parser_last_input_time = STREAM_NO_PTS_VALUE;
+	p->access_unit_size = 0;
+	p->access_unit_time = STREAM_NO_PTS_VALUE;
+	if( p->parser_codec_id == AV_CODEC_ID_NONE ) {
 		return 0;
 	}
+	p->aparser = av_parser_init( p->parser_codec_id );
+	return p->aparser ? 0 : 1;
+}
+
+static int mediacodec_audio_store_access_unit( PRIV *p, const UCHAR *data,
+	int size, int64_t fallback_time )
+{
+	if( !data || size <= 0 ||
+		mediacodec_audio_ensure_access_unit_capacity( p, (size_t)size ) ) {
+		return 1;
+	}
+	memcpy( p->access_unit_buffer, data, (size_t)size );
+	p->access_unit_size = size;
+	p->access_unit_time = p->aparser && p->aparser->pts != AV_NOPTS_VALUE ?
+		p->aparser->pts : fallback_time;
+	return 0;
+}
+
+static int mediacodec_audio_parse_input( PRIV *p, UCHAR *data, int size,
+	int64_t input_time, int *consumed )
+{
+	UCHAR *output = NULL;
+	int output_size = 0;
+	int64_t parser_time = input_time == STREAM_NO_PTS_VALUE ? AV_NOPTS_VALUE : input_time;
+	if( input_time != STREAM_NO_PTS_VALUE ) {
+		p->parser_last_input_time = input_time;
+	}
+	int parsed = av_parser_parse2( p->aparser, &p->avctx,
+		&output, &output_size, data, size,
+		parser_time, parser_time, 0 );
+	if( parsed < 0 || parsed > size ) {
+		return 1;
+	}
+	*consumed = parsed;
+	if( output_size > 0 && mediacodec_audio_store_access_unit( p, output,
+		output_size, p->parser_last_input_time ) ) {
+		return 1;
+	}
+	if( size > 0 && parsed == 0 && output_size == 0 ) {
+		serprintf("mediacodec_audio: parser made no progress on %d bytes\n", size);
+		return 1;
+	}
+	return 0;
+}
+
+static int mediacodec_audio_queue_pending_access_unit( PRIV *p, int *queued )
+{
+	*queued = 0;
+	if( p->access_unit_size <= 0 ) {
+		return 0;
+	}
+	ssize_t accepted = dec_audio_send_input( p->dec_audio,
+		p->access_unit_buffer, (size_t)p->access_unit_size,
+		p->access_unit_time, 0, 1 );
+	if( accepted < 0 || accepted > p->access_unit_size ) {
+		return 1;
+	}
+	if( accepted == 0 ) {
+		return 0;
+	}
+	if( accepted != p->access_unit_size ) {
+		serprintf("mediacodec_audio: partial access-unit queue %zd/%d\n",
+			accepted, p->access_unit_size);
+		return 1;
+	}
+	p->access_unit_size = 0;
+	*queued = 1;
+	return 0;
 }
 
 static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
@@ -136,10 +237,12 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 	}
 	audio->bitsPerSample = 16;
 
-	memset( &p->avctx, 0, sizeof( p->avctx ) );
-	int codecid = wave2libav_codecid( audio->format );
-	p->aparser = av_parser_init( codecid );
-	if( !p->aparser ) serprintf( "cannot open parser for %04X\r\n", codecid );
+	p->parser_codec_id = wave2parser_codecid( audio->format );
+	if( mediacodec_audio_parser_reset( p ) ) {
+		serprintf("mediacodec_audio_codec_open: cannot open parser codec=%d format=%04X\n",
+			p->parser_codec_id, audio->format);
+		return 1;
+	}
 
 	switch( audio->format ) {
 	case WAVE_FORMAT_MPEG:
@@ -217,6 +320,10 @@ static int mediacodec_audio_codec_delete( AUDIO_PROPERTIES *audio )
 		av_parser_close( p->aparser );
 		p->aparser = NULL;
 	}
+	afree( p->access_unit_buffer );
+	p->access_unit_buffer = NULL;
+	p->access_unit_capacity = 0;
+	p->access_unit_size = 0;
 	afree( p->pcm_buffer );
 	p->pcm_buffer = NULL;
 	p->pcm_buffer_capacity = 0;
@@ -278,7 +385,52 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 		return STREAM_DEC_AUDIO_DRAINED;
 	}
 
-	if( p->draining ) {
+	if( p->aparser ) {
+		int queued = 0;
+		if( mediacodec_audio_queue_pending_access_unit( p, &queued ) ) {
+			serprintf("mediacodec_audio_codec_decode: failed to queue parsed access unit\n");
+			goto out;
+		}
+
+		if( !p->draining && p->access_unit_size == 0 && size > 0 ) {
+			int consumed = 0;
+			if( mediacodec_audio_parse_input( p, data, size, input_time, &consumed ) ) {
+				serprintf("mediacodec_audio_codec_decode: compressed parser failed\n");
+				goto out;
+			}
+			if( _decoded ) {
+				*_decoded = consumed;
+			}
+			if( !queued && mediacodec_audio_queue_pending_access_unit( p, &queued ) ) {
+				serprintf("mediacodec_audio_codec_decode: failed to queue parsed access unit\n");
+				goto out;
+			}
+		} else if( p->draining && p->access_unit_size == 0 && !p->parser_drained ) {
+			int consumed = 0;
+			if( mediacodec_audio_parse_input( p, NULL, 0,
+				p->parser_last_input_time, &consumed ) ) {
+				serprintf("mediacodec_audio_codec_decode: parser drain failed\n");
+				goto out;
+			}
+			if( p->access_unit_size == 0 ) {
+				p->parser_drained = 1;
+			} else if( !queued &&
+				mediacodec_audio_queue_pending_access_unit( p, &queued ) ) {
+				serprintf("mediacodec_audio_codec_decode: failed to queue drained access unit\n");
+				goto out;
+			}
+		}
+
+		if( p->draining && p->parser_drained &&
+			p->access_unit_size == 0 && !queued && !p->input_eos_queued ) {
+			int eos_ret = dec_audio_stop_input( p->dec_audio );
+			if( eos_ret < 0 ) {
+				serprintf("mediacodec_audio_codec_decode: failed to queue input EOS\n");
+				goto out;
+			}
+			p->input_eos_queued = eos_ret == 0;
+		}
+	} else if( p->draining ) {
 		if( !p->input_eos_queued ) {
 			int eos_ret = dec_audio_stop_input( p->dec_audio );
 			if( eos_ret < 0 ) {
@@ -288,6 +440,11 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 			p->input_eos_queued = eos_ret == 0;
 		}
 	} else {
+		if( size > MEDIACODEC_AUDIO_MAX_INPUT_SIZE ) {
+			serprintf("mediacodec_audio_codec_decode: access unit too large %d/%d\n",
+				size, MEDIACODEC_AUDIO_MAX_INPUT_SIZE);
+			goto out;
+		}
 		ssize_t accepted = dec_audio_send_input( p->dec_audio, data, size,
 			input_time, 0, 1 );
 		if( accepted < 0 || accepted > size ) {
@@ -304,9 +461,7 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 	int ret = dec_audio_read( p->dec_audio, 0, &read_out );
 	if( ret < 0 ) {
 		serprintf("mediacodec_audio_codec_decode: output dequeue failed (%d)\n", ret);
-		if( _decoded ) {
-			*_decoded = 0;
-		}
+		// Input already queued to MediaCodec or retained by the parser remains consumed.
 		goto out;
 	}
 
@@ -319,27 +474,18 @@ static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, 
 			if( read_out.buf.sfbuf ) {
 				dec_audio_buf_release( p->dec_audio, read_out.buf.sfbuf );
 			}
-			if( _decoded ) {
-				*_decoded = 0;
-			}
 			goto out;
 		}
 		if( read_out.pcmEncoding != 2 ) {
 			serprintf("mediacodec_audio_codec_decode: unsupported PCM encoding %d\n",
 				read_out.pcmEncoding);
 			dec_audio_buf_release( p->dec_audio, read_out.buf.sfbuf );
-			if( _decoded ) {
-				*_decoded = 0;
-			}
 			goto out;
 		}
 
 		memcpy( p->pcm_buffer, read_out.buf.out, (size_t)read_out.buf.out_size );
 		if( dec_audio_buf_release( p->dec_audio, read_out.buf.sfbuf ) ) {
 			serprintf("mediacodec_audio_codec_decode: output release failed\n");
-			if( _decoded ) {
-				*_decoded = 0;
-			}
 			goto out;
 		}
 
@@ -389,6 +535,7 @@ static int mediacodec_audio_codec_drain( AUDIO_PROPERTIES *audio )
 	p->draining = 1;
 	p->input_eos_queued = 0;
 	p->output_eos_pending = 0;
+	p->parser_drained = 0;
 	return 0;
 }
 
@@ -402,8 +549,11 @@ static int mediacodec_audio_codec_flush( AUDIO_PROPERTIES *audio )
 	p->draining = 0;
 	p->input_eos_queued = 0;
 	p->output_eos_pending = 0;
-	int ret = dec_audio_flush( p->dec_audio );
-	DBGS serprintf("mediacodec_flush out ret=%d\n", ret);
+	int parser_ret = mediacodec_audio_parser_reset( p );
+	int codec_ret = dec_audio_flush( p->dec_audio );
+	int ret = parser_ret || codec_ret;
+	DBGS serprintf("mediacodec_flush out parser=%d codec=%d ret=%d\n",
+		parser_ret, codec_ret, ret);
 	return ret;
 }
 static int mediacodec_audio_codec_delay( AUDIO_PROPERTIES *audio ) { return 0; }

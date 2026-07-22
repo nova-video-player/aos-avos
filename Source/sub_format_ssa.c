@@ -40,6 +40,9 @@ typedef struct {
     ASS_Style_Backup *backups;
     int               num_backups;
     uint32_t          last_serial;
+
+    int               orig_playres_x;
+    int               orig_playres_y;
 } SSA_BACKEND;
 
 // Synchronizes Java UI changes safely without corrupting the original ASS track!
@@ -92,6 +95,11 @@ static void sync_styles(SSA_BACKEND *ctx) {
         ctx->num_backups = new_count;
     }
 
+    if (ctx->orig_playres_x == 0 && ctx->track->PlayResX > 0) {
+        ctx->orig_playres_x = ctx->track->PlayResX;
+        ctx->orig_playres_y = ctx->track->PlayResY;
+    }
+
     // 2. Restore everything to original ASS baseline first
     if (ctx->backups) {
         for (int i = 0; i < ctx->num_backups && i < ctx->track->n_styles; i++) {
@@ -108,6 +116,11 @@ static void sync_styles(SSA_BACKEND *ctx) {
             s->Shadow = ctx->backups[i].Shadow;
             s->MarginV = ctx->backups[i].MarginV;
         }
+
+        if (ctx->orig_playres_x > 0) {
+            ctx->track->PlayResX = ctx->orig_playres_x;
+            ctx->track->PlayResY = ctx->orig_playres_y;
+        }
     }
 
     // 3. Apply the Java Overrides!
@@ -119,9 +132,9 @@ static void sync_styles(SSA_BACKEND *ctx) {
             ASS_Style *style = &ctx->track->styles[i];
 
             if (force_all) {
+                float font_res_scale = (ctx->orig_playres_y > 0) ? ((float)ctx->orig_playres_y / 720.0f) : 1.0f;
                 if (u.font_size > 0) {
-                    float scale = u.font_scale > 0 ? u.font_scale : 1.0f;
-                    style->FontSize = u.font_size * scale;
+                    style->FontSize = u.font_size * font_res_scale;
                 }
                 if (u.font_family && u.font_family[0] != '\0') {
                     if (style->FontName) free(style->FontName);
@@ -144,7 +157,7 @@ static void sync_styles(SSA_BACKEND *ctx) {
                     style->BackColour = u.bg_color;
                     // Match OutlineColour to BackColour so the padding shares the exact alpha transparency
                     style->OutlineColour = u.bg_color;
-                    style->Outline = u.outline_width;
+                    style->Outline = u.outline_width * font_res_scale;
                     style->Shadow = 0;
 
                 } else if (u.bg_mode == 2) {
@@ -152,16 +165,16 @@ static void sync_styles(SSA_BACKEND *ctx) {
                     style->BorderStyle = 4;
                     style->OutlineColour = u.outline_color;
                     style->BackColour = u.bg_color;
-                    style->Outline = u.outline_width;
-                    style->Shadow = u.shadow_width; // Hijacked for Padding!
+                    style->Outline = u.outline_width * font_res_scale;
+                    style->Shadow = u.shadow_width * font_res_scale; // Hijacked for Padding!
 
                 } else {
                     // STANDARD OUTLINE + SHADOW
                     style->BorderStyle = 1;
                     style->OutlineColour = u.outline_color;
                     style->BackColour = u.shadow_color;
-                    style->Outline = u.outline_width;
-                    style->Shadow = u.shadow_width;
+                    style->Outline = u.outline_width * font_res_scale;
+                    style->Shadow = u.shadow_width * font_res_scale;
                 }
                 // Apply custom vertical offset only to bottom-aligned subtitles (numpad layout 1, 2, 3).
                 // MarginV is measured from the top for top-aligned styles (7/8/9) — applying it
@@ -183,9 +196,12 @@ static void sync_styles(SSA_BACKEND *ctx) {
 
 
             } else if (u.override_mode == 2) {
-                // SCALE ONLY MODE
+                // SCALE ONLY MODE: Divide resolution by scale to enlarge everything proportionally
                 if (u.font_scale > 0 && u.font_scale != 1.0f) {
-                    style->FontSize = style->FontSize * u.font_scale;
+                    if (ctx->orig_playres_x > 0 && ctx->orig_playres_y > 0) {
+                        ctx->track->PlayResX = (int)(ctx->orig_playres_x / u.font_scale);
+                        ctx->track->PlayResY = (int)(ctx->orig_playres_y / u.font_scale);
+                    }
                 }
             }
         }

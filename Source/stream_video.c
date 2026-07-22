@@ -4774,8 +4774,22 @@ static void _seek_init( STREAM *s )
 	// entry point all seek/restart paths funnel through (user seek via
 	// _stream_seek_real(), seek-loop, codec-error retry, and next-part
 	// restart further up in this file), so one call here covers all of them.
-	if( s->sub_engine )
+	if( s->sub_engine ) {
 		sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
+
+		// External text tracks (SRT/VTT/ASS) are bulk-fed into the engine ONCE
+		// at track open (stream_sub_ext_feed_engine(), gated by subtitle_frame
+		// being NULL in stream_subtitle.c) -- the flush above just wiped that
+		// same track's already-loaded events with nothing left to naturally
+		// refill them, since external text never receives further per-frame
+		// packets the way internal embedded text does. Set unconditionally
+		// here (not gated on checking the active track's format) to avoid
+		// duplicating the _is_ext_text() classification that already lives in
+		// stream_subtitle.c -- _get_next_ext_sub() is the only consumer of
+		// this flag and is never even called for internal tracks, so setting
+		// it when the active track isn't external text is a harmless no-op.
+		s->subtitle_ext_needs_refeed = 1;
+	}
 
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;

@@ -364,6 +364,7 @@ static void _get_next_ext_sub( STREAM *s, int time )
 				// Bulk-feed the full parsed cue list (or raw ASS buffer) right now.
 				// After this call the engine has everything — no per-frame polling needed.
 				stream_sub_ext_feed_engine( s );
+				s->subtitle_ext_needs_refeed = 0; // freshly fed, nothing pending
 			}
 			// No sub_dec for external text — engine owns the timeline.
 		}
@@ -376,6 +377,18 @@ static void _get_next_ext_sub( STREAM *s, int time )
 			stream_drop_subtitles( s );
 			return;
 		}
+	} else if( _is_ext_text(fmt) && s->subtitle_ext_needs_refeed && s->sub_engine ) {
+		// Track was already open before this seek -- the INIT block above did
+		// NOT run (subtitle_frame is still set from before), so nothing else
+		// would re-populate the engine after _seek_init()'s flush wiped its
+		// events. Re-run the same bulk-feed the INIT block uses, but do NOT
+		// call sub_engine_open_track() again: the libass track/renderer is
+		// still open and valid, only its already-fed events were cleared, so
+		// re-opening would just tear down and immediately recreate the exact
+		// same backend for no reason.
+DBG serprintf("_get_next_ext_sub: re-feeding external text track after seek\r\n");
+		stream_sub_ext_feed_engine( s );
+		s->subtitle_ext_needs_refeed = 0;
 	}
 
 	if( time == -1 ) return;

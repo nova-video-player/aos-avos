@@ -827,6 +827,18 @@ typedef struct STREAM {
 	int		subtitle_ratio_n;		// allow to scale sub timestamps with a given ratio
 	int		subtitle_ratio_d;
 	void		*subtitle_priv;		// private data for subtitles
+	// Set to 1 by _seek_init() (stream_video.c) whenever the active subtitle track is an
+	// external, bulk-fed-once text track (SRT/VTT/ASS -- see _is_ext_text() in
+	// stream_subtitle.c). sub_engine_flush() clears whatever cues/events the engine already
+	// has loaded on every seek, but external text tracks are only ever bulk-fed ONCE at track
+	// open (stream_sub_ext_feed_engine(), gated by subtitle_frame being NULL) -- a seek does
+	// NOT free subtitle_frame, so nothing would otherwise re-trigger that feed, leaving the
+	// engine permanently empty for that track post-seek. _get_next_ext_sub() checks this flag
+	// once the seek completes, re-feeds if set, then clears it. Internal embedded text tracks
+	// don't need this: they keep receiving fresh packets from the demuxer every frame via the
+	// per-frame block in _get_next_int_sub(), so a flush there is naturally refilled by the
+	// next packet with no separate re-feed step required.
+	int		subtitle_ext_needs_refeed;
 	
 	// current subtitle chunk
 	STREAM_CDATA	cdata_sub;

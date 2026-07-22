@@ -4,6 +4,17 @@
 
 This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a sink-side synchronization mechanism. In the AudioTrack PlaybackParams path, speed changes are applied seamlessly by retargeting the timeline mapping without a self-seek. (The atempo path may optionally use a frame-accurate seek; see the atempo architecture doc.)
 
+### MediaCodec Audio Exclusion
+
+This architecture does not apply when MediaCodec is the active audio decoder.
+AudioTrack PlaybackParams can consume PCM faster, but it cannot make an
+upstream vendor MediaCodec implementation decode faster. When that decoder
+remains near 1.0x, faster playback drains AudioTrack, stalls the heard clock,
+and can leave video waiting. AVOS therefore rejects every non-1.0 speed request
+while MediaCodec audio decoding is active. This restriction concerns
+MediaCodec audio decoding, not MediaCodec video presentation scheduling. See
+`doc/mediacodec_audio_decoder.md`.
+
 ## Time Domains
 
 There are three fundamental time domains in the implementation:

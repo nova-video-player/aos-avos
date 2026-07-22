@@ -9,6 +9,18 @@ AudioTrack PlaybackParams, the atempo filter is part of the steady PCM audio
 pipeline even at exactly 1.0x. Keeping the neutral filter hot avoids a pipeline
 discontinuity when the user changes speed while playback is running.
 
+### MediaCodec Audio Exclusion
+
+This architecture does not apply when MediaCodec is the active audio decoder.
+Although `atempo` runs in software after decoding, it still depends on the
+decoder supplying PCM fast enough for the requested rate. Some vendor
+MediaCodec audio implementations remain near 1.0x; at faster rates this starves
+`atempo` and AudioTrack, stalls the heard clock, and can leave video waiting.
+AVOS therefore rejects every non-1.0 speed request while MediaCodec audio
+decoding is active. This restriction concerns MediaCodec audio decoding, not
+MediaCodec video presentation scheduling. See
+`doc/mediacodec_audio_decoder.md`.
+
 ## Current State (2026-07-20)
 
 The current implementation uses the atempo path as a software speed backend with

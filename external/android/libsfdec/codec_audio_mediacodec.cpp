@@ -31,6 +31,8 @@ typedef struct dec_audio_mediacodec sfdec_priv_t;
 
 #define DBG if (0)
 
+#define PCM_ENCODING_16BIT 2
+
 #undef LOG
 #define LOG(fmt, ...) do { \
     printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); \
@@ -48,6 +50,11 @@ struct dec_audio_mediacodec
     int rotation;
     bool started;
     int flush;
+    int32_t channels;
+    int32_t samplesPerSec;
+    int32_t bitRate;
+    int32_t channelMask;
+    int32_t pcmEncoding;
 };
 
 struct sfbuf
@@ -68,22 +75,28 @@ static ssize_t dec_audio_send_input2(sfdec_priv_t *sfdec, void *data, size_t siz
 } while (0)
 #define CHECK_STATUS(err) CHECK((err) == AMEDIA_OK)
 
-static int init_renderer(sfdec_priv_t *sfdec)
+static int update_output_format(sfdec_priv_t *sfdec)
 {
-    media_status_t err;
-    int32_t width, height,channels,samplesPerSec;
     AMediaFormat *format = AMediaCodec_getOutputFormat(sfdec->mCodec);
+    if (format == NULL)
+        return -1;
 
-    if (format != NULL) {
-        if (AMediaFormat_getInt32(format, "width", &width)) {
-            LOG("width changed: %d -> %d", sfdec->width, width);
-            sfdec->width = width;
-        }
-        if (AMediaFormat_getInt32(format, "height", &height)) {
-            LOG("height changed: %d -> %d", sfdec->height, height);
-            sfdec->height = height;
-        }
-    }
+    int32_t value;
+    if (AMediaFormat_getInt32(format, "channel-count", &value) && value > 0)
+        sfdec->channels = value;
+    if (AMediaFormat_getInt32(format, "sample-rate", &value) && value > 0)
+        sfdec->samplesPerSec = value;
+    if (AMediaFormat_getInt32(format, "bitrate", &value) && value >= 0)
+        sfdec->bitRate = value;
+    if (AMediaFormat_getInt32(format, "channel-mask", &value) && value >= 0)
+        sfdec->channelMask = value;
+    if (AMediaFormat_getInt32(format, "pcm-encoding", &value))
+        sfdec->pcmEncoding = value;
+
+    LOG("output format: channels=%d rate=%d bitrate=%d channel-mask=0x%x pcm-encoding=%d",
+        sfdec->channels, sfdec->samplesPerSec, sfdec->bitRate,
+        sfdec->channelMask, sfdec->pcmEncoding);
+    AMediaFormat_delete(format);
 
     return 0;
 }
@@ -108,6 +121,11 @@ static sfdec_priv_t *dec_audio_init(sfdec_codec_t codec,
         return NULL;
 
     sfdec->mFormat = NULL;
+    sfdec->channels = channels;
+    sfdec->samplesPerSec = samplesPerSec;
+    sfdec->bitRate = 0;
+    sfdec->channelMask = 0;
+    sfdec->pcmEncoding = PCM_ENCODING_16BIT;
     sfdec->mCodec = AMediaCodec_createDecoderByType(mime_type);
     CHECK(sfdec->mCodec != NULL);
 
@@ -123,13 +141,14 @@ static sfdec_priv_t *dec_audio_init(sfdec_codec_t codec,
     AMediaFormat_setInt32(sfdec->mFormat, "sample-rate", samplesPerSec);
     AMediaFormat_setInt32(sfdec->mFormat, "channel-count", channels);
 
-   if ( extradata ) {
-    AMediaFormat_setBuffer(sfdec->mFormat, "csd-0", extradata, extradata_size);
-    if (codec == SFDEC_AUDIO_OPUS) {
-        AMediaFormat_setBuffer(sfdec->mFormat, "csd-1", &codec_delay, sizeof(codec_delay));
-	AMediaFormat_setBuffer(sfdec->mFormat, "csd-2", &seek_preroll, sizeof(seek_preroll));
-    	DBG LOG("(NdkMediaCodec): %s with extradata size %d", mime_type, extradata_size);
-	DBG LOG("(NdkMediaCodec): codec_delay %lld seek_preroll %lld", codec_delay, seek_preroll);
+    if (extradata) {
+        AMediaFormat_setBuffer(sfdec->mFormat, "csd-0", extradata, extradata_size);
+        if (codec == SFDEC_AUDIO_OPUS) {
+            AMediaFormat_setBuffer(sfdec->mFormat, "csd-1", &codec_delay, sizeof(codec_delay));
+            AMediaFormat_setBuffer(sfdec->mFormat, "csd-2", &seek_preroll, sizeof(seek_preroll));
+            DBG LOG("(NdkMediaCodec): %s with extradata size %zu", mime_type, extradata_size);
+            DBG LOG("(NdkMediaCodec): codec_delay %" PRId64 " seek_preroll %" PRId64,
+                    codec_delay, seek_preroll);
         }
     }
 
@@ -198,16 +217,25 @@ static ssize_t dec_audio_send_input2(sfdec_priv_t *sfdec, void *data, size_t siz
     sfdec->flush = 0;
 
     index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, wait ? 5000ll : 0);
-    if (index < 0)
+    if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
         return 0;
+    if (index < 0) {
+        LOG("dequeueInputBuffer failed: %zd", index);
+        return -1;
+    }
     buf = AMediaCodec_getInputBuffer(sfdec->mCodec, index, &bufsize);
 
-    if (size > bufsize)
-        size = bufsize;
+    if ((size > 0 && (data == NULL || buf == NULL)) || size > bufsize) {
+        LOG("input access unit does not fit: size=%zu capacity=%zu", size, bufsize);
+        AMediaCodec_queueInputBuffer(sfdec->mCodec, index, 0, 0, time_us, 0);
+        return -1;
+    }
 
-    memcpy(buf, data, size);
+    if (size > 0)
+        memcpy(buf, data, size);
 
-    DBG LOG("queueInputBuffer: index %d size %d time %lld flag %d\n", index, size, time_us, flag);
+    DBG LOG("queueInputBuffer: index %zd size %zu time %" PRId64 " flag %d\n",
+            index, size, time_us, flag);
     err = AMediaCodec_queueInputBuffer(sfdec->mCodec,
             index,
             0,
@@ -240,6 +268,7 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
     if (!read_out)
         return -1;
 
+    memset(read_out, 0, sizeof(*read_out));
     read_out->flag = SFDEC_READ_INVALID;
 
     for (;;) {
@@ -247,43 +276,49 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
         index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, INT64_C(100));
 
         if (index >= 0) {
-            sfbuf_t *sfdec_buf = (sfbuf_t*) calloc(1, sizeof(sfbuf_t));
-            if (sfdec_buf == NULL)
+            size_t out_size = 0;
+            uint8_t *out = AMediaCodec_getOutputBuffer(sfdec->mCodec, index, &out_size);
+            if (info.offset < 0 || info.size < 0 ||
+                (size_t)info.offset > out_size ||
+                (size_t)info.size > out_size - (size_t)info.offset ||
+                (info.size > 0 && out == NULL)) {
+                LOG("invalid output buffer: index=%zd capacity=%zu offset=%d size=%d",
+                    index, out_size, info.offset, info.size);
+                AMediaCodec_releaseOutputBuffer(sfdec->mCodec, index, false);
                 return -1;
-	    size_t out_size;
+            }
+
+            if (info.size == 0) {
+                media_status_t err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, index, false);
+                return err == AMEDIA_OK ? 0 : -1;
+            }
+
+            sfbuf_t *sfdec_buf = (sfbuf_t*) calloc(1, sizeof(sfbuf_t));
+            if (sfdec_buf == NULL) {
+                AMediaCodec_releaseOutputBuffer(sfdec->mCodec, index, false);
+                return -1;
+            }
             sfdec_buf->index = index;
             sfdec_buf->released = false;
 
-	    read_out->buf.out = AMediaCodec_getOutputBuffer(sfdec->mCodec,index, &out_size);
-	    
-	    DBG LOG("sfdec->mCodec %p, index %d size %u, info.size %d", sfdec->mCodec, index, out_size, info.size);
-	
-	    read_out->buf.out_size= info.size;
-	       
+            read_out->buf.out = out + info.offset;
+            read_out->buf.out_size = info.size;
             read_out->flag |= SFDEC_READ_BUF;
-	    int32_t channels,samplesPerSec,bitRate;
-	if(AMediaFormat_getInt32(AMediaCodec_getOutputFormat(sfdec->mCodec), "channel-count", &channels))
-	    read_out->channels = channels;
-	if(AMediaFormat_getInt32(AMediaCodec_getOutputFormat(sfdec->mCodec), "sample-rate", &samplesPerSec))
-	    read_out->samplesPerSec = samplesPerSec;
-	if(AMediaFormat_getInt32(AMediaCodec_getOutputFormat(sfdec->mCodec), "bitrate", &bitRate))
-	    read_out->bitRate = bitRate;
-	    DBG LOG("\n\rmediacodec_audio_codec_decode set ead_out->flag %d",read_out->flag);
+            read_out->channels = sfdec->channels;
+            read_out->samplesPerSec = sfdec->samplesPerSec;
+            read_out->bitRate = sfdec->bitRate;
+            read_out->channelMask = sfdec->channelMask;
+            read_out->pcmEncoding = sfdec->pcmEncoding;
             read_out->buf.sfbuf = sfdec_buf;
             read_out->buf.time_us = info.presentationTimeUs;
+            DBG LOG("sfdec->mCodec %p, index %zd size %zu, info.size %d",
+                    sfdec->mCodec, index, out_size, info.size);
             DBG LOG("buf: %zu / time: % " PRId64, index, info.presentationTimeUs);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
-	  
-            if (init_renderer(sfdec))
-                continue;
-            read_out->flag |= SFDEC_READ_SIZE;
-            read_out->size.width = sfdec->width;
-            read_out->size.height = sfdec->height;
-            read_out->size.interlaced = 0;
-	    
-            DBG LOG("INFO_FORMAT_CHANGED: %dx%d", sfdec->width, sfdec->height);
-            return 1;
+            if (update_output_format(sfdec))
+                return -1;
+            return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
             DBG LOG("INFO_OUTPUT_BUFFERS_CHANGED");
         } else if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
@@ -298,8 +333,8 @@ static int dec_audio_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *r
                 return -1;
             }
         } else {
-            LOG("mCodec->dequeueOutputBuffer returned: %X", index);
-            return 0;
+            LOG("mCodec->dequeueOutputBuffer returned: %zX", index);
+            return -1;
         }
     }
 }

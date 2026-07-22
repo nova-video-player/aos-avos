@@ -55,11 +55,30 @@ int acodecs_is_supported( int format, int is_video, int is_sw_allowed );
 #define MEDIACODEC_CAP_E_AC3_JOC       18
 #define MEDIACODEC_CAP_OPUS            20
 
+#define MEDIACODEC_AUDIO_MAX_INPUT_SIZE (512 * 1024)
+
 typedef struct PRIV {
 	struct dec_audio *dec_audio;
 	AVCodecParserContext *aparser;
 	struct AVCodecContext avctx;
+	UCHAR *pcm_buffer;
+	size_t pcm_buffer_capacity;
 } PRIV;
+
+static int mediacodec_audio_ensure_pcm_capacity( PRIV *p, size_t size )
+{
+	if( size <= p->pcm_buffer_capacity ) {
+		return 0;
+	}
+
+	UCHAR *buffer = (UCHAR *)arealloc( p->pcm_buffer, size );
+	if( !buffer ) {
+		return 1;
+	}
+	p->pcm_buffer = buffer;
+	p->pcm_buffer_capacity = size;
+	return 0;
+}
 
 static const char *mediacodec_capability_name( int capability_bit )
 {
@@ -164,12 +183,16 @@ static int mediacodec_audio_codec_open( AUDIO_PROPERTIES *audio )
 		extradata_size = audio->extraDataSize2;
 	}
 
-	DBGS serprintf("extraDataSize: %d, extraDataSize2 : %d, using %d\r\n", audio->extraDataSize, audio->extraDataSize2, extradata_size);
-	DBGS serprintf("codec_delay %lld seek_preroll %lld\n", audio->codec_delay, audio->seek_preroll);
+	DBGS serprintf("extraDataSize: %d, extraDataSize2: %d, using %zu\r\n",
+		audio->extraDataSize, audio->extraDataSize2, extradata_size);
+	DBGS serprintf("codec_delay %" PRIu64 " seek_preroll %" PRIu64 "\n",
+		(uint64_t)audio->codec_delay, (uint64_t)audio->seek_preroll);
 	DBG serprintf("mediacodec_audio_codec_open: format=%s sfdec_codec=%d channels=%d rate=%d extradata=%zu\n",
 		audio_get_format_name(audio), sfdec_codec, audio->channels, audio->samplesPerSec, extradata_size);
 
-	p->dec_audio = dec_audio_new( sfdec_codec, 0, 0, audio->samplesPerSec, audio->channels, audio->bitsPerSample, extradata, extradata_size, audio->codec_delay, audio->seek_preroll);
+	p->dec_audio = dec_audio_new( sfdec_codec, 0, MEDIACODEC_AUDIO_MAX_INPUT_SIZE,
+		audio->samplesPerSec, audio->channels, audio->bitsPerSample,
+		extradata, extradata_size, audio->codec_delay, audio->seek_preroll );
 	if(!p->dec_audio) {
 		DBG serprintf("mediacodec_audio_codec_open: dec_audio_new failed for format=%s\n", audio_get_format_name(audio));
 		return 1;
@@ -191,6 +214,9 @@ static int mediacodec_audio_codec_delete( AUDIO_PROPERTIES *audio )
 		av_parser_close( p->aparser );
 		p->aparser = NULL;
 	}
+	afree( p->pcm_buffer );
+	p->pcm_buffer = NULL;
+	p->pcm_buffer_capacity = 0;
 	free( p );
 	audio->priv = NULL;
 	return 0;
@@ -215,42 +241,117 @@ static int mediacodec_audio_codec_close( AUDIO_PROPERTIES *audio )
 	if( !p || !p->dec_audio ) {
 		return 0;
 	}
-	dec_audio_stop( p->dec_audio );
-
-	return 0;
+	return dec_audio_stop( p->dec_audio );
 }
 
 static int mediacodec_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *avos_frame,
 										  int *_decoded, int *_time )
 {
 	DBGS serprintf("mediacodec_audio_codec_decode in\n");
+	if( _decoded ) {
+		*_decoded = 0;
+	}
+	if( _time ) {
+		*_time = 0;
+	}
+	if( !avos_frame ) {
+		return 1;
+	}
+	int64_t input_time = avos_frame->time;
+	memset( avos_frame, 0, sizeof( *avos_frame ) );
+	avos_frame->error = STREAM_ERROR_FATAL;
+
+	if( !audio ) {
+		return 1;
+	}
 	PRIV *p = (PRIV *)audio->priv;
 	if( !p || !p->dec_audio ) {
 		return 1;
 	}
 	int t1 = time_update_time();
-	*_decoded = (int)dec_audio_send_input( p->dec_audio, data, size, (int64_t)avos_frame->time, 0, 1 );
-	sfdec_read_out_t read_out;
+	ssize_t accepted = dec_audio_send_input( p->dec_audio, data, size,
+		input_time, 0, 1 );
+	if( accepted < 0 || accepted > size ) {
+		serprintf("mediacodec_audio_codec_decode: invalid input consumption %zd/%d\n",
+			accepted, size);
+		goto out;
+	}
+	if( _decoded ) {
+		*_decoded = (int)accepted;
+	}
+
+	sfdec_read_out_t read_out = { 0 };
 	int ret = dec_audio_read( p->dec_audio, 0, &read_out );
+	if( ret < 0 ) {
+		serprintf("mediacodec_audio_codec_decode: output dequeue failed (%d)\n", ret);
+		if( _decoded ) {
+			*_decoded = 0;
+		}
+		goto out;
+	}
 
 	if( read_out.flag & SFDEC_READ_BUF ) {
-		avos_frame->data = read_out.buf.out;
+		if( !read_out.buf.sfbuf || !read_out.buf.out || read_out.buf.out_size <= 0 ||
+			read_out.channels <= 0 || read_out.samplesPerSec <= 0 ||
+			mediacodec_audio_ensure_pcm_capacity( p, (size_t)read_out.buf.out_size ) ) {
+			serprintf("mediacodec_audio_codec_decode: invalid output size=%d channels=%d rate=%d\n",
+				read_out.buf.out_size, read_out.channels, read_out.samplesPerSec);
+			if( read_out.buf.sfbuf ) {
+				dec_audio_buf_release( p->dec_audio, read_out.buf.sfbuf );
+			}
+			if( _decoded ) {
+				*_decoded = 0;
+			}
+			goto out;
+		}
+		if( read_out.pcmEncoding != 2 ) {
+			serprintf("mediacodec_audio_codec_decode: unsupported PCM encoding %d\n",
+				read_out.pcmEncoding);
+			dec_audio_buf_release( p->dec_audio, read_out.buf.sfbuf );
+			if( _decoded ) {
+				*_decoded = 0;
+			}
+			goto out;
+		}
+
+		memcpy( p->pcm_buffer, read_out.buf.out, (size_t)read_out.buf.out_size );
+		if( dec_audio_buf_release( p->dec_audio, read_out.buf.sfbuf ) ) {
+			serprintf("mediacodec_audio_codec_decode: output release failed\n");
+			if( _decoded ) {
+				*_decoded = 0;
+			}
+			goto out;
+		}
+
+		avos_frame->data = p->pcm_buffer;
 		avos_frame->size = read_out.buf.out_size;
 		avos_frame->channels = read_out.channels;
-		avos_frame->samplesPerSec = read_out.samplesPerSec / audio->channels * read_out.channels;
+		avos_frame->samplesPerSec = read_out.samplesPerSec;
 		avos_frame->format = WAVE_FORMAT_PCM;
 		avos_frame->error = 0;
 		avos_frame->bits = 16;
-		dec_audio_buf_render( p->dec_audio, read_out.buf.sfbuf, 0 );
+		if( read_out.channelMask ) {
+			audio->channelMask = read_out.channelMask;
+		}
+	} else {
+		// MediaCodec commonly accepts input before producing the first PCM frame.
+		avos_frame->format = WAVE_FORMAT_PCM;
+		avos_frame->channels = audio->channels;
+		avos_frame->samplesPerSec = audio->samplesPerSec;
+		avos_frame->bits = 16;
+		avos_frame->error = 0;
+	}
 
-	} else
-		avos_frame->error = 1;
-	int t2 = time_update_time();
-
-	*_time = t2 - t1;
+out:
+	{
+		int t2 = time_update_time();
+		if( _time ) {
+			*_time = t2 - t1;
+		}
+	}
 
 	DBGS serprintf("mediacodec_audio_codec_decode out\n");
-	return ret;
+	return avos_frame->error ? 1 : 0;
 }
 
 static int mediacodec_audio_codec_flush( AUDIO_PROPERTIES *audio )
@@ -260,10 +361,9 @@ static int mediacodec_audio_codec_flush( AUDIO_PROPERTIES *audio )
 	if( !p || !p->dec_audio ) {
 		return 0;
 	}
-	dec_audio_flush( p->dec_audio );
-
-	DBGS serprintf("mediacodec_flush out\n");
-	return 0;
+	int ret = dec_audio_flush( p->dec_audio );
+	DBGS serprintf("mediacodec_flush out ret=%d\n", ret);
+	return ret;
 }
 static int mediacodec_audio_codec_delay( AUDIO_PROPERTIES *audio ) { return 0; }
 static int mediacodec_audio_codec_get_rc( AUDIO_PROPERTIES *audio, STREAM_RC *rc )
@@ -277,6 +377,12 @@ static int mediacodec_audio_codec_is_supported( AUDIO_PROPERTIES *audio )
 {
 	int64_t capabilities = device_config_get_mediacodec_audio_capabilities();
 	int capability_bit = -1;
+
+	if( audio->request_channels > 0 && audio->request_channels != audio->channels ) {
+		DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s requires channel conversion %d->%d -> no\n",
+			audio_get_format_name(audio), audio->channels, audio->request_channels);
+		return 0;
+	}
 
 	switch( audio->format ) {
 	case WAVE_FORMAT_MPEG:
@@ -315,6 +421,10 @@ static int mediacodec_audio_codec_is_supported( AUDIO_PROPERTIES *audio )
 
 	if( capability_bit >= 0 && capabilities >= 0 ) {
 		int supported = (capabilities & ((int64_t)1 << capability_bit)) != 0;
+		if( audio->format == WAVE_FORMAT_E_AC3_JOC && !supported ) {
+			// The MediaCodec path opens the E-AC3 base decoder for JOC streams.
+			supported = (capabilities & ((int64_t)1 << MEDIACODEC_CAP_E_AC3)) != 0;
+		}
 		DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s capability=%s flags=0x%" PRIx64 " -> %s\n",
 			audio_get_format_name(audio),
 			mediacodec_capability_name(capability_bit),
@@ -326,6 +436,11 @@ static int mediacodec_audio_codec_is_supported( AUDIO_PROPERTIES *audio )
 	if( acodecs_is_supported( audio->format, 0, 1 ) ) {
 		DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s using legacy JNI capability probe -> yes\n",
 			audio_get_format_name(audio));
+		return 1;
+	}
+	if( audio->format == WAVE_FORMAT_E_AC3_JOC &&
+		acodecs_is_supported( WAVE_FORMAT_EAC3, 0, 1 ) ) {
+		DBGS serprintf("mediacodec_audio_codec_is_supported: JOC using legacy E-AC3 base capability -> yes\n");
 		return 1;
 	}
 	DBGS serprintf("mediacodec_audio_codec_is_supported: format=%s using legacy JNI capability probe -> no\n",

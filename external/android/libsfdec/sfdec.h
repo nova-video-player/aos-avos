@@ -77,6 +77,8 @@ typedef struct sfdec_read_out {
 	int32_t channels;
 	int32_t samplesPerSec;
 	int32_t bitRate;
+	int32_t channelMask;
+	int32_t pcmEncoding;
 	struct {
 		int32_t width;
 		int32_t height;

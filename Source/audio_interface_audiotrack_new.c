@@ -115,8 +115,9 @@ DBG	LOG();
 	return 0;
 }
 
-static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int bits, int format)
+static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int content_channels, int bits, int format)
 {
+	(void)content_channels;
 	uint32_t track_chanmask;
 	audio_format_t track_format;
 	int status;
@@ -254,13 +255,13 @@ ERR		LOG("audiotrack ctor failed (checked with stopped)");
 
 	if (failed && reinit) {
 		msec_sleep( 30 );
-		return audiotrack_set_output_params(at, rate, channels, bits, format);
+		return audiotrack_set_output_params(at, rate, channels, content_channels, bits, format);
 	}
 
 	//Retrying with flag direct
 	if(failed && !at->direct) {
 		at->direct = 1;
-		return audiotrack_set_output_params(at, rate, channels, bits, format);
+		return audiotrack_set_output_params(at, rate, channels, content_channels, bits, format);
 	}
 	if(failed)
 		return -1;
@@ -278,7 +279,8 @@ DBG	LOG("track created");
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
 	at->passthrough = passthrough;
-	audiotrack_set_output_params(at, at->rate, at->channel_count, (passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, at->format);
+	audiotrack_set_output_params(at, at->rate, at->channel_count, at->channel_count,
+		(passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, at->format);
 	return 0;
 }
 

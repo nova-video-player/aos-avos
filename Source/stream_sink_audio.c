@@ -46,13 +46,15 @@ static int _close( STREAM *s )
 static int start( STREAM *s )
 {
 	AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
+	int content_channels = sink->sourceChannels > 0 ? sink->sourceChannels : sink->channels;
 	int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	DBGS serprintf("stream_sink_audio_start: passthrough=%d sink_format=%04X sink_rate=%d sink_channels=%d sink_bits=%d source_rate=%d source_channels=%d source_bits=%d request_channels=%d\n",
 		passthrough, sink->format, sink->samplesPerSec, sink->channels,
 		sink->bitsPerSample, sink->sourceSamples, sink->sourceChannels,
 		sink->sourceBitsPerSample, sink->request_channels);
-	if( audio_interface_set_output_params( s->audio_ctx, sink->samplesPerSec, sink->channels, sink->bitsPerSample, sink->format ) ) {
+	if( audio_interface_set_output_params( s->audio_ctx, sink->samplesPerSec, sink->channels,
+		content_channels, sink->bitsPerSample, sink->format ) ) {
 serprintf("stream_sink_audio_start: cannot set params: fs %d  ch %d  bits %d\r\n", sink->samplesPerSec, sink->channels, sink->bitsPerSample );
 		return 1;
 	}

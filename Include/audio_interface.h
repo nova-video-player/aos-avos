@@ -45,7 +45,7 @@ typedef int (*audio_interface_impl_pause)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_unpause)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_can_write)(audio_ctx_t *ctx, int len);
 typedef int (*audio_interface_impl_write)(audio_ctx_t *ctx, unsigned char *data, int data_length);
-typedef int (*audio_interface_impl_set_output_params)(audio_ctx_t *ctx, int freq, int channels, int bits, int format);
+typedef int (*audio_interface_impl_set_output_params)(audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format);
 typedef int (*audio_interface_impl_get_delay)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_get_latency)(audio_ctx_t *ctx);
 typedef int (*audio_interface_impl_get_fixed_latency)(audio_ctx_t *ctx);
@@ -163,7 +163,7 @@ int audio_interface_pause(audio_ctx_t *ctx);
 int audio_interface_unpause(audio_ctx_t *ctx);
 int audio_interface_can_write(audio_ctx_t *ctx, int len);
 int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length);
-int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format);
+int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format);
 int audio_interface_get_delay(audio_ctx_t *ctx);
 int audio_interface_get_latency(audio_ctx_t *ctx);
 // Fixed downstream portion of the selected latency, excluding sink buffer capacity.

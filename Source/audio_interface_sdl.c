@@ -232,8 +232,9 @@ static int _get_bytes_per_sample( SDL_AudioFormat fmt )
 	}
 }
 
-static int sdl_set_output_params( audio_ctx_t *ctx, int freq, int channels, int bits, int format )
+static int sdl_set_output_params( audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format )
 {
+	(void)content_channels;
 	struct audio_ctx *c = (struct audio_ctx *)ctx;
 	SDL_AudioSpec desired, obtained;
 	SDL_AudioFormat sdl_fmt;

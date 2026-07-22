@@ -93,6 +93,8 @@ struct audio_ctx {
 	int frame_count;
 	size_t frame_size;
 	int channel_count;
+	int logical_channel_count; // synthetic PCM-equivalent geometry used by compressed timing
+	int content_channel_count; // source layout advertised for lossless compressed formats
 	uint32_t latency;           // scheduler-safe latency (= app buffer geometry)
 	uint32_t track_latency;     // diagnostic: AudioTrack.getLatency() (may include HAL/platform)
 	uint32_t system_latency;    // diagnostic: AudioSystem.getOutputLatency()
@@ -775,7 +777,7 @@ static uint32_t audiotrack_default_channel_mask(int channels)
 	}
 }
 
-static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int bits, int format)
+static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int content_channels, int bits, int format)
 {
 	uint32_t track_chanmask;
 	audio_format_t track_format;
@@ -786,6 +788,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int prev_applied_passthrough = at->applied_passthrough;
 	int prev_applied_spatialization_behavior = at->applied_spatialization_behavior;
 	size_t prev_frame_size = at->frame_size;
+	if (content_channels <= 0) {
+		content_channels = channels;
+	} else if (content_channels > 8) {
+		content_channels = 8;
+	}
 
 	float as = get_effective_audio_speed();
 	int is_audio_speed_enabled = audio_interface_is_audio_speed_enabled();
@@ -817,6 +824,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			requested_passthrough = 2;
 		}
 		channels = 2;  // IEC/codec-specific container is stereo for compressed payload
+		content_channels = 2;
 		// Latch the recode output layout published by the encoder filter (which opens
 		// before this sink is configured) into this context, so a later overlapping
 		// playback that changes the process-global cannot alter this AudioTrack's
@@ -828,9 +836,9 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	}
 	at->passthrough = requested_passthrough;
 
-	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
-	DBG LOG( "audiotrack_set_output_params: enter req_rate=%d req_channels=%d req_bits=%d req_format=%04X passthrough=%d using_atempo=%d speed=%.3f init=%d prev_rate=%d prev_channels=%d prev_format=%04X prev_passthrough=%d prev_frame_size=%zu",
-		rate, channels, bits, format, at->passthrough, using_atempo, as, at->init,
+	DBG LOG( "rate %d, channels %d, content_channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, content_channels, bits, format, at->passthrough, as );
+	DBG LOG( "audiotrack_set_output_params: enter req_rate=%d logical_channels=%d content_channels=%d req_bits=%d req_format=%04X passthrough=%d using_atempo=%d speed=%.3f init=%d prev_rate=%d prev_channels=%d prev_format=%04X prev_passthrough=%d prev_frame_size=%zu",
+		rate, channels, content_channels, bits, format, at->passthrough, using_atempo, as, at->init,
 		prev_rate, prev_channels, prev_format, prev_applied_passthrough, prev_frame_size );
 
 	attach_thread( at );
@@ -839,6 +847,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int output_channels = channels;
 	int retry_rate = rate;
 	int retry_channels = channels;
+	int retry_content_channels = content_channels;
 	int retry_bits = bits;
 	int retry_format = format;
 	track_chanmask = audiotrack_default_channel_mask(output_channels);
@@ -913,8 +922,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				} else {
 					track_format = device_get_android_api() >= 34 ? 29 : 8; // Try best DTS-HD mode when caps are missing/unknown.
 				}
-				if (track_format != 7 && channels > 2) {
-					output_channels = channels > 8 ? 8 : channels;
+				if (track_format != 7 && content_channels > 2) {
+					output_channels = content_channels;
 					track_chanmask = audiotrack_default_channel_mask(output_channels);
 					if (!track_chanmask) {
 						track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
@@ -933,23 +942,16 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				} else {
 					track_format = 8; // Try DTS-HD when caps are missing/unknown; creation fallback remains below.
 				}
-				if (track_format == 8 && channels > 2) {
-					output_channels = channels > 8 ? 8 : channels;
-					track_chanmask = audiotrack_default_channel_mask(output_channels);
-					if (!track_chanmask) {
-						track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-						output_channels = 2;
-					}
-				} else {
-					track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-					output_channels = 2;
-				}
+				// DTS-HD HRA uses the stereo codec-specific transport layout. Only
+				// DTS-HD MA carries its source channel layout to AudioTrack.
+				track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
+				output_channels = 2;
 				break;
 			case WAVE_FORMAT_TRUEHD:
 				track_format = 14; // AudioFormat.ENCODING_DOLBY_TRUEHD
-				if (device_get_android_api() >= 25 && channels > 2 &&
+				if (device_get_android_api() >= 25 && content_channels > 2 &&
 				    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_DOLBY_TRUEHD)) {
-					output_channels = channels > 8 ? 8 : channels;
+					output_channels = content_channels;
 					track_chanmask = audiotrack_default_channel_mask(output_channels);
 					if (!track_chanmask) {
 						track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
@@ -966,8 +968,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				// Fallback to IEC61937 for unknown formats
 				track_format = 13; // AudioFormat.ENCODING_IEC61937
 		}
-		DBG LOG("Mode 2: codec-specific encoding=%d for format=%04X, channels=%d, rate=%d",
-			track_format, at->format, output_channels, rate);
+		DBG LOG("Mode 2: codec-specific encoding=%d for format=%04X, logical_channels=%d content_channels=%d output_channels=%d rate=%d",
+			track_format, at->format, channels, content_channels, output_channels, rate);
 	} else if(at->passthrough == 1 && device_get_android_api() >= 24 && get_hdmi_supports_iec()) {
         track_format = 13; // AudioFormat.ENCODING_IEC61937
         switch(at->format) {
@@ -1034,14 +1036,17 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	audio_rate = rate;
 	at->rate = rate;
 	at->channel_count = output_channels;
+	at->logical_channel_count = channels;
+	at->content_channel_count = content_channels;
 	at->frame_size = frame_size;
 	at->mode2_latency_bytes_accum = 0;
 	at->mode2_latency_samples_accum = 0;
 	at->mode2_latency_corrected = 0;
 	at->mode2_latency_correction_delta_ms = 0;
 	channels = output_channels;
-	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
-		rate, output_channels, frame_size, track_format, track_chanmask, same_config, at->passthrough);
+	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d logical_channels=%d content_channels=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
+		rate, at->logical_channel_count, at->content_channel_count, output_channels,
+		frame_size, track_format, track_chanmask, same_config, at->passthrough);
 
 	if (same_config) {
 		DBG LOG("audiotrack_set_output_params: reusing existing track (rate=%d ch=%d fmt=%d passthrough=%d speed=%.3f using_atempo=%d)",
@@ -1391,28 +1396,29 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			if (at->format == WAVE_FORMAT_AC3 && track_format == 5 &&
 			    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3)) {
 				DBG LOG("audiotrack_set_output_params: AC3 AudioTrack failed, retrying as EAC3 compatibility layer");
-				return audiotrack_set_output_params(at, rate, 2, 16, WAVE_FORMAT_EAC3);
+				return audiotrack_set_output_params(at, rate, 2, 2, 16, WAVE_FORMAT_EAC3);
 			}
 			// If DTS HD failed, fallback to DTS for DTS core mode
 			if ((at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) &&
 			    track_format != 7 && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
 				DBG LOG("audiotrack_set_output_params: DTS-HD multichannel AudioTrack failed, retrying with stereo channel mask");
-				return audiotrack_set_output_params(at, rate, 2, bits, at->format);
+				return audiotrack_set_output_params(at, rate, retry_channels, 2, bits, at->format);
 			}
 			if (at->format == WAVE_FORMAT_DTS_HD_MA && track_format == 29) {
 				DBG LOG("audiotrack_set_output_params: DTS-HD-MA AudioTrack failed, retrying as generic DTS-HD");
-				return audiotrack_set_output_params(at, rate, channels, bits, WAVE_FORMAT_DTS_HD);
+				return audiotrack_set_output_params(at, rate, retry_channels,
+					retry_content_channels, bits, WAVE_FORMAT_DTS_HD);
 			}
 			if (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) {
-				return audiotrack_set_output_params(at, 48000, 2, 16, WAVE_FORMAT_DTS);
+				return audiotrack_set_output_params(at, 48000, 2, 2, 16, WAVE_FORMAT_DTS);
 			}
 			if (at->format == WAVE_FORMAT_TRUEHD && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
 				DBG LOG("audiotrack_set_output_params: TrueHD multichannel AudioTrack failed, retrying with stereo channel mask");
-				return audiotrack_set_output_params(at, rate, 2, bits, WAVE_FORMAT_TRUEHD);
+				return audiotrack_set_output_params(at, rate, retry_channels, 2, bits, WAVE_FORMAT_TRUEHD);
 			}
 			if (at->format == WAVE_FORMAT_E_AC3_JOC && track_format == AUDIO_FORMAT_ENCODING_E_AC3_JOC) {
 				DBG LOG("audiotrack_set_output_params: EAC3_JOC AudioTrack failed, retrying as EAC3 base layer");
-				return audiotrack_set_output_params(at, rate, 2, 16, WAVE_FORMAT_EAC3);
+				return audiotrack_set_output_params(at, rate, 2, 2, 16, WAVE_FORMAT_EAC3);
 			}
 			msec_sleep(100); // give AudioFlinger more time to recover before re-entering
 		} else {
@@ -1425,9 +1431,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			int actual_format = call_int_method(at, "getAudioFormat", "()I");
 			int actual_chmask = call_int_method(at, "getChannelConfiguration", "()I");
 			int actual_rate = call_int_method(at, "getSampleRate", "()I");
-			DBG2 LOG("audiotrack_set_output_params: actual AudioTrack format=%d chmask=0x%x rate=%d (requested format=%d chmask=0x%x passthrough=%d channels=%d)",
+			DBG2 LOG("audiotrack_set_output_params: actual AudioTrack format=%d chmask=0x%x rate=%d (requested format=%d chmask=0x%x passthrough=%d logical_channels=%d content_channels=%d output_channels=%d)",
 				actual_format, actual_chmask, actual_rate,
-				track_format, track_chanmask, at->passthrough, channels);
+				track_format, track_chanmask, at->passthrough,
+				at->logical_channel_count, at->content_channel_count, at->channel_count);
 		}
 
 		//frame_size reported can be false for compressed formats
@@ -1439,7 +1446,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if (failed && reinit) {
 		msec_sleep( 100 );
 		ERR LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
-		return audiotrack_set_output_params(at, retry_rate, retry_channels, retry_bits, retry_format);
+		return audiotrack_set_output_params(at, retry_rate, retry_channels,
+			retry_content_channels, retry_bits, retry_format);
 	}
 
 	if(failed) {
@@ -1517,8 +1525,10 @@ DBG		LOG("audiotrack_set_passthrough: recreating track for error recovery (passt
 		// Choose appropriate format for recovery
 		int recovery_format = at->format;
 
-		return audiotrack_set_output_params(at, at->rate, at->channel_count,
-			(passthrough == 2) ? 16 : at->frame_size * 8 / at->channel_count, recovery_format);
+		return audiotrack_set_output_params(at, at->rate, at->logical_channel_count,
+			at->content_channel_count,
+			(passthrough == 2) ? 16 : at->frame_size * 8 / at->logical_channel_count,
+			recovery_format);
 	}
 
 	return 0;

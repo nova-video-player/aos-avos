@@ -187,9 +187,9 @@ int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length
 	return impl->write(ctx, data, data_length);
 }
 
-int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format)
+int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format)
 {
-	return impl->set_output_params(ctx, freq, channels, bits, format);
+	return impl->set_output_params(ctx, freq, channels, content_channels, bits, format);
 }
 
 int audio_interface_get_delay(audio_ctx_t *ctx)

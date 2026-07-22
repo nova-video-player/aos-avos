@@ -317,9 +317,10 @@ int audio_interface_write(void *ctx, unsigned char *data, int data_length)
 	return 0;
 }
 
-int audio_interface_set_output_params(void *ctx, int freq, int channels, int bits, int format )
+int audio_interface_set_output_params(void *ctx, int freq, int channels, int content_channels, int bits, int format )
 {
 	struct audio_interface_tinyalsa *tinyalsa = ctx;
+	(void)content_channels;
 	struct pcm_config *config = &tinyalsa->config;
 DBG serprintf( "TINYALSA: audio_interface_set_output_params\n");
 

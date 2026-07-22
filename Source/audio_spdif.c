@@ -711,8 +711,9 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 		audio->bytesPerFrame = audio->channels * audio->bitsPerSample / 8;
 		audio->bytesPerSec = audio->samplesPerSec * audio->bytesPerFrame;
 	} else if (passthrough_on == 2) {
-		// Mode 2: Keep content sample rate for timing, but match channel/bit-depth to AudioTrack
-		// Android handles the actual container format when using codec-specific encodings
+		// Mode 2 uses synthetic stereo PCM geometry for compressed timing and byte
+		// accounting. sourceChannels retains the content layout that AudioTrack may
+		// advertise separately for DTS-HD MA and TrueHD.
 		audio->bitsPerSample = 16;
 		audio->channels = 2;
 		// Keep original samplesPerSec from demuxer (typically 48kHz for AC3/EAC3/DTS content)

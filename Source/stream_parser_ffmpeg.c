@@ -1737,7 +1737,13 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 	// sub_engine_feed(..., pts_ms, duration_ms) (see stream_subtitle.c's fast lane). Routing
 	// SUB_FORMAT_TEXT through msk_fixup_srt() here would prepend a bogus timestamp string
 	// that libass would render as literal garbage text at the start of every line.
-	if( s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT ) {
+	if( s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT ||
+	    s->subtitle->format == SUB_FORMAT_MOV_TEXT || s->subtitle->format == SUB_FORMAT_WEBVTT ) {
+		// mov_text/webvtt (ffdec-text, CASE 2) need this too: their ffmpeg subtitle
+		// decoders (tx3g / webvtt) do not populate AVSubtitle.start_display_time/
+		// end_display_time (both come back 0 -- see codec_ffsub.c's DBGS log), so
+		// codec_ffsub.c's _decode() has no other source for the real cue duration.
+		// Without this prefix every decoded cue is stuck at frame->duration = -1.
 		memcpy(sub_buffer->data, &duration_ts, sizeof(int));
 		memcpy(sub_buffer->data + sizeof(int), packet->data, packet->size);
 		cdata->size = packet->size + sizeof(int);

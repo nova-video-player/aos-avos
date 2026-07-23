@@ -117,7 +117,7 @@ static int _close( STREAM_DEC_SUB *dec )
 		DBGS serprintf("ffsub: Freeing context %p\n", self->avcontext);
 		avcodec_free_context(&self->avcontext);
 	}
-	
+
 	dec->is_open = 0;
  	return 0;
 }
@@ -138,6 +138,27 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	frame->time = time;
 	frame->duration = -1;
 
+    // Fix: Explicitly clear the buffer to prevent ghosting of old text
+    // when a container sends an empty clear-screen packet.
+    if (frame->data[0]) {
+        frame->data[0][0] = '\0';
+    }
+
+	// mov_text/webvtt packets carry a 4-byte little-endian duration prepended by
+	// stream_parser_ffmpeg.c's _get_subtitle_cdata() (same trick already used for
+	// raw SSA/TEXT passthrough), because AVSubtitle.start_display_time/
+	// end_display_time always come back 0 from these two ffmpeg decoders -- there
+	// is no other source for the real per-cue duration. Strip it before handing
+	// the payload to avcodec_decode_subtitle2().
+	int packet_duration = -1;
+	if ((self->base._subtitle.format == SUB_FORMAT_MOV_TEXT ||
+	     self->base._subtitle.format == SUB_FORMAT_WEBVTT) &&
+	    size >= (int)sizeof(int)) {
+		packet_duration = *(int*)data;
+		data += sizeof(int);
+		size -= sizeof(int);
+	}
+
 	DBGS serprintf("codec_ffsub: frame width=%d, height=%d, size=%d\n", frame->width, frame->height, frame->size);
 
 	AVPacket *avpkt = av_packet_alloc();
@@ -146,7 +167,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		return 1;
 	}
 
-	char *avdata = av_malloc(size);
+	// Fix: Allocate AV_INPUT_BUFFER_PADDING_SIZE to prevent the webvtt string
+    // parser from reading uninitialized heap memory and outputting garbage text.
+	char *avdata = av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE);
 	if (!avdata) {
 		serprintf("codec_ffsub: Failed to allocate AVPacket data\n");
 		av_packet_free(&avpkt);
@@ -154,10 +177,19 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	memcpy(avdata, data, size);
+	memset(avdata + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 	av_packet_from_data(avpkt, avdata, size);
 	DBGS serprintf("codec_ffsub: avpkt->pts=%d, avpkt->dts=%d overridden by time=%d\n", avpkt->pts, avpkt->dts, time);
 	avpkt->pts = time;
 	avpkt->dts = time;
+	// Mirror mpv's sub/lavc_conv.c (mp_set_av_packet): hand the real packet
+	// duration to ffmpeg via avpkt->duration BEFORE decode, not just read it
+	// out afterwards. This is what lets avcodec_decode_subtitle2() populate
+	// AVSubtitle.end_display_time correctly for mov_text/webvtt -- without
+	// it, avpkt->duration is left unset (0) and end_display_time comes back 0.
+	if (packet_duration >= 0) {
+		avpkt->duration = packet_duration;
+	}
 
 	int got_frame;
 	AVSubtitle sub;
@@ -247,8 +279,12 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			// Note that external srt are handled directly by Android and not by codec_ffsub
 			frame->time = sub.pts + sub.start_display_time;
 			frame->duration = sub.end_display_time - sub.start_display_time;
-			// revert to data parsing to get start and end time if decoder fails to provide start_display_time and end_display_time
-			if (sub.start_display_time == 0 && sub.end_display_time == 0) {
+			// sub.start_display_time/end_display_time are always 0 for mov_text/webvtt --
+			// prefer the duration that was prepended to the packet by the demuxer.
+			if (packet_duration >= 0) {
+				frame->duration = packet_duration;
+			} else if (sub.start_display_time == 0 && sub.end_display_time == 0) {
+				// legacy fallback for callers that never had a duration prefix
 				int start, end;
 				if(sscanf( data, "%d:%d,", &start, &end ) == 2) {
 					frame->time = start;
@@ -283,7 +319,16 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 				if (pos) pos++;
 			}
 			int found_timing = 0;
-			if (pos != NULL && sscanf(pos, "%d:%d,", &start, &end) == 2) {
+			if (packet_duration >= 0) {
+				// Authoritative: duration prepended by the demuxer from the real
+				// packet duration. frame->time was already set from `time` above
+				// this loop (the pts passed into _decode()), which is correct --
+				// only duration was ever missing. Do NOT set found_timing here:
+				// that flag also triggers an extra comma-skip meant to consume an
+				// inline "start:end," segment, which isn't present at `pos` in
+				// this case -- pos already points at the text after skipCommas.
+				frame->duration = packet_duration;
+			} else if (pos != NULL && sscanf(pos, "%d:%d,", &start, &end) == 2) {
 				frame->time = start;
 				frame->duration = end - start;
 				found_timing = 1;
@@ -296,8 +341,10 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 					}
 				}
 			}
-			// Continue skipping to the 9th comma to reach the text content only if timing information has been found
-			// otherwise need to not skip an additional comma
+			// Continue skipping to the 9th comma to reach the text content only if an
+			// inline "start:end," segment was actually found and consumed above --
+			// not when duration came from the packet_duration prefix, since in that
+			// case pos already points straight at the text.
 			if (pos != NULL && found_timing) {
 				pos = strchr(pos, ',');
 				if (pos) pos++;
@@ -458,9 +505,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 
 static int _flush( STREAM_DEC_SUB *dec )
-{	
+{
 	return 0;
-} 
+}
 
 static int _destroy( STREAM_DEC_SUB *dec )
 {
@@ -468,7 +515,7 @@ static int _destroy( STREAM_DEC_SUB *dec )
 		afree( dec );
 	}
 	return 0;
-} 
+}
 
 static STREAM_DEC_SUB *_new_dec( void )
 {
@@ -488,7 +535,7 @@ static STREAM_DEC_SUB *_new_dec( void )
 	dec->close   = _close;
 	dec->decode  = _decode;
 	dec->flush   = _flush;
-	
+
 	return dec;
 }
 

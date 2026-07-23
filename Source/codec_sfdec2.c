@@ -157,6 +157,8 @@ typedef struct priv {
 	int pending_seek_reanchor;
 	int last_seek_epoch;
 	int last_audio_resume_pending;
+	int snap_origin_time;
+	int snap_origin_epoch;
 	STREAM_DEC_VIDEO *dec;
 	STREAM *s;
 	int64_t render_offset_ns;
@@ -188,23 +190,32 @@ static inline INT64 _get_monotonic_ns(void)
 	return (INT64)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
 }
 
-static INT64 _snap_timestamp_ns(priv_t *p, int frame_time)
+// Caller holds p->locked.mtx; snapping owns epoch-scoped phase state.
+static INT64 _snap_timestamp_ns(priv_t *p, int frame_time, int frame_epoch)
 {
 	if( frame_time < 0 )
 		return 0;
+	if( p->snap_origin_epoch != frame_epoch ) {
+		p->snap_origin_time = frame_time;
+		p->snap_origin_epoch = frame_epoch;
+		DBGSI serprintf("android_sync: snap origin frame=%d epoch=%d\n",
+			frame_time, frame_epoch);
+	}
 	INT64 timestamp_us = (INT64)frame_time * 1000LL;
 	if( p->video_frame_rate_den && p->playback_speed_den ) {
 		INT64 rendering_num = (INT64)p->video_frame_rate_num * p->playback_speed_num;
 		INT64 rendering_den = (INT64)p->video_frame_rate_den * p->playback_speed_den;
 		if( rendering_num && rendering_den ) {
+			// Preserve the stream's timestamp phase. Absolute snapping around zero
+			// aliases a half-frame stream offset into duplicate/skipped deadlines.
 			double frame_length = (double)rendering_num / (double)rendering_den;
-			double tus = (double)timestamp_us;
-			double half_frame = 0.5 * 1000.0 * 1000.0 / frame_length;
-			tus += half_frame;
-			double frame_index = (double)timestamp_us * frame_length / 1000000.0;
-			int snapped_index = (int)(frame_index + 0.5);
-			double snapped = (double)snapped_index * 1000.0 * 1000.0 / frame_length;
-			timestamp_us = (INT64)snapped;
+			INT64 origin_us = (INT64)p->snap_origin_time * 1000LL;
+			double relative_us = (double)(timestamp_us - origin_us);
+			double frame_index = relative_us * frame_length / 1000000.0;
+			INT64 snapped_index = (INT64)llround(frame_index);
+			double snapped_delta =
+				(double)snapped_index * 1000.0 * 1000.0 / frame_length;
+			timestamp_us = origin_us + (INT64)snapped_delta;
 		}
 	}
 	return timestamp_us * 1000LL;
@@ -271,9 +282,11 @@ static int _compute_blit_wait_ms(priv_t *p, VIDEO_FRAME *f, int av_delay_ts)
 	int frame_time = f ? f->time : -1;
 	// Video can only be delayed; negative user delay is realized by holding audio.
 	int video_av_delay_ts = av_delay_ts > 0 ? av_delay_ts : 0;
+	INT64 timestamp_ns =
+		_snap_timestamp_ns(p, frame_time, f ? f->epoch : INT_MIN);
 	if( frame_time >= 0 )
 		frame_time += video_av_delay_ts;
-	INT64 timestamp_ns = _snap_timestamp_ns(p, frame_time);
+	timestamp_ns += (INT64)video_av_delay_ts * 1000000LL;
 	INT64 now_ns = _get_monotonic_ns();
 	INT64 start_off = p->sched_start_off_ns;
 	INT64 start_mono = p->sched_start_mono_ns;
@@ -1157,7 +1170,8 @@ static void *videosink_thread(void *ctx)
 			}
 
 			INT64 av_delay_ns = (INT64)RST_TO_TS_DELTA(p->effective_av_delay_ms, int) * 1000000LL;
-			render_ts_ns = _snap_timestamp_ns(p, f->time) + p->render_offset_ns + av_delay_ns;
+			render_ts_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
+				p->render_offset_ns + av_delay_ns;
 			INT64 delta_ns = render_ts_ns - now_ns;
 			const INT64 k_max_lookahead_ns = 200 * 1000000LL; // 200ms lookahead
 
@@ -1182,7 +1196,8 @@ static void *videosink_thread(void *ctx)
 			if( s ) {
 				av_delay_ns = (INT64)_update_effective_av_delay_ts( p, s ) * 1000000LL;
 			}
-			render_ts_ns = _snap_timestamp_ns(p, f->time) + p->render_offset_ns + av_delay_ns;
+			render_ts_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
+				p->render_offset_ns + av_delay_ns;
 			break;
 		}
 		if (!consumed) {
@@ -1613,6 +1628,8 @@ retry_decoder_open:
 	p->pending_seek_reanchor = 0;
 	p->last_seek_epoch = 0;
 	p->last_audio_resume_pending = 0;
+	p->snap_origin_time = 0;
+	p->snap_origin_epoch = INT_MIN;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
@@ -1813,6 +1830,8 @@ DBGCV	CLOG();
 	p->pending_seek_reanchor = 0;
 	p->last_seek_epoch = 0;
 	p->last_audio_resume_pending = 0;
+	p->snap_origin_time = 0;
+	p->snap_origin_epoch = INT_MIN;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
@@ -1875,13 +1894,26 @@ static int videodec_destroy(STREAM_DEC_VIDEO *dec)
 
 static int videodec_set_playback_speed(struct STREAM_DEC_VIDEO *dec, int den, int num) {
 	priv_t *p = (priv_t*)dec->priv;
-	    if( den )
-	    	p->playback_speed_den = den;
-	    if( num )
-	    	p->playback_speed_num = num;
-	    int rc = sfdec_set_playback_speed(p->sfdec, den, num);
-	    DBGSI serprintf("sfdec2: set_playback_speed den=%d num=%d rc=%d\n", den, num, rc);
-	    return rc;
+	int changed = 0;
+	pthread_mutex_lock(&p->locked.mtx);
+	if( den && den != p->playback_speed_den ) {
+		p->playback_speed_den = den;
+		changed = 1;
+	}
+	if( num && num != p->playback_speed_num ) {
+		p->playback_speed_num = num;
+		changed = 1;
+	}
+	if( changed ) {
+		p->snap_origin_time = 0;
+		p->snap_origin_epoch = INT_MIN;
+	}
+	pthread_mutex_unlock(&p->locked.mtx);
+
+	int rc = sfdec_set_playback_speed(p->sfdec, den, num);
+	DBGSI serprintf("sfdec2: set_playback_speed den=%d num=%d rc=%d snap_reset=%d\n",
+		den, num, rc, changed);
+	return rc;
 }
 
 
@@ -1947,6 +1979,8 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->pending_seek_reanchor = 1;
 	p->last_seek_epoch = 0;
 	p->last_audio_resume_pending = 0;
+	p->snap_origin_time = 0;
+	p->snap_origin_epoch = INT_MIN;
 	p->grace_until_ms = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;

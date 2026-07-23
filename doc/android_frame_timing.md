@@ -40,15 +40,23 @@ that window are submitted to MediaCodec with the computed deadline.
 ## Frame Snapping and Wall-Clock Mapping (`Source/codec_sfdec2.c`)
 
 `_snap_timestamp_ns()` rounds the frame TS to the nearest frame interval using
-the current frame rate and playback speed. The sink then adds `render_offset_ns`
-and the effective user video delay. `sfdec_buf_render()` forwards the resulting
+the current frame rate and playback speed. Snapping is relative to the first
+epoch-valid video frame rather than absolute timestamp zero, so a legitimate
+stream phase offset cannot alias millisecond-quantized timestamps into duplicate
+or skipped presentation deadlines. The phase origin is reset for codec open,
+flush, seek, and seek-epoch changes. The sink then adds `render_offset_ns` and
+the effective user video delay. `sfdec_buf_render()` forwards the resulting
 non-zero `render_ts_ns` to MediaCodec for timed release.
 
 ## Audio Speed Interaction
 
 - The parser feeds MediaCodec timestamps that are already scaled by the active audio speed (`ts` domain). Because `Δts = Δwc`, the wall-clock projection remains valid at any speed.
-- When the app changes audio speed (or resumes playback with a remembered non-1.0x speed), `stream_set_av_speed` caches the requested ratio on the `STREAM` object and ensures the active decoder receives it via `sfdec_set_playback_speed` (`Source/stream.c:534-566`, `Source/stream_video.c:608-615`, `Source/codec_sfdec2.c:980-984`). The MediaCodec helper stores the new numerator/denominator and the snapping logic starts using the updated effective frame rate on the very next frame.
-- After the notification, the player performs a seek so all subsequent frames adopt the new timestamps. No additional MediaCodec reset is required.
+- When the app changes audio speed (or resumes playback with a remembered
+  non-1.0x speed), `stream_set_av_speed` caches the requested ratio and sends the
+  effective ratio to `sfdec_set_playback_speed`. The MediaCodec helper updates
+  the snapping rate and invalidates its phase origin under the codec lock. The
+  first subsequent frame establishes the phase for the new time mapping; no
+  MediaCodec reset is required.
 
 ## Operational Notes and Caveats
 

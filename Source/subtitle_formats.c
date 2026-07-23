@@ -235,6 +235,7 @@ DBG serprintf("ext [%s]  lang [%s] -> [%s]\n", title->ext, title->lang, sub_arra
 				title->language_name = 0;
 				if( sub_array->converted[count + i] == 0 ) {
 					// error in file. ignore it
+					sub_array->cnt--;
 					count--;
 					continue;
 				}

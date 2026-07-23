@@ -62,7 +62,7 @@ static void _adjust_timing( STREAM *s, converted_subs *subs )
 
 	int i;
 	for(i = 0; i < p->subs->cnt; ++i){
-		if(p->subs->converted[i]->frame_multiplier ){
+		if(p->subs->converted[i] && p->subs->converted[i]->frame_multiplier ){
 			sub_line *line = p->subs->converted[i]->first;
 			while(line){
 				line->start = _get_time_from_frame(s->video, line->start);
@@ -160,6 +160,9 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 
 	if( !s->subtitle_priv ) {
 		s->subtitle_priv = amalloc( sizeof( SUB_PRIV ) );
+		if( !s->subtitle_priv ) {
+			goto NULL_SUBTITLES;
+		}
 	}
 	SUB_PRIV *p = s->subtitle_priv;
 	memset( p, 0, sizeof( SUB_PRIV ) );
@@ -186,6 +189,13 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 	int i;
 	struct subt_orig_t *sub_files = p->files->files;
 	for( i = 0; i < p->subs->cnt; i++ ) {
+		if( !p->subs->converted[i] ) {
+			if( sub_files ) {
+				sub_files = sub_files->next;
+			}
+			continue;
+		}
+
 		if( s->av.subs_max >= SUB_TRACK_MAX )
 			break;
 				

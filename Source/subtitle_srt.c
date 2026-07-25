@@ -82,6 +82,14 @@ static int detect_SRT( FILE * file )
 	char _line [LINE_LEN + 1 ];
 	char* line = _line;
 
+	// Skip BOM if present (UTF-8: EF BB BF)
+	int c0 = fgetc(file), c1 = fgetc(file), c2 = fgetc(file);
+	if( !((unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF) ) {
+		// Not a BOM — rewind
+		fseek( file, 0, SEEK_SET );
+	}
+
+	// Read line 1 (cue index number) then line 2 (timestamp)
 	Xfgets(line, LINE_LEN, file)
 	if(feof(file)){
 		goto ErrorExit;
@@ -134,195 +142,121 @@ char *subtitle_get_next_line( char *start, int len, FILE *fd )
 	return ret;
 }
 
-/**************
- * * Parses SRT formatted subtitle text
- * input:
- * spex->filename must exist and point to VALID srt file
- * * returns subtitles, packed into uni_sub*
- * * ***********************/
-static uni_sub *parse_SRT( subt_orig *spex, int clean_tags )
+// ---------------------------------------------------------------------------
+// feed_SRT — streaming single-pass path
+//
+// Parses the SRT file and fires cb(ctx, text, start_ms, end_ms) for every
+// cue as it is parsed. No sub_line allocation, no linked list, no second
+// pass. The callback (stream_sub_ext_feed_engine) converts each cue to an
+// ASS Dialogue event and feeds it directly to sub_engine_feed().
+//
+// This is the primary path for external SRT files. parse_SRT below is kept
+// only for formats that still need the uni_sub list (SMI/SUB/MPL2 fallback).
+// ---------------------------------------------------------------------------
+static void feed_SRT( subt_orig *spex, sub_cue_cb cb, void *ctx )
 {
-	// --- NATIVE LIBASS UPGRADE ---
-	// Force clean_tags to 0 so AVOS stops deleting HTML/Colors! Libass needs them.
-	clean_tags = 0;
+	if( !spex || !spex->filename || !cb ) return;
 
-	uni_sub *sub_record = acalloc(1, sizeof( uni_sub ) );
-	char _line[ LINE_LEN + 1];
-	memset(_line,0,LINE_LEN);
+	char _line[ LINE_LEN + 1 ];
+	memset( _line, 0, LINE_LEN );
 	char *line = _line;
-	FILE *fd = 0;
-	sub_line *new_line = 0;
+	char  cue_text[ LINE_LEN * 2 + 4 ];
+	cue_text[0] = '\0';
+	FILE *fd = fopen( spex->filename, "r" );
+	if( !fd ) return;
+
+	// Skip BOM
+	{
+		int c0 = fgetc(fd), c1 = fgetc(fd), c2 = fgetc(fd);
+		if( !((unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF) )
+			fseek( fd, 0, SEEK_SET );
+	}
+
 	int srt_state = SRT_NR;
-	char* store = 0;
 	int next_index = 0;
-	//in SRT there is no data for all fields
-	if ( !spex ) {
-		DBG serprintf( "SRT: Invalid parameter\n" );
-		goto CLEAR_ERROR;
-	}
-	if ( !spex->filename ) {
-		DBG serprintf( "SRT: Invalid filename parameter\n" );
-		goto CLEAR_ERROR;
-	}
-	fd = fopen( spex->filename, "r" );
-	if( !fd )
-		goto CLEAR_ERROR;
+	int cue_start = 0, cue_end = 0;
+	char *store = 0;
+
 	line = subtitle_get_next_line( line, LINE_LEN, fd );
-	while ( line ) {
-
-		switch ( srt_state ) {
-			case SRT_NR:{
-				//here should be data, but ignore possible blank lines
-				srt_chop(line);
-				if(*line == '\0'){
-					memset(line,0,LINE_LEN);
-					line = subtitle_get_next_line( line, LINE_LEN, fd );
-					continue;
-				}
-				if ( next_index == atoi( line ) ) {
-					next_index++;
-					srt_state = SRT_TIME;
-				} else {
-					DBG2 serprintf( "SRT: missing index %i(%i),line='%s'\n", next_index, atoi( line ), line );
-					next_index = atoi( line ) + 1;
-					srt_state = SRT_TIME;
-				}
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
+	while( line ) {
+		switch( srt_state ) {
+			case SRT_NR: {
+				srt_chop( line );
+				if( *line == '\0' ) break;
+				next_index = atoi( line ) + 1;
+				srt_state  = SRT_TIME;
+				break;
 			}
-			case SRT_TIME:{
-				int start;
-				int end;
-				if ( subtitle_get_srt_time( line, &start, &end ) ) {
-					DBG serprintf( "subtitle: SRT time error near index %i  line %s\n", next_index - 1, line );
+			case SRT_TIME: {
+				if( subtitle_get_srt_time( line, &cue_start, &cue_end ) ) {
+					DBG serprintf( "SRT feed: time error line %s\n", line );
 					srt_state = SRT_NR;
-					memset(line,0,LINE_LEN);
-					line = subtitle_get_next_line( line, LINE_LEN, fd );
-					continue;
+					break;
 				}
-				//new title coming, init new struct for it
-				new_line = acalloc(1, sizeof( sub_line ) );
-				new_line->start = start;
-				new_line->end   = end;
-
-				srt_state = SRT_TEXT;
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
+				cue_text[0] = '\0';
+				srt_state   = SRT_TEXT;
+				break;
 			}
-			case SRT_TEXT:{
-				//here can be either blank (ends this title) or text.
-				//ok. the title ends to this line
-				if ( line[0] == NEW_LINE_CH || line[0] == MS_CURSOR_BEGIN ) {
-					if ( new_line->top == 0 && new_line->bottom == 0 ) {
-						DBG serprintf( "no text found for index %i\n", next_index - 1 );
-						afree( new_line );
-						memset(line,0,LINE_LEN);
-						new_line = 0;
-						line = subtitle_get_next_line( line, LINE_LEN, fd );
-						if( !line ) {
-							continue;
+			case SRT_TEXT: {
+				srt_chop( line );
+				if( line[0] == NEW_LINE_CH || line[0] == MS_CURSOR_BEGIN || line[0] == '\0' ) {
+					// Blank line — cue is complete, fire callback
+					if( cue_text[0] ) {
+						cb( ctx, cue_text, cue_start, cue_end );
+					}
+					cue_text[0] = '\0';
+					srt_state   = SRT_NR;
+					break;
+				}
+				#ifdef CONFIG_I18N
+				if( !spex->utf8 ) {
+					wchar unicode[ LINE_LEN + 1 ];
+					memset( unicode, 0, LINE_LEN );
+					wchar *uc = unicode;
+					char  *c  = line;
+					while( *c ) { c += I18N_codepage_to_unicode( c, uc ); uc++; }
+					utf16_to_utf8( line, unicode, LINE_LEN );
+				}
+				#endif
+				store = subtitle_clean_formatter( line, 0 ); // clean_tags always 0
+				if( store ) {
+					if( cue_text[0] ) {
+						// Multi-line: append \N separator
+						if( strlen(cue_text) + strlen(store) + 3 < sizeof(cue_text) ) {
+							strcat( cue_text, "\\N" );
+							strcat( cue_text, store );
 						}
 					} else {
-						//end of this title. Store it
-						if ( sub_record->first == 0 ) {
-							sub_record->first = new_line;
-							sub_record->last = new_line;
-						} else {
-							if( sub_record->last->end < new_line->end ) {
-								sub_record->last->next = new_line;
-								new_line->prev   = sub_record->last;
-								sub_record->last = new_line;
-							}
-						}
-						new_line = 0;
+						strncpy( cue_text, store, sizeof(cue_text) - 1 );
+						cue_text[sizeof(cue_text)-1] = '\0';
 					}
-					srt_state = SRT_NR;
-				}
-				//IF \n or \r must be erased, do it here!!
-				srt_chop(line);
-				if ( strlen( line ) ) {
-					#ifdef CONFIG_I18N
-					if( !spex->utf8 ) {
-						//serprintf("LINE: %s\r\n", line );
-						wchar unicode[ LINE_LEN + 1 ];
-						memset(unicode,0, LINE_LEN);
-						wchar *uc = unicode;
-						char *c = line;
-						while( *c ) {
-							// take care about wide codepage chars!
-							c += I18N_codepage_to_unicode( c, uc );
-							uc++;
-						}
-						// convert to utf8
-						utf16_to_utf8( line, unicode, LINE_LEN );
-						//serprintf("LINE: %s\r\n", line );
-					}
-					#endif
-					store = subtitle_clean_formatter(line, clean_tags);
-					//There may be multiple lines. If true put to top line
-					if(new_line){
-						if ( new_line->top == 0 ) {
-							new_line->top = amalloc( strlen( store ) + 1 );
-							strcpy( new_line->top, store );
-						} else {
-							// --- NATIVE LIBASS UPGRADE ---
-							// Concatenate multi-line subs using ASS line break (\N)
-							if((strlen(new_line->top) + strlen(store) + 2) < LINE_LEN){
-								new_line->top = arealloc( new_line->top,
-														  strlen( store ) + strlen( new_line->top ) + 3 );
-								strcat( new_line->top, "\\N" );
-								strcat( new_line->top, store );
-							}
-						}
-					}
-					else{
-						srt_state = SRT_NR;
-					}
-					afree(store);
+					afree( store );
 					store = 0;
 				}
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
+				break;
 			}
 		}
-	}
-	if( new_line ) { //last one was not stored;
-		if( sub_record->first == 0 ) {
-			sub_record->first = new_line;
-			sub_record->last = new_line;
-		} else {
-			if( sub_record->last->end < new_line->end ) {
-				sub_record->last->next = new_line;
-				new_line->prev = sub_record->last;
-				sub_record->last = new_line;
-			}
-		}
+		memset( line, 0, LINE_LEN );
+		line = subtitle_get_next_line( line, LINE_LEN, fd );
 	}
 
-	if(fd){
-		fclose(fd);
-	}
-	if(store){
-		afree(store);
-	}
-	return sub_record;
-	CLEAR_ERROR:
-	if(fd){
-		fclose(fd);
-	}
-	if(store){
-		afree(store);
-	}
-	subtitle_clean_error(sub_record);
+	// Last cue (file doesn't end with blank line)
+	if( cue_text[0] ) cb( ctx, cue_text, cue_start, cue_end );
+	if( store ) afree( store );
+	fclose( fd );
+}
 
-	afree(sub_record);
-	if(new_line){
-		free(new_line);
-	}
-	return 0;
+// parse_SRT — kept for backward compatibility. Only used by formats that
+// still need the uni_sub linked list (currently none for SRT — but the
+// subtitle_formats vtable requires a parse() entry).
+// Returns an empty but valid uni_sub so subtitle_get_converted() doesn't
+// reject the track. The actual cue data is delivered via feed_SRT above.
+static uni_sub *parse_SRT( subt_orig *spex, int clean_tags )
+{
+	(void)clean_tags;
+	if( !spex || !spex->filename ) return NULL;
+	uni_sub *sub_record = acalloc( 1, sizeof( uni_sub ) );
+	return sub_record; // empty — feed_SRT delivers the data
 }
 
 __attribute__((unused))
@@ -346,6 +280,9 @@ static struct SUBTITLE_FORMAT SRT = {
 	detect_SRT,
 	NULL,		// no info
 	parse_SRT,
+	NULL,		// no get_gfx
+	NULL,		// no close
+	feed_SRT,	// streaming single-pass feed — primary path
 };
 
 SUBTITLE_REGISTER_FORMAT( SRT );

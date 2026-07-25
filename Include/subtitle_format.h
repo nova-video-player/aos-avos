@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <stdint.h>
 
+typedef void (*sub_cue_cb)(void *ctx, const char *text, int start_ms, int end_ms);
+
 //if the subtitle contains title for multiple languages
 //it should fill this field in info_XXX function
 
@@ -100,6 +102,8 @@ typedef struct uni_sub_t
 	int   is_ssa;
 	char *raw_data;
 	int   raw_size;
+	int   is_streaming;
+	subt_orig *spex;
 } uni_sub;
 
 typedef struct converted_subs_t
@@ -118,6 +122,7 @@ typedef struct SUBTITLE_FORMAT {
 	uni_sub*		(*parse)( subt_orig *subs, int clean_tags );
 	int			(*get_gfx)( uni_sub *subs, uint32_t pos, uint8_t *data, int *size );
 	int			(*close)( uni_sub *subs );
+	void		(*feed)( subt_orig *subs, sub_cue_cb cb, void *ctx );
 } SUBTITLE_FORMAT;
 
 struct SUBTITLE_REG_FORMAT;
@@ -140,6 +145,7 @@ int subtitle_register_format( SUBTITLE_REG_FORMAT *reg );
 		subtitle_register_format( &_reg_##etype##format ); \
 	}
 
+SUBTITLE_FORMAT *subtitle_get_format_for_sub( uni_sub *subs );
 subtitle_files *subtitle_check_files( const char **path_list, const char *filename );
 void            subtitle_free_files( subtitle_files *files );
 converted_subs *subtitle_get_converted( subtitle_files *sub_files, int clean_tags );

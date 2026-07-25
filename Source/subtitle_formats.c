@@ -200,6 +200,9 @@ DBG serprintf( "subtitles: cannot alloc sub_array\n" );
 				continue;
 			}
 
+			sub_array->converted[count]->spex = title;
+			sub_array->converted[count]->is_streaming = (title->format->feed != NULL) ? 1 : 0;
+
 			// if there is a . separated part before the extension, treat it as a
 			// language code and try to map a proper language name to it!
 			if( title->ext[0] ) {
@@ -239,6 +242,10 @@ DBG serprintf("ext [%s]  lang [%s] -> [%s]\n", title->ext, title->lang, sub_arra
 					count--;
 					continue;
 				}
+
+				sub_array->converted[count + i]->spex = title;
+				sub_array->converted[count + i]->is_streaming = (title->format->feed != NULL) ? 1 : 0;
+
 				sub_array->converted[count + i]->identifier = astrdup( title->title_langs[i]->name );
 			}
 			count += i;
@@ -687,6 +694,23 @@ static void free_subline( sub_line * sub )
 		sub = sub->next;
 		afree( tmp );
 	}
+}
+
+SUBTITLE_FORMAT *subtitle_get_format_for_sub( uni_sub *subs )
+{
+    // uni_sub->format is never populated by parse_SRT()/parse_VTT() (it was
+    // only ever set by gfx-style formats that need get_gfx()/close()), so
+    // reading it here always yielded NULL and silently forced every
+    // external SRT/VTT track onto the fallback sub_line list-walk in
+    // stream_sub_ext_feed_engine() -- a list that's now always empty since
+    // parse_SRT()/parse_VTT() are just stubs. Resolve through spex instead:
+    // subt_orig->format is unconditionally set for every track in
+    // subtitle_parse_file(), so this reliably returns the streaming feed()
+    // backend and lets cues reach libass as they're parsed -- unordered
+    // and overlapping cues included, since feed() no longer filters them
+    // through the old "only keep it if end time increases" list insertion.
+    if (!subs || !subs->spex) return NULL;
+    return (SUBTITLE_FORMAT *)subs->spex->format;
 }
 
 void subtitle_free_converted( converted_subs *subs )

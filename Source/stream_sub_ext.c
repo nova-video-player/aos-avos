@@ -54,7 +54,7 @@ static int _get_time_from_frame(VIDEO_PROPERTIES *video, int frame)
 	if( !video->valid) {
 		return -2;
 	}
-	return (UINT32)( 1000ull * (UINT64)frame * (UINT64)video->scale / (UINT64)video->rate); 
+	return (UINT32)( 1000ull * (UINT64)frame * (UINT64)video->scale / (UINT64)video->rate);
 }
 
 // adjusts subtitle timing by multiplying the start and end time of title with framerate
@@ -82,7 +82,7 @@ static int scale_time( STREAM *s, int time )
 
 	if( ratio_n && ratio_d ) {
 		return time * (UINT64)ratio_n / (UINT64)ratio_d;
-	} 
+	}
 
 	return time;
 }
@@ -171,13 +171,13 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 	p->prev_max = s->av.subs_max;
 	p->files = files;
 
-	// now every file that contains valid subtitles (according to name of file) 
-	// has been found. Convert every file to general format. 
+	// now every file that contains valid subtitles (according to name of file)
+	// has been found. Convert every file to general format.
 	if ( !p->files ) {
 		DBG serprintf( "Failed to find subtitles\n" );
 		goto NULL_SUBTITLES;
 	}
-	
+
 	// read all the files now rather than during videoplayback
 	p->subs = subtitle_get_converted( p->files, s->flags & STREAM_SUBTITLES_CLEAN_TAGS );
 	if(!p->subs){
@@ -200,9 +200,9 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 
 		if( s->av.subs_max >= SUB_TRACK_MAX )
 			break;
-				
+
 		SUB_PROPERTIES *sub = s->av.sub + s->av.subs_max;
-	
+
 		// Determine format and engine target for this track
 		if ( p->subs->converted[i]->vobsub ) {
 			sub->format        = SUB_FORMAT_DVD_GFX;
@@ -216,6 +216,11 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 			sub->format        = SUB_FORMAT_EXT;
 			sub->gfx           = 0;
 			p->engine_fmt[s->av.subs_max] = SUB_FMT_SRT;
+			// Mark streaming tracks (SRT/VTT) — feed() will be used instead
+			// of walking the uni_sub list in stream_sub_ext_feed_engine()
+			if ( p->subs->converted[i]->is_streaming ) {
+				p->engine_fmt[s->av.subs_max] = SUB_FMT_SRT; // same engine, different feed path
+			}
 		}
 		sub->ext            = 1;
 		sub->stream         = i;
@@ -237,7 +242,7 @@ DBGS serprintf("has palette!\n");
 	}
 
 	p->stream = -1;
-	
+
 	return 0;
 
 NULL_SUBTITLES:
@@ -268,6 +273,22 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 		afree( s->subtitle_priv );
 		s->subtitle_priv = NULL;
 	}
+}
+
+// _cue_to_engine — sub_cue_cb implementation.
+// Fired by feed_SRT / feed_VTT for each parsed cue.
+// Converts the cue text to an ASS Dialogue event and feeds it to the engine.
+// time parameters from the parser are already in milliseconds.
+static void _cue_to_engine( void *ctx, const char *text, int start_ms, int end_ms )
+{
+	STREAM *s = (STREAM *)ctx;
+	if( !s || !s->sub_engine || !text || !text[0] ) return;
+	int duration = end_ms - start_ms;
+	if( duration < 0 ) duration = 0;
+	sub_engine_feed( (SUB_ENGINE*)s->sub_engine,
+	                 (const uint8_t*)text, strlen(text),
+	                 scale_time( s, start_ms ),
+	                 scale_time( s, duration ) );
 }
 
 // *************************
@@ -308,23 +329,32 @@ DBG serprintf("sub_ext_feed_engine: stream %d  engine_fmt %d  is_ssa %d\r\n",
 		}
 
 	} else if( engine_fmt == SUB_FMT_SRT ) {
-		// SRT/VTT/SMI/SUB/MPL2: walk the cue list and bulk-feed every node
-		sub_line *node = subs->first;
-		while( node ) {
-			char merged[LINE_LEN * 2 + 4];
-			if( node->top && node->bottom ) {
-				snprintf( merged, sizeof(merged), "%s\\N%s", node->top, node->bottom );
-			} else {
-				snprintf( merged, sizeof(merged), "%s", node->top ? node->top : "" );
-			}
-			if( merged[0] && s->sub_engine ) {
-				int duration = scale_time( s, node->end ) - scale_time( s, node->start );
-				sub_engine_feed( (SUB_ENGINE*)s->sub_engine,
-				                 (uint8_t*)merged, strlen(merged),
-				                 scale_time( s, node->start ),
+		// Preferred path: streaming feed() — single pass, zero intermediate allocs.
+		// Available for SRT and VTT. Falls back to list walk for SMI/SUB/MPL2
+		// which don't implement feed() and still produce a uni_sub list.
+		SUBTITLE_FORMAT *fmt = subtitle_get_format_for_sub( subs );
+		if( fmt && fmt->feed && subs->spex ) {
+			// Streaming path: parser fires _cue_to_engine for each cue directly
+			fmt->feed( subs->spex, _cue_to_engine, s );
+		} else {
+			// Fallback list-walk path: SMI / MicroDVD SUB / MPL2
+			sub_line *node = subs->first;
+			while( node ) {
+				char merged[LINE_LEN * 2 + 4];
+				if( node->top && node->bottom ) {
+					snprintf( merged, sizeof(merged), "%s\\N%s", node->top, node->bottom );
+				} else {
+					snprintf( merged, sizeof(merged), "%s", node->top ? node->top : "" );
+				}
+				if( merged[0] && s->sub_engine ) {
+					int duration = scale_time( s, node->end ) - scale_time( s, node->start );
+					sub_engine_feed( (SUB_ENGINE*)s->sub_engine,
+					                 (uint8_t*)merged, strlen(merged),
+					                 scale_time( s, node->start ),
 				                 duration );
+				}
+				node = node->next;
 			}
-			node = node->next;
 		}
 	}
 	// SUB_FMT_GFX (VobSub bitmap) is handled by the existing

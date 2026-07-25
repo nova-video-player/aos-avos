@@ -104,6 +104,8 @@ typedef struct uni_sub_t
 	int   raw_size;
 	int   is_streaming;
 	subt_orig *spex;
+	int   is_pgs;
+	FILE *sup_fd;
 } uni_sub;
 
 typedef struct converted_subs_t

@@ -208,6 +208,10 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 			sub->format        = SUB_FORMAT_DVD_GFX;
 			sub->gfx           = 1;
 			p->engine_fmt[s->av.subs_max] = SUB_FMT_GFX;
+		} else if ( p->subs->converted[i]->is_pgs ) {
+			sub->format        = SUB_FORMAT_PGS;
+			sub->gfx           = 1;
+			p->engine_fmt[s->av.subs_max] = SUB_FMT_GFX;
 		} else if ( p->subs->converted[i]->is_ssa ) {
 			sub->format        = SUB_FORMAT_SSA;
 			sub->gfx           = 0;

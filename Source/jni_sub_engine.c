@@ -1,13 +1,11 @@
 #include "jni_sub_engine.h"
 #include "sub_engine.h"
+#include "sub_engine_registry.h"
 #include "sub_style.h"
 #include <android/native_window_jni.h>
 #include <android/bitmap.h>
 #include <stddef.h>
 #include <string.h>
-
-// Global pointer so the AVOS core demuxer can easily find the engine
-SUB_ENGINE *g_sub_engine = NULL;
 
 // Helper to extract the engine pointer
 static SUB_ENGINE* get_engine(jlong handle) {
@@ -18,15 +16,18 @@ static SUB_ENGINE* get_engine(jlong handle) {
 
 JNIEXPORT jlong JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeCreate(JNIEnv *env, jobject thiz) {
     SUB_ENGINE *eng = sub_engine_create();
-    g_sub_engine = eng;
+    sub_engine_registry_publish(eng);
     return (jlong)(intptr_t)eng;
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeDestroy(JNIEnv *env, jobject thiz, jlong handle) {
     SUB_ENGINE *eng = get_engine(handle);
-    if (g_sub_engine == eng) {
-        g_sub_engine = NULL; // Clear global before destroy to prevent dangling pointer
-    }
+    // Retract FIRST and block until every STREAM that had acquired a
+    // reference to this exact engine has released it (see
+    // sub_engine_registry.h). Only once that's guaranteed is it safe to
+    // free the engine below -- this is what makes it impossible for a
+    // STREAM::sub_engine snapshot to outlive the memory it points to.
+    sub_engine_registry_retract(eng);
     sub_engine_destroy(eng);
 }
 

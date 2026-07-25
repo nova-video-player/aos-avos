@@ -25,8 +25,8 @@
 #include "stream.h"
 #include "stream_subtitle.h"
 #include "sub_engine.h"
+#include "sub_engine_registry.h"
 
-extern SUB_ENGINE *g_sub_engine;
 extern int libavos_get_ac3_recoding_enabled(void);
 
 #define DBG if(Debug[DBG_VIDEO_PLAYER])
@@ -366,8 +366,14 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	send_state_msg(mp, video);
 
 	stream_set_volume(video->s, 100, 100);
-	// NEW: Start the subtitle engine clock
-	video->s->sub_engine = (void*)g_sub_engine;
+	// Acquire a reference-counted handle to whatever SUB_ENGINE Java currently
+	// has published. Unlike the old raw g_sub_engine copy, this is guaranteed
+	// safe to hold for the STREAM's entire lifetime: nativeDestroy() on the
+	// Java side cannot free the underlying engine while this STREAM (or any
+	// other acquirer) still holds a reference -- see sub_engine_registry.h.
+	// Must be matched by exactly one sub_engine_registry_release() in
+	// avos_mp_video_close() below.
+	video->s->sub_engine = (void*)sub_engine_registry_acquire();
 
 	// Use the isolated instance
 	if (video->s->sub_engine) {
@@ -412,13 +418,20 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 	// is fully torn down. Closing it earlier (right after sub_engine_stop, as
 	// the first pass at this fix did) left a window where that thread could
 	// still be mid-loop and call back into sub_engine_open_track()/feed()
-	// with this video's own subtitle data, re-populating g_sub_engine's
-	// active track right after we'd just cleared it -- so the next video
+	// with this video's own subtitle data, re-populating the (still-referenced)
+	// engine's active track right after we'd just cleared it -- so the next video
 	// could still inherit stale state. Waiting until the stream (and its
 	// thread) is actually gone removes that window. We use the snapshotted
 	// sub_engine pointer here (not video->s->sub_engine) since video->s is
 	// no longer valid at this point.
 	if (sub_engine) sub_engine_close_track(sub_engine);
+
+	// Release the reference acquired in avos_mp_video_open(). Must happen
+	// last, after every other use of `sub_engine` above -- this is what
+	// allows a concurrent nativeDestroy() on the Java side (blocked in
+	// sub_engine_registry_retract() if it got here first) to proceed and
+	// free the engine. Safe to call with sub_engine == NULL.
+	sub_engine_registry_release(sub_engine);
 
 	return AVOS_ERR_OK;
 }

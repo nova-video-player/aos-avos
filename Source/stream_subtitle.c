@@ -53,10 +53,20 @@
 // -----------------------------------------------------------------------------
 
 static inline int _is_raw_text(int fmt) {
+    // Internal embedded raw passthrough: SSA/ASS and SRT/TEXT packets
+    // go straight from the demuxer to sub_engine_feed with no decoding.
+    // SUB_FORMAT_EXT is EXTERNAL only — never appears on internal tracks.
     return (fmt == SUB_FORMAT_SSA  ||
-            fmt == SUB_FORMAT_TEXT ||
-            fmt == SUB_FORMAT_EXT); // external text tracks (SRT/VTT/SMI/SUB/MPL2)
-                                    // SSA external tracks use fmt==SUB_FORMAT_SSA
+            fmt == SUB_FORMAT_TEXT);
+}
+
+static inline int _is_ext_text(int fmt) {
+    // External text tracks: all non-bitmap external formats.
+    // SUB_FORMAT_SSA here means an external .ass/.ssa file detected by
+    // subtitle_ssa.c and registered by stream_sub_ext_check().
+    // SUB_FORMAT_EXT covers SRT/VTT/SMI/SUB/MPL2 external files.
+    return (fmt == SUB_FORMAT_SSA ||
+            fmt == SUB_FORMAT_EXT);
 }
 
 static inline int _is_ffdec_text(int fmt) {
@@ -336,7 +346,7 @@ static void _get_next_ext_sub( STREAM *s, int time )
 				stream_drop_subtitles( s );
 				return;
 			}
-		} else {
+		} else if( _is_ext_text(fmt) ) {
 			// EXTERNAL TEXT (SRT/VTT/SMI/SUB/MPL2/ASS/SSA):
 			// Open the engine track first, then bulk-feed the entire cue list.
 			// engine_fmt comes from SUB_PRIV->engine_fmt[track] set at parse time.

@@ -261,12 +261,19 @@ static int ssa_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64
 
     // NO MORE 4-BYTE STRIPPING HERE. The data pointer is pure string.
     pthread_mutex_lock(&ctx->lock);
-    if (size >= 10 && strncmp((const char*)data, "Dialogue: ", 10) == 0) {
-            ass_process_data(ctx->track, (char *)data, size);
-        } else {
-            int64_t final_dur = duration_ms > 0 ? duration_ms : 0;
-            ass_process_chunk(ctx->track, (char *)data, size, pts_ms, final_dur);
-        }
+    if (size >= 13 && strncmp((const char*)data, "[Script Info]", 13) == 0) {
+        // Full ASS/SSA script buffer (external .ass/.ssa file via sub_engine_feed_raw).
+        // ass_process_data() parses the complete script — [Script Info],
+        // [V4+ Styles], and all [Events] — in one shot.
+        ass_process_data(ctx->track, (char *)data, size);
+    } else if (size >= 10 && strncmp((const char*)data, "Dialogue: ", 10) == 0) {
+        // Single Dialogue line from an internal embedded SSA track.
+        ass_process_data(ctx->track, (char *)data, size);
+    } else {
+        // Plain text chunk from SRT/VTT wrapper — wrap as an ASS event.
+        int64_t final_dur = duration_ms > 0 ? duration_ms : 0;
+        ass_process_chunk(ctx->track, (char *)data, size, pts_ms, final_dur);
+    }
     pthread_mutex_unlock(&ctx->lock);
     return 0;
 }

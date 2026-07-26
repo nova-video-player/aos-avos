@@ -85,33 +85,161 @@ static int srt_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     return 0;
 }
 
+// srt_text_to_ass — the SHARED/COMMON-tag layer.
+//
+// Contract (mirrors the old subtitle_clean_formatter clean_tags split, but
+// enforced structurally instead of via a flag):
+//
+//   1. Format-specific syntax (VTT <v Speaker>/<c.class>, SMI <P Class=...>,
+//      etc.) is NOT this function's job. Each parser (subtitle_vtt.c,
+//      subtitle_smi.c, ...) must translate its own dialect -- into either
+//      plain text or real ASS override blocks ("{\...}") -- BEFORE the text
+//      reaches feed()/sub_engine_feed(). By the time text lands here, no
+//      format-specific tags should remain.
+//
+//   2. Any "{\...}" ASS override block already present in the input (put
+//      there by an upstream parser, e.g. a translated <v> or a passthrough
+//      of native ASS syntax) is passed through byte-for-byte, untouched.
+//      This function must never mangle or strip real ASS tags -- only
+//      HTML-ish "<...>" tags are its concern.
+//
+//   3. Within "<...>" tags, only the small common set below -- the styling
+//      markup that shows up across multiple plain-text formats (SRT, VTT,
+//      SMI, SUB, MPL2) and has no format-specific meaning -- is translated:
+//        <b>...</b>             -> {\b1}...{\b0}
+//        <i>...</i>              -> {\i1}...{\i0}
+//        <u>...</u>              -> {\u1}...{\u0}
+//        <font color="#RRGGBB">  -> {\c&HBBGGRR&}   (HTML RGB -> ASS BGR)
+//        </font>                 -> {\c}             (reset to style default)
+//
+//   4. ANY other "<...>" tag -- unknown, malformed, or a format-specific tag
+//      that slipped through because its parser didn't handle it -- is
+//      dropped silently. This is the safety net: we never want to leak a
+//      raw "<...>" onto the screen as literal text, and we never want to
+//      guess at semantics we don't own here.
+//
+// `in` is the cue text after any format-specific translation upstream (may
+// still contain embedded '\n' from multi-line cues and/or literal "{\...}"
+// blocks). `out` must be at least in_size * 6 + 1 bytes (worst case: every
+// input byte becomes part of a "{\c&HBBGGRR&}"-sized expansion; 6x is
+// generous headroom since color tags are the biggest expansion and operate
+// on whole tags, not per byte). Returns the number of bytes written to
+// `out`, not including the terminating '\0'.
+static int srt_text_to_ass(const char *in, int in_size, char *out) {
+    int i = 0, j = 0;
+
+    while (i < in_size && in[i] != '\0') {
+        if (in[i] == '\r') {
+            i++;
+            continue; // skip Windows line endings
+        }
+        if (in[i] == '\n') {
+            out[j++] = '\\';
+            out[j++] = 'N';
+            i++;
+            continue;
+        }
+
+        // Rule 2: an ASS override block already in the input (from an
+        // upstream format-specific translation) passes through verbatim.
+        // We must not treat its '{' / '\' / '}' as ordinary text to mangle,
+        // and must not accidentally match it against the '<' tag logic
+        // below (it can't, since it starts with '{' not '<', but the guard
+        // is kept explicit here so this contract can't be broken by a
+        // future edit that reorders the checks).
+        if (in[i] == '{') {
+            int k = i + 1;
+            while (k < in_size && in[k] != '\0' && in[k] != '}') k++;
+            if (k < in_size && in[k] == '}') {
+                int block_len = k - i + 1;
+                memcpy(out + j, in + i, block_len);
+                j += block_len;
+                i = k + 1;
+                continue;
+            }
+            // Unterminated '{' — fall through and copy it as a literal char
+            // rather than losing it; matches the unterminated-tag handling
+            // for '<' below.
+            out[j++] = in[i++];
+            continue;
+        }
+
+        if (in[i] != '<') {
+            out[j++] = in[i++];
+            continue;
+        }
+
+        // We're at a '<' — find the matching '>' before deciding what to do.
+        int tag_start = i;
+        int k = i + 1;
+        while (k < in_size && in[k] != '\0' && in[k] != '>') k++;
+        if (k >= in_size || in[k] != '>') {
+            // No closing '>' in this chunk — treat the rest as plain text
+            // rather than silently eating an unterminated tag's tail.
+            out[j++] = in[i++];
+            continue;
+        }
+        int tag_len = k - tag_start + 1; // includes '<' and '>'
+        const char *tag = in + tag_start;
+
+        if (tag_len >= 3 && (tag[1] == 'b' || tag[1] == 'B') && tag[2] == '>') {
+            memcpy(out + j, "{\\b1}", 5); j += 5;
+        } else if (tag_len >= 4 && tag[1] == '/' && (tag[2] == 'b' || tag[2] == 'B') && tag[3] == '>') {
+            memcpy(out + j, "{\\b0}", 5); j += 5;
+        } else if (tag_len >= 3 && (tag[1] == 'i' || tag[1] == 'I') && tag[2] == '>') {
+            memcpy(out + j, "{\\i1}", 5); j += 5;
+        } else if (tag_len >= 4 && tag[1] == '/' && (tag[2] == 'i' || tag[2] == 'I') && tag[3] == '>') {
+            memcpy(out + j, "{\\i0}", 5); j += 5;
+        } else if (tag_len >= 3 && (tag[1] == 'u' || tag[1] == 'U') && tag[2] == '>') {
+            memcpy(out + j, "{\\u1}", 5); j += 5;
+        } else if (tag_len >= 4 && tag[1] == '/' && (tag[2] == 'u' || tag[2] == 'U') && tag[3] == '>') {
+            memcpy(out + j, "{\\u0}", 5); j += 5;
+        } else if (tag_len >= 7 && strncasecmp(tag + 1, "font", 4) == 0 &&
+                   (tag[5] == '>' || tag[5] == ' ')) {
+            // <font ... color="#RRGGBB" ...> — pull the first hex color found
+            // between here and '>'. Anything we can't parse just emits no
+            // override (falls back to the style's own PrimaryColour), rather
+            // than aborting the whole tag translation.
+            const char *search = tag;
+            const char *hash = memchr(search, '#', tag_len);
+            unsigned int rr = 0, gg = 0, bb = 0;
+            int parsed = 0;
+            if (hash && (hash - tag) < tag_len - 6) {
+                parsed = sscanf(hash + 1, "%2x%2x%2x", &rr, &gg, &bb) == 3;
+            }
+            if (parsed) {
+                // HTML #RRGGBB -> ASS &HBBGGRR& (byte order reversed)
+                j += sprintf(out + j, "{\\c&H%02X%02X%02X&}", bb, gg, rr);
+            }
+            // no recognizable color -> emit nothing, just drop the tag
+        } else if (tag_len >= 7 && tag[1] == '/' && strncasecmp(tag + 2, "font", 4) == 0 && tag[6] == '>') {
+            memcpy(out + j, "{\\c}", 4); j += 4;
+        }
+        // Rule 4: anything else -- unrecognized common tag, or a format-
+        // specific tag (VTT <v>/<c>, SMI <P Class=...>, ...) that its own
+        // parser should have translated already but didn't -- is dropped.
+        // We deliberately do NOT try to guess its semantics here.
+
+        i = k + 1;
+    }
+    out[j] = '\0';
+    return j;
+}
+
 static int srt_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms) {
     SRT_BACKEND *ctx = (SRT_BACKEND *)be->priv;
     const char *text = (const char *)data;
 
-    char *ass_payload = malloc(size * 2 + 128);
+    // Prefix "N,0,Default,,0,0,0,," (read_order can grow to several digits
+    // over a long track) + translated text, worst case ~6x input size (see
+    // srt_text_to_ass() comment) + NUL.
+    char *ass_payload = malloc(size * 6 + 160);
     int offset = sprintf(ass_payload, "%d,0,Default,,0,0,0,,", ctx->read_order++);
 
-    int i = 0, j = offset;
-    int in_tag = 0;
-    while (i < size && text[i] != '\0') {
-        if (text[i] == '<') in_tag = 1;
-        else if (text[i] == '>') in_tag = 0;
-        else if (!in_tag) {
-            if (text[i] == '\r') { /* skip Windows returns */ }
-            else if (text[i] == '\n') {
-                ass_payload[j++] = '\\';
-                ass_payload[j++] = 'N';
-            } else {
-                ass_payload[j++] = text[i];
-            }
-        }
-        i++;
-    }
-    ass_payload[j] = '\0';
+    offset += srt_text_to_ass(text, size, ass_payload + offset);
 
-    // Send pure string down into the SSA backend with the correctly extracted duration!
-    int ret = ctx->ssa_backend->feed(ctx->ssa_backend, (const uint8_t*)ass_payload, strlen(ass_payload), pts_ms, duration_ms);
+    // Send the ASS-tagged string down into the SSA backend with the correctly extracted duration!
+    int ret = ctx->ssa_backend->feed(ctx->ssa_backend, (const uint8_t*)ass_payload, offset, pts_ms, duration_ms);
 
     free(ass_payload);
     return ret;

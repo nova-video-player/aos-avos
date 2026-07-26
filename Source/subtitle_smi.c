@@ -33,10 +33,27 @@
 #define SMI_ARRAY_SIZE 10
 static sub_coding_style *chop_line( char * );
 
+// Seeks to the beginning of the file, skipping a leading UTF-8 BOM
+// (EF BB BF) if present. Every "start of file" seek in this parser must go
+// through here rather than a raw fseek(file,0,SEEK_SET): detect_SMI,
+// info_SMI, and parse_SMI each independently rewind and re-read from the
+// top, and a raw seek-to-0 would re-introduce the BOM bytes into the
+// header/body scan every time, breaking the "<SAMI>" match in detect_SMI
+// and offsetting every subsequent line read.
+static void smi_seek_start( FILE *file )
+{
+	fseek( file, 0, SEEK_SET );
+	int c0 = fgetc( file ), c1 = fgetc( file ), c2 = fgetc( file );
+	if( (unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF ) {
+		return; // leave positioned right after the BOM
+	}
+	fseek( file, 0, SEEK_SET );
+}
+
 static int detect_SMI( FILE * file )
 {
-	//make sure that read starts at the beginning of file
-	fseek( file, 0, SEEK_SET );
+	//make sure that read starts at the beginning of file (skipping BOM)
+	smi_seek_start( file );
 	
 	char _tmp[ LINE_LEN + 1 ];
 	char* tmp = _tmp;
@@ -44,7 +61,7 @@ static int detect_SMI( FILE * file )
 		goto ErrorExit;
 	}
 	if ( strstrNC( tmp, "<SAMI>" ) ) {
-		fseek( file, 0, SEEK_SET );
+		smi_seek_start( file );
 DBG serprintf( "SMI: found!\n" );
 		return 0;
 	}
@@ -139,8 +156,8 @@ static sub_coding_style **info_SMI( FILE * file, int *cnt, uint32_t *palette, in
 	int styles = 0;
 	sub_coding_style **style_arr = NULL;
 	sub_coding_style *ifstyle = NULL;
-	//make sure that reading start from the begining of file
-	fseek( file, 0, SEEK_SET );
+	//make sure that reading start from the begining of file (skipping BOM)
+	smi_seek_start( file );
 	
 	//store header to read it easier.
 	header = fgets( header, LINE_LEN, file );
@@ -501,14 +518,22 @@ static sub_line *extract_smi_line( char **data, char *coding, int clean_tags, in
         //ignore empty spaces
         char *tmp_line = clear_empty(tmp);
         //loop through every line and acquire lines that have <P Class=coding>
-        if(!tmp_line)     {
+        //
+        // NOTE: this used to be two single-shot "if empty/short, advance
+        // once" checks, which only ever skipped at most one blank/short
+        // line before falling through. A SAMI file with two blank/short
+        // lines in a row (e.g. an empty line followed by a lone short
+        // "<P Class=EN>" tag on its own line before the real text) would
+        // silently orphan the actual cue text sitting past them -- it was
+        // never reached, and the cue was dropped. Loop until we land on
+        // real content, run out of buffer, or hit the next <Sync Start=.
+        while ( tmp_line && line < SMI_ARRAY_SIZE - 1 &&
+                ( *tmp_line == '\0' || strlen( tmp_line ) < 5 ) &&
+                strncmpNC( tmp_line, "<Sync Start=", 12 ) ) {
 		tmp_line = data[++line];
 	}
         if(!tmp_line)     {
 		goto ERROR_CLEAN;
-	}
-	if ( strlen( tmp_line ) < 5 ) {
-		tmp_line = data[++line];
 	}
 	
 	int get_line = 0;
@@ -683,7 +708,7 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 	
 	sub_record = acalloc(1, sizeof( uni_sub ) );
 	
-	fseek( file, 0, SEEK_SET );
+	smi_seek_start( file );
 	line_read = getNextLine( line_read_start, LINE_LEN, file );
 	//skip the header
 	while ( !feof( file ) ) {

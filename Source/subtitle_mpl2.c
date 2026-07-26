@@ -26,42 +26,20 @@
 
 #define DBG if(Debug[DBG_SUB])
 
-#define LINE_BREAK_CH_NUM	3
-
 char *subtitle_get_next_line( char *start, int len, FILE *fd );
-
-static const char *LineBreakCh[LINE_BREAK_CH_NUM] =
-{
-	"|",
-	"<br>",
-	"&nbsr"
-};
-
-/************************
- * Function: subtitle_get_sub_time
- * input: timeline of sub-formatted subtitle
- * output: array of start and endtime in int
- * 
- * Converts the given string to start end endtime.
- * The string must be in "{XX}{YY}ZTY" where XX and YY are int
- * *********************/
-static int *subtitle_get_sub_time( char *line )
-{
-	int *times = amalloc( 2 * sizeof( int ) );
-	if( 2 != sscanf( line, "[%d][%d]", &times[0], &times[1] ) ) {
-		afree(times);		
-		return 0;
-	}
-	times[0] *= 100;
-	times[1] *= 100;
-	
-	return times;
-}
 
 static int detect_MPL( FILE * file )
 {
 	//make sure that read starts at the beginning of file
 	fseek( file, 0, SEEK_SET );
+
+	// Skip BOM if present (UTF-8: EF BB BF) -- otherwise it lands as three
+	// garbage bytes prefixed onto the first "[start][stop]" line and the
+	// sscanf match below silently fails, rejecting an otherwise-valid file.
+	int c0 = fgetc(file), c1 = fgetc(file), c2 = fgetc(file);
+	if( !((unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF) ) {
+		fseek( file, 0, SEEK_SET );
+	}
 
 	char _line[ LINE_LEN + 1 ];
 	char* line = _line;
@@ -83,53 +61,43 @@ DBG printf( "MPL: not MPL\n" );
 
 }
 
-static void store_line(char *line, sub_line *sub, int utf8, int clean_tags)
+// ---------------------------------------------------------------------------
+// mpl_italic_marker_to_ass — MPL2-specific tag layer.
+//
+// Per the shared/format-specific split (mirrors subtitle_vtt.c's
+// vtt_translate_format_tags and subtitle_sub.c's microdvd_style_codes_to_ass):
+// MPL2's own italics marker -- a leading '/' at the start of a physical line
+// -- has no meaning to the common layer downstream (srt_text_to_ass() in
+// sub_format_srt.c), which only knows the shared <b>/<i>/<u>/<font> HTML
+// subset. It must be translated here, before the text leaves this file.
+//
+// Per spec, italics applies per physical line, not to the whole cue: a cue
+// with two lines can mark just one of them italic ("Line 1|/Line 2"), so
+// this must be called independently on the top and bottom halves after the
+// '|' split, same as MicroDVD's per-line marker.
+//
+// Writes into `out` (caller-provided, must be at least strlen(in) + 11
+// bytes: "{\i1}" + text + "{\i0}" + NUL). Returns bytes written, excluding
+// NUL. `in` is not modified.
+// ---------------------------------------------------------------------------
+static int mpl_italic_marker_to_ass( const char *in, char *out, int out_size )
 {
-#ifdef CONFIG_I18N
-	if( !utf8 ) {
-//serprintf("LINE: %s\r\n", line );
-		wchar unicode[ LINE_LEN];
-		memset(unicode, 0, LINE_LEN * sizeof(wchar));
-		wchar *uc = unicode;
-		char *c = line;
-		while( *c ) {
-			// take care about wide codepage chars!
-			c += I18N_codepage_to_unicode( c, uc );
-			uc++; 
-		}
-		// convert to utf8
-		utf16_to_utf8( line, unicode, LINE_LEN );
-//serprintf("LINE: %s\r\n", line );
-	}
-#endif
+	int has_italic = ( in[0] == '/' );
+	const char *text = has_italic ? in + 1 : in;
+	int text_len = (int)strlen( text );
 
-	line = subtitle_clean_formatter(line, clean_tags);
-	int i;
-	for(i = 0; i < LINE_BREAK_CH_NUM;++i){
-		char *top = line;
-		char *bot = strstr(line, LineBreakCh[i]);
-		if(bot){
-			*bot = '\0';
-			if( top[0] == '/' )
-				top++;
-			sub->top = acalloc(strlen(top) + 1, 1);
-			strncpy(sub->top, top, strlen(top));
-			bot += strlen(LineBreakCh[i]);
-			if( bot[0] == '/' )
-				bot++;
-			sub->bottom = acalloc(strlen(bot) + 1, 1);
-			strncpy(sub->bottom, bot, strlen(bot));
-			break;
-		}
+	if( !has_italic ) {
+		int n = text_len < out_size - 1 ? text_len : out_size - 1;
+		memcpy( out, text, n );
+		out[n] = '\0';
+		return n;
 	}
-	if(!sub->top){
-		char *top = line;
-		if( top[0] == '/' )
-			top++;
-		sub->top = acalloc(strlen(top) + 1, 1);
-		strcpy(sub->top, top);
-	}
-	afree(line); //this is different than the parameter. thus free it
+
+	// {\i1} + text + {\i0} + NUL, bounds-checked against out_size.
+	int n = snprintf( out, out_size, "{\\i1}%s{\\i0}", text );
+	if( n < 0 ) { out[0] = '\0'; return 0; }
+	if( n >= out_size ) n = out_size - 1; // snprintf already NUL-terminated at truncation
+	return n;
 }
 
 static uni_sub *parse_MPL( subt_orig *spex, int clean_tags )
@@ -155,6 +123,15 @@ static uni_sub *parse_MPL( subt_orig *spex, int clean_tags )
 	fd = fopen( spex->filename, "r" );
 	if( !fd ) {
 		goto CLEAR_ERROR;
+	}
+
+	// Skip BOM if present -- see detect_MPL for why this matters even
+	// though parse_MPL's own strchr-based scanning is more forgiving than
+	// detect_MPL's anchored sscanf.
+	{
+		int c0 = fgetc(fd), c1 = fgetc(fd), c2 = fgetc(fd);
+		if( !((unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF) )
+			fseek( fd, 0, SEEK_SET );
 	}
 
 	line = subtitle_get_next_line( line, LINE_LEN, fd );
@@ -242,12 +219,23 @@ static uni_sub *parse_MPL( subt_orig *spex, int clean_tags )
 		}
 		#endif
 
-		store = subtitle_clean_formatter(text_str, clean_tags);
-		new_line->top = astrdup( store );
-		afree(store);
+		// MPL2's leading-'/' italic marker must be translated to ASS before
+		// subtitle_clean_formatter (a no-op pass-through with clean_tags==0)
+		// and before the text reaches the shared common-tag layer
+		// downstream, which has no knowledge of MPL2's own marker syntax
+		// and would otherwise leak a literal '/' onto the screen.
+		{
+			char ass_top[ LINE_LEN + 16 ];
+			mpl_italic_marker_to_ass( text_str, ass_top, sizeof(ass_top) );
+			store = subtitle_clean_formatter(ass_top, clean_tags);
+			new_line->top = astrdup( store );
+			afree(store);
+		}
 
 		if ( line_bottom ) {
-			store = subtitle_clean_formatter(line_bottom, clean_tags);
+			char ass_bottom[ LINE_LEN + 16 ];
+			mpl_italic_marker_to_ass( line_bottom, ass_bottom, sizeof(ass_bottom) );
+			store = subtitle_clean_formatter(ass_bottom, clean_tags);
 
 			// --- NATIVE LIBASS UPGRADE ---
 			// Do not split into bottom! Concatenate using ASS \N line break!

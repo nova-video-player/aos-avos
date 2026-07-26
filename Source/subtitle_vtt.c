@@ -122,6 +122,124 @@ static void vtt_chop( char *line )
 }
 
 // ---------------------------------------------------------------------------
+// vtt_translate_format_tags — VTT-specific tag layer.
+//
+// Per the shared/format-specific split: the common HTML-ish tags (<b>, <i>,
+// <u>, <font color>) are handled downstream by srt_text_to_ass() in
+// sub_format_srt.c, which every plain-text format funnels through. Anything
+// that's VTT's OWN syntax and not shared with SRT/SMI/SUB/MPL2 must be
+// translated HERE, before the text leaves this file — otherwise it lands in
+// the shared layer as just another unrecognized "<...>" tag and gets
+// silently dropped with no chance to preserve its meaning.
+//
+// Handles, in place, modifying `line` (caller's buffer is LINE_LEN sized and
+// this only ever shortens the string, so no separate output buffer needed):
+//
+//   <v Speaker Name>text</v>   -> "Speaker Name: text"   (voice/speaker cue —
+//                                  dropping this silently loses who's
+//                                  talking, so we fold it into visible text
+//                                  instead of discarding it)
+//   <v.loud Speaker>text</v>   -> "Speaker: text"          (leading .class on
+//                                  <v> is ignored — no ASS equivalent, but
+//                                  the speaker name itself is still worth
+//                                  keeping)
+//   <c.classname>text</c>      -> "text"                   (VTT's CSS-class
+//                                  cue span — no shared ASS equivalent for
+//                                  arbitrary classes, so just unwrap the tag
+//                                  and keep the text, rather than losing the
+//                                  whole span downstream)
+//   <lang.classname>           -> unwrapped the same way as <c> (rare tag,
+//   or any other <XX...>          same reasoning: no ASS equivalent for
+//                                  format-only metadata; keep the text)
+//
+// <b>/<i>/<u>/<font> are intentionally left untouched here — those are the
+// shared tags and belong to the common layer downstream, not this one.
+// ---------------------------------------------------------------------------
+static void vtt_translate_format_tags( char *line )
+{
+    char out[ LINE_LEN * 2 ];
+    int  o = 0;
+    char *p = line;
+
+    while( *p && o < (int)sizeof(out) - 1 ) {
+        if( *p != '<' ) {
+            out[o++] = *p++;
+            continue;
+        }
+
+        char *tag_end = strchr( p, '>' );
+        if( !tag_end ) {
+            // Unterminated tag — copy the rest verbatim rather than losing it.
+            while( *p && o < (int)sizeof(out) - 1 ) out[o++] = *p++;
+            break;
+        }
+        int tag_len = (int)(tag_end - p) + 1;
+
+        // Is this one of the shared tags (owned by the common layer
+        // downstream, srt_text_to_ass())? Check the actual boundary char,
+        // not just a prefix -- "<b2" or "<big" must NOT match "<b".
+        int is_shared =
+            (tag_len >= 3 && (p[1]=='b'||p[1]=='B') && p[2]=='>') ||
+            (tag_len >= 4 && p[1]=='/' && (p[2]=='b'||p[2]=='B') && p[3]=='>') ||
+            (tag_len >= 3 && (p[1]=='i'||p[1]=='I') && p[2]=='>') ||
+            (tag_len >= 4 && p[1]=='/' && (p[2]=='i'||p[2]=='I') && p[3]=='>') ||
+            (tag_len >= 3 && (p[1]=='u'||p[1]=='U') && p[2]=='>') ||
+            (tag_len >= 4 && p[1]=='/' && (p[2]=='u'||p[2]=='U') && p[3]=='>') ||
+            (tag_len >= 7 && !strncmpNC(p+1, "font", 4) && (p[5]=='>' || p[5]==' ')) ||
+            (tag_len >= 7 && p[1]=='/' && !strncmpNC(p+2, "font", 4) && p[6]=='>');
+
+        if( is_shared ) {
+            // Shared tag — not ours to translate. Copy the whole tag through
+            // verbatim so the common layer (srt_text_to_ass) sees it intact.
+            int n = tag_len;
+            if( o + n > (int)sizeof(out) - 1 ) n = (int)sizeof(out) - 1 - o;
+            memcpy( out + o, p, n );
+            o += n;
+            p = tag_end + 1;
+            continue;
+        }
+
+        if( (p[1] == 'v' || p[1] == 'V') && (p[2] == ' ' || p[2] == '.' || p[2] == '>') ) {
+            // <v[.class] Speaker Name> — extract the speaker name (skip any
+            // leading .class token(s) and the space separating them from
+            // the name) and fold it into the visible text as
+            // "Speaker Name: ". The matching </v> just gets unwrapped below.
+            char *name_start = p + 2;
+            while( *name_start == '.' ) {
+                while( *name_start && *name_start != ' ' && *name_start != '>' ) name_start++;
+            }
+            while( *name_start == ' ' ) name_start++;
+            int name_len = (int)(tag_end - name_start);
+            if( name_len > 0 && o + name_len + 2 < (int)sizeof(out) - 1 ) {
+                memcpy( out + o, name_start, name_len );
+                o += name_len;
+                out[o++] = ':';
+                out[o++] = ' ';
+            }
+            p = tag_end + 1;
+            continue;
+        }
+        if( tag_len >= 4 && !strncmpNC(p, "</v", 3) && p[3] == '>' ) {
+            // Closing </v> carries no text of its own — just unwrap it.
+            p = tag_end + 1;
+            continue;
+        }
+
+        // <c...>, </c>, <lang...>, or any other VTT-only/unknown tag: no
+        // shared ASS equivalent and no text worth extracting beyond what's
+        // already inside — unwrap (drop the tag, keep the enclosed text
+        // which will follow as plain characters on the next loop iterations).
+        p = tag_end + 1;
+    }
+    out[o] = '\0';
+
+    // line's caller buffer is LINE_LEN+1 sized (see feed_VTT's _line[]);
+    // out can only be <= the input length since every branch either copies
+    // through 1:1 or shortens, so this always fits.
+    strcpy( line, out );
+}
+
+// ---------------------------------------------------------------------------
 // feed_VTT — streaming single-pass path
 //
 // Parses the VTT file and fires cb(ctx, text, start_ms, end_ms) for every
@@ -216,6 +334,13 @@ static void feed_VTT( subt_orig *spex, sub_cue_cb cb, void *ctx )
                     utf16_to_utf8(line, unicode, LINE_LEN);
                 }
                 #endif
+                // VTT-specific tags (<v>, <c>, <lang>, ...) must be translated
+                // here, before subtitle_clean_formatter/feed(): they have no
+                // meaning to the shared common-tag layer downstream
+                // (srt_text_to_ass in sub_format_srt.c), which only knows the
+                // handful of tags shared across formats (<b>/<i>/<u>/<font>)
+                // and silently drops everything else as a safety net.
+                vtt_translate_format_tags( line );
                 store = subtitle_clean_formatter(line, 0); // clean_tags always 0
                 if( store ) {
                     if( cue_text[0] ) {

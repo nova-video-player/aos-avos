@@ -2063,7 +2063,6 @@ static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64
 
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
 {
-DBG	LOG("audiotrack_write: format=%04X, passthrough=%d, len=%d", at->format, at->passthrough, len);
 	if (!at->init) {
 ERR		LOG("audiotrack_write: track not valid, error");
 		return -1;
@@ -2086,7 +2085,6 @@ ERR		LOG("audiotrack_write: track not valid, error");
 		ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
 	}
 	if (ret == 0 && nonblocking_write) {
-		DBG3 LOG("audiotrack_write: nonblocking passthrough backpressure");
 		return 0;
 	}
 DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d)",

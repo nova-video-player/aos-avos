@@ -835,6 +835,10 @@ static compressed_write_result_t _stream_write_compressed_unit(
 {
 	AUDIO_FRAME pending = *frame;
 	int can_write_retries = 0;
+	int zero_write_retries = 0;
+	int zero_write_start_ms = -1;
+	int zero_write_last_log_ms = -1;
+	int zero_write_reported = 0;
 	*accepted_bytes = 0;
 
 	while( pending.size > 0 ) {
@@ -882,6 +886,21 @@ static compressed_write_result_t _stream_write_compressed_unit(
 			// API 23+ compressed AudioTrack writes are non-blocking. Zero is
 			// ordinary queue backpressure; retain the same unit and retry after
 			// yielding so pause can wait only for its remaining media duration.
+			int now_ms = atime();
+			if( zero_write_start_ms < 0 ) {
+				zero_write_start_ms = now_ms;
+				zero_write_last_log_ms = now_ms;
+			}
+			zero_write_retries++;
+			int blocked_ms = now_ms - zero_write_start_ms;
+			if( blocked_ms >= 1000 &&
+				now_ms - zero_write_last_log_ms >= 1000 ) {
+				DBG serprintf("stream_audio: compressed write backpressure remaining=%d accepted=%d/%d retries=%d blocked=%dms\n",
+					pending.size, *accepted_bytes, frame->size,
+					zero_write_retries, blocked_ms);
+				zero_write_last_log_ms = now_ms;
+				zero_write_reported = 1;
+			}
 			stream_yield_RT();
 			continue;
 		}
@@ -897,6 +916,15 @@ static compressed_write_result_t _stream_write_compressed_unit(
 				written, pending.size, *accepted_bytes, frame->format);
 			return COMPRESSED_WRITE_ERROR;
 		}
+		if( zero_write_reported ) {
+			DBG serprintf("stream_audio: compressed write backpressure cleared remaining=%d accepted=%d/%d retries=%d blocked=%dms\n",
+				pending.size, *accepted_bytes, frame->size,
+				zero_write_retries, atime() - zero_write_start_ms);
+		}
+		zero_write_retries = 0;
+		zero_write_start_ms = -1;
+		zero_write_last_log_ms = -1;
+		zero_write_reported = 0;
 
 		*accepted_bytes += written;
 		if( written < pending.size ) {

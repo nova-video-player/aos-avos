@@ -345,10 +345,11 @@ static int get_info_subtitle(const char *full_path, FILE_INFO *info)
 		converted_subs *sub_conv = subtitle_get_converted( sub_info, 0 );
 		if (sub_conv) {
 			int i;
+			int added = 0;
 			struct subt_orig_t *sub_files = sub_info->files;
 
-			for (i = 0; i < sub_conv->cnt; ++i) {
-				SUB_PROPERTIES *sub = &info->av.sub[i+info->av.subs_max];
+			for (i = 0; i < sub_conv->cnt && info->av.subs_max + added < SUB_TRACK_MAX; ++i) {
+				SUB_PROPERTIES *sub = &info->av.sub[info->av.subs_max + added];
 				sub->format = SUB_FORMAT_EXT;
 				sub->gfx = 0;
 				sub->ext = 1;
@@ -360,8 +361,14 @@ static int get_info_subtitle(const char *full_path, FILE_INFO *info)
 					}
 					sub_files = sub_files->next;
 				}
+				added++;
 			}
-			info->av.subs_max += sub_info->count;
+			info->av.subs_max += added;
+			if (i < sub_conv->cnt) {
+				serprintf("get_info_subtitle: ignored %d external subtitle tracks: "
+					"maximum of %d subtitle tracks reached\n",
+					sub_conv->cnt - i, SUB_TRACK_MAX);
+			}
 			subtitle_free_converted(sub_conv);
 		}
 		subtitle_free_files(sub_info);
@@ -505,23 +512,27 @@ void file_info_dump_for_path( const char *path, int verbose )
 		return;
 	} 
 
-	FILE_INFO info;
+	FILE_INFO *info = acalloc(1, sizeof(*info));
+	if (!info) {
+		return;
+	}
 	APIC apic = { 0 };
 	apic.buffer_size = 512 * 1024;
 		
-	if( get_file_info_clean( path, type, etype, &info, &apic, NULL) ){
+	if( get_file_info_clean( path, type, etype, info, &apic, NULL) ){
 serprintf("cannot get info: %s\r\n", path);
-		return;
+		goto out;
 	}
 	
 	if( verbose ) {
-		file_info_dump( &info, &apic );
+		file_info_dump( info, &apic );
 	} else {
-serprintf("\t%-80s  %s  %s\n", cut_path( path ), info.id3_tag.valid ? "TAG" : "   ", apic.valid ? av_get_etype_name( apic.etype) : "" );	
+serprintf("\t%-80s  %s  %s\n", cut_path( path ), info->id3_tag.valid ? "TAG" : "   ", apic.valid ? av_get_etype_name( apic.etype) : "" );
 	}
 	
+out:
 	if( apic.buffer ) {
 		afree( apic.buffer );		
 	}
+	afree( info );
 }
-

@@ -587,7 +587,7 @@ DBGP serprintf("\tchannels   %d\r\n", codecpar->ch_layout.nb_channels);
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 			}
 
-			if ( priv->av.as_max < AUDIO_TRACK_MAX ) {	
+			if ( priv->av.as_max < AUDIO_TRACK_MAX ) {
 				AUDIO_PROPERTIES *audio = priv->av.audio + priv->av.as_max;
 
 				audio->codec_id	     = codecpar->codec_id;
@@ -667,7 +667,11 @@ DBGP serprintf( "arate=%d; ascale=%d\n", audio->rate, audio->scale );
 				
 				priv->av.as_max ++;
 				discard = 0;
-			} 
+			} else {
+				serprintf("stream_parser_ffmpeg: ignoring audio stream %d: "
+					"maximum of %d audio tracks reached\n",
+					i, AUDIO_TRACK_MAX);
+			}
 		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codecpar->codec_type == AVMEDIA_TYPE_DATA ){
 			//
 			// subtitle
@@ -709,6 +713,10 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 
 				priv->av.subs_max ++;
 				discard = 0;
+			} else if( fmt ) {
+				serprintf("stream_parser_ffmpeg: ignoring subtitle stream %d: "
+					"maximum of %d subtitle tracks reached\n",
+					i, SUB_TRACK_MAX);
 			}
 		}
 DISCARD_STREAM:

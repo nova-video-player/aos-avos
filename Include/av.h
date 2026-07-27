@@ -544,9 +544,9 @@ enum {
 	SUB_FORMAT_WEBVTT,
 };
 
-#define AUDIO_TRACK_MAX		16
+#define AUDIO_TRACK_MAX		32
 #define VIDEO_TRACK_MAX		6
-#define SUB_TRACK_MAX		64
+#define SUB_TRACK_MAX		128
 #define AV_NAME_LEN			256
 
 enum {

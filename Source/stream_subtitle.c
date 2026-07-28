@@ -191,6 +191,41 @@ DBG serprintf("sub int GFX->engine: video %8d  start %8d  dur %8d  [%dx%d]\r\n",
 
 // *****************************************************************************
 //
+//	_bridge_embedded_fonts
+//
+// *****************************************************************************
+// Bridges the demuxer-layer ATTACHED_FONT records in s->av.font[] (harvested
+// from container attachments -- e.g. MKV AVMEDIA_TYPE_ATTACHMENT streams --
+// by stream_parser_ffmpeg.c's _parse_format(), see av.h) into the
+// sub-engine-layer SUB_EMBEDDED_FONT shape sub_engine_open_track() expects
+// (see sub_format.h). Two distinct struct types by design, not an accidental
+// duplicate: av.h must not depend on anything sub-engine/libass-shaped, the
+// same reasoning that already keeps SUB_PROPERTIES and SUB_FORMAT_OPEN_PARAMS
+// independent (codec_private below is bridged from s->subtitle->extraData2
+// exactly the same way).
+//
+// One shared helper instead of duplicating this loop at each of the three
+// sub_engine_open_track() call sites below. `out` must have room for at
+// least s->av.fonts_max entries (ATTACHED_FONT_MAX covers every caller here).
+// Returns how many entries were written (only valid==1, non-empty entries
+// are copied).
+static int _bridge_embedded_fonts( STREAM *s, SUB_EMBEDDED_FONT *out, int out_cap )
+{
+	int n = 0;
+	int i;
+	for( i = 0; i < s->av.fonts_max && n < out_cap; i++ ) {
+		ATTACHED_FONT *f = s->av.font + i;
+		if( !f->valid || !f->data || f->size <= 0 ) continue;
+		out[n].name = f->filename;
+		out[n].data = f->data;
+		out[n].size = f->size;
+		n++;
+	}
+	return n;
+}
+
+// *****************************************************************************
+//
 //	_get_next_int_sub
 //
 // *****************************************************************************
@@ -206,13 +241,16 @@ static void _get_next_int_sub( STREAM *s, int time )
 				// CASE 1: Raw passthrough — open C engine, no sub_dec needed
 				if (s->sub_engine) {
 					int engine_fmt = (fmt == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
+					SUB_EMBEDDED_FONT embedded_fonts[ATTACHED_FONT_MAX];
+					int embedded_fonts_count = _bridge_embedded_fonts( s, embedded_fonts, ATTACHED_FONT_MAX );
 					sub_engine_open_track(
 						(SUB_ENGINE*)s->sub_engine,
 						engine_fmt,
 						s->video ? s->video->width  : 0,
 						s->video ? s->video->height : 0,
 						s->subtitle->extraData2,
-						s->subtitle->extraDataSize2);
+						s->subtitle->extraDataSize2,
+						embedded_fonts, embedded_fonts_count);
 					// NOTE: do NOT call sub_engine_start() here. avos_mp_video_open() already
 					// registered the engine clock once (engine_clock_cb -> stream_get_current_time),
 					// and that registration stays valid for the stream's entire lifetime, including
@@ -229,12 +267,15 @@ static void _get_next_int_sub( STREAM *s, int time )
 				}
 				if (s->sub_engine) {
 					// All ffdec text formats funnel through the SRT wrapper in the engine
+					SUB_EMBEDDED_FONT embedded_fonts[ATTACHED_FONT_MAX];
+					int embedded_fonts_count = _bridge_embedded_fonts( s, embedded_fonts, ATTACHED_FONT_MAX );
 					sub_engine_open_track(
 						(SUB_ENGINE*)s->sub_engine,
 						SUB_FMT_SRT,
 						s->video ? s->video->width  : 0,
 						s->video ? s->video->height : 0,
-						NULL, 0);
+						NULL, 0,
+						embedded_fonts, embedded_fonts_count);
 				}
 
 			} else if( _is_ffdec_bitmap(fmt) ) {
@@ -354,12 +395,15 @@ static void _get_next_ext_sub( STREAM *s, int time )
 				int engine_fmt = stream_sub_ext_get_engine_fmt( s );
 				if( engine_fmt < 0 ) engine_fmt = SUB_FMT_SRT; // safe default
 
+				SUB_EMBEDDED_FONT embedded_fonts[ATTACHED_FONT_MAX];
+				int embedded_fonts_count = _bridge_embedded_fonts( s, embedded_fonts, ATTACHED_FONT_MAX );
 				sub_engine_open_track(
 					(SUB_ENGINE*)s->sub_engine,
 					engine_fmt,
 					s->video ? s->video->width  : 0,
 					s->video ? s->video->height : 0,
-					NULL, 0); // no codec_private for external files
+					NULL, 0, // no codec_private for external files
+					embedded_fonts, embedded_fonts_count);
 
 				// Bulk-feed the full parsed cue list (or raw ASS buffer) right now.
 				// After this call the engine has everything — no per-frame polling needed.

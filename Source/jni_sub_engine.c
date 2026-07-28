@@ -146,3 +146,35 @@ JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_n
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetOverrideMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {
     sub_style_set_override_mode(sub_engine_get_style(get_engine(handle)), mode);
 }
+
+// --- CUSTOM FONTS FOLDER (third-party fonts dir, MX Player / mpv-android style) ---
+
+JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontsFolder(JNIEnv *env, jobject thiz, jlong handle, jstring dirPath) {
+    SUB_ENGINE *eng = get_engine(handle);
+    if (!eng) return;
+
+    if (!dirPath) {
+        // Same "clear" convention as nativeSetFontFamily would use if it
+        // supported clearing: NULL jstring -> NULL C string -> feature off.
+        sub_engine_set_fonts_dir(eng, NULL);
+        return;
+    }
+
+    const char *path = (*env)->GetStringUTFChars(env, dirPath, 0);
+    sub_engine_set_fonts_dir(eng, path);
+    (*env)->ReleaseStringUTFChars(env, dirPath, path);
+}
+
+JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetDefaultFontName(JNIEnv *env, jobject thiz, jlong handle, jstring familyName) {
+    SUB_ENGINE *eng = get_engine(handle);
+    if (!eng) return;
+
+    if (!familyName) {
+        sub_engine_set_default_font_name(eng, NULL);
+        return;
+    }
+
+    const char *name = (*env)->GetStringUTFChars(env, familyName, 0);
+    sub_engine_set_default_font_name(eng, name);
+    (*env)->ReleaseStringUTFChars(env, familyName, name);
+}

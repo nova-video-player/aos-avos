@@ -43,6 +43,10 @@ extern "C" {
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetVerticalOffset(JNIEnv *env, jobject thiz, jlong handle, jfloat pixels);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetOverrideMode(JNIEnv *env, jobject thiz, jlong handle, jint mode);
 
+    /* ── Custom Fonts Folder (third-party fonts dir) ── */
+    JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontsFolder(JNIEnv *env, jobject thiz, jlong handle, jstring dirPath);
+    JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetDefaultFontName(JNIEnv *env, jobject thiz, jlong handle, jstring familyName);
+
     #ifdef __cplusplus
 }
 #endif

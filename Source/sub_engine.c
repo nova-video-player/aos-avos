@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <string.h>
 #include <android/log.h>
 
 #define LOG_TAG "SubEngine"
@@ -22,6 +23,15 @@ struct SUB_ENGINE {
     int surface_w;
     int surface_h;
 
+    // Custom fonts folder (MX Player / mpv-android style third-party fonts
+    // dir). Both are simple owned heap strings guarded by eng->lock, snapshot
+    // into SUB_FORMAT_OPEN_PARAMS at open_track() time -- the SSA backend
+    // reads them once at ass_renderer/ass_add_font time in ssa_open() and
+    // does not need live updates mid-track (changing fonts mid-playback of
+    // the SAME track isn't a supported use case; switching tracks/files
+    // picks up the latest value naturally since open_track() re-reads it).
+    char *fonts_dir;          // folder to scan for .ttf/.otf/.ttc, or NULL
+    char *default_font_name;  // family name to use as fallback (e.g. for SRT), or NULL
 
     int is_paused;
     sub_engine_clock_fn clock_fn;
@@ -44,8 +54,38 @@ void sub_engine_destroy(SUB_ENGINE *eng) {
     sub_engine_close_track(eng);
     sub_render_gl_destroy(eng->renderer);
     sub_style_destroy(eng->style);
+    free(eng->fonts_dir);
+    free(eng->default_font_name);
     pthread_mutex_destroy(&eng->lock);
     free(eng);
+}
+
+// Sets the folder to scan for extra .ttf/.otf/.ttc fonts (third-party fonts
+// folder, à la MX Player / mpv-android). Takes effect on the NEXT
+// open_track() call -- it does not touch whatever backend is already active,
+// mirroring how style changes need sync_styles() to notice a serial bump
+// rather than reaching into a live ASS_Renderer's font provider directly.
+// Pass NULL or "" to clear (falls back to fontconfig-only resolution).
+void sub_engine_set_fonts_dir(SUB_ENGINE *eng, const char *dir) {
+    if (!eng) return;
+    pthread_mutex_lock(&eng->lock);
+    free(eng->fonts_dir);
+    eng->fonts_dir = (dir && dir[0]) ? strdup(dir) : NULL;
+    pthread_mutex_unlock(&eng->lock);
+}
+
+// Sets the fallback family name libass should use when nothing else names a
+// font -- this is what makes plain SRT actually use a font from the custom
+// folder instead of fontconfig's generic "sans-serif" alias. Should be a
+// family name that's resolvable given the CURRENT fonts_dir (typically one
+// of the files just scanned by sub_engine_set_fonts_dir()); takes effect on
+// the next open_track() call, same as fonts_dir above.
+void sub_engine_set_default_font_name(SUB_ENGINE *eng, const char *name) {
+    if (!eng) return;
+    pthread_mutex_lock(&eng->lock);
+    free(eng->default_font_name);
+    eng->default_font_name = (name && name[0]) ? strdup(name) : NULL;
+    pthread_mutex_unlock(&eng->lock);
 }
 
 void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window) {
@@ -89,7 +129,9 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
     sub_engine_resize_video(eng, width, height); // <--- Tells Libass to wrap text to the new 3D box!
 }
 
-int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h, const uint8_t *codec_private, int codec_private_size) {
+int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h,
+                           const uint8_t *codec_private, int codec_private_size,
+                           const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count) {
     if (!eng) return -1;
 
     // Use the actual reported surface size when known, for every format. This used to branch
@@ -129,14 +171,45 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w,
         return -1;
     }
 
+    // Snapshot the fonts-dir settings under lock as OWNED COPIES, not raw
+    // pointers into eng->fonts_dir/eng->default_font_name. open_track() runs
+    // backend->open() (potentially slow: it scans a directory and reads
+    // every font file in it) entirely AFTER this unlock, so a concurrent
+    // sub_engine_set_fonts_dir()/sub_engine_set_default_font_name() call on
+    // another thread could free() the live buffer out from under a held raw
+    // pointer -- the same use-after-free shape sub_style_snapshot() already
+    // guards against for font_family, for the same reason. These locals are
+    // freed below once backend->open() returns.
+    pthread_mutex_lock(&eng->lock);
+    char *fonts_dir_snapshot = eng->fonts_dir ? strdup(eng->fonts_dir) : NULL;
+    char *default_font_snapshot = eng->default_font_name ? strdup(eng->default_font_name) : NULL;
+    pthread_mutex_unlock(&eng->lock);
+
     SUB_FORMAT_OPEN_PARAMS params = {
         .video_w = target_w, .video_h = target_h,
         .codec_private = codec_private, .codec_private_size = codec_private_size,
         .user_style = eng->style,
-        .is_plain_text_format = (format_id == SUB_FMT_SRT) // Tell backend to force styles!
+        .is_plain_text_format = (format_id == SUB_FMT_SRT), // Tell backend to force styles!
+        .fonts_dir = fonts_dir_snapshot,
+        .default_font_name = default_font_snapshot,
+        // Passed straight through, same as codec_private above -- no
+        // snapshot/copy needed since backend->open() (load_embedded_fonts()
+        // in sub_format_ssa.c) only reads embedded_fonts[i].data
+        // synchronously during this call, handing each blob straight to
+        // ass_add_font() (which copies internally) before returning.
+        .embedded_fonts = embedded_fonts,
+        .embedded_fonts_count = embedded_fonts_count
     };
 
     int rc = backend->open(backend, &params);
+    // backend->open() (ssa_open() in particular) only reads params.fonts_dir /
+    // params.default_font_name synchronously during this call -- to scan the
+    // directory and register fonts -- and does not retain either pointer, so
+    // it's safe to free our local copies unconditionally now, regardless of
+    // which branch below runs next.
+    free(fonts_dir_snapshot);
+    free(default_font_snapshot);
+
     if (rc != 0) {
         // backend->open() may have partially constructed a private ctx (e.g.
         // calloc'd SSA_BACKEND and initialised the mutex before failing on

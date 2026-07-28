@@ -1,4 +1,5 @@
 #include "sub_format.h"
+#include "font_name_parser.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -14,7 +15,28 @@ typedef struct {
     int read_order;
 } SRT_BACKEND;
 
-static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_w, int video_h) {
+// Writes `src` into `dst` (capacity `dst_cap`, NUL-terminated), replacing any
+// comma with a space. The generated header embeds this name directly into a
+// CSV-format "Style:" line (see below) -- an unsanitized comma would shift
+// every field after it, corrupting Fontsize/PrimaryColour/etc. parsing.
+// A real font family name can legitimately contain a comma in rare cases
+// (e.g. some fonts report "Roboto,Roboto Medium" as a combined name-table
+// value), so this is a real, not merely defensive, concern now that the
+// name comes from actual font parsing rather than a filename guess.
+static void sanitize_ass_field(const char *src, char *dst, size_t dst_cap) {
+    size_t n = 0;
+    for (; src[n] != '\0' && n < dst_cap - 1; n++) {
+        dst[n] = (src[n] == ',') ? ' ' : src[n];
+    }
+    dst[n] = '\0';
+}
+
+// Real-family resolution now lives in font_name_parser.c as
+// font_name_resolve_family() -- this used to be a near-verbatim duplicate of
+// sub_format_ssa.c's own copy. See font_name_parser.h for the full contract.
+
+static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_w, int video_h,
+                                          const char *default_font_name, const char *fonts_dir) {
     char *header = malloc(2048);
 
     double aspect = 16.0 / 9.0;
@@ -32,6 +54,41 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
     int margin_v = 10;
     int margin_h = 20;
 
+    // Prefer the user's chosen default font (from the custom fonts folder,
+    // see sub_engine_set_default_font_name()) over the old hardcoded literal
+    // "sans-serif". This matters even though sync_styles() in
+    // sub_format_ssa.c will usually overwrite FontName again right after
+    // open() (whenever u.font_family is explicitly set, since force_all is
+    // always true for SRT) -- the case THIS fixes is when the user picked a
+    // fonts folder + a default font but never separately set an explicit
+    // font_family override. In that case u.font_family is empty,
+    // sync_styles() leaves FontName exactly as this header wrote it, and
+    // ass_set_fonts()'s own fallback (see ssa_open()) never gets a chance to
+    // apply because this style already names SOME font -- "sans-serif"
+    // verbatim being the wrong one. Writing the actual chosen default here
+    // closes that gap.
+    //
+    // default_font_name, as stored by the Settings UI, is the exact
+    // FILENAME ass_add_font() registered a custom font under (e.g.
+    // "bahnschrift.ttf") -- font_name_resolve_family() reads the actual
+    // font file (via FreeType) to get its REAL family name rather than
+    // guessing from that filename string. This replaced an earlier
+    // extension-stripping heuristic that was confirmed wrong on real test
+    // fonts: bahnschrift.ttf's real family is "Bahnschrift" (capital B,
+    // no ".ttf") and it's a variable font with 15 named instances, while
+    // Roboto-Medium.ttf's real family is "Roboto"/"Roboto Medium", not
+    // "Roboto-Medium" -- neither is derivable from the filename by any
+    // string transform.
+    char font_name[256];
+    if (!font_name_resolve_family(fonts_dir, default_font_name, font_name, sizeof(font_name))) {
+        strcpy(font_name, "sans-serif");
+    } else {
+        char sanitized[256];
+        sanitize_ass_field(font_name, sanitized, sizeof(sanitized));
+        strncpy(font_name, sanitized, sizeof(font_name) - 1);
+        font_name[sizeof(font_name) - 1] = '\0';
+    }
+
     // Alignment 2 = Bottom-Center. BorderStyle 3 = Tight Box.
     snprintf(header, 2048,
         "[Script Info]\n"
@@ -40,8 +97,8 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
         "PlayResY: %d\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,sans-serif,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,3,0,0,2,%d,%d,%d,1\n",
-        playres_x, playres_y, font_size, margin_h, margin_h, margin_v);
+        "Style: Default,%s,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,3,0,0,2,%d,%d,%d,1\n",
+        playres_x, playres_y, font_name, font_size, margin_h, margin_h, margin_v);
 
     return header;
 }
@@ -56,7 +113,8 @@ static int srt_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
         return -1;
     }
 
-    char *synthetic_header = generate_dynamic_ass_header(params->user_style, params->video_w, params->video_h);
+    char *synthetic_header = generate_dynamic_ass_header(params->user_style, params->video_w, params->video_h,
+                                                           params->default_font_name, params->fonts_dir);
     if (!synthetic_header) {
         free(ctx->ssa_backend);
         free(ctx);

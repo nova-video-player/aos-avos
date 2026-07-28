@@ -18,6 +18,33 @@
 typedef struct SUB_FORMAT_BACKEND SUB_FORMAT_BACKEND;
 
 /* ------------------------------------------------------------------
+ * One font extracted from a container attachment (e.g. an MKV
+ * AVMEDIA_TYPE_ATTACHMENT stream carrying an embedded .ttf/.otf/.ttc --
+ * see stream_parser_ffmpeg.c's AVMEDIA_TYPE_ATTACHMENT handling and
+ * av.h's ATTACHED_FONT, which this is bridged from by stream_subtitle.c).
+ *
+ * Deliberately a SEPARATE type from av.h's ATTACHED_FONT rather than
+ * reusing it directly: this header must not depend on anything
+ * ffmpeg/demux-shaped, mirroring how SUB_PROPERTIES (av.h) and
+ * SUB_FORMAT_OPEN_PARAMS (this file) are already two independent shapes
+ * bridged by hand at the call site -- codec_private below is exactly the
+ * same pattern, populated from SUB_PROPERTIES::extraData2 by whichever
+ * caller builds these params.
+ *
+ * `data` is NOT owned by the backend and is only guaranteed valid for the
+ * duration of open() -- it aliases the demuxer's own AVCodecParameters
+ * buffer, the same lifetime contract SUB_PROPERTIES::extraData2 already
+ * relies on for codec_private above. Nothing here needs its own teardown.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    const char    *name;   // attachment filename (e.g. "arial.ttf"), used as
+                            // ass_add_font()'s label and for logging; may be
+                            // NULL/empty if the container didn't tag one
+    const uint8_t *data;
+    int            size;
+} SUB_EMBEDDED_FONT;
+
+/* ------------------------------------------------------------------
  * Lifecycle
  * ------------------------------------------------------------------ */
 
@@ -33,6 +60,33 @@ typedef struct {
                                         * sub_style_snapshot() each frame if
                                         * it wants live updates              */
     int is_plain_text_format;        /* Tells the backend if this was converted from SRT/TXT */
+
+    /* --- Custom fonts folder (MX Player / mpv-android style third-party
+     * fonts dir) --- Both NULL/empty by default, meaning "feature off,
+     * behave exactly as before" (fontconfig-only resolution, hardcoded
+     * "sans-serif" fallback). Only the SSA backend currently reads these
+     * (see ssa_open() in sub_format_ssa.c); other backends may ignore them.
+     */
+    const char *fonts_dir;          /* folder to scan for .ttf/.otf/.ttc,
+                                      * registered with libass via
+                                      * ass_add_font() BEFORE fontconfig gets
+                                      * a chance to resolve anything          */
+    const char *default_font_name;  /* fallback family name libass uses when
+                                      * nothing else names a font — notably
+                                      * what plain-text (SRT/VTT) subtitles
+                                      * render with, since they carry no font
+                                      * info of their own                     */
+
+    /* --- Container-embedded fonts (e.g. MKV AVMEDIA_TYPE_ATTACHMENT
+     * streams) --- NULL/0 by default, meaning "none found/not applicable".
+     * See SUB_EMBEDDED_FONT above for the array element shape and lifetime
+     * contract. Only the SSA backend currently reads this (see
+     * load_embedded_fonts() in sub_format_ssa.c); other backends may ignore
+     * it. Registered with libass via ass_add_font() the same way fonts_dir
+     * is, just from memory instead of a directory scan.
+     */
+    const SUB_EMBEDDED_FONT *embedded_fonts;
+    int                      embedded_fonts_count;
 } SUB_FORMAT_OPEN_PARAMS;
 
 /*

@@ -330,6 +330,47 @@ static int get_ff_format( int id, UINT32 *fourcc )
 
 // ************************************************************
 //
+//	is_font_attachment
+//
+// ************************************************************
+// Recognizes container-attachment mimetypes that are actual embeddable font
+// files, as opposed to the OTHER things AVMEDIA_TYPE_ATTACHMENT covers in a
+// container (cover art, generic binary blobs, etc.) -- we only want to hand
+// FreeType/libass things it can actually parse as fonts. Matroska muxers
+// consistently tag font attachments with one of these MIME types; falls back
+// to the filename extension for muxers/remuxes that leave mimetype blank or
+// generic (e.g. "application/octet-stream").
+static int is_font_attachment( const char *mimetype, const char *filename )
+{
+	if( mimetype ) {
+		if( !strcmp( mimetype, "application/x-truetype-font" ) ||
+		    !strcmp( mimetype, "application/x-font-ttf" )      ||
+		    !strcmp( mimetype, "application/x-font-otf" )      ||
+		    !strcmp( mimetype, "application/vnd.ms-opentype" ) ||
+		    !strcmp( mimetype, "application/font-sfnt" )       ||
+		    !strcmp( mimetype, "font/ttf" )                    ||
+		    !strcmp( mimetype, "font/otf" )                    ||
+		    !strcmp( mimetype, "font/sfnt" )                   ||
+		    !strcmp( mimetype, "font/collection" ) ) {
+			return 1;
+		}
+	}
+	if( filename ) {
+		static const char *exts[] = { ".ttf", ".otf", ".ttc", ".TTF", ".OTF", ".TTC" };
+		size_t len = strlen( filename );
+		size_t e;
+		for( e = 0; e < sizeof( exts ) / sizeof( exts[0] ); e++ ) {
+			size_t elen = strlen( exts[e] );
+			if( len > elen && !strcmp( filename + len - elen, exts[e] ) ) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
+// ************************************************************
+//
 //	_parse_format
 //
 // ************************************************************
@@ -783,6 +824,46 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				serprintf("stream_parser_ffmpeg: ignoring subtitle stream %d: "
 					"maximum of %d subtitle tracks reached\n",
 					i, SUB_TRACK_MAX);
+			}
+		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT ){
+			//
+			// font attachment (e.g. MKV-embedded .ttf/.otf/.ttc) -- see
+			// font_name_parser.c/.h and sub_format_ssa.c's
+			// load_embedded_fonts() for what happens to these downstream.
+			//
+			// Deliberately does NOT set discard = 0: attachment streams
+			// carry no time-stamped packets to read in the first place (the
+			// whole payload is already sitting in codecpar->extradata by
+			// the time avformat_find_stream_info() returns, same as it is
+			// for the AVMEDIA_TYPE_SUBTITLE codec_private case above) -- so
+			// there's nothing to gain from keeping this stream un-discarded,
+			// exactly as before this feature existed.
+			AVDictionaryEntry *filename_tag = av_dict_get(st->metadata, "filename", NULL, 0);
+			AVDictionaryEntry *mimetype_tag = av_dict_get(st->metadata, "mimetype", NULL, 0);
+			const char *att_name = filename_tag ? filename_tag->value : NULL;
+			const char *att_mime = mimetype_tag ? mimetype_tag->value : NULL;
+
+			if( codecpar->extradata && codecpar->extradata_size > 0 &&
+			    is_font_attachment( att_mime, att_name ) ) {
+				if( priv->av.fonts_max < ATTACHED_FONT_MAX ) {
+					ATTACHED_FONT *font = priv->av.font + priv->av.fonts_max;
+
+					font->valid = 1;
+					strnZcpy( font->filename, att_name ? att_name : "", AV_NAME_LEN );
+					strnZcpy( font->mimetype, att_mime ? att_mime : "", AV_NAME_LEN );
+					// Alias, not a copy -- see ATTACHED_FONT's doc comment
+					// in av.h for the lifetime contract (mirrors extraData2
+					// just above for AVMEDIA_TYPE_SUBTITLE).
+					font->data = codecpar->extradata;
+					font->size = codecpar->extradata_size;
+
+					priv->av.fonts_max ++;
+DBGP serprintf("\tfont attachment: '%s' (%s, %d bytes)\r\n", font->filename, font->mimetype, font->size);
+				} else {
+					serprintf("stream_parser_ffmpeg: ignoring font attachment stream %d: "
+						"maximum of %d font attachments reached\n",
+						i, ATTACHED_FONT_MAX);
+				}
 			}
 		}
 DISCARD_STREAM:

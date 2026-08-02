@@ -23,8 +23,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <limits.h>
-#include <errno.h>
 
 #define DBG if(Debug[DBG_SUB])
 #define DBG2 if(Debug[DBG_SUB] > 1)
@@ -142,43 +140,75 @@ char *subtitle_get_next_line( char *start, int len, FILE *fd )
 	return ret;
 }
 
-// ---------------------------------------------------------------------------
-// feed_SRT — streaming single-pass path
-//
-// Parses the SRT file and fires cb(ctx, text, start_ms, end_ms) for every
-// cue as it is parsed. No sub_line allocation, no linked list, no second
-// pass. The callback (stream_sub_ext_feed_engine) converts each cue to an
-// ASS Dialogue event and feeds it directly to sub_engine_feed().
-//
-// This is the primary path for external SRT files. parse_SRT below is kept
-// only for formats that still need the uni_sub list (SMI/SUB/MPL2 fallback).
-// ---------------------------------------------------------------------------
-static void feed_SRT( subt_orig *spex, sub_cue_cb cb, void *ctx )
+// In-memory equivalent of subtitle_get_next_line(), for callers (feed_SRT, feed_VTT) that read the whole file into a buffer upfront; same fgets()-like contract, but an oversized line is truncated into `out` while `*cursor` still advances past the full physical line so the next call resyncs. Returns NULL at EOF.
+char *subtitle_get_next_line_from_buffer( const char **cursor, const char *end, char *out, int len )
+{
+	if( *cursor >= end ) return NULL;
+
+	const char *p  = *cursor;
+	const char *nl = memchr( p, '\n', end - p );
+	const char *line_end = nl ? nl + 1 : end; // include the '\n', like fgets()
+
+	int phys_len = (int)(line_end - p);
+	int out_len  = phys_len < len ? phys_len : len - 1;
+
+	memcpy( out, p, out_len );
+	out[out_len] = '\0';
+
+	*cursor = line_end;
+	return out;
+}
+
+// Streaming single-pass SRT parser: fires cb() per cue as parsed, no linked list or second pass; this is the only path (SRT.parse is NULL below). `poll` is checked every SRT_POLL_INTERVAL lines -- on interruption the loop just stops (caller retries later) and `interrupted` suppresses flushing a genuinely-incomplete trailing cue.
+#define SRT_POLL_INTERVAL 200
+
+static void feed_SRT( subt_orig *spex, sub_cue_cb cb, void *ctx, sub_feed_poll_cb poll, void *poll_ctx )
 {
 	if( !spex || !spex->filename || !cb ) return;
 
-	char _line[ LINE_LEN + 1 ];
-	memset( _line, 0, LINE_LEN );
-	char *line = _line;
-	char  cue_text[ LINE_LEN * 2 + 4 ];
-	cue_text[0] = '\0';
-	FILE *fd = fopen( spex->filename, "r" );
+	// Full-file buffered read: one read() instead of many fgets() round-trips (costly on network shares); parse from RAM instead.
+	FILE *fd = fopen( spex->filename, "rb" );
 	if( !fd ) return;
 
+	fseek( fd, 0, SEEK_END );
+	long file_size = ftell( fd );
+	fseek( fd, 0, SEEK_SET );
+	if( file_size <= 0 ) { fclose( fd ); return; }
+
+	char *buf = amalloc( file_size + 1 );
+	if( !buf ) { fclose( fd ); return; }
+
+	long bytes_read = (long)fread( buf, 1, file_size, fd );
+	fclose( fd );
+	if( bytes_read <= 0 ) { afree( buf ); return; }
+	buf[bytes_read] = '\0';
+
+	const char *cursor = buf;
+	const char *end     = buf + bytes_read;
+
 	// Skip BOM
-	{
-		int c0 = fgetc(fd), c1 = fgetc(fd), c2 = fgetc(fd);
-		if( !((unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF) )
-			fseek( fd, 0, SEEK_SET );
+	if( bytes_read >= 3 && (unsigned char)cursor[0] == 0xEF && (unsigned char)cursor[1] == 0xBB && (unsigned char)cursor[2] == 0xBF ) {
+		cursor += 3;
 	}
+
+	char  _line[ LINE_LEN + 1 ];
+	char *line;
+	char  cue_text[ LINE_LEN * 2 + 4 ];
+	cue_text[0] = '\0';
 
 	int srt_state = SRT_NR;
 	int next_index = 0;
 	int cue_start = 0, cue_end = 0;
 	char *store = 0;
+	int line_count = 0;
+	int interrupted = 0;
 
-	line = subtitle_get_next_line( line, LINE_LEN, fd );
+	line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
 	while( line ) {
+		if( poll && (++line_count % SRT_POLL_INTERVAL) == 0 && poll( poll_ctx ) ) {
+			interrupted = 1;
+			break;
+		}
 		switch( srt_state ) {
 			case SRT_NR: {
 				srt_chop( line );
@@ -236,50 +266,20 @@ static void feed_SRT( subt_orig *spex, sub_cue_cb cb, void *ctx )
 				break;
 			}
 		}
-		memset( line, 0, LINE_LEN );
-		line = subtitle_get_next_line( line, LINE_LEN, fd );
+		line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
 	}
 
-	// Last cue (file doesn't end with blank line)
-	if( cue_text[0] ) cb( ctx, cue_text, cue_start, cue_end );
+	// Flush the trailing cue only at true EOF -- on interruption it may still be incomplete, and a full re-parse will happen next pass anyway.
+	if( !interrupted && cue_text[0] ) cb( ctx, cue_text, cue_start, cue_end );
 	if( store ) afree( store );
-	fclose( fd );
-}
-
-// parse_SRT — kept for backward compatibility. Only used by formats that
-// still need the uni_sub linked list (currently none for SRT — but the
-// subtitle_formats vtable requires a parse() entry).
-// Returns an empty but valid uni_sub so subtitle_get_converted() doesn't
-// reject the track. The actual cue data is delivered via feed_SRT above.
-static uni_sub *parse_SRT( subt_orig *spex, int clean_tags )
-{
-	(void)clean_tags;
-	if( !spex || !spex->filename ) return NULL;
-	uni_sub *sub_record = acalloc( 1, sizeof( uni_sub ) );
-	return sub_record; // empty — feed_SRT delivers the data
-}
-
-__attribute__((unused))
-static int subtitle_get_next_time_val(const char **start, int sep, long int *val)
-{
-	char *endptr;
-
-	errno = 0;
-	*val = strtol(*start, &endptr, 10);
-	if ((errno == ERANGE && (*val == LONG_MAX || *val == LONG_MIN))
-	    || (errno != 0 && *val == 0) || (sep != 0 && endptr != NULL && endptr - *start != sep)) {
-		return 1;
-	} else {
-		*start = endptr +1;
-		return 0;
-	}
+	afree( buf );
 }
 
 static struct SUBTITLE_FORMAT SRT = {
 	"SubRip",
 	detect_SRT,
 	NULL,		// no info
-	parse_SRT,
+	NULL,		// no parse -- feed_SRT (streaming) is the only path; NULL .parse is treated as an immediate SUBT_PARSE_FAILED (see subtitle_do_parse())
 	NULL,		// no get_gfx
 	NULL,		// no close
 	feed_SRT,	// streaming single-pass feed — primary path

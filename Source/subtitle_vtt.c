@@ -52,6 +52,8 @@ enum
 
 // Defined in subtitle_srt.c, declaring it here to use it
 extern char *subtitle_get_next_line( char *start, int len, FILE *fd );
+// In-memory equivalent, for feed_VTT's full-file buffered read -- see its contract in subtitle_srt.c.
+extern char *subtitle_get_next_line_from_buffer( const char **cursor, const char *end, char *out, int len );
 
 static int subtitle_get_vtt_time( char *line, int *start, int *end )
 {
@@ -121,40 +123,7 @@ static void vtt_chop( char *line )
     }
 }
 
-// ---------------------------------------------------------------------------
-// vtt_translate_format_tags — VTT-specific tag layer.
-//
-// Per the shared/format-specific split: the common HTML-ish tags (<b>, <i>,
-// <u>, <font color>) are handled downstream by srt_text_to_ass() in
-// sub_format_srt.c, which every plain-text format funnels through. Anything
-// that's VTT's OWN syntax and not shared with SRT/SMI/SUB/MPL2 must be
-// translated HERE, before the text leaves this file — otherwise it lands in
-// the shared layer as just another unrecognized "<...>" tag and gets
-// silently dropped with no chance to preserve its meaning.
-//
-// Handles, in place, modifying `line` (caller's buffer is LINE_LEN sized and
-// this only ever shortens the string, so no separate output buffer needed):
-//
-//   <v Speaker Name>text</v>   -> "Speaker Name: text"   (voice/speaker cue —
-//                                  dropping this silently loses who's
-//                                  talking, so we fold it into visible text
-//                                  instead of discarding it)
-//   <v.loud Speaker>text</v>   -> "Speaker: text"          (leading .class on
-//                                  <v> is ignored — no ASS equivalent, but
-//                                  the speaker name itself is still worth
-//                                  keeping)
-//   <c.classname>text</c>      -> "text"                   (VTT's CSS-class
-//                                  cue span — no shared ASS equivalent for
-//                                  arbitrary classes, so just unwrap the tag
-//                                  and keep the text, rather than losing the
-//                                  whole span downstream)
-//   <lang.classname>           -> unwrapped the same way as <c> (rare tag,
-//   or any other <XX...>          same reasoning: no ASS equivalent for
-//                                  format-only metadata; keep the text)
-//
-// <b>/<i>/<u>/<font> are intentionally left untouched here — those are the
-// shared tags and belong to the common layer downstream, not this one.
-// ---------------------------------------------------------------------------
+// Translates VTT-only tags in place before the shared tag layer (srt_text_to_ass) sees them: <v Name>text</v> -> "Name: text", <c.class>/<lang...> unwrapped to plain text; <b>/<i>/<u>/<font> are left alone since those are shared tags handled downstream.
 static void vtt_translate_format_tags( char *line )
 {
     char out[ LINE_LEN * 2 ];
@@ -239,43 +208,59 @@ static void vtt_translate_format_tags( char *line )
     strcpy( line, out );
 }
 
-// ---------------------------------------------------------------------------
-// feed_VTT — streaming single-pass path
-//
-// Parses the VTT file and fires cb(ctx, text, start_ms, end_ms) for every
-// cue as it is parsed. No sub_line allocation, no linked list, no second
-// pass. The callback converts each cue to an ASS Dialogue event and feeds
-// it directly to sub_engine_feed().
-// ---------------------------------------------------------------------------
-static void feed_VTT( subt_orig *spex, sub_cue_cb cb, void *ctx )
+// Streaming single-pass VTT parser, mirroring feed_SRT() in subtitle_srt.c: fires cb() per cue, no linked list; `poll` is checked every VTT_POLL_INTERVAL lines.
+#define VTT_POLL_INTERVAL 200
+
+static void feed_VTT( subt_orig *spex, sub_cue_cb cb, void *ctx, sub_feed_poll_cb poll, void *poll_ctx )
 {
     if( !spex || !spex->filename || !cb ) return;
 
+    // Full-file buffered read: one read() instead of many fgets() round-trips (costly on network shares); parse from RAM instead.
+    FILE *fd = fopen( spex->filename, "rb" );
+    if( !fd ) return;
+
+    fseek( fd, 0, SEEK_END );
+    long file_size = ftell( fd );
+    fseek( fd, 0, SEEK_SET );
+    if( file_size <= 0 ) { fclose( fd ); return; }
+
+    char *buf = amalloc( file_size + 1 );
+    if( !buf ) { fclose( fd ); return; }
+
+    long bytes_read = (long)fread( buf, 1, file_size, fd );
+    fclose( fd );
+    if( bytes_read <= 0 ) { afree( buf ); return; }
+    buf[bytes_read] = '\0';
+
+    const char *cursor = buf;
+    const char *end     = buf + bytes_read;
+
     char _line[ LINE_LEN + 1 ];
-    memset( _line, 0, LINE_LEN );
-    char *line = _line;
+    char *line;
     char  cue_text[ LINE_LEN * 2 + 4 ];
     cue_text[0] = '\0';
     char *store = 0;
     int   cue_start = 0, cue_end = 0;
     int   vtt_state = VTT_SEARCH;
-
-    FILE *fd = fopen( spex->filename, "r" );
-    if( !fd ) return;
+    int   line_count = 0;
+    int   interrupted = 0;
 
     // Skip WEBVTT header line (including optional BOM)
-    line = subtitle_get_next_line( line, LINE_LEN, fd );
-    if( !line ) { fclose(fd); return; }
+    line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
+    if( !line ) { afree( buf ); return; }
     {
         char *p = line;
         if( (unsigned char)p[0]==0xEF && (unsigned char)p[1]==0xBB && (unsigned char)p[2]==0xBF ) p += 3;
-        if( strncmp(p, "WEBVTT", 6) != 0 ) { fclose(fd); return; }
+        if( strncmp(p, "WEBVTT", 6) != 0 ) { afree( buf ); return; }
     }
 
-    memset( line, 0, LINE_LEN );
-    line = subtitle_get_next_line( line, LINE_LEN, fd );
+    line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
 
     while( line ) {
+        if( poll && (++line_count % VTT_POLL_INTERVAL) == 0 && poll( poll_ctx ) ) {
+            interrupted = 1;
+            break;
+        }
         vtt_chop( line );
 
         switch( vtt_state ) {
@@ -284,8 +269,7 @@ static void feed_VTT( subt_orig *spex, sub_cue_cb cb, void *ctx )
                 if( strncmp(line, "NOTE", 4) == 0 ) {
                     // Skip comment block
                     while( line && *line != '\0' ) {
-                        memset(line,0,LINE_LEN);
-                        line = subtitle_get_next_line(line,LINE_LEN,fd);
+                        line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
                         if(line) vtt_chop(line);
                     }
                     break;
@@ -334,12 +318,7 @@ static void feed_VTT( subt_orig *spex, sub_cue_cb cb, void *ctx )
                     utf16_to_utf8(line, unicode, LINE_LEN);
                 }
                 #endif
-                // VTT-specific tags (<v>, <c>, <lang>, ...) must be translated
-                // here, before subtitle_clean_formatter/feed(): they have no
-                // meaning to the shared common-tag layer downstream
-                // (srt_text_to_ass in sub_format_srt.c), which only knows the
-                // handful of tags shared across formats (<b>/<i>/<u>/<font>)
-                // and silently drops everything else as a safety net.
+                // VTT-only tags must be translated here -- the shared tag layer downstream only knows <b>/<i>/<u>/<font> and silently drops anything else.
                 vtt_translate_format_tags( line );
                 store = subtitle_clean_formatter(line, 0); // clean_tags always 0
                 if( store ) {
@@ -359,31 +338,20 @@ static void feed_VTT( subt_orig *spex, sub_cue_cb cb, void *ctx )
             }
         }
 
-        memset(line, 0, LINE_LEN);
-        line = subtitle_get_next_line(line, LINE_LEN, fd);
+        line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
     }
 
-    // Last cue if file doesn't end with blank line
-    if( cue_text[0] ) cb( ctx, cue_text, cue_start, cue_end );
+    // Flush the trailing cue only at true EOF -- see feed_SRT()'s matching comment in subtitle_srt.c.
+    if( !interrupted && cue_text[0] ) cb( ctx, cue_text, cue_start, cue_end );
     if( store ) afree(store);
-    fclose(fd);
-}
-
-// parse_VTT — stub kept so subtitle_get_converted() accepts the track.
-// Returns an empty but valid uni_sub. Actual data delivered via feed_VTT.
-static uni_sub *parse_VTT( subt_orig *spex, int clean_tags )
-{
-    (void)clean_tags;
-    if( !spex || !spex->filename ) return NULL;
-    uni_sub *sub_record = acalloc(1, sizeof(uni_sub));
-    return sub_record;
+    afree( buf );
 }
 
 static struct SUBTITLE_FORMAT VTT = {
 	"WebVTT",
 	detect_VTT,
 	NULL,		// no info
-	parse_VTT,
+	NULL,		// no parse -- feed_VTT (streaming) is the only path; NULL .parse is treated as an immediate SUBT_PARSE_FAILED (see subtitle_do_parse())
 	NULL,		// no get_gfx
 	NULL,		// no close
 	feed_VTT,	// streaming single-pass feed — primary path

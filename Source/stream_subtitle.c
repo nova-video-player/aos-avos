@@ -405,10 +405,9 @@ static void _get_next_ext_sub( STREAM *s, int time )
 					NULL, 0, // no codec_private for external files
 					embedded_fonts, embedded_fonts_count);
 
-				// Bulk-feed the full parsed cue list (or raw ASS buffer) right now.
-				// After this call the engine has everything — no per-frame polling needed.
+				// Bulk-feed the full cue list now; clear the refeed flag BEFORE the call so that if a streaming feed gets interrupted and sets it back to 1, that survives for the refeed branch below to pick up.
+				s->subtitle_ext_needs_refeed = 0;
 				stream_sub_ext_feed_engine( s );
-				s->subtitle_ext_needs_refeed = 0; // freshly fed, nothing pending
 			}
 			// No sub_dec for external text — engine owns the timeline.
 		}
@@ -422,17 +421,10 @@ static void _get_next_ext_sub( STREAM *s, int time )
 			return;
 		}
 	} else if( _is_ext_text(fmt) && s->subtitle_ext_needs_refeed && s->sub_engine ) {
-		// Track was already open before this seek -- the INIT block above did
-		// NOT run (subtitle_frame is still set from before), so nothing else
-		// would re-populate the engine after _seek_init()'s flush wiped its
-		// events. Re-run the same bulk-feed the INIT block uses, but do NOT
-		// call sub_engine_open_track() again: the libass track/renderer is
-		// still open and valid, only its already-fed events were cleared, so
-		// re-opening would just tear down and immediately recreate the exact
-		// same backend for no reason.
-DBG serprintf("_get_next_ext_sub: re-feeding external text track after seek\r\n");
-		stream_sub_ext_feed_engine( s );
+		// Track was already open (a seek flushed the engine's events, or a prior streaming feed was interrupted); re-run the bulk-feed without reopening the track. Uses stream_sub_ext_force_streaming_refeed() rather than stream_sub_ext_feed_engine() directly since for streaming (SRT/VTT) tracks SUBT_PARSE_DONE would otherwise be treated as "already fed" -- see its comment in stream_sub_ext.c.
+DBG serprintf("_get_next_ext_sub: re-feeding external text track after seek/interrupt\r\n");
 		s->subtitle_ext_needs_refeed = 0;
+		stream_sub_ext_force_streaming_refeed( s );
 	}
 
 	if( time == -1 ) return;
@@ -515,24 +507,20 @@ DBGS serprintf("PID[%5d] stream_sub_dec_thread::Exiting\r\n", getpid() );
  	return NULL;
 }
 
-// *****************************************************************************
-//
-//	stream_check_subtitles
-//
-// *****************************************************************************
-int stream_check_subtitles( STREAM *s )
+// _stream_check_subtitles_sync -- unchanged pause/idle handling from the old stream_check_subtitles() body; now called from the discovery worker below instead of directly on the JNI caller's thread.
+static int _stream_check_subtitles_sync( STREAM *s )
 {
 	if( !s->open ) {
 serprintf("ScS: not open!\r\n");
 		return 1;
 	}
 
-	// We don't want to pause / unpause if there is no new subtitles, so check it first.
-	if( !stream_sub_ext_has_new( s ) ) {
-DBGS serprintf("stream_check_subtitles, no new ext subtitles\r\n");
+	// stream_sub_ext_update() does one incremental scan and picks the cheapest outcome itself, replacing the old has_new()+close()+check() double-scan. Append/rebuild still pause/idle as before since we can't be sure a live append is safe to do while stream_sub_dec_thread is running; only the no-op path skips pausing entirely.
+	if( !s->subtitle_priv ) {
+		// First-time open: nothing to diff against, no pause needed. Must still signal subtitle_changed explicitly -- stream_check_subtitles() now returns before this scan even runs, so nothing else announces the first menu population.
+		stream_sub_ext_check( s );
+		s->subtitle_changed = 1;
 		return 0;
-	} else {
-DBGS serprintf("stream_check_subtitles, has new ext subtitles\r\n");
 	}
 
 	char prev_extsub[MAX_NAME_LEN + 1];
@@ -542,22 +530,36 @@ DBGS serprintf("stream_check_subtitles, has new ext subtitles\r\n");
 		strncpy(prev_extsub, s->subtitle->path, MAX_NAME_LEN);
 		has_prev_extsub = 1;
 	}
-	int was_paused = stream_pause( s );
 
-	// idle threads to make sure they are at a known state
+	int was_paused = stream_pause( s );
 	thread_state_set( &s->engine_tstate, THREAD_IDLE );
 	thread_state_set( &s->sub_tstate,    THREAD_IDLE );
 
-	// close old subtitle decoder
-	stream_close_sub_dec( s );
+	int result = stream_sub_ext_update( s );
 
-	// free subtitle frame
+	if( result == 0 ) {
+DBGS serprintf("stream_check_subtitles, no change in ext subtitles\r\n");
+		thread_state_set( &s->engine_tstate, THREAD_RUNNING );
+		thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
+		stream_un_pause( s, was_paused );
+		return 0;
+	}
+
+	if( result > 0 ) {
+		// Live append: new tracks are already in s->av.sub[]/subs_max and subtitle_changed is set; the playing track's index didn't move and there's no old decoder to tear down, so skip straight to resuming.
+DBGS serprintf("stream_check_subtitles, %d new ext subtitle track(s) added\r\n", result);
+		thread_state_set( &s->engine_tstate, THREAD_RUNNING );
+		thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
+		stream_un_pause( s, was_paused );
+		return 0;
+	}
+
+	// result == -1: full rebuild already happened inside stream_sub_ext_update(); tear down the old decoder and reselect by path as before.
+DBGS serprintf("stream_check_subtitles, ext subtitles rebuilt\r\n");
+
+	stream_close_sub_dec( s );
 	frame_free( s->subtitle_frame );
 	s->subtitle_frame = NULL;
-
-	stream_sub_ext_close( s );
-
-	stream_sub_ext_check( s );
 
 	if (has_prev_extsub) {
 		int i;
@@ -575,15 +577,114 @@ DBGS serprintf("stream_check_subtitles, has new ext subtitles\r\n");
 		s->av.subs = 0;
 	s->subtitle = s->av.sub + s->av.subs;
 
-	// notify the app too
 	s->subtitle_changed = 1;
 
-	// run threads again
 	thread_state_set( &s->engine_tstate, THREAD_RUNNING );
 	thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
 
 	stream_un_pause( s, was_paused );
 	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Discovery worker: moves the (possibly slow) filesystem scan + fopen()/detect() off whatever thread called stream_check_subtitles() (a JNI entry point with no thread hop of its own) -- same problem the parse worker in stream_sub_ext.c solves for format->parse(). Single-slot mailbox (not a queue): a second request just overwrites the pending one. Process-wide static, not per-STREAM, and deliberately never stopped at stream close -- see stream_sub_ext_wait_for_discovery() below.
+typedef struct SUB_DISCOVERY_WORKER {
+	pthread_t       thread;
+	int             thread_started;
+	THREAD_STATE    tstate;	// private; RUNNING while alive, never IDLE -- must not join any blocking idle-rendezvous
+	pthread_mutex_t mutex;
+	pthread_cond_t  cond;		// signaled on new request and on scan completion; both waiters re-check their own predicate on wake
+	int             pending;	// 1 = a scan request is waiting to be picked up
+	int             busy;		// 1 = a scan is actually running right now
+	STREAM         *target;	// which STREAM the pending/running scan is for
+} SUB_DISCOVERY_WORKER;
+
+static SUB_DISCOVERY_WORKER *_discovery_worker = NULL;
+
+static void *_discovery_worker_thread( void *arg )
+{
+	SUB_DISCOVERY_WORKER *w = (SUB_DISCOVERY_WORKER *)arg;
+
+	while( thread_state_get( &w->tstate ) != THREAD_EXIT ) {
+		pthread_mutex_lock( &w->mutex );
+		while( !w->pending && thread_state_get( &w->tstate ) != THREAD_EXIT ) {
+			pthread_cond_wait( &w->cond, &w->mutex );
+		}
+		if( thread_state_get( &w->tstate ) == THREAD_EXIT ) {
+			pthread_mutex_unlock( &w->mutex );
+			break;
+		}
+		STREAM *target = w->target;
+		w->pending = 0;
+		w->busy    = 1;
+		pthread_mutex_unlock( &w->mutex );
+
+		// The actual (possibly slow) directory scan + per-candidate
+		// fopen()+detect(), plus this function's own pause/idle/reselect
+		// handling -- safely off-thread now, unchanged internally.
+		_stream_check_subtitles_sync( target );
+
+		pthread_mutex_lock( &w->mutex );
+		w->busy = 0;
+		pthread_cond_broadcast( &w->cond ); // wakes stream_sub_ext_wait_for_discovery()
+		pthread_mutex_unlock( &w->mutex );
+	}
+	return NULL;
+}
+
+static SUB_DISCOVERY_WORKER *_discovery_worker_ensure_started( void )
+{
+	if( _discovery_worker ) return _discovery_worker;
+
+	SUB_DISCOVERY_WORKER *w = acalloc( 1, sizeof( SUB_DISCOVERY_WORKER ) );
+	if( !w ) return NULL;
+
+	pthread_mutex_init( &w->mutex, NULL );
+	pthread_cond_init( &w->cond, NULL );
+	thread_state_init( &w->tstate, THREAD_RUNNING, "subdiscover" );
+
+	if( thread_create( &w->thread, _discovery_worker_thread, w, 0, "ext subtitle discovery" ) != 0 ) {
+serprintf( "SUB_DISCOVERY_WORKER: failed to create thread\n" );
+		pthread_mutex_destroy( &w->mutex );
+		pthread_cond_destroy( &w->cond );
+		afree( w );
+		return NULL;
+	}
+	w->thread_started = 1;
+	_discovery_worker = w;
+	return w;
+}
+
+// stream_check_subtitles -- public/JNI entry point. Non-blocking: queues a scan on the discovery worker and returns immediately; falls back to a synchronous scan only if the worker couldn't be created (OOM).
+int stream_check_subtitles( STREAM *s )
+{
+	if( !s ) return 1;
+
+	SUB_DISCOVERY_WORKER *w = _discovery_worker_ensure_started();
+	if( !w ) {
+serprintf( "stream_check_subtitles: no discovery worker, scanning synchronously\n" );
+		return _stream_check_subtitles_sync( s );
+	}
+
+	pthread_mutex_lock( &w->mutex );
+	w->target  = s;
+	w->pending = 1;
+	pthread_cond_signal( &w->cond );
+	pthread_mutex_unlock( &w->mutex );
+	return 0;
+}
+
+// Called from stream_sub_ext_close() before it touches s->subtitle_priv, so closing a STREAM doesn't race the (process-wide) discovery worker still scanning for it. Bounded wait: returns immediately unless the worker is mid-scan or has a pending request for this s.
+void stream_sub_ext_wait_for_discovery( STREAM *s )
+{
+	SUB_DISCOVERY_WORKER *w = _discovery_worker;
+	if( !w ) return;
+
+	pthread_mutex_lock( &w->mutex );
+	while( w->target == s && ( w->pending || w->busy ) ) {
+		pthread_cond_wait( &w->cond, &w->mutex );
+	}
+	pthread_mutex_unlock( &w->mutex );
 }
 
 // *****************************************************************************
@@ -647,11 +748,14 @@ serprintf("SsS: sub_stream already set\n");
 
 	stream_un_pause( s, was_paused );
 
-	// FIXME: there should be a better way without seek jumping
-	int current_time = stream_get_current_time( s, NULL );
-	if( current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
-		// reseek to current time to get internal subtitle decoder to reinitialize
-		stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
+	// External tracks are fed to the engine independent of demuxer position and get picked up on the next sub_tstate tick, so reseeking for them just costs a demux/decode restart. Only internal/embedded tracks need the demuxer repositioned, since their cues arrive as demuxed packets.
+	if( !s->subtitle->ext ) {
+		// FIXME: there should be a better way without seek jumping
+		int current_time = stream_get_current_time( s, NULL );
+		if( current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
+			// reseek to current time to get internal subtitle decoder to reinitialize
+			stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
+		}
 	}
 	return 0;
 }

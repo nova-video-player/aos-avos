@@ -19,11 +19,16 @@
 
 #include "stream.h"
 
-int  stream_sub_ext_has_new( STREAM *s );
 int  stream_sub_ext_check( STREAM *s );
+// Preferred periodic re-check: one incremental scan, picks the cheapest outcome itself. Returns 0=no change, >0=tracks appended live, -1=full rebuild ran.
+int  stream_sub_ext_update( STREAM *s );
+// Syncs with stream_subtitle.c's discovery worker before stream_sub_ext_close() tears down subtitle_priv.
+void stream_sub_ext_wait_for_discovery( STREAM *s );
 void stream_sub_ext_close( STREAM *s );
 int  stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **frame, int time );
 int  stream_sub_ext_feed_engine(STREAM *s);
+// Use instead of stream_sub_ext_feed_engine() when re-feeding on subtitle_ext_needs_refeed (seek flush or an interrupted streaming feed); safe for all formats.
+int  stream_sub_ext_force_streaming_refeed(STREAM *s);
 int  stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time );
 int  stream_sub_ext_get_engine_fmt( STREAM *s );
 

@@ -44,6 +44,7 @@
 #include <libavutil/dovi_meta.h>
 
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 
 #define DBGS 	if(Debug[DBG_STREAM])
@@ -79,6 +80,64 @@ DECLARE_DEBUG_TOGGLE("ffpts", use_pts );
 DECLARE_DEBUG_TOGGLE("ffreo", force_reorder );
 DECLARE_DEBUG_PARAM("ffvp",  force_vpid );
 DECLARE_DEBUG_PARAM("ffap",  force_apid );
+
+static int http_header_is_safe( const char *key, const char *value )
+{
+	const unsigned char *p;
+	if( !key || !key[0] || !value )
+		return 0;
+	for( p = (const unsigned char *)key; *p; p++ ) {
+		if( *p <= 32 || *p >= 127 || *p == ':' )
+			return 0;
+	}
+	return !strchr( value, '\r' ) && !strchr( value, '\n' );
+}
+
+static void ffmpeg_set_http_options( AVDictionary **options, const STREAM_URL *src )
+{
+	const char *user_agent = "Mozilla/5.0 (Linux; Android) Nova/1.0";
+	const char *referer = NULL;
+	char *headers = NULL;
+	size_t headers_size = 1;
+	int i;
+
+	if( src && src->extra_list ) {
+		for( i = 0; src->extra_list[i] && src->extra_list[i + 1]; i += 2 ) {
+			const char *key = src->extra_list[i];
+			const char *value = src->extra_list[i + 1];
+			if( !http_header_is_safe( key, value ) || !strcasecmp( key, "extra_name" ) )
+				continue;
+			if( !strcasecmp( key, "User-Agent" ) )
+				user_agent = value;
+			else if( !strcasecmp( key, "Referer" ) )
+				referer = value;
+			else
+				headers_size += strlen( key ) + 2 + strlen( value ) + 2;
+		}
+		if( headers_size > 1 ) {
+			size_t offset = 0;
+			headers = (char *)amalloc( headers_size );
+			if( headers ) {
+				for( i = 0; src->extra_list[i] && src->extra_list[i + 1]; i += 2 ) {
+					const char *key = src->extra_list[i];
+					const char *value = src->extra_list[i + 1];
+					if( !http_header_is_safe( key, value ) || !strcasecmp( key, "extra_name" ) ||
+							!strcasecmp( key, "User-Agent" ) || !strcasecmp( key, "Referer" ) )
+						continue;
+					offset += snprintf( headers + offset, headers_size - offset,
+							"%s: %s\r\n", key, value );
+				}
+			}
+		}
+	}
+	av_dict_set( options, "user_agent", user_agent, 0 );
+	if( referer )
+		av_dict_set( options, "referer", referer, 0 );
+	if( headers ) {
+		av_dict_set( options, "headers", headers, 0 );
+		afree( headers );
+	}
+}
 
 typedef struct PacketNode {
 	LinkedListNode s;
@@ -851,8 +910,7 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 		av_dict_set(&ff_p->fmt_opts, "probesize", "10000000", 0);
 	}
 
-	// Set user agent for HTTP streams to improve compatibility with CDN/debrid services
-	av_dict_set(&ff_p->fmt_opts, "user_agent", "Mozilla/5.0 (Linux; Android) Nova/1.0", 0);
+	ffmpeg_set_http_options(&ff_p->fmt_opts, &s->src);
 DBGP serprintf("FFMPEG: opening url [%s]\r\n", s->src.url);
 
 	if( avformat_open_input(&ff_p->fmt, s->src.url, NULL, &ff_p->fmt_opts ) != 0) {
@@ -1828,9 +1886,10 @@ STREAM_REGISTER_IO( proto, _dummy_new, STREAM_IO_NONLOCAL, ETYPE_RTSP );
 //	get_info_FFMPEG
 //
 // *****************************************************************************
-static int _get_info_FFMPEG( const char *full_path, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
+static int _get_info_FFMPEG( const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
 {
 DBGP serprintf("ReadFFMPEGInfo: ");
+	const char *full_path = src->url;
 
 	FF_PRIV *priv = NULL;
 	// allocate private data
@@ -1852,8 +1911,7 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 	AVDictionary *fmt_opts = NULL;
 	av_dict_set(&fmt_opts, "probesize", "500000", 0);      // 500KB instead of 5MB default
 	av_dict_set(&fmt_opts, "analyzeduration", "1000000", 0);  // 1 second max
-	// Set user agent for HTTP streams to improve compatibility with CDN/debrid services
-	av_dict_set(&fmt_opts, "user_agent", "Mozilla/5.0 (Linux; Android) Nova/1.0", 0);
+	ffmpeg_set_http_options(&fmt_opts, src);
 
 	serprintf("FFMPEG: metadata opening url [%s]\r\n", full_path);
 	if( avformat_open_input(&priv->fmt, full_path, NULL, &fmt_opts ) != 0) {
@@ -1915,78 +1973,78 @@ ErrorExit:
 #ifdef CONFIG_MPEG_TS
 #ifdef CONFIG_MPEG_TS_FF
 STREAM_REGISTER_PARSER( ETYPE_MPEG_TS, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPEG_TS, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPEG_TS, _get_info_FFMPEG );
 #endif
 #endif
 
 #ifdef CONFIG_WTV
 STREAM_REGISTER_PARSER( ETYPE_WTV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_WTV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_WTV, _get_info_FFMPEG );
 #endif
 
 #ifdef CONFIG_OGV
 STREAM_REGISTER_PARSER( ETYPE_OGV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_OGV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_OGV, _get_info_FFMPEG );
 #endif
 
 #ifdef CONFIG_FLV
 STREAM_REGISTER_PARSER( ETYPE_FLV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_FLV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_FLV, _get_info_FFMPEG );
 #endif
 
 STREAM_REGISTER_PARSER( ETYPE_AMV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_AMV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_AMV, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_AC3, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_AC3, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_AC3, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_H264_RAW, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_H264_RAW, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_H264_RAW, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MPG4_RAW, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPG4_RAW, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPG4_RAW, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MPEG_PS, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPEG_PS, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPEG_PS, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MPEG_RAW, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPEG_RAW, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPEG_RAW, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_DTS, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_DTS, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_DTS, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MP3, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_MP3, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_MP3, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_AAC, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_AAC, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_AAC, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_FLAC, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_FLAC, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_FLAC, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_WAVPACK, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_WAVPACK, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_WAVPACK, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_TTA, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_TTA, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_TTA, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_OGG, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_OGG, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_OGG, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_ASF, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_ASF, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_ASF, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_AVI, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_AVI, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_AVI, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MP4, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MP4, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MP4, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MKV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MKV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MKV, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_RM, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_RM, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_RM, _get_info_FFMPEG );
 
 #ifdef DEBUG_MSG
 static STREAM_REG_PARSER reg_avi = {
@@ -2020,21 +2078,17 @@ static STREAM_REG_PARSER reg_mp4 = {
 };
 
 static FILE_INFO_REG fi_mkv = {
-	TYPE_VID,
-	ETYPE_MKV,
-	_get_info_FFMPEG,
-	"_get_info_FFMPEG",
-	NULL,
-	NULL,
+	.type = TYPE_VID,
+	.etype = ETYPE_MKV,
+	.info_url = _get_info_FFMPEG,
+	.info_url_name = "_get_info_FFMPEG",
 };
 
 static FILE_INFO_REG fi_ogg = {
-	TYPE_VID,
-	ETYPE_OGG,
-	_get_info_FFMPEG,
-	"_get_info_FFMPEG",
-	NULL,
-	NULL,
+	.type = TYPE_VID,
+	.etype = ETYPE_OGG,
+	.info_url = _get_info_FFMPEG,
+	.info_url_name = "_get_info_FFMPEG",
 };
 
 static void _reg_ff( void ) 

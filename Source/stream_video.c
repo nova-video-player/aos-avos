@@ -1948,10 +1948,12 @@ serprintf("error in stream_init\r\n");
 		timeline_map_apply( 0.0, 0.0, current_speed );
 	}
 
-	if( src )
-		stream_url_cpy( &s->src, src );
-	else
-		stream_url_cpy_url( &s->src, "" );
+	if( src ) {
+		if( stream_url_cpy( &s->src, src ) )
+			goto ErrorExit;
+	} else if( stream_url_cpy_url( &s->src, "" ) ) {
+		goto ErrorExit;
+	}
 
 	int    idx_size = 0; 
 	UCHAR *idx_data = NULL;

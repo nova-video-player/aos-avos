@@ -510,6 +510,7 @@ static int avos_mp_destroy(avos_mp_t *mp)
 	pthread_mutex_destroy(&mp->close_mtx);
 	if (mp->fd != -1)
 		close(mp->fd);
+	stream_url_clear(&mp->src);
 	afree(mp);
 	return AVOS_ERR_OK;
 }
@@ -611,7 +612,8 @@ static int avos_mp_setdatasource(avos_mp_t *mp, const char *path, const char **k
 	}
 	if (extra_name)
 		MPLOG("EXTRA_NAME: %s", extra_name);
-	stream_url_cpy_url_name(&mp->src, path, extra_name);
+	if (stream_url_cpy_url_name_headers(&mp->src, path, extra_name, keys, values))
+		return AVOS_ERR_CRITICAL;
 	get_url_type(&mp->src, &mp->type, &mp->etype);
 	MPLOGV("file type: %d|%s  %d|%s", mp->type, mp->type == TYPE_VID ? "VIDEO" : mp->type == TYPE_AUD ? "AUDIO" : "UNKNOWN", mp->etype, av_get_etype_name( mp->etype) );
 	if (mp->type == TYPE_NONE || mp->type == TYPE_UNKNOWN) {
@@ -646,7 +648,10 @@ static int avos_mp_setdatasource_fd(avos_mp_t *mp, int fd, int64_t offset, int64
 
 	mp->fd = dup(fd);
 
-	snprintf(mp->src.url, 255, "fd://%d:%"PRId64":%"PRId64, mp->fd, offset, length);
+	char fd_url[128];
+	snprintf(fd_url, sizeof(fd_url), "fd://%d:%"PRId64":%"PRId64, mp->fd, offset, length);
+	if (stream_url_cpy_url(&mp->src, fd_url))
+		goto err;
 	get_url_type(&mp->src, &mp->type, &mp->etype);
 
 	MPLOGV("file type: %s", mp->type == TYPE_VID ? "video" : mp->type == TYPE_AUD ? "audio" : "unknown");

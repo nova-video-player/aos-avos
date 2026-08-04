@@ -52,9 +52,11 @@ extern int audio_main_buffer;
 
 static void audio_track_init(avos_mp_audio_track_t *track, STREAM_URL *url, int etype)
 {
+	stream_url_clear(&track->src);
 	if (url) {
 		track->etype = etype;
-		memcpy(&track->src, url, sizeof(STREAM_URL));
+		if (stream_url_cpy(&track->src, url))
+			track->etype = ETYPE_NONE;
 	} else {
 		track->etype = ETYPE_NONE;
 	}
@@ -62,7 +64,11 @@ static void audio_track_init(avos_mp_audio_track_t *track, STREAM_URL *url, int 
 
 static void audio_track_move(avos_mp_audio_track_t *dest, avos_mp_audio_track_t *src)
 {
-	memcpy(dest, src, sizeof(avos_mp_audio_track_t));
+	stream_url_clear(&dest->src);
+	*dest = *src;
+	src->src.url = NULL;
+	src->src.name[0] = '\0';
+	src->src.extra_list = NULL;
 	src->etype = ETYPE_NONE;
 }
 

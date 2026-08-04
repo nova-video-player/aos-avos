@@ -584,21 +584,23 @@ static int _get_file_type( STREAM_URL *src, int *_type, int *_etype, const char 
 
 	// the path could be an URL, and URLs are allowed to have params at the end,
 	// separated by a "?", so parse the string and drop everything after the last ?
-	char name[MAX_PATH_LEN + 1];
-	strnZcpy( name, src->url, MAX_PATH_LEN );
-	char *c = name + strlen( name ) - 1;
+	char *name = astrdup( src->url ? src->url : "" );
+	if( !name )
+		return 1;
+	char *c = name + strlen( name );
 	while( c > name ) {
+		c--;
 		if( *c == '?' ) {
 DBG serprintf("get_file_type: drop %s\r\n", c );
 			*c = '\0';
 			break;
 		}
-		c--;
 	}
 	
 	int must_probe = 0;
 	if( !get_file_type_from_ext( get_extension( name ), _type, _etype, _mime, &must_probe ) ) {
 		if( !probe || !must_probe ) {
+			afree( name );
 			return 0;
 		}
 	}
@@ -610,6 +612,7 @@ DBG serprintf("get_file_type: drop %s\r\n", c );
 			*_etype = ETYPE_RTSP;
 		if( _mime )
 			*_mime = "";
+		afree( name );
 		return 0;
 	}
 	
@@ -621,6 +624,7 @@ DBG serprintf("get_file_type: drop %s\r\n", c );
 		*_mime = "";
 
 DBG serprintf("%s: could not find a file type for '%s'\n", __FUNCTION__, name);
+	afree( name );
 	return 1;
 }
 
@@ -631,9 +635,13 @@ DBG serprintf("%s: could not find a file type for '%s'\n", __FUNCTION__, name);
 // ************************************************
 int get_file_type( const char *_name, int *_type, int *_etype ) 
 {
-	STREAM_URL src;
-	stream_url_cpy_url( &src, _name );
-	return _get_file_type( &src, _type, _etype, NULL, 1 );
+	STREAM_URL src = STREAM_URL_INITIALIZER;
+	int ret;
+	if( stream_url_cpy_url( &src, _name ) )
+		return 1;
+	ret = _get_file_type( &src, _type, _etype, NULL, 1 );
+	stream_url_clear( &src );
+	return ret;
 }
 
 // ************************************************
@@ -643,9 +651,13 @@ int get_file_type( const char *_name, int *_type, int *_etype )
 // ************************************************
 int get_file_type_no_probe( const char *_name, int *_type, int *_etype ) 
 {
-	STREAM_URL src;
-	stream_url_cpy_url( &src, _name );
-	return _get_file_type( &src, _type, _etype, NULL, 0 );
+	STREAM_URL src = STREAM_URL_INITIALIZER;
+	int ret;
+	if( stream_url_cpy_url( &src, _name ) )
+		return 1;
+	ret = _get_file_type( &src, _type, _etype, NULL, 0 );
+	stream_url_clear( &src );
+	return ret;
 }
 
 // ************************************************
@@ -655,9 +667,13 @@ int get_file_type_no_probe( const char *_name, int *_type, int *_etype )
 // ************************************************
 int get_file_type_and_mime( const char *_name, int *_type, int *_etype, const char **_mime ) 
 {
-	STREAM_URL src;
-	stream_url_cpy_url( &src, _name );
-	return _get_file_type( &src, _type, _etype, _mime, 1 );
+	STREAM_URL src = STREAM_URL_INITIALIZER;
+	int ret;
+	if( stream_url_cpy_url( &src, _name ) )
+		return 1;
+	ret = _get_file_type( &src, _type, _etype, _mime, 1 );
+	stream_url_clear( &src );
+	return ret;
 }
 
 

@@ -153,12 +153,17 @@ DBGV serprintf("etype: %d\n", etype);
 	stream_sink_video_set_output( video_sink, STREAM_OUTPUT_PRIMARY, &screen, NULL ); 
 	stream_set_video_sink( v, video_sink ); 
 
-	STREAM_URL src;
-	stream_url_cpy_url( &src, url );
-	if( stream_open( v, &src, etype, _flags ) ) {
+	STREAM_URL src = STREAM_URL_INITIALIZER;
+	if( stream_url_cpy_url( &src, url ) ) {
 		stream_delete( &v );
 		return NULL;
 	}
+	if( stream_open( v, &src, etype, _flags ) ) {
+		stream_url_clear( &src );
+		stream_delete( &v );
+		return NULL;
+	}
+	stream_url_clear( &src );
 
 	if( stream_start( v ) ) {
 		stream_delete( &v );
@@ -284,4 +289,3 @@ DECLARE_DEBUG_COMMAND     ("vas", _video_set_audio_stream );
 DECLARE_DEBUG_COMMAND     ("vss", _video_set_subtitle_stream );
 
 #endif
-

@@ -75,6 +75,7 @@ static int avos_mr_destroy(avos_mr_t *mr)
 		free(mr->apic.buffer);
 	if (mr->fd != -1)
 		close(mr->fd);
+	stream_url_clear(&mr->src);
 	afree(mr);
 	return AVOS_ERR_OK;
 }
@@ -102,8 +103,8 @@ static int avos_mr_setdatasource_common(avos_mr_t *mr)
 static int avos_mr_setdatasource(avos_mr_t *mr, const char *path, const char **keys, const char **values)
 {
 	MRLOGV("%s", path);
-	// XXX handle extra
-	stream_url_cpy_url(&mr->src, path);
+	if (stream_url_cpy_url_name_headers(&mr->src, path, NULL, keys, values))
+		return AVOS_ERR;
 	return avos_mr_setdatasource_common(mr);
 }
 
@@ -127,7 +128,10 @@ static int avos_mr_setdatasource_fd(avos_mr_t *mr, int fd, int64_t offset, int64
 
 	mr->fd = dup(fd);
 
-	snprintf(mr->src.url, 255, "fd://%d:%"PRId64":%"PRId64, mr->fd, offset, length);
+	char fd_url[128];
+	snprintf(fd_url, sizeof(fd_url), "fd://%d:%"PRId64":%"PRId64, mr->fd, offset, length);
+	if (stream_url_cpy_url(&mr->src, fd_url))
+		goto err;
 	close(fd);
 	return avos_mr_setdatasource_common(mr);
 err:

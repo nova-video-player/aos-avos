@@ -265,7 +265,7 @@ static void make_thumb( int argc, char *argv[] )
 	int time = -1;
 	int etype;
 	int error;
-	STREAM_URL src;
+	STREAM_URL src = STREAM_URL_INITIALIZER;
 	const char *full_path;
 	if (argc <= 1) {
 		return;
@@ -275,7 +275,8 @@ static void make_thumb( int argc, char *argv[] )
 		time = atoi( argv[2] );
 	}
 
-	stream_url_cpy_url( &src, full_path );
+	if( stream_url_cpy_url( &src, full_path ) )
+		return;
 	get_url_type( &src, NULL, &etype );
 serprintf("make thumb for %s at %d\n", full_path, time );
 	IMAGE *img = thumb_get_image_from_url( &src, etype, &error, time, 0 );
@@ -284,6 +285,7 @@ serprintf("make thumb for %s at %d\n", full_path, time );
 		av_dump_video_frame( (VIDEO_FRAME*)img );
 		image_free(img);
 	}
+	stream_url_clear( &src );
 }
 DECLARE_DEBUG_COMMAND("mkt", make_thumb );
 #endif

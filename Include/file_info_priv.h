@@ -52,6 +52,7 @@ typedef struct FILE_INFO {
 } FILE_INFO;
 
 typedef int (*FILE_INFO_PATH)( const char *path,           struct FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );
+typedef int (*FILE_INFO_URL) ( const STREAM_URL *src,      struct FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );
 typedef int (*FILE_INFO_IO)  ( STREAM_IO *io,              struct FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );
 typedef int (*FILE_INFO_MMAP)( UCHAR *buffer, UINT64 size, struct FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );
 
@@ -63,6 +64,8 @@ typedef struct FILE_INFO_REG {
 	int			etype;
 	FILE_INFO_PATH		info_path;
 	const char		*info_path_name;
+	FILE_INFO_URL		info_url;
+	const char		*info_url_name;
 	FILE_INFO_IO		info_io;
 	const char		*info_io_name;
 	FILE_INFO_MMAP		info_mmap;
@@ -83,6 +86,8 @@ int  file_info_unregister( int type, int etype );
 		"NULL",\
 		NULL,\
 		"NULL",\
+		NULL,\
+		"NULL",\
 		NULL\
 	}; \
 	static void _fi_reg_fn##type##etype( void ) __attribute__((constructor));\
@@ -95,6 +100,8 @@ int  file_info_unregister( int type, int etype );
 	static FILE_INFO_REG _fi_reg##type##etype = { \
 		type,\
 		etype,\
+		NULL,\
+		"NULL",\
 		NULL,\
 		"NULL",\
 		io,\
@@ -117,8 +124,30 @@ int  file_info_unregister( int type, int etype );
 		"NULL",\
 		NULL,\
 		"NULL",\
+		NULL,\
+		"NULL",\
 		mmap,\
 		__stringify(mmap),\
+		NULL\
+	}; \
+	static void _fi_reg_fn##type##etype( void ) __attribute__((constructor));\
+	static void _fi_reg_fn##type##etype( void )\
+	{ \
+		file_info_register( &_fi_reg##type##etype ); \
+	}
+
+#define FILE_INFO_REGISTER_URL( type, etype, url ) \
+	static FILE_INFO_REG _fi_reg##type##etype = { \
+		type,\
+		etype,\
+		NULL,\
+		"NULL",\
+		url,\
+		__stringify(url),\
+		NULL,\
+		"NULL",\
+		NULL,\
+		"NULL",\
 		NULL\
 	}; \
 	static void _fi_reg_fn##type##etype( void ) __attribute__((constructor));\

@@ -247,6 +247,7 @@ int stream_delete( STREAM **s )
 DBGS serprintf("stream_delete: %08X\r\n", s ? (long)*s : -1 );
 	if( !s || !*s )
 		return 1;
+	stream_url_clear( &(*s)->src );
 	afree( *s );
 	*s = NULL;
 	return 0;

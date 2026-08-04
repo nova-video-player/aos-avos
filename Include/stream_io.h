@@ -26,10 +26,12 @@
 #define STREAM_MAX_PATH_LEN 512
 
 typedef struct {
-	char 		url[STREAM_MAX_PATH_LEN + 1];
+	char 		*url;
 	char		name[STREAM_MAX_PATH_LEN + 1];
-	char		**extra_list; /* NULL terminated */
+	char		**extra_list; /* NULL terminated HTTP header key/value pairs */
 } STREAM_URL;
+
+#define STREAM_URL_INITIALIZER { NULL, { 0 }, NULL }
 
 struct STREAM_IO;
 
@@ -108,26 +110,129 @@ typedef struct STREAM_IO {
 } STREAM_IO;
 
 // common methods
-static inline void stream_url_cpy_url( STREAM_URL *dst, const char *url )
+static inline void stream_url_free_extra_list( char **extra_list )
 {
-	strnZcpy(dst->url, url, STREAM_MAX_PATH_LEN);
-	dst->name[0] = '\0';
-	dst->extra_list = NULL;
+	int i;
+	if( !extra_list )
+		return;
+	for( i = 0; extra_list[i]; i++ )
+		afree( extra_list[i] );
+	afree( extra_list );
 }
 
-static inline void stream_url_cpy_url_name( STREAM_URL *dst, const char *url, const char *name )
+static inline void stream_url_clear( STREAM_URL *src )
 {
-	strnZcpy(dst->url, url, STREAM_MAX_PATH_LEN);
-	if (name)
-		strnZcpy(dst->name, name, STREAM_MAX_PATH_LEN);
-	dst->extra_list = NULL;
+	if( !src )
+		return;
+	afree( src->url );
+	stream_url_free_extra_list( src->extra_list );
+	src->url = NULL;
+	src->name[0] = '\0';
+	src->extra_list = NULL;
 }
 
-static inline void stream_url_cpy( STREAM_URL *dst, STREAM_URL *src )
+static inline char **stream_url_dup_extra_list( char **extra_list )
 {
-	strnZcpy(dst->url, src->url, STREAM_MAX_PATH_LEN);
-	strnZcpy(dst->name, src->name, STREAM_MAX_PATH_LEN);
-	dst->extra_list = src->extra_list;
+	char **copy;
+	int count = 0;
+	int i;
+
+	if( !extra_list )
+		return NULL;
+	while( extra_list[count] )
+		count++;
+	copy = (char **)acalloc( count + 1, sizeof(char *) );
+	if( !copy )
+		return NULL;
+	for( i = 0; i < count; i++ ) {
+		copy[i] = astrdup( extra_list[i] );
+		if( !copy[i] ) {
+			stream_url_free_extra_list( copy );
+			return NULL;
+		}
+	}
+	return copy;
+}
+
+static inline char **stream_url_dup_headers( const char **keys, const char **values )
+{
+	char **headers;
+	int count = 0;
+	int i;
+
+	if( !keys || !values )
+		return NULL;
+	while( keys[count] && values[count] )
+		count++;
+	if( !count )
+		return NULL;
+	headers = (char **)acalloc( count * 2 + 1, sizeof(char *) );
+	if( !headers )
+		return NULL;
+	for( i = 0; i < count; i++ ) {
+		headers[i * 2] = astrdup( keys[i] );
+		headers[i * 2 + 1] = astrdup( values[i] );
+		if( !headers[i * 2] || !headers[i * 2 + 1] ) {
+			stream_url_free_extra_list( headers );
+			return NULL;
+		}
+	}
+	return headers;
+}
+
+static inline int stream_url_set( STREAM_URL *dst, const char *url, const char *name, char **extra_list )
+{
+	char *url_copy;
+	char **extra_copy = NULL;
+
+	if( !dst )
+		return 1;
+	url_copy = astrdup( url ? url : "" );
+	if( !url_copy )
+		return 1;
+	if( extra_list ) {
+		extra_copy = stream_url_dup_extra_list( extra_list );
+		if( !extra_copy ) {
+			afree( url_copy );
+			return 1;
+		}
+	}
+	stream_url_clear( dst );
+	dst->url = url_copy;
+	if( name )
+		strnZcpy( dst->name, name, STREAM_MAX_PATH_LEN );
+	dst->extra_list = extra_copy;
+	return 0;
+}
+
+static inline int stream_url_cpy_url( STREAM_URL *dst, const char *url )
+{
+	return stream_url_set( dst, url, NULL, NULL );
+}
+
+static inline int stream_url_cpy_url_name( STREAM_URL *dst, const char *url, const char *name )
+{
+	return stream_url_set( dst, url, name, NULL );
+}
+
+static inline int stream_url_cpy_url_name_headers( STREAM_URL *dst, const char *url, const char *name,
+		const char **keys, const char **values )
+{
+	char **headers = stream_url_dup_headers( keys, values );
+	int ret;
+
+	if( keys && values && keys[0] && values[0] && !headers )
+		return 1;
+	ret = stream_url_set( dst, url, name, headers );
+	stream_url_free_extra_list( headers );
+	return ret;
+}
+
+static inline int stream_url_cpy( STREAM_URL *dst, STREAM_URL *src )
+{
+	if( !src )
+		return stream_url_set( dst, "", NULL, NULL );
+	return stream_url_set( dst, src->url, src->name[0] ? src->name : NULL, src->extra_list );
 }
 
 static inline STREAM_IO *stream_io_new( STREAM_URL *src )
@@ -137,7 +242,10 @@ static inline STREAM_IO *stream_io_new( STREAM_URL *src )
 	if( !io )
 		 return NULL;
 	memset( io, 0, sizeof( STREAM_IO ) );
-	stream_url_cpy( &io->src, src );
+	if( stream_url_cpy( &io->src, src ) ) {
+		afree( io );
+		return NULL;
+	}
 	return io;
 }
 

@@ -52,9 +52,10 @@ static volatile int	catio_run = 0;
 static void *catio_threadle( void *data )
 {
 	char *url = data;
-	STREAM_URL src;
+	STREAM_URL src = STREAM_URL_INITIALIZER;
 	
-	stream_url_cpy_url(&src, url);
+	if( stream_url_cpy_url(&src, url) )
+		goto ErrorExit;
 	STREAM_IO *io = stream_get_new_io( &src );
 	
 	if( !io ) {
@@ -93,6 +94,7 @@ serprintf("catio: read %lld of %lld bytes in %dms = %d bytes/s\r\n", count, size
 	io->delete(io);
 
 ErrorExit:
+	stream_url_clear(&src);
 	catio_run = 0;
 	return NULL;
 }

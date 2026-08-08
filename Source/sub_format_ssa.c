@@ -4,10 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <android/log.h>
+#include "debug.h"
 
-#define LOG_TAG "SubFormatSSA"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define DBG if(Debug[DBG_SUB])
 
 typedef struct {
     double FontSize;
@@ -123,7 +122,7 @@ static void register_font_blob(ASS_Library *lib, const char *label, const uint8_
     // ass_add_font() copies the data internally, so the caller's buffer can
     // be freed/reused immediately after this call regardless of source.
     ass_add_font(lib, label, (char *)data, size);
-    LOGD("SUB_FONTS: registered '%s' (%d bytes) with libass", label, size);
+    DBG serprintf("SUB_FONTS: registered '%s' (%d bytes) with libass\n", label, size);
 }
 
 // --- In-process cache of the custom fonts folder's file contents ---------
@@ -222,7 +221,7 @@ static int load_fonts_dir(ASS_Library *lib, const char *dir) {
 
         DIR *d = opendir(dir);
         if (!d) {
-            LOGD("SUB_FONTS: could not open fonts dir '%s'", dir);
+            DBG serprintf("SUB_FONTS: could not open fonts dir '%s'\n", dir);
             pthread_mutex_unlock(&s_fonts_cache_lock);
             return 0;
         }
@@ -239,7 +238,7 @@ static int load_fonts_dir(ASS_Library *lib, const char *dir) {
 
             FILE *f = fopen(path, "rb");
             if (!f) {
-                LOGD("SUB_FONTS: failed to open '%s'", path);
+                DBG serprintf("SUB_FONTS: failed to open '%s'\n", path);
                 continue;
             }
 
@@ -268,7 +267,7 @@ static int load_fonts_dir(ASS_Library *lib, const char *dir) {
         s_fonts_cache_signature = sig;
         s_fonts_cache_valid = 1;
 
-        LOGD("SUB_FONTS: (re)scanned '%s' from disk -- %d font file(s) cached", dir, s_fonts_cache_count);
+        DBG serprintf("SUB_FONTS: (re)scanned '%s' from disk -- %d font file(s) cached\n", dir, s_fonts_cache_count);
     }
 
     int loaded = 0;
@@ -279,7 +278,7 @@ static int load_fonts_dir(ASS_Library *lib, const char *dir) {
 
     pthread_mutex_unlock(&s_fonts_cache_lock);
 
-    LOGD("SUB_FONTS: loaded %d font(s) from custom fonts folder '%s' (%s)",
+    DBG serprintf("SUB_FONTS: loaded %d font(s) from custom fonts folder '%s' (%s)\n",
          loaded, dir, cache_hit ? "cache hit, no disk I/O" : "freshly scanned");
     return loaded;
 }
@@ -306,7 +305,7 @@ static int load_embedded_fonts(ASS_Library *lib, const SUB_EMBEDDED_FONT *fonts,
         register_font_blob(lib, label, fonts[i].data, fonts[i].size);
         loaded++;
     }
-    LOGD("SUB_FONTS: loaded %d font(s) embedded in container attachments", loaded);
+    DBG serprintf("SUB_FONTS: loaded %d font(s) embedded in container attachments\n", loaded);
     return loaded;
 }
 
@@ -472,7 +471,7 @@ static void sync_styles(SSA_BACKEND *ctx) {
                         if (ctx->video_h > 0 && ctx->track->PlayResY > 0) {
                             float scale_ratio = (float)ctx->track->PlayResY / (float)ctx->video_h;
                             style->MarginV = (int)(u.margin_bottom * scale_ratio);
-                            LOGD("SUB_SURFACE: Margin translation: UI sent %d physical px -> libass mapped to %d logical px (Scale: %f, PlayResY: %d, SurfaceH: %d)",
+                            DBG serprintf("SUB_SURFACE: Margin translation: UI sent %d physical px -> libass mapped to %d logical px (Scale: %f, PlayResY: %d, SurfaceH: %d)\n",
                                  u.margin_bottom, style->MarginV, scale_ratio, ctx->track->PlayResY, ctx->video_h);
                         } else {
                             // Fallback just in case
@@ -516,7 +515,7 @@ static void ass_msg_cb(int level, const char *fmt, va_list va, void *data) {
     if (level < 4) {
         char buf[256];
         vsnprintf(buf, sizeof(buf), fmt, va);
-        LOGD("LIBASS[%d]: %s", level, buf);
+        DBG serprintf("LIBASS[%d]: %s\n", level, buf);
         return;
     }
     if (level <= 6) {
@@ -534,7 +533,7 @@ static void ass_msg_cb(int level, const char *fmt, va_list va, void *data) {
             }
         }
         if (mentions_font) {
-            LOGD("LIBASS[%d] SUB_FONTS: %s", level, buf);
+            DBG serprintf("LIBASS[%d] SUB_FONTS: %s\n", level, buf);
         }
     }
 }
@@ -566,7 +565,7 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
 
     int final_w = ctx->video_w > 0 ? ctx->video_w : 1920;
     int final_h = ctx->video_h > 0 ? ctx->video_h : 1080;
-    LOGD("SUB_SURFACE: Configured libass renderer frame size: %d x %d", final_w, final_h);
+    DBG serprintf("SUB_SURFACE: Configured libass renderer frame size: %d x %d\n", final_w, final_h);
     ass_set_frame_size(ctx->renderer, final_w, final_h);
 
     ctx->track = ass_new_track(ctx->library);
@@ -629,8 +628,8 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
             // "sans-serif" at least behaves exactly like the feature being off,
             // which is a safer failure mode.
             strcpy(default_font, "sans-serif");
-            LOGD("SUB_FONTS: failed to resolve real family name for stored default '%s', "
-                 "falling back to sans-serif", params->default_font_name);
+            DBG serprintf("SUB_FONTS: failed to resolve real family name for stored default '%s', "
+                 "falling back to sans-serif\n", params->default_font_name);
         }
     }
     // Cache the resolved name on ctx so sync_styles() (called repeatedly --
@@ -646,8 +645,8 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     }
     ctx->fonts_dir = (params->fonts_dir && params->fonts_dir[0]) ? strdup(params->fonts_dir) : NULL;
 
-    LOGD("SUB_FONTS: requesting default/fallback family '%s' from libass "
-         "(custom fonts folder %s)", default_font,
+    DBG serprintf("SUB_FONTS: requesting default/fallback family '%s' from libass "
+         "(custom fonts folder %s)\n", default_font,
          (params->fonts_dir && params->fonts_dir[0]) ? "ACTIVE" : "not set");
     ass_set_fonts(ctx->renderer, NULL, default_font, ASS_FONTPROVIDER_FONTCONFIG, NULL, 1);
     // ass_set_fonts() itself doesn't return whether default_font actually

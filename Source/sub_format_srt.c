@@ -3,10 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <android/log.h>
+#include "debug.h"
 
-#define LOG_TAG "SubFormatSRT"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define DBG if(Debug[DBG_SUB])
 
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 
@@ -47,7 +46,7 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
     int playres_y = 720;
     int playres_x = (int)(playres_y * aspect);
 
-    LOGD("SUB_SURFACE: Generated ASS header with PlayResX: %d, PlayResY: %d (Aspect: %f, Surface: %dx%d)",
+    DBG serprintf("SUB_SURFACE: Generated ASS header with PlayResX: %d, PlayResY: %d (Aspect: %f, Surface: %dx%d)\n",
          playres_x, playres_y, aspect, video_w, video_h);
 
     int font_size = 40;

@@ -5,10 +5,9 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <string.h>
-#include <android/log.h>
+#include "debug.h"
 
-#define LOG_TAG "SubEngine"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define DBG if(Debug[DBG_SUB])
 
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_srt_create(void);
@@ -119,7 +118,7 @@ void sub_engine_detach_surface(SUB_ENGINE *eng) {
 void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
     if (!eng) return;
 
-    LOGD("SUB_SURFACE: Surface resized event received: %d x %d", width, height);
+    DBG serprintf("SUB_SURFACE: Surface resized event received: %d x %d\n", width, height);
 
     pthread_mutex_lock(&eng->lock);
     eng->surface_w = width;
@@ -157,7 +156,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w,
     target_h = eng->surface_h > 0 ? eng->surface_h : video_h;
     pthread_mutex_unlock(&eng->lock);
 
-    LOGD("SUB_SURFACE: Opening track (format=%d) with canvas dimensions: %d x %d (raw video dim: %d x %d)",
+    DBG serprintf("SUB_SURFACE: Opening track (format=%d) with canvas dimensions: %d x %d (raw video dim: %d x %d)\n",
          format_id, target_w, target_h, video_w, video_h);
 
     SUB_FORMAT_BACKEND *backend;

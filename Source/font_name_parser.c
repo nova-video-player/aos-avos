@@ -6,11 +6,9 @@
 
 #include <string.h>
 #include <stdio.h>
-#include <android/log.h>
+#include "debug.h"
 
-#define LOG_TAG "FontNameParser"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+#define DBG if(Debug[DBG_SUB])
 
 // Was previously duplicated near-verbatim as a static resolve_real_family_name()
 // in both sub_format_ssa.c and sub_format_srt.c -- consolidated here since it's
@@ -50,7 +48,7 @@ int font_name_resolve_family(const char *fonts_dir, const char *stored_value, ch
     FONT_NAME_RESULT result;
     FONT_NAME_STATUS status = font_name_parse_file(path, &result);
     if (status != FONT_NAME_OK || result.count == 0) {
-        LOGD("SUB_FONTS: could not resolve real family name for '%s': %s",
+        DBG serprintf("SUB_FONTS: could not resolve real family name for '%s': %s\n",
              filename, font_name_status_string(status));
         return 0;
     }
@@ -66,7 +64,7 @@ int font_name_resolve_family(const char *fonts_dir, const char *stored_value, ch
             if (len >= out_cap) len = out_cap - 1;
             memcpy(out, result.entries[i].family, len);
             out[len] = '\0';
-            LOGD("SUB_FONTS: resolved '%s' (face=%d instance=%d) -> real family '%s'",
+            DBG serprintf("SUB_FONTS: resolved '%s' (face=%d instance=%d) -> real family '%s'\n",
                  filename, wanted_face, wanted_instance, out);
             return 1;
         }
@@ -77,8 +75,8 @@ int font_name_resolve_family(const char *fonts_dir, const char *stored_value, ch
     // to the first available entry rather than fail outright, since some
     // resolved font is better than silently reverting to the OS default for
     // what's likely a stale-but-close-enough stored value.
-    LOGD("SUB_FONTS: selector face=%d instance=%d not found in '%s' (has %d entries), "
-         "falling back to first available entry", wanted_face, wanted_instance, filename, result.count);
+    DBG serprintf("SUB_FONTS: selector face=%d instance=%d not found in '%s' (has %d entries), "
+         "falling back to first available entry\n", wanted_face, wanted_instance, filename, result.count);
     for (int i = 0; i < result.count; i++) {
         if (result.entries[i].family[0] != '\0') {
             size_t len = strlen(result.entries[i].family);
@@ -168,7 +166,7 @@ static void enumerate_named_instances(FT_Library ft, FT_Open_Args *args, FT_Face
         FT_Face instance_face = NULL;
         FT_Long combined_index = ((FT_Long)i << 16) | (FT_Long)face_index;
         if (FT_Open_Face(ft, args, combined_index, &instance_face) != 0 || !instance_face) {
-            LOGW("enumerate_named_instances: failed to load named instance %u of face %d in '%s'",
+            serprintf("enumerate_named_instances: failed to load named instance %u of face %d in '%s'\n",
                  i, face_index, debug_name ? debug_name : "?");
             continue;
         }
@@ -196,7 +194,7 @@ static FONT_NAME_STATUS parse_open_args(FT_Library ft, FT_Open_Args *args,
     // .ttf/.otf this just reports num_faces == 1.
     FT_Face probe_face = NULL;
     if (FT_Open_Face(ft, args, -1, &probe_face) != 0 || !probe_face) {
-        LOGW("font_name_parse: probe failed for '%s' -- not a font FreeType recognizes, or unreadable", debug_name);
+        serprintf("font_name_parse: probe failed for '%s' -- not a font FreeType recognizes, or unreadable\n", debug_name);
         return FONT_NAME_ERR_OPEN;
     }
     FT_Long num_faces = probe_face->num_faces;
@@ -205,7 +203,7 @@ static FONT_NAME_STATUS parse_open_args(FT_Library ft, FT_Open_Args *args,
     for (FT_Long face_index = 0; face_index < num_faces; face_index++) {
         FT_Face face = NULL;
         if (FT_Open_Face(ft, args, face_index, &face) != 0 || !face) {
-            LOGW("font_name_parse: failed to open face %ld in '%s'", face_index, debug_name);
+            serprintf("font_name_parse: failed to open face %ld in '%s'\n", face_index, debug_name);
             continue; // one bad sub-font in a .ttc shouldn't take out the rest
         }
 
@@ -221,12 +219,12 @@ static FONT_NAME_STATUS parse_open_args(FT_Library ft, FT_Open_Args *args,
     }
 
     if (out->count == 0) {
-        LOGW("font_name_parse: '%s' opened but yielded no usable family name", debug_name);
+        serprintf("font_name_parse: '%s' opened but yielded no usable family name\n", debug_name);
         return FONT_NAME_ERR_NO_FAMILY;
     }
 
     for (int i = 0; i < out->count; i++) {
-        LOGD("font_name_parse: '%s' -> face=%d instance=%d family='%s' style='%s'",
+        DBG serprintf("font_name_parse: '%s' -> face=%d instance=%d family='%s' style='%s'\n",
              debug_name, out->entries[i].face_index, out->entries[i].named_instance,
              out->entries[i].family, out->entries[i].style);
     }
@@ -239,7 +237,7 @@ FONT_NAME_STATUS font_name_parse_file(const char *path, FONT_NAME_RESULT *out) {
 
     FT_Library ft;
     if (FT_Init_FreeType(&ft) != 0) {
-        LOGW("font_name_parse_file: FT_Init_FreeType failed");
+        serprintf("font_name_parse_file: FT_Init_FreeType failed\n");
         return FONT_NAME_ERR_INIT;
     }
 
@@ -259,7 +257,7 @@ FONT_NAME_STATUS font_name_parse_memory(const uint8_t *data, int size, const cha
 
     FT_Library ft;
     if (FT_Init_FreeType(&ft) != 0) {
-        LOGW("font_name_parse_memory: FT_Init_FreeType failed");
+        serprintf("font_name_parse_memory: FT_Init_FreeType failed\n");
         return FONT_NAME_ERR_INIT;
     }
 

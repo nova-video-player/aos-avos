@@ -5,12 +5,10 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <android/log.h>
+#include "debug.h"
 #include <time.h>
 
-#define LOG_TAG "SubRenderGL"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define DBG if(Debug[DBG_SUB])
 
 struct SUB_RENDERER {
     ANativeWindow  *window;
@@ -46,7 +44,7 @@ static GLuint compile_shader(GLenum type, const char *source) {
     if (!status) {
         char buf[512];
         glGetShaderInfoLog(shader, sizeof(buf), NULL, buf);
-        LOGE("Shader compile error: %s", buf);
+        serprintf("Shader compile error: %s\n", buf);
     }
     return shader;
 }
@@ -64,7 +62,7 @@ static GLuint create_program(const char *vertex_src, const char *fragment_src) {
     if (!status) {
         char buf[512];
         glGetProgramInfoLog(program, sizeof(buf), NULL, buf);
-        LOGE("Program link error: %s", buf);
+        serprintf("Program link error: %s\n", buf);
     }
     glDeleteShader(vs);
     glDeleteShader(fs);
@@ -142,7 +140,7 @@ static void* egl_render_thread(void* arg) {
                         r->surface_width  = real_w;
                         r->surface_height = real_h;
                         pthread_mutex_unlock(&r->lock);
-                        LOGD("SUB_RENDER_GL: adopted real EGL surface size %d x %d on window attach", real_w, real_h);
+                        DBG serprintf("SUB_RENDER_GL: adopted real EGL surface size %d x %d on window attach\n", real_w, real_h);
                     }
 
                     if (r->gl_program == 0) {

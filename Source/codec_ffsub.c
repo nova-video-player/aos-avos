@@ -53,18 +53,7 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	dec->is_open = 1;
 
 	const AVCodec* myCodec;
-	if (sub->format == SUB_FORMAT_TEXT) {
-		DBGS serprintf("codec_ffsub: ffsub: Open text\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_TEXT);
-	} else if (sub->format == SUB_FORMAT_SSA) {
-		// TODO MARC codec not found with embedded ssa subs: need to add libssa
-		DBGS serprintf("codec_ffsub: ffsub: Open ssa\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_SSA);
-	} else if (sub->format == SUB_FORMAT_ASS) {
-		// TODO MARC codec not found with embedded ssa subs: need to add libssa
-		DBGS serprintf("codec_ffsub: ffsub: Open ass\n");
-		myCodec = avcodec_find_decoder(AV_CODEC_ID_SSA);
-	} else if (sub->format == SUB_FORMAT_MOV_TEXT) {
+	if (sub->format == SUB_FORMAT_MOV_TEXT) {
 		DBGS serprintf("codec_ffsub: ffsub: Open mov_text\n");
 		myCodec = avcodec_find_decoder(AV_CODEC_ID_MOV_TEXT);
 	} else if (sub->format == SUB_FORMAT_DVD_GFX) {
@@ -542,8 +531,6 @@ static STREAM_DEC_SUB *_new_dec( void )
 // TODO MARC XSUB not covered
 
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_MOV_TEXT, _new_dec, "MOV_TEXT" );
-STREAM_REGISTER_DEC_SUB( SUB_FORMAT_TEXT, _new_dec, "TEXT" );
-//STREAM_REGISTER_DEC_SUB( SUB_FORMAT_SSA, _new_dec, "SSA" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_PGS, _new_dec, "PGS" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_DVD_GFX, _new_dec, "vobsub" );
 STREAM_REGISTER_DEC_SUB( SUB_FORMAT_WEBVTT, _new_dec, "WEBVTT" );

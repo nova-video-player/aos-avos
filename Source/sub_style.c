@@ -189,6 +189,17 @@ void sub_style_set_bg_color(SUB_USER_STYLE *style, uint32_t argb) {
     pthread_mutex_unlock(&style->lock);
 }
 
+void sub_style_set_bg_opacity(SUB_USER_STYLE *style, uint8_t android_alpha) {
+    if (!style) return;
+    uint8_t ass_transparency = 255 - android_alpha;
+    pthread_mutex_lock(&style->lock);
+    uint32_t new_color = (style->bg_color & 0xFFFFFF00) | ass_transparency;
+    if (style->bg_color != new_color) {
+        style->bg_color = new_color;
+        style->serial++;
+    }
+    pthread_mutex_unlock(&style->lock);
+}
 void sub_style_set_outline_width(SUB_USER_STYLE *style, float px) {
     if (!style) return;
     int w = (int)px;

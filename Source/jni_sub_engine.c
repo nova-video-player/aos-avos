@@ -124,17 +124,10 @@ JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_n
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundOpacity(JNIEnv *env, jobject thiz, jlong handle, jfloat opacity) {
-    SUB_USER_STYLE *style = sub_engine_get_style(get_engine(handle));
-    if (style) {
-        // Convert 0.0-1.0 float to 0-255 Android Alpha
-        uint8_t android_alpha = (uint8_t)(255.0f * opacity);
-        // Libass uses RGBA where A is transparency (0 = solid, 255 = fully transparent)
-        uint8_t ass_transparency = 255 - android_alpha;
-
-        // Isolate RGB and replace Alpha
-        style->bg_color = (style->bg_color & 0xFFFFFF00) | ass_transparency;
-        style->serial++;
-    }
+    // Convert 0.0-1.0 float to 0-255 Android Alpha; sub_style_set_bg_opacity() does the
+    // libass transparency-byte conversion and the locked read-modify-write on bg_color.
+    uint8_t android_alpha = (uint8_t)(255.0f * opacity);
+    sub_style_set_bg_opacity(sub_engine_get_style(get_engine(handle)), android_alpha);
 }
 
 // --- POSITIONING & OVERRIDES ---

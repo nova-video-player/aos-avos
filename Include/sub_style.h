@@ -71,6 +71,7 @@ void sub_style_set_text_color(SUB_USER_STYLE *style, uint32_t argb);
 // --- INTERDEPENDENT BACKGROUNDS, OUTLINES & SHADOWS ---
 void sub_style_set_bg_mode(SUB_USER_STYLE *style, int mode);
 void sub_style_set_bg_color(SUB_USER_STYLE *style, uint32_t argb);
+void sub_style_set_bg_opacity(SUB_USER_STYLE *style, uint8_t android_alpha);
 void sub_style_set_outline_width(SUB_USER_STYLE *style, float px);
 void sub_style_set_outline_color(SUB_USER_STYLE *style, uint32_t argb);
 void sub_style_set_shadow_width(SUB_USER_STYLE *style, float px);

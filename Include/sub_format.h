@@ -124,14 +124,29 @@ struct SUB_FORMAT_BACKEND {
 
 /* ------------------------------------------------------------------
  * Registration — each sub_format_*.c registers itself; sub_engine.c
- * picks the right one by SUB_FORMAT_ID at stream-open time. Mirrors
+ * picks the right one by SUB_FMT_ID (SUB_FMT_SRT/SSA/GFX — the engine
+ * backend selector defined in sub_types.h, NOT av.h's 12-value
+ * SUB_FORMAT_* codec/container enum) at stream-open time. Mirrors
  * avos's existing STREAM_REGISTER_DEC_SUB macro pattern.
  * ------------------------------------------------------------------ */
 
 typedef SUB_FORMAT_BACKEND *(*sub_format_factory_fn)(void);
 
-void sub_format_register(SUB_FORMAT_ID id, sub_format_factory_fn factory, const char *name);
-SUB_FORMAT_BACKEND *sub_format_create(SUB_FORMAT_ID id);
+void sub_format_register(SUB_FMT_ID id, sub_format_factory_fn factory, const char *name);
+SUB_FORMAT_BACKEND *sub_format_create(SUB_FMT_ID id);
+
+/* ------------------------------------------------------------------
+ * sub_fmt_from_format() — the SINGLE canonical mapping from a track's
+ * demux/codec format (av.h's SUB_FORMAT_* — SUB_FORMAT_SSA,
+ * SUB_FORMAT_PGS, SUB_FORMAT_WEBVTT, etc.) to the engine backend that
+ * should render it (SUB_FMT_ID). Every call site that needs to turn a
+ * SUB_FORMAT_* value into a SUB_FMT_ID — internal tracks, external
+ * tracks, ffdec bitmap tracks — must go through this function instead
+ * of re-deriving the mapping locally. Returns SUB_FMT_UNKNOWN for any
+ * SUB_FORMAT_* value that isn't (yet) routed to the C engine.
+ * ------------------------------------------------------------------ */
+
+SUB_FMT_ID sub_fmt_from_format(int sub_format_id);
 
 #define SUB_FORMAT_REGISTER(id, factory_fn, name) \
     /* call sub_format_register(id, factory_fn, name) from a constructor

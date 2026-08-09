@@ -97,10 +97,17 @@ typedef struct {
 } SUB_FRAME;
 
 /* ------------------------------------------------------------------
- * Subtitle format identifiers — supersedes the old SUB_FORMAT_* enum
- * for the new engine's dispatch; kept numerically compatible where
- * possible with the existing subtitle.h enum so old and new code can
- * coexist during migration.
+ * SUB_FMT_ID — engine backend selector. NOT the same thing as av.h's
+ * SUB_FORMAT_* (SUB_FORMAT_SSA, SUB_FORMAT_PGS, SUB_FORMAT_WEBVTT, ...),
+ * which identifies the on-disk/container codec format (12 values, used
+ * for demux dispatch and codec_ffsub decoder selection). SUB_FMT_ID is
+ * the much smaller set of engine backends those 12 formats collapse
+ * onto (3 values) — e.g. SUB_FORMAT_WEBVTT, SUB_FORMAT_MOV_TEXT, and
+ * SUB_FORMAT_TEXT are all plain text and all map to SUB_FMT_SRT.
+ * There is no numeric relationship between the two enums; the mapping
+ * from SUB_FORMAT_* to SUB_FMT_ID is semantic and lives in exactly one
+ * place: sub_fmt_from_format() in sub_format.h/.c. Do not re-derive it
+ * ad hoc at call sites.
  * ------------------------------------------------------------------ */
 
 typedef enum {
@@ -108,4 +115,4 @@ typedef enum {
     SUB_FMT_SSA     = 1,   /* via libass */
     SUB_FMT_GFX     = 2,   /* NEW: Universal OpenGL Bitmap Backend */
     SUB_FMT_UNKNOWN = -1,
-} SUB_FORMAT_ID;
+} SUB_FMT_ID;

@@ -29,8 +29,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
-#include "sub_engine.h" // <-- ADD THIS
-#include "sub_types.h"  // <-- ADD THIS (if SUB_FMT_GFX is defined here)
+#include "sub_engine.h"
 
 #define DBGS	if(Debug[DBG_STREAM])
 #define DBG 	if(Debug[DBG_SUB])
@@ -90,7 +89,7 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 			if (stream->video->width > 0) w = stream->video->width;
 			if (stream->video->height > 0) h = stream->video->height;
 		}
-		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, SUB_FMT_GFX, w, h, NULL, 0, NULL, 0);
+		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, sub_fmt_from_format(sub->format), w, h, NULL, 0, NULL, 0);
 	}
 
 	return 0;

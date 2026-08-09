@@ -18,7 +18,7 @@ void        sub_engine_destroy(SUB_ENGINE *eng);
 // (e.g. bitmap subtitle tracks). Same synchronous-only lifetime contract as
 // codec_private above: only needs to stay valid for the duration of this
 // call -- see SUB_EMBEDDED_FONT's doc comment in sub_format.h.
-int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h,
+int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,
                            const uint8_t *codec_private, int codec_private_size,
                            const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count);
 void sub_engine_close_track(SUB_ENGINE *eng);

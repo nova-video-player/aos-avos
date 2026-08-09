@@ -240,7 +240,7 @@ static void _get_next_int_sub( STREAM *s, int time )
 			if( _is_raw_text(fmt) ) {
 				// CASE 1: Raw passthrough — open C engine, no sub_dec needed
 				if (s->sub_engine) {
-					int engine_fmt = (fmt == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
+					int engine_fmt = sub_fmt_from_format(fmt);
 					SUB_EMBEDDED_FONT embedded_fonts[ATTACHED_FONT_MAX];
 					int embedded_fonts_count = _bridge_embedded_fonts( s, embedded_fonts, ATTACHED_FONT_MAX );
 					sub_engine_open_track(

@@ -1,6 +1,7 @@
 #include "sub_engine.h"
 #include "sub_render_gl.h"
 #include "sub_format.h"
+#include "av.h"
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -13,6 +14,31 @@ extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_srt_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_gfx_create(void);
 extern void sub_render_gl_set_engine(SUB_RENDERER *r, void *engine);
+
+/* Canonical SUB_FORMAT_* (av.h, 12 values, codec/container identity) ->
+ * SUB_FMT_ID (sub_types.h, 3 values, engine backend selector) mapping.
+ * Declared in sub_format.h. This used to be re-derived independently at
+ * three call sites (stream_subtitle.c's internal-track ternary,
+ * stream_sub_ext.c's vobsub/is_pgs/is_ssa chain, codec_ffsub.c's
+ * hardcoded SUB_FMT_GFX literal) -- collapsed here so adding a new
+ * SUB_FORMAT_* value only requires updating one place. */
+SUB_FMT_ID sub_fmt_from_format(int fmt) {
+    switch (fmt) {
+    case SUB_FORMAT_SSA:
+    case SUB_FORMAT_ASS:
+        return SUB_FMT_SSA;
+    case SUB_FORMAT_PGS:
+    case SUB_FORMAT_DVD_GFX:
+        return SUB_FMT_GFX;
+    case SUB_FORMAT_TEXT:
+    case SUB_FORMAT_EXT:
+    case SUB_FORMAT_WEBVTT:
+    case SUB_FORMAT_MOV_TEXT:
+        return SUB_FMT_SRT;
+    default:
+        return SUB_FMT_UNKNOWN;
+    }
+}
 
 struct SUB_ENGINE {
     SUB_RENDERER         *renderer;
@@ -128,7 +154,7 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
     sub_engine_resize_video(eng, width, height); // <--- Tells Libass to wrap text to the new 3D box!
 }
 
-int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h,
+int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,
                            const uint8_t *codec_private, int codec_private_size,
                            const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count) {
     if (!eng) return -1;

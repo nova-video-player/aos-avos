@@ -519,29 +519,28 @@ static void _add_menu_entries( STREAM *s, SUB_PRIV *p, int start_idx )
 		SUB_PROPERTIES *sub = s->av.sub + s->av.subs_max;
 		uni_sub *conv = p->subs->converted[i];
 
-		// Determine format and engine target for this track
+		// Determine SUB_FORMAT_* first (the only thing the vobsub/is_pgs/is_ssa
+		// detector booleans decide). engine_fmt is then ALWAYS derived from
+		// sub->format via the single canonical sub_fmt_from_format() mapping --
+		// see sub_format.h -- rather than assigned independently per-branch, so
+		// this can't drift from the internal-track / ffdec-bitmap call sites.
 		if ( conv->vobsub ) {
 			sub->format        = SUB_FORMAT_DVD_GFX;
 			sub->gfx           = 1;
-			p->engine_fmt[s->av.subs_max] = SUB_FMT_GFX;
 		} else if ( conv->is_pgs ) {
 			sub->format        = SUB_FORMAT_PGS;
 			sub->gfx           = 1;
-			p->engine_fmt[s->av.subs_max] = SUB_FMT_GFX;
 		} else if ( conv->is_ssa ) {
 			sub->format        = SUB_FORMAT_SSA;
 			sub->gfx           = 0;
-			p->engine_fmt[s->av.subs_max] = SUB_FMT_SSA;
 		} else {
 			sub->format        = SUB_FORMAT_EXT;
 			sub->gfx           = 0;
-			p->engine_fmt[s->av.subs_max] = SUB_FMT_SRT;
-			// Mark streaming tracks (SRT/VTT) — feed() will be used instead
-			// of walking the uni_sub list in stream_sub_ext_feed_engine()
-			if ( conv->is_streaming ) {
-				p->engine_fmt[s->av.subs_max] = SUB_FMT_SRT; // same engine, different feed path
-			}
+			// conv->is_streaming (SRT/VTT) marks that feed() will be used instead
+			// of walking the uni_sub list in stream_sub_ext_feed_engine() -- it
+			// does not change the engine format, both paths are SUB_FMT_SRT.
 		}
+		p->engine_fmt[s->av.subs_max] = sub_fmt_from_format( sub->format );
 		sub->ext            = 1;
 		sub->stream         = i;
 		sub->valid          = 1;

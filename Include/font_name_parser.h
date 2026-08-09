@@ -114,9 +114,9 @@ const char *font_name_status_string(FONT_NAME_STATUS status);
 // file not found, not a font FreeType recognizes, or the selector doesn't
 // match any entry the file actually contains -- in which case this falls
 // back to the file's first available entry rather than fail outright)
-// returns 0 and leaves `out` untouched; callers should fall back to a
-// generic family like "sans-serif" rather than fail the whole track open
-// over one unresolvable font.
+// returns 0 and leaves `out` untouched; callers should fall back to
+// SUB_DEFAULT_FONT_FAMILY (see sub_style.h) rather than fail the whole
+// track open over one unresolvable font.
 //
 // Shared by every backend that needs this (sub_format_ssa.c, sub_format_srt.c)
 // instead of each keeping its own copy -- the logic is pure font_name_parser-

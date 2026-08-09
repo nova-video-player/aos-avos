@@ -403,8 +403,8 @@ static void sync_styles(SSA_BACKEND *ctx) {
                 if (u.font_family && u.font_family[0] != '\0') {
                     // If the user has an explicit fonts-folder default font AND
                     // u.font_family is still exactly sub_style_create()'s hardcoded
-                    // factory default ("roboto medium"), prefer the resolved fonts-
-                    // folder default instead. This is the fix for a confirmed bug
+                    // factory default (SUB_DEFAULT_FONT_FAMILY), prefer the resolved
+                    // fonts-folder default instead. This is the fix for a confirmed bug
                     // (via LIBASS SUB_FONTS logcat output): u.font_family is NEVER
                     // empty by construction, so it always won this force-apply,
                     // which meant a fonts-folder default font could never actually
@@ -413,14 +413,14 @@ static void sync_styles(SSA_BACKEND *ctx) {
                     // is never consulted once a style already names a font. This
                     // check specifically distinguishes "user never touched the
                     // general font picker" (still holding the exact factory value)
-                    // from "user explicitly chose roboto medium via that picker" --
-                    // an actual explicit choice, even of the same string, still
-                    // wins here since we can't (and shouldn't) tell those apart
+                    // from "user explicitly chose SUB_DEFAULT_FONT_FAMILY via that
+                    // picker" -- an actual explicit choice, even of the same string,
+                    // still wins here since we can't (and shouldn't) tell those apart
                     // from the value alone; this only helps the untouched-default
                     // case, which is what every fresh install/profile starts in.
                     const char *effective_font_name = u.font_family;
                     if (ctx->resolved_default_family[0] != '\0' &&
-                        strcmp(u.font_family, "roboto medium") == 0) {
+                        strcmp(u.font_family, SUB_DEFAULT_FONT_FAMILY) == 0) {
                         effective_font_name = ctx->resolved_default_family;
                     }
                     if (style->FontName) free(style->FontName);
@@ -608,13 +608,14 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     // custom folder, resolve its REAL family name (via FreeType, reading the
     // font's own name table -- see font_name_resolve_family() in
     // font_name_parser.h) and use
-    // that here instead of the generic "sans-serif" alias.
+    // that here instead of the locked internal default, SUB_DEFAULT_FONT_FAMILY
+    // (see sub_style.h).
     //
     // Note this does NOT disable fontconfig: ASS_FONTPROVIDER_FONTCONFIG is
     // still passed as the provider for names that aren't in the custom
     // fonts folder (e.g. an embedded ASS track's own named style), so system
     // fonts keep working exactly as before for everything else.
-    char default_font[256] = "sans-serif";
+    char default_font[256] = SUB_DEFAULT_FONT_FAMILY;
     int resolved_ok = 0;
     if (params->default_font_name && params->default_font_name[0] &&
         params->fonts_dir && params->fonts_dir[0]) {
@@ -622,14 +623,14 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
                                                 default_font, sizeof(default_font));
         if (!resolved_ok) {
             // Resolution failed (file gone, corrupt, or FreeType couldn't parse
-            // it) -- fall back to "sans-serif" rather than passing the raw
-            // filename through as a guess; a wrong-but-plausible-looking guess
-            // silently renders with the wrong font, whereas falling back to
-            // "sans-serif" at least behaves exactly like the feature being off,
+            // it) -- fall back to SUB_DEFAULT_FONT_FAMILY rather than passing the
+            // raw filename through as a guess; a wrong-but-plausible-looking guess
+            // silently renders with the wrong font, whereas falling back to the
+            // locked default at least behaves exactly like the feature being off,
             // which is a safer failure mode.
-            strcpy(default_font, "sans-serif");
+            strcpy(default_font, SUB_DEFAULT_FONT_FAMILY);
             DBG serprintf("SUB_FONTS: failed to resolve real family name for stored default '%s', "
-                 "falling back to sans-serif\n", params->default_font_name);
+                 "falling back to " SUB_DEFAULT_FONT_FAMILY "\n", params->default_font_name);
         }
     }
     // Cache the resolved name on ctx so sync_styles() (called repeatedly --

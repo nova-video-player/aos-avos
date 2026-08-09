@@ -20,6 +20,23 @@
  * a snapshot copy at the start of each frame, never a live pointer.
  * ------------------------------------------------------------------ */
 
+// Locked internal fallback font family name. This is the ONE hardcoded
+// default for the whole subtitle engine -- used both as font_family's
+// factory default below (sub_style_create(), sub_style.c) and as the
+// last-resort family whenever no font can otherwise be resolved (ssa_open()'s
+// default_font in sub_format_ssa.c, and the generated synthetic-header
+// FontName fallback in sub_format_srt.c -- that header is only ever handed
+// straight to the SSA backend's open(), so this is really one style default
+// wearing two call sites, not two separate concerns).
+//
+// This MUST stay a single #define rather than several independent string
+// literals: sub_format_ssa.c's force-apply logic does a strcmp() against
+// this exact value to detect "user never touched the font picker" (see
+// sync_styles() in sub_format_ssa.c) -- a hand-edited literal that drifts
+// out of sync with sub_style_create()'s default would silently break that
+// check, with no compiler error to catch it.
+#define SUB_DEFAULT_FONT_FAMILY "sans-serif-medium"
+
 typedef struct SUB_USER_STYLE {
     float    font_size;
     float    font_scale;

@@ -101,7 +101,9 @@ void sub_engine_set_fonts_dir(SUB_ENGINE *eng, const char *dir) {
 
 // Sets the fallback family name libass should use when nothing else names a
 // font -- this is what makes plain SRT actually use a font from the custom
-// folder instead of fontconfig's generic "sans-serif" alias. Should be a
+// folder instead of the locked internal default, SUB_DEFAULT_FONT_FAMILY
+// (see sub_style.h; consumed by sub_style_create()'s factory default and
+// ssa_open()'s default_font fallback). Should be a
 // family name that's resolvable given the CURRENT fonts_dir (typically one
 // of the files just scanned by sub_engine_set_fonts_dir()); takes effect on
 // the next open_track() call, same as fonts_dir above.

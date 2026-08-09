@@ -1,4 +1,5 @@
 #include "sub_format.h"
+#include "sub_style.h"
 #include "font_name_parser.h"
 #include <stdlib.h>
 #include <string.h>
@@ -54,8 +55,8 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
     int margin_h = 20;
 
     // Prefer the user's chosen default font (from the custom fonts folder,
-    // see sub_engine_set_default_font_name()) over the old hardcoded literal
-    // "sans-serif". This matters even though sync_styles() in
+    // see sub_engine_set_default_font_name()) over the locked internal
+    // default, SUB_DEFAULT_FONT_FAMILY (see sub_style.h). This matters even though sync_styles() in
     // sub_format_ssa.c will usually overwrite FontName again right after
     // open() (whenever u.font_family is explicitly set, since force_all is
     // always true for SRT) -- the case THIS fixes is when the user picked a
@@ -63,7 +64,7 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
     // font_family override. In that case u.font_family is empty,
     // sync_styles() leaves FontName exactly as this header wrote it, and
     // ass_set_fonts()'s own fallback (see ssa_open()) never gets a chance to
-    // apply because this style already names SOME font -- "sans-serif"
+    // apply because this style already names SOME font -- SUB_DEFAULT_FONT_FAMILY
     // verbatim being the wrong one. Writing the actual chosen default here
     // closes that gap.
     //
@@ -80,7 +81,7 @@ static char* generate_dynamic_ass_header(const SUB_USER_STYLE *style, int video_
     // string transform.
     char font_name[256];
     if (!font_name_resolve_family(fonts_dir, default_font_name, font_name, sizeof(font_name))) {
-        strcpy(font_name, "sans-serif");
+        strcpy(font_name, SUB_DEFAULT_FONT_FAMILY);
     } else {
         char sanitized[256];
         sanitize_ass_field(font_name, sanitized, sizeof(sanitized));

@@ -20,9 +20,11 @@ SUB_USER_STYLE* sub_style_create(void) {
 
     pthread_mutex_init(&style->lock, NULL);
 
+    /* These are only the values a freshly-created engine renders with in the brief
+     * window before PlayerActivity/ pushes its own persisted-or-default settings */
     style->font_size     = 55.0f;
     style->font_scale    = 1.0f;
-    style->font_family   = strdup("roboto medium"); // Locked internal fontconfig target
+    style->font_family   = strdup(SUB_DEFAULT_FONT_FAMILY);
     style->is_bold       = 0;
     style->text_color    = argb_to_libass(0xFFFFFFFF); // Solid White
 

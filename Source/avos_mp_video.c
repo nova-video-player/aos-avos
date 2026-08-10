@@ -39,10 +39,9 @@ extern int libavos_get_ac3_recoding_enabled(void);
 static int64_t engine_clock_cb(void *ctx) {
 	STREAM *s = (STREAM *)ctx; // Cast the context directly to the STREAM pointer
 	if (!s) return 0;
-	int dummy_duration = 0;
 
-	// 1. Get the raw video PTS
-	int64_t time = stream_get_current_time(s, &dummy_duration);
+	// 1. Get the raw video/audio PTS directly to slave the subtitle engine to the internal media clock
+	int64_t time = (s->video && s->video->valid) ? s->video_time : s->audio_time;
 
 	// 2. Apply the exact same correction as _sub_decode
 	time -= s->subtitle_offset;

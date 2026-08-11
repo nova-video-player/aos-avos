@@ -213,6 +213,32 @@ PCM Delay Memory
   `last_good` and LWMA history but preserves `smoothed_av_delay` as a
   warm start for the new position.
 
+PCM Startup Pipeline Seed and Correction
+----------------------------------------
+Decoded PCM startup uses two delay trust levels:
+
+- The initial anchor may use AudioTrack's HAL-aware `pipeline_latency` instead
+  of the smaller application-buffer latency. This is a provisional seed,
+  bounded to at most 500ms above the application latency and 1000ms total, so
+  a large or unreliable platform report cannot create an unbounded offset.
+- Playback-head fallback is not promoted during the first 1500ms of timestamp
+  warmup. It remains available after that grace period for devices that never
+  provide a usable `AudioTimestamp`.
+- General PCM delay caching continues to use
+  `STREAM_PCM_DELAY_STABLE_STREAK` (3). The one-shot renderer correction has a
+  stricter contract: the direct-timestamp success streak must reach 10. A
+  promoted playback-head value therefore cannot trigger that correction while
+  the direct timestamp path is still below its trust threshold; a throttled
+  cache remains usable after the threshold has been reached.
+- Once the direct delay is trusted, AVOS compares it with the provisional
+  seed. Residuals below 16ms are ignored and residuals above 500ms are rejected.
+  A valid residual requests one frame-bounded renderer correction for the
+  current seek and speed epoch.
+
+The policy applies only to decoded PCM. Passthrough modes 1 and 2 and AC3
+recoding retain their existing latency and anchoring policies. A speed change
+during warmup rearms the comparison for the new speed epoch.
+
 PCM heard_ts Interpolation
 --------------------------
 In `put_time` mode with valid delay, `heard_ts` is wall-clock
@@ -311,6 +337,10 @@ Rules:
    - PCM should prefer dynamic AudioTrack timing when stable. Static latency is
      only a warmup/fallback anchor because PCM queued delay changes with buffer
      fill, resume, speed filtering, and device timing behavior.
+   - At startup, a bounded HAL-aware pipeline latency may seed the provisional
+     anchor. It is corrected only after the direct-timestamp success streak
+     reaches 10; the ordinary 3-sample delay-cache threshold is not sufficient
+     to move the renderer.
 
 1) Choose delay candidate (raw):
    - If `delay_valid`, use dynamic delay (timestamp or playhead).

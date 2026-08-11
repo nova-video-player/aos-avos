@@ -186,6 +186,11 @@ static int stream_mode2_dynamic_all = 1;
 #define STREAM_PCM_EVIDENCE_COMMIT_DELTA_MS   12
 #define STREAM_PCM_EVIDENCE_CANDIDATE_BAND_MS  6
 #define STREAM_PCM_EVIDENCE_CANDIDATE_COUNT    3
+#define STREAM_PCM_STARTUP_PIPELINE_EXTRA_MAX_MS 500
+#define STREAM_PCM_STARTUP_PIPELINE_MAX_MS      1000
+#define STREAM_PCM_STARTUP_CORRECTION_MIN_MS      16
+#define STREAM_PCM_STARTUP_CORRECTION_MAX_MS     500
+#define STREAM_PCM_STARTUP_DIRECT_STREAK           10
 typedef enum {
 	STREAM_DELAY_SOURCE_NONE = 0,
 	STREAM_DELAY_SOURCE_DYNAMIC,
@@ -270,6 +275,10 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->atempo_ledger_next_rst_us = 0;
 	s->atempo_ledger_media_cursor = 0;
 	s->atempo_ledger_media_valid = 0;
+	s->pcm_startup_seed_delay_ms = 0;
+	s->pcm_startup_correction_pending = 0;
+	s->pcm_startup_correction_seek_epoch = -1;
+	s->pcm_startup_correction_speed_epoch = -1;
 	// Pending commits reference the old ledger frame domain; on seek/flush the
 	// boundaries AND their RST anchor source are invalid.  The target speeds are
 	// already live in the filter, so the video-side commit must still happen or the
@@ -1042,6 +1051,37 @@ static int _stream_is_dynamic_evidence_tag(const char *tag)
 	return 0;
 }
 
+int stream_get_pcm_startup_seed_delay_ms( STREAM *s )
+{
+#ifdef CONFIG_ANDROID
+	if( !s || !s->audio_ctx ) {
+		return 0;
+	}
+	int app_latency = audio_interface_get_latency( s->audio_ctx );
+	int pipeline_latency = audio_interface_get_pipeline_latency( s->audio_ctx );
+	if( app_latency < 0 ) {
+		app_latency = 0;
+	}
+	if( pipeline_latency < app_latency ) {
+		pipeline_latency = app_latency;
+	}
+	// Some HDMI HALs publish implausibly large route latency. This estimate is
+	// only a cold PCM seed, so bound it relative to the known local buffer and
+	// let direct AudioTimestamp evidence own the subsequent correction.
+	int max_pipeline = app_latency + STREAM_PCM_STARTUP_PIPELINE_EXTRA_MAX_MS;
+	if( max_pipeline > STREAM_PCM_STARTUP_PIPELINE_MAX_MS ) {
+		max_pipeline = STREAM_PCM_STARTUP_PIPELINE_MAX_MS;
+	}
+	if( pipeline_latency > max_pipeline ) {
+		pipeline_latency = max_pipeline;
+	}
+	return pipeline_latency;
+#else
+	(void)s;
+	return 0;
+#endif
+}
+
 // ************************************************************
 //
 //	stream_get_heard_audio_ts
@@ -1134,6 +1174,13 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 
 	if( s && allow_static && s->audio_ctx ) {
 		int static_latency = audio_interface_get_latency(s->audio_ctx);
+		if( !passthrough_mode && !ac3_recoding &&
+			audio_interface_is_startup_hold_active(s->audio_ctx) ) {
+			int startup_seed = stream_get_pcm_startup_seed_delay_ms( s );
+			if( startup_seed > static_latency ) {
+				static_latency = startup_seed;
+			}
+		}
 		if( static_latency > 0 ) {
 			status.effective_delay_ms = static_latency;
 			status.is_anchorable = 1;
@@ -2333,6 +2380,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	int current_av_delay = delay_status.effective_delay_ms;
 	int anchor_delay = current_av_delay;
 	int diag_log = _sync_diag_should_log(s);
+	int pcm_startup_request_correction = 0;
 
 	_sync_diag_log_state(s, "audio", &delay_status);
 
@@ -2454,6 +2502,45 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			}
 		}
 	}
+	if( s->pcm_startup_correction_pending ) {
+		int passthrough_mode = s->audio_sink && s->audio_sink->get_passthrough ?
+			s->audio_sink->get_passthrough( s ) : 0;
+		int ac3_recoding = 0;
+#ifdef CONFIG_AUDIO_AC3
+		ac3_recoding = libavos_get_ac3_recoding_enabled();
+#endif
+		if( passthrough_mode || ac3_recoding ||
+			s->pcm_startup_correction_seek_epoch != s->seek_epoch ) {
+			s->pcm_startup_correction_pending = 0;
+		} else if( s->pcm_startup_correction_speed_epoch != s->audio_speed_diag_epoch ) {
+			// A speed change invalidates the old phase comparison. Keep the feature
+			// armed for headphones at non-1.0x, but wait for evidence from the new
+			// atempo/PlaybackParams epoch.
+			s->pcm_startup_seed_delay_ms = stream_get_pcm_startup_seed_delay_ms( s ) +
+				stream_get_atempo_delay( s );
+			s->pcm_startup_correction_speed_epoch = s->audio_speed_diag_epoch;
+			DBG serprintf("pcm_startup_correction: rearm speed_epoch=%d seed=%d speed=%.3f\n",
+				s->audio_speed_diag_epoch, s->pcm_startup_seed_delay_ms,
+				audio_interface_get_audio_speed());
+		} else if( delay_status.has_dynamic_evidence &&
+			delay_status.dynamic_evidence_streak >= STREAM_PCM_STARTUP_DIRECT_STREAK ) {
+			int delta = delay_status.dynamic_evidence_ms - s->pcm_startup_seed_delay_ms;
+			int abs_delta = ABS( delta );
+			if( abs_delta >= STREAM_PCM_STARTUP_CORRECTION_MIN_MS &&
+				abs_delta <= STREAM_PCM_STARTUP_CORRECTION_MAX_MS ) {
+				pcm_startup_request_correction = 1;
+				DBG serprintf("pcm_startup_correction: request seed=%d dynamic=%d delta=%d streak=%d speed=%.3f epoch=%d\n",
+					s->pcm_startup_seed_delay_ms, delay_status.dynamic_evidence_ms,
+					delta, delay_status.dynamic_evidence_streak,
+					audio_interface_get_audio_speed(), s->audio_speed_diag_epoch);
+			} else {
+				DBG serprintf("pcm_startup_correction: complete without slew seed=%d dynamic=%d delta=%d streak=%d\n",
+					s->pcm_startup_seed_delay_ms, delay_status.dynamic_evidence_ms,
+					delta, delay_status.dynamic_evidence_streak);
+			}
+			s->pcm_startup_correction_pending = 0;
+		}
+	}
 	// Check if passthrough mode is active - static delay is immediately valid
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	int sink_ref_time = stream_sync_anchor_get_sink( s );
@@ -2523,6 +2610,9 @@ int stream_sync_audio( STREAM *s, int audio_time )
 					audio_time, anchor_ts, s->video_time, s->seek_epoch, passthrough_mode);
 			}
 		}
+	}
+	if( pcm_startup_request_correction ) {
+		sfdec2_request_pcm_startup_correction( s );
 	}
 
 	s->sync_a_time = audio_time;

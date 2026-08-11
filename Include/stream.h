@@ -903,6 +903,10 @@ typedef struct STREAM {
 	int		pcm_reanchor_seek_epoch;
 	int		pcm_reanchor_source;
 	int		pcm_reanchor_delay_ms;
+	int		pcm_startup_seed_delay_ms;
+	int		pcm_startup_correction_pending;
+	int		pcm_startup_correction_seek_epoch;
+	int		pcm_startup_correction_speed_epoch;
 	int		video_hold_for_delay;
 	int		video_hold_for_resume_audio;
 	int		audio_speed_diag_epoch;
@@ -1054,6 +1058,7 @@ int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
 int	stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state );
 int	stream_get_anchor_delay_ms( STREAM *s, int allow_static );
+int	stream_get_pcm_startup_seed_delay_ms( STREAM *s );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
 void    stream_audio_reset_ac3_passthrough_state(void);
@@ -1064,10 +1069,12 @@ void	stream_un_pause ( STREAM *s, int was_paused );
 void    sfdec2_reset_sync_state_on_seek( STREAM *s );
 void    sfdec2_android_sync_on_pause( STREAM *s, int paused );
 void    sfdec2_refresh_sched_anchor( STREAM *s );
+void    sfdec2_request_pcm_startup_correction( STREAM *s );
 #else
 static inline void sfdec2_reset_sync_state_on_seek( STREAM *s ) {}
 static inline void sfdec2_android_sync_on_pause( STREAM *s, int paused ) {}
 static inline void sfdec2_refresh_sched_anchor( STREAM *s ) {}
+static inline void sfdec2_request_pcm_startup_correction( STREAM *s ) {}
 #endif
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );

@@ -23,8 +23,13 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   `stream_get_heard_audio_ts()` only when `put_time` is stale. This avoids
   cross-thread heard-time skew at seek/resume boundaries.
 - For PCM and mode 1, the offset is **slewed** toward a new target only on
-  explicit events (seek/resume/speed/hard discontinuity). Direct mode 2 normally
-  keeps its render offset stable after initialization. A newly trusted dynamic
+  explicit events (seek/resume/speed/hard discontinuity). Decoded PCM has one
+  additional epoch-scoped event: after a bounded pipeline-latency startup seed,
+  a direct AudioTimestamp success streak of 10 may enable a single correction.
+  That correction moves at 1ms per distinct video frame and stops within an 8ms
+  deadband; playback-head fallback cannot trigger it below that timestamp trust
+  threshold. Direct mode 2 normally keeps its render offset stable after
+  initialization. A newly trusted dynamic
   clock first completes any monotonic heard-time hold while the renderer remains
   on its provisional anchor. Once the dynamic phase is ready, the renderer makes
   one explicit audio-based reanchor instead of stacking a second slew on that
@@ -62,8 +67,9 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
 
 - The render offset is initialized from a stable fallback when timing is
   unreliable; this provides a consistent A/V alignment at startup.
-- Subsequent corrections are event‑driven (seek/resume/speed) and applied via
-  slow slew to avoid visible acceleration or stutter.
+- Subsequent corrections are event-driven (seek/resume/speed, plus the one-shot
+  decoded-PCM startup correction) and applied via bounded slew to avoid visible
+  acceleration or stutter.
 - For `passthrough=2`, the renderer uses the centralized Mode 2 interpolator,
   preferably through a fresh `put_time`. Initial and seek reanchors clamp an
   implausible forward lead and prevent a backward seek from anchoring behind the

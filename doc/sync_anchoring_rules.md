@@ -125,6 +125,28 @@ reaches `audio_start_pts - anchor_delay`. Hold threshold:
 `startup_audio_hold` runs as long as needed (not only for `video_time < 1000`),
 so seeks late in a file are also covered.
 
+### PCM startup latency convergence
+
+The first committed decoded-PCM output records the provisional anchor delay and
+arms an epoch-scoped correction. The provisional delay may use AudioTrack's
+HAL-aware pipeline latency, bounded to 500ms above application-buffer latency
+and 1000ms total. This avoids starting long-latency routes, such as Bluetooth,
+from an anchor that accounts only for the local AudioTrack buffer.
+
+Playback-head fallback is withheld for the first 1500ms while direct timestamp
+evidence warms up. Once the direct-timestamp success streak reaches 10, AVOS
+may compare dynamic-derived evidence with the provisional seed. A residual from
+16ms through 500ms requests one renderer correction; smaller differences need
+no movement and larger differences are treated as implausible. A promoted
+playback-head value cannot request correction below that timestamp threshold;
+the normal throttled cache remains usable after the threshold is reached.
+
+The renderer converges at 1ms per distinct video frame and stops within an 8ms
+deadband. Correction state is scoped to the current seek and audio-speed epochs
+and is reset across playback lifecycle boundaries. A speed change during warmup
+rearms the comparison for the new speed epoch. This path is decoded-PCM-only;
+passthrough and AC3 recoding do not participate.
+
 ### PCM resume reanchor state machine
 
 On the first write after resume, `stream_sync_pcm_reanchor_arm()` arms a
@@ -185,7 +207,7 @@ used elsewhere (e.g. `pcm_audio_lead_gate`).
 - **Pause**: direct Mode 2 preserves its heard phase and compressed ledger while resetting the observation epoch, so paused duration is not credited. A valid MediaCodec render offset is shifted by the paused wall duration rather than force-reanchored. Trusted presentation evidence has a bounded remapping grace period after resume.
 - **Seek**: synchronization state is reset (`sink_ref_time = -1`). When playback was already established, the flushed compressed track is explicitly marked empty and the next Mode 2 epoch seeds at the submitted frontier minus fixed route latency.
   - Audio preroll cannot establish the new epoch until video preroll reaches `seek_video_target_ts`. The audio thread waits on epoch-tagged `seek_video_target_pending`; the video thread clears it only when a frame from the current epoch reaches the target. This handshake is independent from audio occupancy or latency estimation.
-  - **PCM**: `startup_audio_hold` gates writes; `pcm_reanchor` then sets the anchor from dynamic/last-good/static delay.
+  - **PCM**: `startup_audio_hold` gates writes; `pcm_reanchor` then sets the anchor from dynamic/last-good/static delay. If the initial decoded-PCM anchor used a provisional pipeline seed, the epoch-scoped direct-timestamp correction may subsequently converge it without synthesizing another seek or pause/resume.
   - **EAC3/AC3 passthrough**: `startup_anchor_commit` sets `audio_time = video_time + latency`; pre-commit negative anchors are suppressed (see below).
   - **TrueHD passthrough**: Uses a relaxed 300ms hold threshold to accommodate extremely high packet cadence (1200/sec) and prevent video freezes while filling the HAL pipeline.
 

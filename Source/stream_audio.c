@@ -2373,6 +2373,17 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							start_time, s->put_time_mode, s->audio_start_gap_hold);
 
 						_set_audio_time( s, start_time );
+						if( !passthrough_active && !ac3_recoding ) {
+							s->pcm_startup_seed_delay_ms = anchor_delay;
+							s->pcm_startup_correction_pending = 1;
+							s->pcm_startup_correction_seek_epoch = s->seek_epoch;
+							s->pcm_startup_correction_speed_epoch = s->audio_speed_diag_epoch;
+							DBG serprintf("pcm_startup_correction: armed seed=%d seek_epoch=%d speed_epoch=%d speed=%.3f\n",
+								anchor_delay, s->seek_epoch, s->audio_speed_diag_epoch,
+								audio_interface_get_audio_speed());
+						} else {
+							s->pcm_startup_correction_pending = 0;
+						}
 						s->audio_start_pending = 0;
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
 						s->audio_start_gap_hold = 0;

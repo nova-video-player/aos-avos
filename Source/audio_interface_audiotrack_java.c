@@ -209,6 +209,7 @@ extern int stream_audio_ac3_mode2_force_pipeline( void );
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
 static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
+static int audiotrack_playhead_promotion_ready(audio_ctx_t *at, int now_ms);
 static int audiotrack_get_latency(audio_ctx_t *at);
 static void audiotrack_reset_timing(audio_ctx_t *at);
 static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64_t raw_frames);
@@ -2250,7 +2251,8 @@ DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 		}
 		// No cached timing; reuse last fallback delay for heard-time only.
 		if (at->last_fallback_delay_ms > 0 && (now_ms - at->last_fallback_ms) < 5000) {
-			if (at->playhead_valid_streak >= playhead_streak_required) {
+			if (at->playhead_valid_streak >= playhead_streak_required &&
+				audiotrack_playhead_promotion_ready(at, now_ms)) {
 				at->ts_cached_delay_ms = at->last_fallback_delay_ms;
 				at->ts_cached_valid = 1;
 				at->last_good_dynamic_delay_ms = at->last_fallback_delay_ms;
@@ -2351,7 +2353,8 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 		at->ts_use_timestamp = 0;
 		at->ts_last_query_ms = now_ms;
 		// If timestamps never stabilize (e.g., Sabrina), promote stable playhead fallback.
-		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required) {
+		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required &&
+			audiotrack_playhead_promotion_ready(at, now_ms)) {
 			at->ts_cached_delay_ms = fallback_delay;
 			at->ts_cached_valid = 1;
 			at->last_good_dynamic_delay_ms = fallback_delay;
@@ -2395,7 +2398,8 @@ DBG2	LOG("getTimestamp success=%d framePosition=%lld nanoTime=%lld rate=%d ts_us
 DBG2		LOG("Non-positive timestamp values, timing unavailable (framePosition=%lld nanoTime=%lld)",
 			(long long)framePosition, (long long)nanoTime);
 		at->ts_last_query_ms = now_ms;
-		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required) {
+		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required &&
+			audiotrack_playhead_promotion_ready(at, now_ms)) {
 			at->ts_cached_delay_ms = fallback_delay;
 			at->ts_cached_valid = 1;
 			at->last_good_dynamic_delay_ms = fallback_delay;
@@ -2742,6 +2746,16 @@ static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_
 	return 1;
 }
 
+static int audiotrack_playhead_promotion_ready(audio_ctx_t *at, int now_ms)
+{
+	const int startup_playhead_grace_ms = 1500;
+	if (!at || !at->startup_hold_active) {
+		return 1;
+	}
+	return at->startup_hold_start_ms > 0 &&
+		(now_ms - at->startup_hold_start_ms) >= startup_playhead_grace_ms;
+}
+
 static int audiotrack_get_latency(audio_ctx_t *at)
 {
 	if (!at || !at->init) {
@@ -2809,6 +2823,11 @@ DBG3		LOG("audiotrack_get_latency: AC3-recode mode2 plain policy app_latency=%u 
 		}
 	}
 	return (int)at->latency;
+}
+
+static int audiotrack_get_pipeline_latency(audio_ctx_t *at)
+{
+	return at && at->init ? (int)at->pipeline_latency : -1;
 }
 
 static int audiotrack_is_delay_valid(audio_ctx_t *at)
@@ -3308,6 +3327,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.set_output_params = audiotrack_set_output_params,
 	.get_delay = audiotrack_get_delay,
 	.get_latency = audiotrack_get_latency,
+	.get_pipeline_latency = audiotrack_get_pipeline_latency,
 	.get_fixed_latency = audiotrack_get_fixed_latency,
 	.flush_output = audiotrack_flush_output,
 	.preload = audiotrack_preload,

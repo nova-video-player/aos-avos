@@ -205,6 +205,14 @@ int audio_interface_get_latency(audio_ctx_t *ctx)
 	return impl->get_latency(ctx);
 }
 
+int audio_interface_get_pipeline_latency(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->get_pipeline_latency) {
+		return audio_interface_get_latency(ctx);
+	}
+	return impl->get_pipeline_latency(ctx);
+}
+
 int audio_interface_get_fixed_latency(audio_ctx_t *ctx)
 {
 	if (!impl || !impl->get_fixed_latency) {

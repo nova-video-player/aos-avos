@@ -152,6 +152,10 @@ typedef struct priv {
 	const void *mode2_slew_frame_handle;
 	int mode2_slew_frame_time;
 	int mode2_slew_frame_epoch;
+	int pcm_startup_slew;
+	const void *pcm_startup_slew_frame_handle;
+	int pcm_startup_slew_frame_time;
+	int pcm_startup_slew_frame_epoch;
 	int64_t target_offset_ns;
 	int pending_reanchor;
 	int pending_seek_reanchor;
@@ -715,6 +719,30 @@ void sfdec2_refresh_sched_anchor( STREAM *s )
 	pthread_mutex_unlock(&p->locked.mtx);
 }
 
+void sfdec2_request_pcm_startup_correction( STREAM *s )
+{
+	if( !s || !s->video_sink || !s->video_sink->priv )
+		return;
+	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
+		return;
+	priv_t *p = (priv_t*)s->video_sink->priv;
+	pthread_mutex_lock(&p->locked.mtx);
+	if( p->render_offset_ns != -1 && p->render_offset_from_audio ) {
+		p->pending_reanchor = 1;
+		p->pcm_startup_slew = 1;
+		p->pcm_startup_slew_frame_handle = NULL;
+		p->pcm_startup_slew_frame_time = INT_MIN;
+		p->pcm_startup_slew_frame_epoch = INT_MIN;
+		pthread_cond_broadcast(&p->locked.cond);
+		DBGSI serprintf("android_sync: PCM startup correction armed offset=%lld\n",
+			(long long)p->render_offset_ns);
+	} else {
+		DBGSI serprintf("android_sync: PCM startup correction already covered by pending anchor offset=%lld from_audio=%d\n",
+			(long long)p->render_offset_ns, p->render_offset_from_audio);
+	}
+	pthread_mutex_unlock(&p->locked.mtx);
+}
+
 static int videosink_get_time( STREAM_SINK_VIDEO *sink )
 {
 	priv_t *p = (priv_t *) sink->priv;
@@ -907,6 +935,10 @@ static void *videosink_thread(void *ctx)
 				(f->android_handle != p->mode2_slew_frame_handle ||
 				 f->time != p->mode2_slew_frame_time ||
 				 f->epoch != p->mode2_slew_frame_epoch);
+			int pcm_startup_new_slew_frame = p->pcm_startup_slew &&
+				(f->android_handle != p->pcm_startup_slew_frame_handle ||
+				 f->time != p->pcm_startup_slew_frame_time ||
+				 f->epoch != p->pcm_startup_slew_frame_epoch);
 			int hold_passthrough = 0;
 
 			// Passthrough mode 2 startup hold. Seek preview has no audio producer;
@@ -1125,6 +1157,16 @@ static void *videosink_thread(void *ctx)
 								p->mode2_dynamic_settle_frames = 0;
 							}
 						}
+					} else if( p->pcm_startup_slew &&
+						llabs(p->target_offset_ns - p->render_offset_ns) <= 8000000LL ) {
+						// Do not turn millisecond timestamp noise into a recurring PCM
+						// cadence adjustment once the cold-start phase is close enough.
+						p->target_offset_ns = p->render_offset_ns;
+						p->slew_active = 0;
+						p->pcm_startup_slew = 0;
+						p->pcm_startup_slew_frame_handle = NULL;
+						p->pcm_startup_slew_frame_time = INT_MIN;
+						p->pcm_startup_slew_frame_epoch = INT_MIN;
 					} else if (p->target_offset_ns != p->render_offset_ns) {
 						p->mode2_dynamic_settle_frames = 0;
 						p->slew_active = 1;
@@ -1135,14 +1177,17 @@ static void *videosink_thread(void *ctx)
 			}
 
 			if (p->slew_active &&
-				(!p->mode2_dynamic_slew || mode2_new_slew_frame)) {
+				(!p->mode2_dynamic_slew || mode2_new_slew_frame) &&
+				(!p->pcm_startup_slew || pcm_startup_new_slew_frame)) {
 				INT64 delta = p->target_offset_ns - p->render_offset_ns;
 				// A Mode 2 clock transition can correct hundreds of milliseconds, so
-				// converge it at 5ms/frame. Once established, track ordinary clock
-				// drift at 0.2ms/frame: compressed presentation samples can move by a
-				// whole codec frame and then hold, and chasing that temporary phase at
-				// 5ms/frame produces visible cadence reversals on 60fps content.
-				INT64 step = p->mode2_dynamic_fast_slew ? 5000000 : 200000;
+				// converge it at 5ms/frame. PCM startup uses 1ms per distinct frame to
+				// remove its bounded residual without a snap. Once established, track
+				// ordinary clock drift at 0.2ms/frame: compressed presentation samples
+				// can move by a whole codec frame and then hold, and chasing that
+				// temporary phase at 5ms/frame produces visible cadence reversals.
+				INT64 step = p->mode2_dynamic_fast_slew ? 5000000 :
+					(p->pcm_startup_slew ? 1000000 : 200000);
 				if (delta > step) {
 					delta = step;
 				} else if (delta < -step) {
@@ -1161,12 +1206,23 @@ static void *videosink_thread(void *ctx)
 						p->mode2_slew_frame_time = INT_MIN;
 						p->mode2_slew_frame_epoch = INT_MIN;
 					}
+					if( p->pcm_startup_slew ) {
+						p->pcm_startup_slew = 0;
+						p->pcm_startup_slew_frame_handle = NULL;
+						p->pcm_startup_slew_frame_time = INT_MIN;
+						p->pcm_startup_slew_frame_epoch = INT_MIN;
+					}
 				}
 			}
 			if( p->mode2_dynamic_slew && mode2_new_slew_frame ) {
 				p->mode2_slew_frame_handle = f->android_handle;
 				p->mode2_slew_frame_time = f->time;
 				p->mode2_slew_frame_epoch = f->epoch;
+			}
+			if( p->pcm_startup_slew && pcm_startup_new_slew_frame ) {
+				p->pcm_startup_slew_frame_handle = f->android_handle;
+				p->pcm_startup_slew_frame_time = f->time;
+				p->pcm_startup_slew_frame_epoch = f->epoch;
 			}
 
 			INT64 av_delay_ns = (INT64)RST_TO_TS_DELTA(p->effective_av_delay_ms, int) * 1000000LL;
@@ -1623,6 +1679,10 @@ retry_decoder_open:
 	p->mode2_slew_frame_handle = NULL;
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
+	p->pcm_startup_slew = 0;
+	p->pcm_startup_slew_frame_handle = NULL;
+	p->pcm_startup_slew_frame_time = INT_MIN;
+	p->pcm_startup_slew_frame_epoch = INT_MIN;
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->pending_seek_reanchor = 0;
@@ -1825,6 +1885,10 @@ DBGCV	CLOG();
 	p->mode2_slew_frame_handle = NULL;
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
+	p->pcm_startup_slew = 0;
+	p->pcm_startup_slew_frame_handle = NULL;
+	p->pcm_startup_slew_frame_time = INT_MIN;
+	p->pcm_startup_slew_frame_epoch = INT_MIN;
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->pending_seek_reanchor = 0;
@@ -1974,6 +2038,10 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->mode2_slew_frame_handle = NULL;
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
+	p->pcm_startup_slew = 0;
+	p->pcm_startup_slew_frame_handle = NULL;
+	p->pcm_startup_slew_frame_time = INT_MIN;
+	p->pcm_startup_slew_frame_epoch = INT_MIN;
 	p->target_offset_ns = 0;
 	p->pending_reanchor = 0;
 	p->pending_seek_reanchor = 1;
@@ -2001,6 +2069,10 @@ void sfdec2_android_sync_on_pause( STREAM *s, int paused )
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
 	if( paused ) {
+		p->pcm_startup_slew = 0;
+		p->pcm_startup_slew_frame_handle = NULL;
+		p->pcm_startup_slew_frame_time = INT_MIN;
+		p->pcm_startup_slew_frame_epoch = INT_MIN;
 		int active = (s->audio_time > 0 || s->video_time > 0);
 		if( !active ) {
 			p->pause_start_ms = 0;

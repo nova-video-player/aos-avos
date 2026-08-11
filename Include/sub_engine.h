@@ -64,3 +64,8 @@ void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode);
 // --- HYBRID 3D BRIDGE ---
 int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride);
 int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size); // for external ASS/SSA raw file buffer
+
+void sub_frame_ref(SUB_FRAME *frame);
+void sub_frame_unref(SUB_FRAME *frame);
+void sub_engine_wait_event(SUB_ENGINE *eng);
+void sub_engine_force_wake(SUB_ENGINE *eng);

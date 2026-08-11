@@ -10,6 +10,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdatomic.h>
 
 /* ------------------------------------------------------------------
  * Color / style primitives
@@ -86,6 +87,7 @@ typedef struct SUB_EVENT {
  * ------------------------------------------------------------------ */
 
 typedef struct {
+    _Atomic int refcount;
     int64_t     pts_ms;
     int64_t     duration_ms;   /* renderer hint only; for animated formats
                                  * (libass) this may be a short "valid until

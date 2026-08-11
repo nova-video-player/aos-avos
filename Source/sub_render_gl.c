@@ -19,6 +19,8 @@ struct SUB_RENDERER {
     int             surface_height;
     int             ui_mode; // 0 = 2D, 1 = SBS, 2 = TB
     const SUB_FRAME *current_frame;
+    int              pending_clear;
+    int              pending_resize;
     GLuint           gl_program;
     GLuint           gl_texture;
     GLint            attrib_pos;
@@ -91,8 +93,7 @@ static void* egl_render_thread(void* arg) {
     ANativeWindow *current_window = NULL;
 
     while (1) {
-        struct timespec t_loop_start;
-        clock_gettime(CLOCK_MONOTONIC, &t_loop_start);
+        int needs_redraw = 0; // <--- 1. TRACK REDRAW STATE
 
         pthread_mutex_lock(&r->lock);
         if (!r->running) {
@@ -119,6 +120,7 @@ static void* egl_render_thread(void* arg) {
 
             if (current_window) {
                 surface = eglCreateWindowSurface(display, config, current_window, NULL);
+                needs_redraw = 1; // <--- 2. FORCE REDRAW ON NEW SURFACE
                 if (surface != EGL_NO_SURFACE) {
                     eglMakeCurrent(display, surface, surface, context);
                     eglSwapInterval(display, 1);
@@ -185,11 +187,25 @@ static void* egl_render_thread(void* arg) {
         }
 
         pthread_mutex_lock(&r->lock);
-        if (new_frame != NULL) {
+        if (r->pending_clear) {
+            // sub_render_gl_clear() already dropped r->current_frame to NULL on
+            // whatever thread called it (track switch/close/seek) — that thread
+            // can't itself force this loop to redraw, so it leaves this flag for
+            // us to notice and swap a blank frame instead of leaving whatever was
+            // last drawn frozen on the physical surface.
+            r->pending_clear = 0;
+            needs_redraw = 1;
+        }
+        if (r->pending_resize) {          // NEW
+            r->pending_resize = 0;
+            needs_redraw = 1;
+        }
+        if (new_frame != NULL && new_frame != r->current_frame) {
             if (r->current_frame) {
                 sub_engine_release_frame((SUB_ENGINE*)r->engine, (SUB_FRAME*)r->current_frame);
             }
             r->current_frame = new_frame;
+            needs_redraw = 1; // <--- 3. FORCE REDRAW ON NEW FRAME
         }
 
         int w = r->surface_width;
@@ -197,12 +213,41 @@ static void* egl_render_thread(void* arg) {
         const SUB_FRAME *frame_to_draw = r->current_frame;
         GLint attrib_pos = r->attrib_pos;
         GLint attrib_tex = r->attrib_tex;
+
+        // We're about to use frame_to_draw's pixel data (glTexImage2D) after
+        // unlocking below, in the branch where we actually draw. Take our own
+        // reference to it now, under the lock, so another thread calling
+        // sub_render_gl_clear()/close_track()/destroy() concurrently can't drop
+        // this exact frame's refcount to zero and free() its rgba buffer out
+        // from under us mid-upload. Matched by sub_engine_release_frame() right
+        // after eglSwapBuffers() below, or immediately if we end up not drawing.
+        int will_draw = (surface != EGL_NO_SURFACE) && needs_redraw;
+        if (frame_to_draw && will_draw) {
+            sub_frame_ref((SUB_FRAME *)frame_to_draw);
+        }
         pthread_mutex_unlock(&r->lock);
 
         // If EGL is offline (e.g. we are in 3D Canvas mode), sleep and skip drawing.
         // The Java onFrameAvailable() callback will extract frames via RAM instead.
         if (surface == EGL_NO_SURFACE) {
-            usleep(16000);
+            // will_draw was false in this branch, so no ref was taken -- nothing to release.
+            if (r->engine) {
+                sub_engine_wait_event((SUB_ENGINE*)r->engine);
+            } else {
+                usleep(16000); // Fallback if engine isn't attached yet
+            }
+            continue;
+        }
+
+        // --- 4. THE GL BYPASS ---
+        // If the surface didn't change and the frame didn't change, skip the GPU!
+        if (!needs_redraw) {
+            // will_draw was false in this branch too -- no ref was taken.
+            if (r->engine) {
+                sub_engine_wait_event((SUB_ENGINE*)r->engine);
+            } else {
+                usleep(16000); // Fallback if engine isn't attached yet
+            }
             continue;
         }
 
@@ -259,17 +304,11 @@ static void* egl_render_thread(void* arg) {
 
             eglSwapBuffers(display, surface);
 
-            struct timespec t_render_end;
-            clock_gettime(CLOCK_MONOTONIC, &t_render_end);
+        // Done reading frame_to_draw's pixels -- release the pin taken above.
+        if (frame_to_draw && will_draw) {
+            sub_engine_release_frame((SUB_ENGINE*)r->engine, (SUB_FRAME*)frame_to_draw);
+        }
 
-            double render_ms = (t_render_end.tv_sec  - t_loop_start.tv_sec)  * 1000.0 +
-            (t_render_end.tv_nsec - t_loop_start.tv_nsec) / 1000000.0;
-
-            double target_ms = 16.666;
-            if (render_ms < target_ms) {
-                long sleep_us = (long)((target_ms - render_ms) * 1000.0);
-                usleep(sleep_us);
-            }
     }
 
     if (surface != EGL_NO_SURFACE) {
@@ -307,6 +346,10 @@ void sub_render_gl_destroy(SUB_RENDERER *r) {
     SUB_FRAME *leftover = (SUB_FRAME *)r->current_frame;
     r->current_frame = NULL;
     pthread_mutex_unlock(&r->lock);
+    // WAKE THE THREAD SO IT CAN EXIT!
+    if (r->engine) {
+        sub_engine_force_wake((SUB_ENGINE*)r->engine);
+    }
     pthread_join(r->thread, NULL);
     // The engine is already destroyed by this point (sub_engine_destroy calls
     // close_track then destroy_renderer), so use the bare global free —
@@ -337,6 +380,9 @@ void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
     r->surface_width  = width;
     r->surface_height = height;
     pthread_mutex_unlock(&r->lock);
+    if (r->engine) {
+        sub_engine_force_wake((SUB_ENGINE*)r->engine); // wake it if it's parked
+    }
 }
 
 void sub_render_gl_set_ui_mode(SUB_RENDERER *r, int mode) {
@@ -351,10 +397,19 @@ void sub_render_gl_clear(SUB_RENDERER *r) {
     pthread_mutex_lock(&r->lock);
     SUB_FRAME *to_free = (SUB_FRAME*)r->current_frame;
     r->current_frame = NULL;
+    r->pending_clear = 1; // tell the render loop it must swap a blank frame,
+                           // not just silently note "nothing new" and go back to sleep
     pthread_mutex_unlock(&r->lock);
 
     if (to_free) {
         sub_engine_release_frame((SUB_ENGINE*)r->engine, to_free);
+    }
+    // The render thread may be parked indefinitely in sub_engine_wait_event()
+    // (idle backends now return get_timeout_ms() == -1) -- wake it so it
+    // actually notices pending_clear on this iteration instead of staying
+    // asleep with the last-drawn subtitle still sitting on the physical surface.
+    if (r->engine) {
+        sub_engine_force_wake((SUB_ENGINE*)r->engine);
     }
 }
 

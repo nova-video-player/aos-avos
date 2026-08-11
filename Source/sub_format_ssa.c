@@ -1,5 +1,4 @@
-#include "sub_format.h"
-#include "sub_style.h"
+#include "sub_engine.h"
 #include <ass/ass.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +55,7 @@ typedef struct {
     // would be wasteful for something that cannot change mid-track.
     char             *fonts_dir;
     char              resolved_default_family[256];
+    int               has_on_screen_text; // Tracks if libass is currently rendering anything
 } SSA_BACKEND;
 
 // --- CUSTOM FONTS FOLDER (MX Player / mpv-android style) + MKV-EMBEDDED FONTS ---
@@ -576,6 +576,7 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
         free(ctx);
         return -1;
     }
+    ass_configure_prune(ctx->track, 3000);
 
     if (params->codec_private && params->codec_private_size > 0) {
         ass_process_codec_private(ctx->track, (char *)params->codec_private, params->codec_private_size);
@@ -710,13 +711,15 @@ static SUB_FRAME *ssa_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
 
     int change = 0;
     ASS_Image *imgs = ass_render_frame(ctx->renderer, ctx->track, pts_ms, &change);
+    ctx->has_on_screen_text = (imgs != NULL);
 
-    if (!change && imgs != NULL) {
+    if (!change) {
         pthread_mutex_unlock(&ctx->lock);
         return NULL;
     }
 
     SUB_FRAME *frame = calloc(1, sizeof(SUB_FRAME));
+    atomic_init(&frame->refcount, 1);
     frame->pts_ms = pts_ms;
     frame->video_w = ctx->video_w > 0 ? ctx->video_w : 1920;
     frame->video_h = ctx->video_h > 0 ? ctx->video_h : 1080;
@@ -770,17 +773,7 @@ static SUB_FRAME *ssa_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
 }
 
 static void ssa_free_frame(SUB_FORMAT_BACKEND *be, SUB_FRAME *frame) {
-    if (!frame) return;
-    SUB_EVENT *ev = frame->events;
-    while (ev) {
-        SUB_EVENT *next = ev->next;
-        if (ev->kind == SUB_EVENT_BITMAP && ev->data.bitmap.rgba) {
-            free((void*)ev->data.bitmap.rgba);
-        }
-        free(ev);
-        ev = next;
-    }
-    free(frame);
+    sub_frame_unref(frame);
 }
 
 static int ssa_resize(SUB_FORMAT_BACKEND *be, int w, int h) {
@@ -828,6 +821,40 @@ static int ssa_close(SUB_FORMAT_BACKEND *be) {
     return 0;
 }
 
+static int ssa_get_timeout_ms(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
+    SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
+
+    // Safety lock because we are reading track data
+    pthread_mutex_lock(&ctx->lock);
+
+    // If text is visible, tick at 16ms to smoothly process active \fad or karaoke animations
+    if (ctx->has_on_screen_text) {
+        pthread_mutex_unlock(&ctx->lock);
+        return 16;
+    }
+
+    // Screen is empty. Peek at the linked list to find how far away the next
+    // line starts. ass_step_sub() already returns a DELTA relative to pts_ms
+    // (best->Start - now), not an absolute timestamp -- do not subtract
+    // pts_ms again here, or this collapses to "event is right now" for any
+    // non-trivial playback position and silently degrades to 16ms polling.
+    long long delta = ass_step_sub(ctx->track, pts_ms, 1);
+    pthread_mutex_unlock(&ctx->lock);
+
+    if (delta == 0) {
+        // ass_step_sub() returns 0 both when the track has no events at all
+        // and when nothing was found in this direction -- either way there's
+        // nothing to wait for. Sleep indefinitely until feed()/flush() wakes us.
+        return -1;
+    }
+
+    int delta_ms = (int)delta;
+    if (delta_ms <= 0) return 16; // Edge case: event is right now
+
+    // Cap the max sleep at 1 second so we remain somewhat responsive to sudden track changes
+    return (delta_ms > 1000) ? 1000 : delta_ms;
+}
+
 SUB_FORMAT_BACKEND *sub_format_ssa_create(void) {
     SUB_FORMAT_BACKEND *be = calloc(1, sizeof(SUB_FORMAT_BACKEND));
     be->open = ssa_open;
@@ -837,5 +864,6 @@ SUB_FORMAT_BACKEND *sub_format_ssa_create(void) {
     be->resize = ssa_resize;
     be->flush = ssa_flush;
     be->close = ssa_close;
+    be->get_timeout_ms = ssa_get_timeout_ms;
     return be;
 }

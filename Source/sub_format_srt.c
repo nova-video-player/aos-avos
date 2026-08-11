@@ -1,5 +1,4 @@
-#include "sub_format.h"
-#include "sub_style.h"
+#include "sub_engine.h"
 #include "font_name_parser.h"
 #include <stdlib.h>
 #include <string.h>
@@ -318,6 +317,14 @@ static int srt_close(SUB_FORMAT_BACKEND *be) {
     return 0;
 }
 
+static int srt_get_timeout_ms(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
+    SRT_BACKEND *ctx = (SRT_BACKEND *)be->priv;
+    if (ctx && ctx->ssa_backend && ctx->ssa_backend->get_timeout_ms) {
+        return ctx->ssa_backend->get_timeout_ms(ctx->ssa_backend, pts_ms);
+    }
+    return 16; // Fallback
+}
+
 SUB_FORMAT_BACKEND *sub_format_srt_create(void) {
     SUB_FORMAT_BACKEND *be = calloc(1, sizeof(SUB_FORMAT_BACKEND));
     be->open = srt_open;
@@ -327,5 +334,6 @@ SUB_FORMAT_BACKEND *sub_format_srt_create(void) {
     be->resize = srt_resize;
     be->flush = srt_flush;
     be->close = srt_close;
+    be->get_timeout_ms = srt_get_timeout_ms; // <--- ADD THIS
     return be;
 }

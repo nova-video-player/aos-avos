@@ -62,6 +62,7 @@ struct SUB_ENGINE {
     sub_engine_clock_fn clock_fn;
     void *clock_ctx;
     pthread_mutex_t lock;
+    pthread_cond_t  wake_cond;
 };
 
 SUB_ENGINE *sub_engine_create(void) {
@@ -70,6 +71,7 @@ SUB_ENGINE *sub_engine_create(void) {
     sub_render_gl_set_engine(eng->renderer, eng);
     eng->style    = sub_style_create();
     pthread_mutex_init(&eng->lock, NULL);
+    pthread_cond_init(&eng->wake_cond, NULL);
     return eng;
 }
 
@@ -82,6 +84,7 @@ void sub_engine_destroy(SUB_ENGINE *eng) {
     free(eng->fonts_dir);
     free(eng->default_font_name);
     pthread_mutex_destroy(&eng->lock);
+    pthread_cond_destroy(&eng->wake_cond);
     free(eng);
 }
 
@@ -310,6 +313,7 @@ int sub_engine_feed(SUB_ENGINE *eng, const uint8_t *data, int size, int64_t pts_
         // out from under us mid-feed (see sub_engine_close_track).
         ret = backend->feed(backend, data, size, pts_ms, duration_ms);
     }
+    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
     return ret;
 }
@@ -319,6 +323,7 @@ void sub_engine_flush(SUB_ENGINE *eng) {
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
     if (backend && backend->flush) backend->flush(backend);
+    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -336,6 +341,7 @@ void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h) {
         // No format-specific branching needed here at all.
         eng->active_backend->resize(eng->active_backend, video_w, video_h);
     }
+    pthread_cond_broadcast(&eng->wake_cond); // NEW
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -347,6 +353,7 @@ void sub_engine_start(SUB_ENGINE *eng, sub_engine_clock_fn clock_fn, void *clock
     eng->clock_fn  = clock_fn;
     eng->clock_ctx = clock_ctx;
     eng->is_paused = 0;
+    pthread_cond_broadcast(&eng->wake_cond);
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -362,6 +369,7 @@ void sub_engine_set_paused(SUB_ENGINE *eng, int paused) {
     if (!eng) return;
     pthread_mutex_lock(&eng->lock);
     eng->is_paused = paused;
+    pthread_cond_broadcast(&eng->wake_cond); // NEW — broadcast on both pause and unpause
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -394,17 +402,7 @@ SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
 
 // A global free that doesn't rely on backends, preventing UAF during teardowns
 void sub_engine_free_frame(SUB_FRAME *frame) {
-    if (!frame) return;
-    SUB_EVENT *ev = frame->events;
-    while (ev) {
-        SUB_EVENT *next = ev->next;
-        if (ev->kind == SUB_EVENT_BITMAP && ev->data.bitmap.rgba) {
-            free((void*)ev->data.bitmap.rgba);
-        }
-        free(ev);
-        ev = next;
-    }
-    free(frame);
+    sub_frame_unref(frame);
 }
 
 // sub_engine_release_frame
@@ -422,7 +420,7 @@ void sub_engine_release_frame(SUB_ENGINE *eng, SUB_FRAME *frame) {
         eng->active_backend->free_frame(eng->active_backend, frame);
     } else {
         // Backend already closed or never set — fall back to global free
-        sub_engine_free_frame(frame);
+        sub_frame_unref(frame);
     }
 }
 
@@ -435,6 +433,7 @@ int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int heig
     if (backend && backend->feed_bitmap) {
         ret = backend->feed_bitmap(backend, pixels, width, height, pitch, colorspace, x_offset, y_offset, pts_ms, duration_ms);
     }
+    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
     return ret;
 }
@@ -468,6 +467,67 @@ int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size) {
         // Pass pts_ms=0, duration_ms=0 — timing is embedded in the ASS data
         ret = backend->feed(backend, data, size, 0, 0);
     }
+    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
     return ret;
+}
+
+void sub_frame_ref(SUB_FRAME *frame) {
+    if (frame) {
+        atomic_fetch_add(&frame->refcount, 1);
+    }
+}
+
+void sub_frame_unref(SUB_FRAME *frame) {
+    if (!frame) return;
+
+    // atomic_fetch_sub returns the value BEFORE the subtraction.
+    // If it was 1, it is now 0, meaning we hold the final reference and must free.
+    if (atomic_fetch_sub(&frame->refcount, 1) == 1) {
+        SUB_EVENT *ev = frame->events;
+        while (ev) {
+            SUB_EVENT *next = ev->next;
+            if (ev->kind == SUB_EVENT_BITMAP && ev->data.bitmap.rgba) {
+                free((void*)ev->data.bitmap.rgba);
+            }
+            free(ev);
+            ev = next;
+        }
+        free(frame);
+    }
+}
+
+// --- ADD THE WAIT FUNCTION ---
+void sub_engine_wait_event(SUB_ENGINE *eng) {
+    if (!eng) return;
+
+    pthread_mutex_lock(&eng->lock);
+
+    int timeout_ms = -1;
+    if (eng->active_backend && eng->active_backend->get_timeout_ms && eng->clock_fn) {
+        int64_t pts_ms = eng->clock_fn(eng->clock_ctx);
+        timeout_ms = eng->active_backend->get_timeout_ms(eng->active_backend, pts_ms);
+    }
+
+    if (timeout_ms < 0) {
+        // Sleep indefinitely until a broadcast
+        pthread_cond_wait(&eng->wake_cond, &eng->lock);
+    } else if (timeout_ms > 0) {
+        // Sleep until timeout OR a broadcast
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        long long nsec = ts.tv_nsec + ((long long)timeout_ms * 1000000LL);
+        ts.tv_sec += nsec / 1000000000LL;
+        ts.tv_nsec = nsec % 1000000000LL;
+        pthread_cond_timedwait(&eng->wake_cond, &eng->lock, &ts);
+    }
+
+    pthread_mutex_unlock(&eng->lock);
+}
+
+void sub_engine_force_wake(SUB_ENGINE *eng) {
+    if (!eng) return;
+    pthread_mutex_lock(&eng->lock);
+    pthread_cond_broadcast(&eng->wake_cond);
+    pthread_mutex_unlock(&eng->lock);
 }

@@ -1,4 +1,4 @@
-#include "sub_format.h"
+#include "sub_engine.h"
 #include "stream.h"   // for AV_IMAGE_BGRA_32
 #include <stdlib.h>
 #include <string.h>
@@ -6,70 +6,10 @@
 typedef struct {
     SUB_FRAME *current_frame; // owned here — never freed by the GL renderer
     int        is_cleared;    // 1 = no subtitle currently visible (PGS clear signal received)
+    int        is_dirty;
     int        video_w;
     int        video_h;
 } GFX_BACKEND;
-
-// ---------------------------------------------------------------------------
-// _gfx_free_frame_internal
-//
-// Internal free that always destroys the frame and its pixel data.
-// Called only by gfx_feed_bitmap (replacing old frame) and gfx_close.
-// ---------------------------------------------------------------------------
-static void _gfx_free_frame_internal(SUB_FRAME *frame) {
-    if (!frame) return;
-    SUB_EVENT *ev = frame->events;
-    while (ev) {
-        SUB_EVENT *next = ev->next;
-        if (ev->kind == SUB_EVENT_BITMAP && ev->data.bitmap.rgba) {
-            free((void*)ev->data.bitmap.rgba);
-        }
-        free(ev);
-        ev = next;
-    }
-    free(frame);
-}
-
-// ---------------------------------------------------------------------------
-// _gfx_clone_frame
-//
-// Returns a shallow clone of current_frame with a fresh pixel copy.
-// The GL renderer calls free_frame on whatever render_at returns, so we must
-// hand it a separate allocation — ctx->current_frame must remain intact for
-// the next render_at call.
-// ---------------------------------------------------------------------------
-static SUB_FRAME *_gfx_clone_frame(const SUB_FRAME *src) {
-    if (!src) return NULL;
-
-    SUB_FRAME *dst = calloc(1, sizeof(SUB_FRAME));
-    dst->pts_ms      = src->pts_ms;
-    dst->duration_ms = src->duration_ms;
-    dst->video_w     = src->video_w;
-    dst->video_h     = src->video_h;
-
-    SUB_EVENT *last = NULL;
-    for (const SUB_EVENT *ev = src->events; ev; ev = ev->next) {
-        SUB_EVENT *copy = calloc(1, sizeof(SUB_EVENT));
-        copy->kind = ev->kind;
-        copy->x    = ev->x;
-        copy->y    = ev->y;
-        copy->w    = ev->w;
-        copy->h    = ev->h;
-
-        if (ev->kind == SUB_EVENT_BITMAP && ev->data.bitmap.rgba) {
-            int bytes = ev->data.bitmap.stride * ev->h;
-            copy->data.bitmap.stride = ev->data.bitmap.stride;
-            copy->data.bitmap.rgba   = malloc(bytes);
-            memcpy((void*)copy->data.bitmap.rgba, ev->data.bitmap.rgba, bytes);
-        }
-
-        if (!dst->events) dst->events = copy;
-        else              last->next  = copy;
-        last = copy;
-    }
-
-    return dst;
-}
 
 // ---------------------------------------------------------------------------
 // gfx_open
@@ -106,7 +46,7 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
 
     // Retire the previous stored frame before replacing it
     if (ctx->current_frame) {
-        _gfx_free_frame_internal(ctx->current_frame);
+        sub_frame_unref(ctx->current_frame);
         ctx->current_frame = NULL;
     }
 
@@ -114,13 +54,17 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     // duration=0 to signal "hide the current subtitle". Honour it.
     if (duration_ms == 0 || !pixels || width <= 0 || height <= 0) {
         ctx->is_cleared = 1;
+        ctx->is_dirty = 1;
         return 0;
     }
 
     ctx->is_cleared = 0;
+    ctx->is_dirty = 1;
 
     // Build the stored frame
     SUB_FRAME *frame  = calloc(1, sizeof(SUB_FRAME));
+    atomic_init(&frame->refcount, 1);
+
     frame->pts_ms      = pts_ms;
     frame->duration_ms = duration_ms;
     frame->video_w     = ctx->video_w;
@@ -186,9 +130,19 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
 static SUB_FRAME *gfx_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
     GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
 
-    if (ctx->is_cleared || !ctx->current_frame) return NULL;
+    // 1. If nothing changed, return NULL (Triggers the GL Bypass)
+    if (!ctx->is_dirty) return NULL;
+    // Consume the dirty flag
+    ctx->is_dirty = 0;
+    // 2. If it changed to a CLEAR state, return an empty frame to wipe the screen
+    if (ctx->is_cleared || !ctx->current_frame) {
+        SUB_FRAME *empty_frame = calloc(1, sizeof(SUB_FRAME));
+        atomic_init(&empty_frame->refcount, 1);
+        return empty_frame; // No events attached = clear screen
+    }
 
-    return _gfx_clone_frame(ctx->current_frame);
+    sub_frame_ref(ctx->current_frame);
+    return ctx->current_frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +152,7 @@ static SUB_FRAME *gfx_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
 // Those are clones — free them fully.
 // ---------------------------------------------------------------------------
 static void gfx_free_frame(SUB_FORMAT_BACKEND *be, SUB_FRAME *frame) {
-    _gfx_free_frame_internal(frame);
+    sub_frame_unref(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,10 +173,11 @@ static int gfx_resize(SUB_FORMAT_BACKEND *be, int video_w, int video_h) {
 static int gfx_flush(SUB_FORMAT_BACKEND *be) {
     GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
     if (ctx->current_frame) {
-        _gfx_free_frame_internal(ctx->current_frame);
+        sub_frame_unref(ctx->current_frame);
         ctx->current_frame = NULL;
     }
     ctx->is_cleared = 1;
+    ctx->is_dirty = 1;
     return 0;
 }
 
@@ -232,10 +187,17 @@ static int gfx_flush(SUB_FORMAT_BACKEND *be) {
 static int gfx_close(SUB_FORMAT_BACKEND *be) {
     GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
     if (ctx->current_frame) {
-        _gfx_free_frame_internal(ctx->current_frame);
+        sub_frame_unref(ctx->current_frame);
     }
     free(ctx);
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// gfx_get_timeout_ms
+// ---------------------------------------------------------------------------
+static int gfx_get_timeout_ms(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
+    return -1; // Infinite sleep. Only wakes when a feed/clear signals the engine.
 }
 
 // ---------------------------------------------------------------------------
@@ -250,5 +212,6 @@ SUB_FORMAT_BACKEND *sub_format_gfx_create(void) {
     be->resize      = gfx_resize;
     be->flush       = gfx_flush;
     be->close       = gfx_close;
+    be->get_timeout_ms = gfx_get_timeout_ms;
     return be;
 }

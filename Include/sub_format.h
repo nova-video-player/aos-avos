@@ -120,6 +120,7 @@ struct SUB_FORMAT_BACKEND {
     int  (*resize)    (SUB_FORMAT_BACKEND *be, int video_w, int video_h);
     int  (*flush)     (SUB_FORMAT_BACKEND *be);
     int  (*close)     (SUB_FORMAT_BACKEND *be);
+    int (*get_timeout_ms)(struct SUB_FORMAT_BACKEND *be, int64_t pts_ms);
 };
 
 /* ------------------------------------------------------------------

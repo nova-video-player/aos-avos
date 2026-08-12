@@ -421,7 +421,11 @@ DBGP serprintf("\tdisposition %d / %s\r\n", st->disposition, disposition_name(st
 			if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 			}
-DBGP serprintf("\tPAR        %d/%d\r\n", codecpar->sample_aspect_ratio.num, codecpar->sample_aspect_ratio.den ); 
+			AVRational sample_aspect_ratio = av_guess_sample_aspect_ratio(fmt, st, NULL);
+DBGP serprintf("\tPAR        %d/%d (stream %d/%d, codec %d/%d)\r\n",
+			sample_aspect_ratio.num, sample_aspect_ratio.den,
+			st->sample_aspect_ratio.num, st->sample_aspect_ratio.den,
+			codecpar->sample_aspect_ratio.num, codecpar->sample_aspect_ratio.den );
 			if ( priv->av.vs_max < VIDEO_TRACK_MAX ) {
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
@@ -491,8 +495,10 @@ serprintf("FF: parse H264 SPS\n");
 				
 				video->width       = codecpar->width;
 				video->height      = codecpar->height;
-				video->aspect_n    = codecpar->sample_aspect_ratio.num;
-				video->aspect_d	   = codecpar->sample_aspect_ratio.den;
+				video->aspect_n    = sample_aspect_ratio.num;
+				video->aspect_d	   = sample_aspect_ratio.den;
+				video->aspect_from_container = st->sample_aspect_ratio.num > 0 &&
+						st->sample_aspect_ratio.den > 0;
 				video->bytesPerSec = codecpar->bit_rate / 8;
 
 				video->color_primaries = codecpar->color_primaries;

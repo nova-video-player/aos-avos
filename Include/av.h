@@ -636,6 +636,7 @@ typedef struct _video_props {
 	int	colorspace;
 	int	aspect_n;
 	int	aspect_d;
+	int	aspect_from_container;	// container display metadata takes precedence over codec headers
 	int 	rotation;
 	int 	msPerFrame;
 	int 	framesPerSec;

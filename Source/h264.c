@@ -162,7 +162,14 @@ DBG serprintf("\r\n");
 		rest -= size;
 	}	
 DBG serprintf("\r\n");	
-	if( video->sps.sar_num && video->sps.sar_den ) {
+	/*
+	 * Container display dimensions may intentionally override the value stored
+	 * in the AVC SPS.  Matroska DisplayWidth/DisplayHeight, for example, is
+	 * exposed by libavformat through AVStream.sample_aspect_ratio.  Keep that
+	 * value and use the SPS only when the container supplied no valid aspect
+	 * ratio (raw AVC and similar inputs).
+	 */
+	if( !video->aspect_from_container && video->sps.sar_num && video->sps.sar_den ) {
 		video->aspect_n = video->sps.sar_num;
 		video->aspect_d = video->sps.sar_den;
 	}
@@ -718,8 +725,10 @@ int H264_get_video_props( VIDEO_PROPERTIES *video, const UCHAR *p, int len, H264
 				
 				video->width    = sps->width;
 				video->height   = sps->height;
-				video->aspect_n = sps->sar_num;
-				video->aspect_d = sps->sar_den;
+				if( !video->aspect_from_container ) {
+					video->aspect_n = sps->sar_num;
+					video->aspect_d = sps->sar_den;
+				}
 
 				video->scale    = sps->num_units_in_tick * 2;
 				video->rate     = sps->time_scale;
@@ -875,4 +884,3 @@ STREAM_VIDEO_MANGLER stream_video_mangler_H264 =
 };
 
 #endif
-

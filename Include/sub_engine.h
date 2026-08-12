@@ -67,5 +67,6 @@ int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size); // for 
 
 void sub_frame_ref(SUB_FRAME *frame);
 void sub_frame_unref(SUB_FRAME *frame);
-void sub_engine_wait_event(SUB_ENGINE *eng);
+void sub_engine_wait_event(SUB_ENGINE *eng, uint64_t last_generation);
 void sub_engine_force_wake(SUB_ENGINE *eng);
+uint64_t sub_engine_get_generation(SUB_ENGINE *eng);

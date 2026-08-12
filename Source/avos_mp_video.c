@@ -24,7 +24,6 @@
 #include "image.h"
 #include "stream.h"
 #include "stream_subtitle.h"
-#include "sub_engine.h"
 #include "sub_engine_registry.h"
 
 extern int libavos_get_ac3_recoding_enabled(void);

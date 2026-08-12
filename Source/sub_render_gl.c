@@ -93,7 +93,13 @@ static void* egl_render_thread(void* arg) {
     ANativeWindow *current_window = NULL;
 
     while (1) {
-        int needs_redraw = 0; // <--- 1. TRACK REDRAW STATE
+        // 1. Sample the generation counter BEFORE doing any work
+        uint64_t loop_generation = 0;
+        if (r->engine) {
+            loop_generation = sub_engine_get_generation((SUB_ENGINE*)r->engine);
+        }
+
+        int needs_redraw = 0;
 
         pthread_mutex_lock(&r->lock);
         if (!r->running) {
@@ -101,7 +107,11 @@ static void* egl_render_thread(void* arg) {
             break;
         }
 
+        // 2. Safely acquire our own strong reference to the window
         ANativeWindow *target_window = r->window;
+        if (target_window) {
+            ANativeWindow_acquire(target_window);
+        }
         pthread_mutex_unlock(&r->lock);
 
         // --- CLEAN EGL SURFACE CREATION ---
@@ -115,6 +125,9 @@ static void* egl_render_thread(void* arg) {
                 r->surface_height = 0;
                 pthread_mutex_unlock(&r->lock);
             }
+
+            if (current_window) ANativeWindow_release(current_window);
+            current_window = target_window; // Transfer ownership
 
             current_window = target_window;
 
@@ -176,6 +189,9 @@ static void* egl_render_thread(void* arg) {
                     }
                 }
             }
+        } else {
+            // Unchanged, release the temporary check reference
+            if (target_window) ANativeWindow_release(target_window);
         }
 
         // --- HYBRID FIX: ALWAYS POLL THE ENGINE ---
@@ -232,7 +248,7 @@ static void* egl_render_thread(void* arg) {
         if (surface == EGL_NO_SURFACE) {
             // will_draw was false in this branch, so no ref was taken -- nothing to release.
             if (r->engine) {
-                sub_engine_wait_event((SUB_ENGINE*)r->engine);
+                sub_engine_wait_event((SUB_ENGINE*)r->engine, loop_generation);
             } else {
                 usleep(16000); // Fallback if engine isn't attached yet
             }
@@ -244,7 +260,8 @@ static void* egl_render_thread(void* arg) {
         if (!needs_redraw) {
             // will_draw was false in this branch too -- no ref was taken.
             if (r->engine) {
-                sub_engine_wait_event((SUB_ENGINE*)r->engine);
+                // Pass the generation counter so we don't drop wakes
+                sub_engine_wait_event((SUB_ENGINE*)r->engine, loop_generation);
             } else {
                 usleep(16000); // Fallback if engine isn't attached yet
             }
@@ -315,6 +332,9 @@ static void* egl_render_thread(void* arg) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroySurface(display, surface);
     }
+    if (current_window) {
+        ANativeWindow_release(current_window);   // NEW
+    }
     if (r->gl_program != 0) {
         glDeleteProgram(r->gl_program);
         glDeleteTextures(1, &r->gl_texture);
@@ -369,6 +389,9 @@ void sub_render_gl_attach_surface(SUB_RENDERER *r, ANativeWindow *window) {
         ANativeWindow_acquire(r->window);
     }
     pthread_mutex_unlock(&r->lock);
+    if (r->engine) {
+        sub_engine_force_wake((SUB_ENGINE*)r->engine);   // NEW
+    }
 }
 
 void sub_render_gl_detach_surface(SUB_RENDERER *r) {
@@ -379,6 +402,7 @@ void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
     pthread_mutex_lock(&r->lock);
     r->surface_width  = width;
     r->surface_height = height;
+    r->pending_resize = 1; // <--- FIX: Ensure static frames redraw
     pthread_mutex_unlock(&r->lock);
     if (r->engine) {
         sub_engine_force_wake((SUB_ENGINE*)r->engine); // wake it if it's parked

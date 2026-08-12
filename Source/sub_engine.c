@@ -1,6 +1,5 @@
 #include "sub_engine.h"
 #include "sub_render_gl.h"
-#include "sub_format.h"
 #include "av.h"
 #include <stdlib.h>
 #include <pthread.h>
@@ -63,15 +62,25 @@ struct SUB_ENGINE {
     void *clock_ctx;
     pthread_mutex_t lock;
     pthread_cond_t  wake_cond;
+    uint64_t wakeup_generation; // <--- NEW: Predicate counter
 };
+
+// Internal helper for safe wakeups
+static void broadcast_wake_locked(SUB_ENGINE *eng) {
+    eng->wakeup_generation++;
+    pthread_cond_broadcast(&eng->wake_cond);
+}
 
 SUB_ENGINE *sub_engine_create(void) {
     SUB_ENGINE *eng = calloc(1, sizeof(SUB_ENGINE));
+
+    // FIX: Initialize mutex and cond BEFORE spawning the thread
+    pthread_mutex_init(&eng->lock, NULL);
+    pthread_cond_init(&eng->wake_cond, NULL);
+
     eng->renderer = sub_render_gl_create();
     sub_render_gl_set_engine(eng->renderer, eng);
     eng->style    = sub_style_create();
-    pthread_mutex_init(&eng->lock, NULL);
-    pthread_cond_init(&eng->wake_cond, NULL);
     return eng;
 }
 
@@ -313,7 +322,7 @@ int sub_engine_feed(SUB_ENGINE *eng, const uint8_t *data, int size, int64_t pts_
         // out from under us mid-feed (see sub_engine_close_track).
         ret = backend->feed(backend, data, size, pts_ms, duration_ms);
     }
-    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
+    broadcast_wake_locked(eng); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
     return ret;
 }
@@ -323,7 +332,7 @@ void sub_engine_flush(SUB_ENGINE *eng) {
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
     if (backend && backend->flush) backend->flush(backend);
-    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
+    broadcast_wake_locked(eng); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -341,7 +350,7 @@ void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h) {
         // No format-specific branching needed here at all.
         eng->active_backend->resize(eng->active_backend, video_w, video_h);
     }
-    pthread_cond_broadcast(&eng->wake_cond); // NEW
+    broadcast_wake_locked(eng); // NEW
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -353,7 +362,7 @@ void sub_engine_start(SUB_ENGINE *eng, sub_engine_clock_fn clock_fn, void *clock
     eng->clock_fn  = clock_fn;
     eng->clock_ctx = clock_ctx;
     eng->is_paused = 0;
-    pthread_cond_broadcast(&eng->wake_cond);
+    broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -369,7 +378,7 @@ void sub_engine_set_paused(SUB_ENGINE *eng, int paused) {
     if (!eng) return;
     pthread_mutex_lock(&eng->lock);
     eng->is_paused = paused;
-    pthread_cond_broadcast(&eng->wake_cond); // NEW — broadcast on both pause and unpause
+    broadcast_wake_locked(eng); // NEW — broadcast on both pause and unpause
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -416,12 +425,8 @@ void sub_engine_free_frame(SUB_FRAME *frame) {
 // (e.g. called during teardown after close_track).
 void sub_engine_release_frame(SUB_ENGINE *eng, SUB_FRAME *frame) {
     if (!frame) return;
-    if (eng && eng->active_backend && eng->active_backend->free_frame) {
-        eng->active_backend->free_frame(eng->active_backend, frame);
-    } else {
-        // Backend already closed or never set — fall back to global free
-        sub_frame_unref(frame);
-    }
+    // FIX: Remove backend routing. Frames use global atomic refcounting.
+    sub_frame_unref(frame);
 }
 
 int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms) {
@@ -433,7 +438,7 @@ int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int heig
     if (backend && backend->feed_bitmap) {
         ret = backend->feed_bitmap(backend, pixels, width, height, pitch, colorspace, x_offset, y_offset, pts_ms, duration_ms);
     }
-    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
+    broadcast_wake_locked(eng); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
     return ret;
 }
@@ -467,7 +472,7 @@ int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size) {
         // Pass pts_ms=0, duration_ms=0 — timing is embedded in the ASS data
         ret = backend->feed(backend, data, size, 0, 0);
     }
-    pthread_cond_broadcast(&eng->wake_cond); // <--- WAKE THE GL THREAD
+    broadcast_wake_locked(eng); // <--- WAKE THE GL THREAD
     pthread_mutex_unlock(&eng->lock);
     return ret;
 }
@@ -498,13 +503,22 @@ void sub_frame_unref(SUB_FRAME *frame) {
 }
 
 // --- ADD THE WAIT FUNCTION ---
-void sub_engine_wait_event(SUB_ENGINE *eng) {
+void sub_engine_wait_event(SUB_ENGINE *eng, uint64_t last_generation) {
     if (!eng) return;
 
     pthread_mutex_lock(&eng->lock);
 
+    // Predicate check: if the generation bumped before we locked, skip the sleep!
+    if (eng->wakeup_generation != last_generation) {
+        pthread_mutex_unlock(&eng->lock);
+        return;
+    }
+
     int timeout_ms = -1;
-    if (eng->active_backend && eng->active_backend->get_timeout_ms && eng->clock_fn) {
+    // FIX: Hard sleep if paused. Completely bypasses Libass 16ms polling.
+    if (eng->is_paused) {
+        timeout_ms = -1;
+    } else if (eng->active_backend && eng->active_backend->get_timeout_ms && eng->clock_fn) {
         int64_t pts_ms = eng->clock_fn(eng->clock_ctx);
         timeout_ms = eng->active_backend->get_timeout_ms(eng->active_backend, pts_ms);
     }
@@ -528,6 +542,15 @@ void sub_engine_wait_event(SUB_ENGINE *eng) {
 void sub_engine_force_wake(SUB_ENGINE *eng) {
     if (!eng) return;
     pthread_mutex_lock(&eng->lock);
-    pthread_cond_broadcast(&eng->wake_cond);
+    broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
+}
+
+// Add the getter for the render thread
+uint64_t sub_engine_get_generation(SUB_ENGINE *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->lock);
+    uint64_t gen = eng->wakeup_generation;
+    pthread_mutex_unlock(&eng->lock);
+    return gen;
 }

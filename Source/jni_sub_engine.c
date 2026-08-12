@@ -1,7 +1,5 @@
 #include "jni_sub_engine.h"
-#include "sub_engine.h"
 #include "sub_engine_registry.h"
-#include "sub_style.h"
 #include <android/native_window_jni.h>
 #include <android/bitmap.h>
 #include <stddef.h>
@@ -75,69 +73,97 @@ JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngi
 // --- TYPOGRAPHY & MASTER CONTROL ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontSize(JNIEnv *env, jobject thiz, jlong handle, jfloat pt) {
-    sub_style_set_font_size(sub_engine_get_style(get_engine(handle)), pt);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_font_size(sub_engine_get_style(eng), pt);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontScale(JNIEnv *env, jobject thiz, jlong handle, jfloat scale) {
-    sub_style_set_font_scale(sub_engine_get_style(get_engine(handle)), scale);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_font_scale(sub_engine_get_style(eng), scale);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontFamily(JNIEnv *env, jobject thiz, jlong handle, jstring familyName) {
     if (!familyName) return;
+    SUB_ENGINE *eng = get_engine(handle);
     const char *str = (*env)->GetStringUTFChars(env, familyName, 0);
-    sub_style_set_font_family(sub_engine_get_style(get_engine(handle)), str);
+    sub_style_set_font_family(sub_engine_get_style(eng), str);
     (*env)->ReleaseStringUTFChars(env, familyName, str);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBold(JNIEnv *env, jobject thiz, jlong handle, jboolean bold) {
-    sub_style_set_bold(sub_engine_get_style(get_engine(handle)), bold);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_bold(sub_engine_get_style(eng), bold);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetTextColor(JNIEnv *env, jobject thiz, jlong handle, jint color) {
-    sub_style_set_text_color(sub_engine_get_style(get_engine(handle)), (uint32_t)color);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_text_color(sub_engine_get_style(eng), (uint32_t)color);
+    sub_engine_force_wake(eng);
 }
 
 // --- BORDERS, SHADOWS, AND BACKGROUNDS ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetOutlineColor(JNIEnv *env, jobject thiz, jlong handle, jint color) {
-    sub_style_set_outline_color(sub_engine_get_style(get_engine(handle)), (uint32_t)color);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_outline_color(sub_engine_get_style(eng), (uint32_t)color);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetOutlineWidth(JNIEnv *env, jobject thiz, jlong handle, jfloat px) {
-    sub_style_set_outline_width(sub_engine_get_style(get_engine(handle)), px);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_outline_width(sub_engine_get_style(eng), px);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetShadowColor(JNIEnv *env, jobject thiz, jlong handle, jint color) {
-    sub_style_set_shadow_color(sub_engine_get_style(get_engine(handle)), (uint32_t)color);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_shadow_color(sub_engine_get_style(eng), (uint32_t)color);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetShadowWidth(JNIEnv *env, jobject thiz, jlong handle, jfloat px) {
-    sub_style_set_shadow_width(sub_engine_get_style(get_engine(handle)), px);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_shadow_width(sub_engine_get_style(eng), px);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {
-    sub_style_set_bg_mode(sub_engine_get_style(get_engine(handle)), mode);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_bg_mode(sub_engine_get_style(eng), mode);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundColor(JNIEnv *env, jobject thiz, jlong handle, jint color) {
-    sub_style_set_bg_color(sub_engine_get_style(get_engine(handle)), (uint32_t)color);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_bg_color(sub_engine_get_style(eng), (uint32_t)color);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundOpacity(JNIEnv *env, jobject thiz, jlong handle, jfloat opacity) {
+    SUB_ENGINE *eng = get_engine(handle);
     // Convert 0.0-1.0 float to 0-255 Android Alpha; sub_style_set_bg_opacity() does the
     // libass transparency-byte conversion and the locked read-modify-write on bg_color.
     uint8_t android_alpha = (uint8_t)(255.0f * opacity);
-    sub_style_set_bg_opacity(sub_engine_get_style(get_engine(handle)), android_alpha);
+    sub_style_set_bg_opacity(sub_engine_get_style(eng), android_alpha);
+    sub_engine_force_wake(eng);
 }
 
 // --- POSITIONING & OVERRIDES ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetVerticalOffset(JNIEnv *env, jobject thiz, jlong handle, jfloat pixels) {
-    sub_style_set_margin_bottom(sub_engine_get_style(get_engine(handle)), (int)pixels);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_margin_bottom(sub_engine_get_style(eng), (int)pixels);
+    sub_engine_force_wake(eng);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetOverrideMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {
-    sub_style_set_override_mode(sub_engine_get_style(get_engine(handle)), mode);
+    SUB_ENGINE *eng = get_engine(handle);
+    sub_style_set_override_mode(sub_engine_get_style(eng), mode);
+    sub_engine_force_wake(eng);
 }
 
 // --- CUSTOM FONTS FOLDER (third-party fonts dir, MX Player / mpv-android style) ---

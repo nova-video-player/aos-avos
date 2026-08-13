@@ -30,6 +30,19 @@
 #define DBGS if(Debug[DBG_STREAM])
 #define DBG  if(Debug[DBG_SUB])
 
+// s->subtitle_ext_needs_refeed is shared across threads with no lock --
+// see the full rationale in stream_sub_ext.c (duplicated here rather than
+// shared via a header, to avoid touching stream.h). Use acquire/release
+// atomics instead of a bare read/write.
+static inline void _needs_refeed_set( STREAM *s, int val )
+{
+	__atomic_store_n( &s->subtitle_ext_needs_refeed, val, __ATOMIC_RELEASE );
+}
+static inline int _needs_refeed_get( STREAM *s )
+{
+	return __atomic_load_n( &s->subtitle_ext_needs_refeed, __ATOMIC_ACQUIRE );
+}
+
 #ifdef CONFIG_STREAM
 
 // -----------------------------------------------------------------------------
@@ -406,7 +419,7 @@ static void _get_next_ext_sub( STREAM *s, int time )
 					embedded_fonts, embedded_fonts_count);
 
 				// Bulk-feed the full cue list now; clear the refeed flag BEFORE the call so that if a streaming feed gets interrupted and sets it back to 1, that survives for the refeed branch below to pick up.
-				s->subtitle_ext_needs_refeed = 0;
+				_needs_refeed_set( s, 0 );
 				stream_sub_ext_feed_engine( s );
 			}
 			// No sub_dec for external text — engine owns the timeline.
@@ -420,10 +433,10 @@ static void _get_next_ext_sub( STREAM *s, int time )
 			stream_drop_subtitles( s );
 			return;
 		}
-	} else if( _is_ext_text(fmt) && s->subtitle_ext_needs_refeed && s->sub_engine ) {
+	} else if( _is_ext_text(fmt) && _needs_refeed_get( s ) && s->sub_engine ) {
 		// Track was already open (a seek flushed the engine's events, or a prior streaming feed was interrupted); re-run the bulk-feed without reopening the track. Uses stream_sub_ext_force_streaming_refeed() rather than stream_sub_ext_feed_engine() directly since for streaming (SRT/VTT) tracks SUBT_PARSE_DONE would otherwise be treated as "already fed" -- see its comment in stream_sub_ext.c.
 DBG serprintf("_get_next_ext_sub: re-feeding external text track after seek/interrupt\r\n");
-		s->subtitle_ext_needs_refeed = 0;
+		_needs_refeed_set( s, 0 );
 		stream_sub_ext_force_streaming_refeed( s );
 	}
 

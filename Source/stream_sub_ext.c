@@ -40,6 +40,29 @@
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_SUBTITLES
 
+// -----------------------------------------------------------------------------
+// s->subtitle_ext_needs_refeed is written from the parse-worker pool threads
+// (this file), the seek/video thread (stream_video.c), and read+cleared on
+// whichever thread drives _get_next_ext_sub() (stream_subtitle.c) -- three
+// threads, one plain int, previously with no lock or atomic and therefore no
+// defined cross-core visibility/ordering (a genuine data race under the C
+// memory model, even though a torn read/write isn't realistically possible
+// for a naturally-aligned int on any target this runs on). The flag is a
+// single idempotent latch (worst case of a "lost" update is one harmless
+// extra refeed poll next frame, never a correctness bug), so a full mutex
+// would be overkill here -- acquire/release atomics give it the ordering it
+// actually needs. Duplicated (not shared via a header, to avoid touching
+// stream.h) in stream_subtitle.c and stream_video.c, the other two sites
+// that touch this field.
+static inline void _needs_refeed_set( STREAM *s, int val )
+{
+	__atomic_store_n( &s->subtitle_ext_needs_refeed, val, __ATOMIC_RELEASE );
+}
+static inline int _needs_refeed_get( STREAM *s )
+{
+	return __atomic_load_n( &s->subtitle_ext_needs_refeed, __ATOMIC_ACQUIRE );
+}
+
 // Async subtitle parse worker: a bounded thread pool per STREAM's SUB_PRIV, spun up lazily and torn down in stream_sub_ext_close(). Deliberately not stream_sub_dec_thread -- that thread's THREAD_STATE uses a hard blocking thread_state_set() rendezvous, so a slow parse on it would freeze every other thread waiting on that rendezvous, which is exactly the freeze this worker exists to avoid. Also now runs SRT/VTT's streaming feed() (see _do_streaming_feed()), not just format->parse(); the two job kinds never touch the same shared state so mixing them in one queue is safe.
 
 #define PARSE_QUEUE_MAX (SUB_TRACK_MAX)
@@ -97,13 +120,139 @@ typedef struct _STREAMING_POLL_CTX {
 	int      stale;
 } _STREAMING_POLL_CTX;
 
+// -----------------------------------------------------------------------------
+// SRT/VTT re-feed caching.
+//
+// feed_SRT()/feed_VTT() are a single-pass streaming parse: every call re-opens
+// the file, re-reads it whole, and re-parses every cue from scratch, feeding
+// each straight into the engine as it goes -- no cue list is kept around
+// afterwards (see subtitle_srt.c's file header comment for why: it was
+// designed to avoid holding a second, persistent copy of the file in memory).
+// That's fine for the FIRST feed of a track. But _sub_feed_should_stop()
+// aborts and flushes on every pause/seek/close (see its own comment below),
+// and "abort" for this parser means "restart from the top next time" -- so
+// on a long file, pausing and unpausing repeatedly re-does the full
+// fopen()+fread()+parse() every single time, purely to reproduce cues the
+// engine already had a moment ago.
+//
+// Fix: the first time a track's feed pass runs all the way to true EOF
+// without being interrupted, also capture the cues into a sub_line list
+// (mirroring exactly what parse() builds for every non-streaming format --
+// SMI/SUB/MPL2/IDX -- into uni_sub->first/last, which is otherwise unused
+// for is_streaming tracks and already generically freed by
+// subtitle_free_converted() same as any other format). Every subsequent
+// _do_streaming_feed() call for that track then finds subs->first already
+// populated and takes the cheap path: walk the cached list straight into the
+// engine (_feed_from_cache() below) instead of touching the file again --
+// turning a repeated pause/seek's refeed cost from O(file size) back down to
+// O(cue count), same as every other external text format already gets.
+//
+// A pass that gets interrupted before EOF only has a partial list -- caching
+// that would silently truncate every future refeed, so it's discarded
+// instead (_free_sub_line_list()) and the next call falls through to the
+// slow path again, same as today, until one pass finally completes.
+// -----------------------------------------------------------------------------
+
+#define SRT_CACHE_POLL_INTERVAL 200	// matches SRT_POLL_INTERVAL/VTT_POLL_INTERVAL in subtitle_srt.c/subtitle_vtt.c
+
+static void _free_sub_line_list( sub_line *node )
+{
+	while( node ) {
+		sub_line *next = node->next;
+		if( node->top )    afree( node->top );
+		if( node->bottom ) afree( node->bottom );
+		afree( node );
+		node = next;
+	}
+}
+
+// ctx for _cue_to_engine_and_cache(): feeds the engine exactly like
+// _cue_to_engine() while also appending each cue to an in-memory list, so a
+// first, currently-in-progress feed pass can be captured as a cache without
+// changing feed_SRT()/feed_VTT()'s signature or making a second pass.
+typedef struct _CACHE_BUILD_CTX {
+	STREAM   *s;
+	sub_line *first;
+	sub_line *last;
+} _CACHE_BUILD_CTX;
+
+static void _cue_to_engine_and_cache( void *ctx, const char *text, int start_ms, int end_ms )
+{
+	_CACHE_BUILD_CTX *cc = (_CACHE_BUILD_CTX *)ctx;
+
+	_cue_to_engine( cc->s, text, start_ms, end_ms );
+
+	if( !text || !text[0] ) return; // nothing worth caching -- same filter _cue_to_engine() applies
+
+	sub_line *node = acalloc( 1, sizeof( sub_line ) );
+	if( !node ) return; // OOM building the cache is non-fatal: the engine already
+	                     // got this cue above via _cue_to_engine(); we just lose the
+	                     // fast-refeed optimization for this track and fall back to
+	                     // a full re-parse next time, same behavior as today
+	node->top   = astrdup( text );
+	node->start = start_ms;
+	node->end   = end_ms;
+	if( !cc->first ) {
+		cc->first = cc->last = node;
+	} else {
+		cc->last->next = node;
+		node->prev      = cc->last;
+		cc->last        = node;
+	}
+}
+
+// Cheap refeed path: subs->first/last already holds a complete cached cue
+// list from an earlier uninterrupted feed pass -- walk it straight into the
+// engine instead of re-reading and re-parsing the file. Mirrors the existing
+// SMI/SUB/MPL2 list-walk path in stream_sub_ext_feed_engine(), plus the same
+// periodic yield/stop-check feed_SRT()/feed_VTT() do, so a very large cached
+// track can't hog eng->lock during a refeed either. Return contract matches
+// _do_streaming_feed(): 1 = ran to completion (or was cleanly interrupted --
+// the cache itself is untouched either way, so there's nothing to discard),
+// 2 = track went stale mid-walk, caller must not mark the job DONE.
+static int _feed_from_cache( STREAM *s, uni_sub *subs )
+{
+	_needs_refeed_set( s, 0 );
+
+	int n = 0;
+	sub_line *node = subs->first;
+	while( node ) {
+		SUB_PRIV *p = s->subtitle_priv;
+		int still_current = s->subtitle && p && p->subs &&
+		                     s->subtitle->stream >= 0 && s->subtitle->stream < p->subs->cnt &&
+		                     p->subs->converted[ s->subtitle->stream ] == subs;
+		if( !still_current ) {
+			if( s->sub_engine ) sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
+			return 2;
+		}
+
+		if( (++n % SRT_CACHE_POLL_INTERVAL) == 0 ) {
+			if( thread_state_asked( &s->sub_tstate ) != THREAD_RUNNING ) {
+				if( s->sub_engine ) sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
+				_needs_refeed_set( s, 1 );
+				return 1;
+			}
+			stream_yield_RT();
+		}
+
+		// _cue_to_engine_and_cache() only ever populates ->top (the cue text
+		// already has any multi-line \N embedded by feed_SRT()/feed_VTT()
+		// before it reaches the callback) -- ->bottom stays NULL for every
+		// cached node, so unlike the SMI/SUB/MPL2 fallback walk in
+		// stream_sub_ext_feed_engine() there's no separate half to merge.
+		if( node->top ) {
+			_cue_to_engine( s, node->top, node->start, node->end );
+		}
+
+		node = node->next;
+	}
+	return 1;
+}
+
 // Runs SRT/VTT's streaming feed() on the parse-worker thread instead of stream_sub_dec_thread (see file header comment), reusing the same _cue_to_engine()/_sub_feed_should_stop() every feed() caller uses. Returns 1 if the whole file was fed or a genuine pause/seek/close interrupted it (subtitle_ext_needs_refeed is set for the latter); 2 if `subs` was no longer the actively selected track, so the caller must NOT mark the job DONE; 0 only on a genuine setup failure (maps to SUBT_PARSE_FAILED).
 static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 {
 	if( !s || !subs || !subs->spex ) return 0;
-
-	SUBTITLE_FORMAT *fmt = subtitle_get_format_for_sub( subs );
-	if( !fmt || !fmt->feed ) return 0;
 
 	// Skip if the user already switched away while this job sat in the queue -- nothing fed yet, nothing to flush.
 	SUB_PRIV *p = s->subtitle_priv;
@@ -112,13 +261,49 @@ static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 	                     p->subs->converted[ s->subtitle->stream ] == subs;
 	if( !still_current ) return 2;
 
+	// Fast path -- see the caching comment above. Skips the file entirely.
+	if( subs->first ) {
+		return _feed_from_cache( s, subs );
+	}
+
+	SUBTITLE_FORMAT *fmt = subtitle_get_format_for_sub( subs );
+	if( !fmt || !fmt->feed ) return 0;
+
 	// Cleared before the call, not after: _sub_feed_should_stop() may set it back to 1 during the call, and that must survive.
-	s->subtitle_ext_needs_refeed = 0;
+	_needs_refeed_set( s, 0 );
 
-	_STREAMING_POLL_CTX poll_ctx = { s, subs, 0 };
-	fmt->feed( subs->spex, _cue_to_engine, s, _sub_feed_should_stop, &poll_ctx );
+	_STREAMING_POLL_CTX poll_ctx  = { s, subs, 0 };
+	_CACHE_BUILD_CTX     cache_ctx = { s, NULL, NULL };
+	fmt->feed( subs->spex, _cue_to_engine_and_cache, &cache_ctx, _sub_feed_should_stop, &poll_ctx );
 
-	return poll_ctx.stale ? 2 : 1;
+	if( poll_ctx.stale ) {
+		// Track switched away mid-feed -- nothing was left in the engine
+		// for it (see _sub_feed_should_stop()'s comment), and the partial
+		// list we were accumulating never validly ran against the
+		// currently-selected track either; discard it so a genuine future
+		// re-selection of this track starts the cache fresh.
+		_free_sub_line_list( cache_ctx.first );
+		return 2;
+	}
+
+	if( _needs_refeed_get( s ) ) {
+		// Genuinely interrupted by pause/seek/close partway through --
+		// _sub_feed_should_stop() set the flag back to 1 (see its comment).
+		// The list built so far only covers cues up to the interruption
+		// point; caching a truncated list would silently drop the tail of
+		// the file on every future refeed, so discard it. The next
+		// _do_streaming_feed() call for this track falls through to this
+		// same slow path and tries again from scratch.
+		_free_sub_line_list( cache_ctx.first );
+	} else if( cache_ctx.first ) {
+		// Ran to true EOF, uninterrupted -- the cache is complete and
+		// trustworthy. Commit it so every future refeed of this track
+		// (pause/seek, or a later re-selection) takes the fast path above.
+		subs->first = cache_ctx.first;
+		subs->last  = cache_ctx.last;
+	}
+
+	return 1;
 }
 
 // Finds and removes the first pending job (starting from queue_head, so _worker_prioritize()'s promotions are respected) whose title isn't already IN_PROGRESS on another pool thread. Returns NULL if the queue is empty or every pending job's title collides with something in flight -- only reachable when multiple queued jobs are all language variants of the same multi-language file. Caller must hold queue_mutex and record the returned job's title into inflight_title[my_slot] before releasing it, so claiming the job and its title happen as one atomic step.
@@ -242,7 +427,7 @@ static void *_parse_worker_thread( void *arg )
 
 		// Wake the sub-decode thread's per-frame poll so a freshly-completed non-streaming track is picked up promptly. Scoped to non-streaming only: streaming jobs already fed the engine directly on this thread, and this flag means "redo the feed" -- setting it after a clean streaming completion would loop forever.
 		if( w->stream && !job->is_streaming && !stale ) {
-			w->stream->subtitle_ext_needs_refeed = 1;
+			_needs_refeed_set( w->stream, 1 );
 		}
 
 		// Release this slot's title claim and wake any sibling thread that might have skipped a now-un-collided job.
@@ -302,6 +487,67 @@ static SUB_PARSE_WORKER *_last_active_worker = NULL;
 // Companion to _last_active_worker: covers the no-active-worker fallback, which still needs a STREAM* to run a streaming track's feed against even though there's no w->stream to read. Set unconditionally alongside _last_active_worker, even on worker-creation failure.
 static STREAM *_last_active_stream = NULL;
 
+// -----------------------------------------------------------------------------
+// _last_active_worker/_last_active_stream lifetime guard.
+//
+// These two globals used to be read and written completely unguarded. That's
+// two separate hazards, not one:
+//
+//  1. A torn/stale plain-pointer read racing a concurrent write (e.g. one
+//     thread's stream_sub_ext_check() assigning _last_active_worker while
+//     another thread's _worker_enqueue()/_worker_prioritize() reads it).
+//
+//  2. A genuine use-after-free: even a perfectly torn-free read can hand back
+//     a SUB_PARSE_WORKER*/STREAM* that stream_sub_ext_close()/_worker_stop()
+//     has *already freed by the time the reader dereferences it* -- there was
+//     nothing stopping close() from nulling the globals and returning (letting
+//     its caller free the STREAM/SUB_PRIV/worker) while some other thread was
+//     still mid-way through _synchronous_parse_fallback() using the pointer
+//     it read a moment earlier. This is the real risk when two STREAM
+//     lifetimes overlap (one closing while another is mid check()/enqueue).
+//
+// Fix: _last_active_mutex protects the two pointer values themselves, and
+// _last_active_refs turns "read the globals" into "acquire a reference,
+// dereference, release the reference" (see _last_active_acquire()/_release()
+// below) so close()/_worker_stop() can null the globals AND THEN block
+// (_last_active_cond) until every reference taken before the null-out has
+// been released -- i.e. until nobody can still be holding a live pointer to
+// what's about to be freed. Mirrors the existing bounded
+// stream_sub_ext_wait_for_discovery() pattern already used for the
+// process-wide discovery worker.
+//
+// This is intentionally one shared counter across all streams, not one per
+// stream: the fallback paths it protects (no-worker / queue-full) are
+// documented edge cases, not the hot path, so close() occasionally waiting
+// on an unrelated stream's in-flight fallback call is an acceptable, bounded
+// cost for a lock-free-everywhere-else design.
+static pthread_mutex_t _last_active_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  _last_active_cond  = PTHREAD_COND_INITIALIZER;
+static int             _last_active_refs  = 0;
+
+// Snapshot _last_active_worker/_last_active_stream and mark them "in use".
+// Every caller MUST pair this with exactly one _last_active_release() call,
+// including on every early-return path, before it stops touching either
+// returned pointer.
+static void _last_active_acquire( SUB_PARSE_WORKER **w_out, STREAM **s_out )
+{
+	pthread_mutex_lock( &_last_active_mutex );
+	*w_out = _last_active_worker;
+	*s_out = _last_active_stream;
+	_last_active_refs++;
+	pthread_mutex_unlock( &_last_active_mutex );
+}
+
+static void _last_active_release( void )
+{
+	pthread_mutex_lock( &_last_active_mutex );
+	_last_active_refs--;
+	if( _last_active_refs == 0 ) {
+		pthread_cond_broadcast( &_last_active_cond );
+	}
+	pthread_mutex_unlock( &_last_active_mutex );
+}
+
 // Shared "no active worker"/"queue full" fallback for _worker_enqueue()/_worker_prioritize(). subtitle_do_parse() alone is wrong for streaming (SRT/VTT) tracks since format->parse() is NULL for them -- it would mark them FAILED without ever feeding. `s` may be NULL if no worker was ever started for any stream, in which case a streaming track genuinely can't be fed and the fallback is a real FAILED.
 static void _synchronous_parse_fallback( STREAM *s, uni_sub *sub )
 {
@@ -318,18 +564,24 @@ static void _synchronous_parse_fallback( STREAM *s, uni_sub *sub )
 
 static void _worker_enqueue( uni_sub *sub )
 {
-	SUB_PARSE_WORKER *w = _last_active_worker;
+	SUB_PARSE_WORKER *w;
+	STREAM           *last_stream;
+	_last_active_acquire( &w, &last_stream );
+
 	if( !w ) {
 		// No worker registered/active (e.g. called before any
 		// stream_sub_ext_check() ever ran, or after close()) -- fall back
 		// to a direct synchronous parse/feed right here rather than
 		// dropping the job. subtitle_ensure_parsed_async() already
 		// transitioned this track to QUEUED before calling us, so we own
-		// running it. _last_active_stream (not w->stream -- there is no w
-		// here) is what makes the streaming case work; see its own
-		// comment and _synchronous_parse_fallback()'s.
+		// running it. last_stream (not w->stream -- there is no w here) is
+		// what makes the streaming case work; see its own comment and
+		// _synchronous_parse_fallback()'s. Held across the whole fallback
+		// call via the reference taken above, so close() can't free
+		// last_stream out from under it.
 DBG serprintf("_worker_enqueue: no active worker, parsing synchronously\n");
-		_synchronous_parse_fallback( _last_active_stream, sub );
+		_synchronous_parse_fallback( last_stream, sub );
+		_last_active_release();
 		return;
 	}
 
@@ -343,6 +595,7 @@ DBG serprintf("_worker_enqueue: no active worker, parsing synchronously\n");
 		pthread_mutex_unlock( &w->queue_mutex );
 serprintf("_worker_enqueue: queue full, parsing synchronously\n");
 		_synchronous_parse_fallback( w->stream, sub );
+		_last_active_release();
 		return;
 	}
 	int tail = (w->queue_head + w->queue_count) % PARSE_QUEUE_MAX;
@@ -350,17 +603,22 @@ serprintf("_worker_enqueue: queue full, parsing synchronously\n");
 	w->queue_count++;
 	pthread_cond_signal( &w->queue_cond );
 	pthread_mutex_unlock( &w->queue_mutex );
+	_last_active_release();
 }
 
 // Registered with subtitle_formats.c via subtitle_set_parse_priority_fn(), called for a track that was just actively selected (vs. passively warmed up by _queue_all_tracks(), which still uses the regular tail-insert enqueue). Two cases: if `sub` isn't queued yet, head-insert it (subtitle_ensure_parsed_async_priority() just flipped it to QUEUED); if it's already somewhere in the queue -- the common case, since every track is eagerly warmed up before the user picks one -- find it via linear scan (bounded by PARSE_QUEUE_MAX) and shift it to the front.
 static void _worker_prioritize( uni_sub *sub )
 {
-	SUB_PARSE_WORKER *w = _last_active_worker;
+	SUB_PARSE_WORKER *w;
+	STREAM           *last_stream;
+	_last_active_acquire( &w, &last_stream );
+
 	if( !w ) {
 		// No active worker -- same fallback as _worker_enqueue(), including
-		// using _last_active_stream since there's no w->stream here.
+		// using last_stream since there's no w->stream here.
 DBG serprintf("_worker_prioritize: no active worker, parsing synchronously\n");
-		_synchronous_parse_fallback( _last_active_stream, sub );
+		_synchronous_parse_fallback( last_stream, sub );
+		_last_active_release();
 		return;
 	}
 
@@ -384,6 +642,7 @@ DBG serprintf("_worker_prioritize: no active worker, parsing synchronously\n");
 		w->queue[w->queue_head] = sub;
 
 		pthread_mutex_unlock( &w->queue_mutex );
+		_last_active_release();
 		return;
 	}
 
@@ -392,6 +651,7 @@ DBG serprintf("_worker_prioritize: no active worker, parsing synchronously\n");
 		pthread_mutex_unlock( &w->queue_mutex );
 serprintf("_worker_prioritize: queue full, parsing synchronously\n");
 		_synchronous_parse_fallback( w->stream, sub );
+		_last_active_release();
 		return;
 	}
 	w->queue_head = (w->queue_head - 1 + PARSE_QUEUE_MAX) % PARSE_QUEUE_MAX;
@@ -399,6 +659,7 @@ serprintf("_worker_prioritize: queue full, parsing synchronously\n");
 	w->queue_count++;
 	pthread_cond_signal( &w->queue_cond );
 	pthread_mutex_unlock( &w->queue_mutex );
+	_last_active_release();
 }
 
 // Signals every pool thread to exit and joins each. Called from stream_sub_ext_close(). Jobs still queued are simply abandoned -- no "drain the queue first" wait, since that would reintroduce the blocking-on-parse this worker exists to avoid. In-flight jobs finishing after tstate flips to EXIT is fine: each only touches its own `job` (about to be freed regardless) and w->stream (null-checked in _parse_worker_thread against a racing close()).
@@ -406,9 +667,16 @@ static void _worker_stop( SUB_PARSE_WORKER *w )
 {
 	if( !w ) return;
 
+	// Null the global under the same mutex _worker_enqueue()/_worker_prioritize()
+	// acquire it through, so no NEW reader can start using `w` after this
+	// point. This alone does not guarantee no one is CURRENTLY using it --
+	// see stream_sub_ext_close()'s wait-for-drain below, which the caller of
+	// this function performs before actually freeing `w`.
+	pthread_mutex_lock( &_last_active_mutex );
 	if( _last_active_worker == w ) {
 		_last_active_worker = NULL;
 	}
+	pthread_mutex_unlock( &_last_active_mutex );
 
 	if( w->threads_started > 0 ) {
 		pthread_mutex_lock( &w->queue_mutex );
@@ -617,10 +885,18 @@ static int _stream_sub_ext_check_core( STREAM *s, subtitle_files *files )
 	// below fails -- see its own comment (near _worker_enqueue()) for why:
 	// the no-active-worker fallback in _worker_enqueue()/_worker_prioritize()
 	// needs a STREAM* precisely in the case where there IS no worker to
-	// read one from via w->stream.
+	// read one from via w->stream. Both globals are set together under
+	// _last_active_mutex so a concurrent _worker_enqueue()/_worker_prioritize()
+	// snapshot (see _last_active_acquire()) never observes one updated and
+	// not the other.
+	pthread_mutex_lock( &_last_active_mutex );
 	_last_active_stream = s;
+	pthread_mutex_unlock( &_last_active_mutex );
+
 	if( _worker_ensure_started( s, p ) ) {
+		pthread_mutex_lock( &_last_active_mutex );
 		_last_active_worker = p->worker;
+		pthread_mutex_unlock( &_last_active_mutex );
 		subtitle_set_parse_enqueue_fn( _worker_enqueue );
 		subtitle_set_parse_priority_fn( _worker_prioritize ); // patch 7
 		_queue_all_tracks( p->subs, 0 );
@@ -776,9 +1052,27 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 		// and a later no-active-worker fallback (for some future,
 		// different STREAM opened before a new worker exists yet) could
 		// hand _do_streaming_feed() a dangling pointer.
+		//
+		// Nulling it is only half the fix: _worker_stop() above already
+		// nulled _last_active_worker under _last_active_mutex, and now that
+		// _last_active_stream is nulled the same way, no NEW caller can
+		// start a fallback using either pointer -- but a call that already
+		// took a reference via _last_active_acquire() a moment earlier (on
+		// some other thread) could still be mid-_synchronous_parse_fallback()
+		// using `s` right now. Block here until _last_active_refs drains to
+		// 0, so this function's caller (who frees `s`/`p` right after this
+		// returns) can never race that in-flight use. Bounded: the pool
+		// worker itself was already stopped above, so nothing new can be
+		// queued from here on -- this only waits out whatever fallback
+		// calls were already in flight at this instant.
+		pthread_mutex_lock( &_last_active_mutex );
 		if( _last_active_stream == s ) {
 			_last_active_stream = NULL;
 		}
+		while( _last_active_refs > 0 ) {
+			pthread_cond_wait( &_last_active_cond, &_last_active_mutex );
+		}
+		pthread_mutex_unlock( &_last_active_mutex );
 
 		int i;
 		for (i = p->prev_max; i < s->av.subs_max; ++i) {
@@ -830,7 +1124,7 @@ static int _sub_feed_should_stop( void *poll_ctx )
 
 	if( thread_state_asked( &s->sub_tstate ) != THREAD_RUNNING ) {
 		if( s->sub_engine ) sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
-		s->subtitle_ext_needs_refeed = 1;
+		_needs_refeed_set( s, 1 );
 		return 1;
 	}
 

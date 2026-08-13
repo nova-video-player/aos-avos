@@ -4765,30 +4765,41 @@ static void _seek_init( STREAM *s )
 	// own reset on every seek via stream_audio_flush() - mirror that here.
 	s->video_end = 0;
 	// Clear whatever the per-stream subtitle engine is currently holding
-	// (libass's pending events for SSA/SRT, or the cached bitmap frame for
-	// GFX) so a stale subtitle can't keep being rendered/evaluated at the
-	// new post-seek time. This is the engine-pipeline equivalent of the
-	// s->sub_dec->flush() call in _stream_seek_real() below, which only
+	// (libass's pending events for internal SSA/SRT, or the cached bitmap
+	// frame for GFX) so a stale subtitle can't keep being rendered/evaluated
+	// at the new post-seek time. This is the engine-pipeline equivalent of
+	// the s->sub_dec->flush() call in _stream_seek_real() below, which only
 	// covers the ffdec/bitmap decoder -- s->sub_engine is a separate object
 	// (see stream.h) and needs its own flush. _seek_init() is the single
-	// entry point all seek/restart paths funnel through (user seek via
-	// _stream_seek_real(), seek-loop, codec-error retry, and next-part
-	// restart further up in this file), so one call here covers all of them.
+	// entry point all seek/restart paths funnel through.
 	if( s->sub_engine ) {
-		sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
+		// Optimization: External text tracks (SRT/VTT/SMI/SUB/MPL2, external ASS)
+		// are bulk-fed once and evaluated purely by pts on every render_at() --
+		// nothing about a seek invalidates what's already loaded, so we skip
+		// the flush+refeed entirely for this case (the caching change in
+		// stream_sub_ext.c makes a refeed here unnecessary, not just cheap).
+		// Bitmap (GFX) and internal-raw-text tracks are untouched: those are
+		// genuinely stale after a seek and need the flush ahead of the demuxer
+		// reseek that follows.
+		int skip_flush = s->subtitle && s->subtitle->valid && s->subtitle->ext && !s->subtitle->gfx;
 
-		// External text tracks (SRT/VTT/ASS) are bulk-fed into the engine ONCE
-		// at track open (stream_sub_ext_feed_engine(), gated by subtitle_frame
-		// being NULL in stream_subtitle.c) -- the flush above just wiped that
-		// same track's already-loaded events with nothing left to naturally
-		// refill them, since external text never receives further per-frame
-		// packets the way internal embedded text does. Set unconditionally
-		// here (not gated on checking the active track's format) to avoid
-		// duplicating the _is_ext_text() classification that already lives in
-		// stream_subtitle.c -- _get_next_ext_sub() is the only consumer of
-		// this flag and is never even called for internal tracks, so setting
-		// it when the active track isn't external text is a harmless no-op.
-		s->subtitle_ext_needs_refeed = 1;
+		if( !skip_flush ) {
+			sub_engine_flush( (SUB_ENGINE*)s->sub_engine );
+
+			// Written here with an atomic release store rather than a bare
+			// assignment: this flag is also written by the subtitle parse-
+			// worker threads and read/cleared on whichever thread drives
+			// _get_next_ext_sub() -- see the full rationale next to this same
+			// pattern in stream_sub_ext.c/stream_subtitle.c.
+			__atomic_store_n( &s->subtitle_ext_needs_refeed, 1, __ATOMIC_RELEASE );
+		} else {
+			// Still need to nudge the render thread — it may be parked
+			// asleep at the pre-seek pts's computed timeout, and nothing
+			// else will wake it to re-evaluate get_timeout_ms()/render_at()
+			// at the new position. Flush used to do this as a side effect;
+			// skipping it means we have to ask explicitly.
+			sub_engine_force_wake( (SUB_ENGINE*)s->sub_engine );
+		}
 	}
 
 	if ( s->video->needs_header ) {

@@ -83,8 +83,11 @@ For Mode 2, a trusted `AudioTimestamp` can provide a dynamic
 submitted-minus-presented delay. The centralized heard clock adopts that
 evidence monotonically while keeping the normalized capacity clock alive as
 fallback. The broad `mode2_dynamic_all` test switch is currently enabled;
-disabling it restores the raw AC3/44.1 kHz production allowlist. Mode 1 IEC
-timestamps are collected only as shadow evidence and cannot alter heard time.
+disabling it restores the raw AC3/44.1 kHz direct-passthrough allowlist. AC3
+recoding resolved to Mode 2 is independently enabled: its timestamp occupancy
+already includes pacer write-ahead, so the dynamic target does not subtract
+pacer lead again. Mode 1 IEC and Mode-1 AC3-recode timestamps are collected only
+as shadow evidence and cannot alter heard time.
 
 Exception: during plain PCM AudioTrack PlaybackParams speed epochs, the
 AudioTrack playhead is used as a temporary checkpoint clock. At the speed
@@ -135,8 +138,9 @@ after a complete compressed unit is accepted. The sync layer rejects stale, rese
 implausible, or non-advancing counters before comparing them with the submitted
 ledger.
 
-Mode 2 direct logical-frame evidence must prove the configured rate over an
-advancing streak and then provide three stable delay samples. On entry, heard
+Mode 2 direct logical-frame evidence, including AC3 recode resolved to Mode 2,
+must prove the configured rate over an advancing streak and then provide three
+stable delay samples. On entry, heard
 time never moves backward: it holds until physical presentation catches the
 existing phase, then follows the measured frontier. The renderer remains on its
 provisional anchor during that hold and performs one audio-based reanchor when

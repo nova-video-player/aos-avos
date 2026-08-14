@@ -19,6 +19,7 @@
 #include "debug.h"
 #include "util.h"
 #include "audio_interface.h"
+#include "ac3_recode.h"
 #include "stream.h"
 #include "stream_sync.h"
 
@@ -978,6 +979,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough) ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	int keep_mode2_phase;
+	int keep_dynamic_phase;
 	int interp_ts;
 	int interp_raw_ts;
 	int interp_delay_ms;
@@ -992,6 +994,8 @@ int stream_sync_restart_after_pause( STREAM *s )
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	keep_mode2_phase = passthrough_mode >= 2 &&
 		!libavos_get_ac3_recoding_enabled() && s->mode2_heard_interp_valid;
+	keep_dynamic_phase = passthrough_mode >= 2 &&
+		s->mode2_dynamic_clock_active;
 	interp_ts = s->mode2_heard_interp_ts;
 	interp_raw_ts = s->mode2_heard_interp_raw_ts;
 	interp_delay_ms = s->mode2_heard_interp_delay_ms;
@@ -1014,19 +1018,23 @@ int stream_sync_restart_after_pause( STREAM *s )
 		s->mode2_heard_interp_delay_ms = interp_delay_ms;
 		s->mode2_heard_interp_last_log_ms = interp_last_log_ms;
 		s->mode2_heard_prevideo_phase_active = 1;
-		if( dynamic_active ) {
-			s->mode2_dynamic_clock_active = 1;
-			s->mode2_dynamic_clock_ready = dynamic_ready;
-			s->mode2_dynamic_clock_ts = dynamic_ts;
-			s->mode2_dynamic_clock_wall_ms = atime();
-			s->mode2_dynamic_clock_last_delay_ms = dynamic_last_delay_ms;
-			s->mode2_dynamic_clock_grace_until_wall_ms = atime() +
-				STREAM_MODE2_DIRECT_GRACE_MS;
-			s->mode2_dynamic_clock_last_log_ms = dynamic_last_log_ms;
-		}
-		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d dynamic=%d ready=%d dynamic_ts=%d audio=%d video=%d\n",
-			interp_ts, interp_raw_ts, interp_delay_ms, dynamic_active, dynamic_ready, dynamic_ts,
-			s->audio_time, s->video_time);
+	}
+	if( keep_dynamic_phase ) {
+		s->mode2_dynamic_clock_active = 1;
+		s->mode2_dynamic_clock_ready = dynamic_ready;
+		s->mode2_dynamic_clock_ts = dynamic_ts;
+		s->mode2_dynamic_clock_wall_ms = atime();
+		s->mode2_dynamic_clock_last_delay_ms = dynamic_last_delay_ms;
+		s->mode2_dynamic_clock_grace_until_wall_ms = atime() +
+			STREAM_MODE2_DIRECT_GRACE_MS;
+		s->mode2_dynamic_clock_last_log_ms = dynamic_last_log_ms;
+		s->mode2_heard_prevideo_phase_active = 1;
+	}
+	if( keep_mode2_phase || keep_dynamic_phase ) {
+		DBG serprintf("mode2_pause_phase_restore: interp=%d raw=%d delay=%d dynamic=%d ready=%d dynamic_ts=%d audio=%d video=%d recode=%d\n",
+			interp_ts, interp_raw_ts, interp_delay_ms, dynamic_active, dynamic_ready,
+			dynamic_ts, s->audio_time, s->video_time,
+			libavos_get_ac3_recoding_enabled());
 	}
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	pthread_mutex_unlock( &s->anchor_mutex );
@@ -1349,6 +1357,125 @@ int stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_ra
 	return r.heard_rst;
 }
 
+// Caller holds mode2_heard_mutex. The static clock remains live as fallback;
+// trusted AudioTimestamp evidence replaces it only after proving a stable
+// submitted-minus-presented frontier. For AC3 recode, that frontier already
+// includes the bursts admitted by the wall-clock pacer, so pacer lead must not
+// be subtracted from the dynamic target a second time.
+static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
+	int static_heard_ts, int ac3_recoding )
+{
+	STREAM_PRESENTATION_OBSERVATION *observation = &s->presentation_observation;
+	int validated_profile = observation->format == WAVE_FORMAT_AC3 &&
+		observation->rate == 44100;
+	int recode_profile = observation->format == WAVE_FORMAT_AC3 &&
+		observation->rate == AC3_RECODE_SAMPLE_RATE;
+	int profile_enabled = ac3_recoding ? recode_profile :
+		(validated_profile || stream_mode2_dynamic_all);
+	int direct_valid = observation->epoch == s->mode2_heard_epoch &&
+		observation->direct_trusted &&
+		profile_enabled &&
+		observation->direct_delay_ms >= 0 &&
+		observation->direct_heard_ts != STREAM_NO_PTS_VALUE &&
+		wall_now - observation->direct_heard_wall_ms >= 0 &&
+		wall_now - observation->direct_heard_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
+		wall_now - observation->observed_wall_ms >= 0 &&
+		wall_now - observation->observed_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
+		wall_now - observation->last_advance_wall_ms >= 0 &&
+		wall_now - observation->last_advance_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS;
+	int dynamic_source = 0;
+	int dynamic_target = STREAM_NO_PTS_VALUE;
+	int dynamic_delay = -1;
+
+	if( direct_valid && !s->mode2_dynamic_clock_active ) {
+		s->mode2_dynamic_clock_active = 1;
+		s->mode2_dynamic_clock_ready = 0;
+		s->mode2_dynamic_clock_ts = static_heard_ts;
+		s->mode2_dynamic_clock_wall_ms = wall_now;
+		s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+		DBG serprintf("mode2_dynamic_clock_enter: epoch=%llu heard=%d target=%d delay=%d rate_streak=%d stable_streak=%d fmt=%04X rate=%d forced=%d recode=%d\n",
+			(unsigned long long)s->mode2_heard_epoch, static_heard_ts,
+			observation->direct_heard_ts,
+			observation->direct_delay_ms, observation->direct_rate_streak,
+			observation->direct_stable_streak, observation->format,
+			observation->rate, !validated_profile, ac3_recoding);
+	}
+	if( !s->mode2_dynamic_clock_active ) {
+		return static_heard_ts;
+	}
+
+	int elapsed_ms = wall_now - s->mode2_dynamic_clock_wall_ms;
+	if( elapsed_ms < 0 ) {
+		elapsed_ms = 0;
+	}
+	if( direct_valid ) {
+		dynamic_source = 1;
+		dynamic_delay = observation->direct_delay_ms;
+		// The presentation frontier and its wall epoch are an atomic observation.
+		// Recombining a new submitted frontier with an old occupancy sample makes
+		// compressed write bursts appear as heard progress.
+		dynamic_target = observation->direct_heard_ts +
+			(wall_now - observation->direct_heard_wall_ms);
+		s->mode2_dynamic_clock_last_delay_ms = dynamic_delay;
+		s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+	} else if( s->mode2_dynamic_clock_last_delay_ms >= 0 &&
+		s->mode2_dynamic_clock_grace_until_wall_ms > 0 &&
+		wall_now <= s->mode2_dynamic_clock_grace_until_wall_ms ) {
+		// Only a non-flushing pause gets a grace window while the observer
+		// re-establishes confidence over the preserved AudioTrack queue.
+		dynamic_source = 2;
+		dynamic_delay = s->mode2_dynamic_clock_last_delay_ms;
+		dynamic_target = s->audio_time - dynamic_delay;
+	} else {
+		// Catch the maintained static fallback gradually so loss of evidence cannot
+		// create a visible forward jump. AC3 recode's fallback includes pacer lead.
+		dynamic_source = 3;
+		dynamic_target = static_heard_ts;
+		s->mode2_dynamic_clock_grace_until_wall_ms = 0;
+	}
+
+	if( s->paused || s->paused_internal ) {
+		s->mode2_dynamic_clock_wall_ms = wall_now;
+	} else if( dynamic_target > s->mode2_dynamic_clock_ts ) {
+		int extra_ms = dynamic_source == 3 ? MAX(elapsed_ms / 4, 1) : 25;
+		int maximum_advance = elapsed_ms + extra_ms;
+		int gap = dynamic_target - s->mode2_dynamic_clock_ts;
+		s->mode2_dynamic_clock_ts += MIN(gap, maximum_advance);
+		s->mode2_dynamic_clock_wall_ms = wall_now;
+	} else {
+		// A larger measured delay would move heard time backward. Hold phase until
+		// physical presentation catches up.
+		s->mode2_dynamic_clock_wall_ms = wall_now;
+	}
+	if( direct_valid && !s->mode2_dynamic_clock_ready &&
+		dynamic_target == s->mode2_dynamic_clock_ts ) {
+		s->mode2_dynamic_clock_ready = 1;
+		DBG serprintf("mode2_dynamic_clock_ready: epoch=%llu heard=%d target=%d delay=%d recode=%d\n",
+			(unsigned long long)s->mode2_heard_epoch,
+			s->mode2_dynamic_clock_ts, dynamic_target, dynamic_delay,
+			ac3_recoding);
+	}
+
+	int heard_ts = s->mode2_dynamic_clock_ts;
+	if( dynamic_source == 3 && heard_ts == dynamic_target ) {
+		s->mode2_dynamic_clock_active = 0;
+		s->mode2_dynamic_clock_ready = 0;
+		heard_ts = dynamic_target;
+		DBG serprintf("mode2_dynamic_clock_fallback: epoch=%llu heard=%d static=%d recode=%d\n",
+			(unsigned long long)s->mode2_heard_epoch, heard_ts,
+			dynamic_target, ac3_recoding);
+	}
+	if( wall_now - s->mode2_dynamic_clock_last_log_ms >= 500 ) {
+		s->mode2_dynamic_clock_last_log_ms = wall_now;
+		DBG serprintf("mode2_dynamic_clock: wall=%d source=%d target=%d heard=%d gap=%d delay=%d static=%d audio=%d paused=%d recode=%d\n",
+			wall_now, dynamic_source, dynamic_target, heard_ts,
+			dynamic_target == STREAM_NO_PTS_VALUE ? 0 : dynamic_target - heard_ts,
+			dynamic_delay, static_heard_ts, s->audio_time,
+			s->paused || s->paused_internal, ac3_recoding);
+	}
+	return heard_ts;
+}
+
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
@@ -1408,10 +1535,6 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 		int raw_heard_ts = heard_ts;
 		int reset_interp = 0;
 		int do_log = 0;
-		int do_dynamic_log = 0;
-		int dynamic_source = 0;
-		int dynamic_target = STREAM_NO_PTS_VALUE;
-		int dynamic_delay = -1;
 
 		pthread_mutex_lock( &s->mode2_heard_mutex );
 		if( s->sync_v_time >= 0 || s->mode2_heard_prevideo_phase_active ||
@@ -1541,106 +1664,10 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 			s->mode2_heard_interp_delay_ms = heard_delay;
 			heard_ts = s->mode2_heard_interp_ts;
 
-			// Promote only the format/rate profile validated by avos-57/58 unless
-			// the debug-only broad-profile device test is explicitly enabled.
-			// The timestamp must independently prove both its frame-rate domain and
-			// stable submitted-minus-presented occupancy before it can bound heard
-			// time. Adoption never moves heard time backward: the clock holds until
-			// the measured presentation frontier catches its current phase.
-			STREAM_PRESENTATION_OBSERVATION *observation =
-				&s->presentation_observation;
-			int validated_profile = observation->format == WAVE_FORMAT_AC3 &&
-				observation->rate == 44100;
-			int direct_valid = observation->epoch == s->mode2_heard_epoch &&
-				observation->direct_trusted &&
-				(validated_profile || stream_mode2_dynamic_all) &&
-				observation->direct_delay_ms >= 0 &&
-				observation->direct_heard_ts != STREAM_NO_PTS_VALUE &&
-				wall_now - observation->direct_heard_wall_ms >= 0 &&
-				wall_now - observation->direct_heard_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
-				wall_now - observation->observed_wall_ms >= 0 &&
-				wall_now - observation->observed_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
-				wall_now - observation->last_advance_wall_ms >= 0 &&
-				wall_now - observation->last_advance_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS;
-			if( direct_valid && !s->mode2_dynamic_clock_active ) {
-				s->mode2_dynamic_clock_active = 1;
-				s->mode2_dynamic_clock_ready = 0;
-				s->mode2_dynamic_clock_ts = heard_ts;
-				s->mode2_dynamic_clock_wall_ms = wall_now;
-				s->mode2_dynamic_clock_grace_until_wall_ms = 0;
-				DBG serprintf("mode2_dynamic_clock_enter: epoch=%llu heard=%d target=%d delay=%d rate_streak=%d stable_streak=%d fmt=%04X rate=%d forced=%d\n",
-					(unsigned long long)s->mode2_heard_epoch, heard_ts,
-					observation->direct_heard_ts,
-					observation->direct_delay_ms, observation->direct_rate_streak,
-					observation->direct_stable_streak, observation->format,
-					observation->rate, !validated_profile);
-			}
-			if( s->mode2_dynamic_clock_active ) {
-				int elapsed_ms = wall_now - s->mode2_dynamic_clock_wall_ms;
-				if( elapsed_ms < 0 ) {
-					elapsed_ms = 0;
-				}
-				if( direct_valid ) {
-					dynamic_source = 1;
-					dynamic_delay = observation->direct_delay_ms;
-					// The presentation frontier and its wall epoch are an atomic
-					// observation. Recombining a new submitted frontier with an old
-					// occupancy sample makes compressed write bursts appear as heard
-					// progress and produces a sawtooth renderer clock.
-					dynamic_target = observation->direct_heard_ts +
-						(wall_now - observation->direct_heard_wall_ms);
-					s->mode2_dynamic_clock_last_delay_ms = dynamic_delay;
-					s->mode2_dynamic_clock_grace_until_wall_ms = 0;
-				} else if( s->mode2_dynamic_clock_last_delay_ms >= 0 &&
-					s->mode2_dynamic_clock_grace_until_wall_ms > 0 &&
-					wall_now <= s->mode2_dynamic_clock_grace_until_wall_ms ) {
-					// Only a non-flushing pause gets a grace window while the observer
-					// re-establishes confidence over the preserved AudioTrack queue.
-					dynamic_source = 2;
-					dynamic_delay = s->mode2_dynamic_clock_last_delay_ms;
-					dynamic_target = s->audio_time - dynamic_delay;
-				} else {
-					// Static fallback remains live in parallel. Catch it with a 25%
-					// slew so loss of evidence cannot create a visible forward jump.
-					dynamic_source = 3;
-					dynamic_target = heard_ts;
-					s->mode2_dynamic_clock_grace_until_wall_ms = 0;
-				}
-
-				if( s->paused || s->paused_internal ) {
-					s->mode2_dynamic_clock_wall_ms = wall_now;
-				} else if( dynamic_target > s->mode2_dynamic_clock_ts ) {
-					int extra_ms = dynamic_source == 3 ? MAX(elapsed_ms / 4, 1) : 25;
-					int maximum_advance = elapsed_ms + extra_ms;
-					int gap = dynamic_target - s->mode2_dynamic_clock_ts;
-					s->mode2_dynamic_clock_ts += MIN(gap, maximum_advance);
-					s->mode2_dynamic_clock_wall_ms = wall_now;
-				} else {
-					// A larger measured delay would move heard time backward. Hold the
-					// current phase and let physical presentation catch up instead.
-					s->mode2_dynamic_clock_wall_ms = wall_now;
-				}
-				if( direct_valid && !s->mode2_dynamic_clock_ready &&
-					dynamic_target == s->mode2_dynamic_clock_ts ) {
-					s->mode2_dynamic_clock_ready = 1;
-					DBG serprintf("mode2_dynamic_clock_ready: epoch=%llu heard=%d target=%d delay=%d\n",
-						(unsigned long long)s->mode2_heard_epoch,
-						s->mode2_dynamic_clock_ts, dynamic_target, dynamic_delay);
-				}
-
-				heard_ts = s->mode2_dynamic_clock_ts;
-				if( dynamic_source == 3 && heard_ts == dynamic_target ) {
-					s->mode2_dynamic_clock_active = 0;
-					s->mode2_dynamic_clock_ready = 0;
-					heard_ts = dynamic_target;
-					DBG serprintf("mode2_dynamic_clock_fallback: epoch=%llu heard=%d static=%d\n",
-						(unsigned long long)s->mode2_heard_epoch, heard_ts, dynamic_target);
-				}
-				if( wall_now - s->mode2_dynamic_clock_last_log_ms >= 500 ) {
-					s->mode2_dynamic_clock_last_log_ms = wall_now;
-					do_dynamic_log = 1;
-				}
-			}
+			// The direct-mode2 interpolator supplies the static fallback phase. A
+			// trusted timestamp may then replace it with measured presentation.
+			heard_ts = _stream_apply_mode2_dynamic_clock_locked( s, wall_now,
+				heard_ts, 0 );
 			// Audio can publish put_time before the video thread establishes its new
 			// sync sample. Keep using the explicit pause/seek phase during that window;
 			// once video is live, the ordinary sync_v_time condition owns continuity.
@@ -1662,13 +1689,22 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 				s->audio_time, heard_delay, reset_interp,
 				s->paused || s->paused_internal);
 		}
-		if( do_dynamic_log ) {
-			DBG serprintf("mode2_dynamic_clock: wall=%d source=%d target=%d heard=%d gap=%d delay=%d static=%d audio=%d paused=%d\n",
-				wall_now, dynamic_source, dynamic_target, heard_ts,
-				dynamic_target == STREAM_NO_PTS_VALUE ? 0 : dynamic_target - heard_ts,
-				dynamic_delay, raw_heard_ts, s->audio_time,
-				s->paused || s->paused_internal);
+	}
+
+	// AC3 recode retains its dedicated wall-clock writer pacer, but when that
+	// encoded output resolves to raw Android Mode 2, trusted AudioTimestamp
+	// occupancy is authoritative for presentation. The measured queue already
+	// contains pacer write-ahead; the static fallback above keeps adding pacer
+	// lead only while presentation evidence is unavailable.
+	if( passthrough_mode >= 2 && ac3_recoding &&
+		(s->sync_v_time >= 0 || s->mode2_heard_prevideo_phase_active) ) {
+		pthread_mutex_lock( &s->mode2_heard_mutex );
+		heard_ts = _stream_apply_mode2_dynamic_clock_locked( s, wall_now,
+			heard_ts, 1 );
+		if( s->sync_v_time >= 0 ) {
+			s->mode2_heard_prevideo_phase_active = 0;
 		}
+		pthread_mutex_unlock( &s->mode2_heard_mutex );
 	}
 
 	// 3. STARTUP CLAMP (Non-Mode 2 only)

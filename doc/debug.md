@@ -218,8 +218,10 @@ avsh mode2_dynamic_all 1
 
 This removes only the codec/rate allowlist. Timestamp source, advancement, rate,
 freshness, stability, epoch, submitted-frontier, underrun, and physical-delay
-checks remain mandatory. It does not enable the dynamic clock for Mode 1 IEC,
-PCM decode, or AC3 recode. Restore the route-gated production policy with:
+checks remain mandatory. AC3 recoding resolved to Mode 2 is enabled independently
+of this switch because its complete encoder-frame ledger uses the same trusted
+timestamp mapping. Mode 1 IEC, Mode-1 AC3 recoding, and PCM decode remain excluded.
+Restore the route-gated direct-passthrough policy with:
 
 ```sh
 avsh mode2_dynamic_all 0

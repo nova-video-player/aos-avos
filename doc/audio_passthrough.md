@@ -178,6 +178,13 @@ retained as a startup fallback. There is no production ceiling: low-bitrate stre
 legitimately represent more than one second of media in the configured compressed
 buffer, and truncating that capacity caused a persistent phase error after track changes.
 
+When AC3 recoding resolves to mode 2, fresh and stable direct `AudioTimestamp`
+evidence may replace this static fallback with submitted-minus-presented occupancy.
+The occupancy already includes the AC3 bursts admitted by the recode pacer, so pacer
+lead is not subtracted again from the dynamic heard timestamp. The pacer remains the
+write-ahead controller. Mode-1 AC3 recoding keeps static timing and records occupancy
+only as diagnostics.
+
 `audio_spdif.c` mode-2 handling for recoding:
 
 - In mode 2 with parser output: send raw codec frames (`ENCODING_AC3` path) and keep timing via `fakeSize`
@@ -363,7 +370,7 @@ to an audible value.
 - **Mode 2 heard-time baseline**: mode 2 uses submitted compressed packet duration to advance `audio_time`, then subtracts the normalized compressed-buffer latency to form the raw heard frontier. The latency estimate freezes after a 250ms paired byte/sample evidence window. Existing codec-aware app/pipeline selection remains only as the startup fallback.
 - **Mode 2 continuous clock**: direct mode 2 wall-clock-interpolates between accepted compressed batches, bounded by the raw frontier plus encoded capacity. This is not the former synthetic fill-window experiment and does not measure actual AudioTrack occupancy.
 - **Latency terminology**: geometry/app latency is the PCM-style local AudioTrack buffer calculation and is not a reliable duration for compressed bytes. Raw pipeline latency is the platform maximum of AudioTrack-reported track latency and output/system latency plus app geometry. Normalized mode-2 latency replaces the platform's nominal compressed-buffer component with the duration derived from accepted compressed bytes and logical samples.
-- **Mode 2 dynamic evidence**: the synchronous playhead/timestamp audit is diagnostic-only. It does not change selected latency, interpolator phase, or scheduler anchors.
+- **Mode 2 dynamic evidence**: the asynchronous observer can promote trusted direct `AudioTimestamp` evidence for direct mode 2 and AC3 recoding resolved to mode 2. Mode 1, playback-head, byte, and frame-size interpretations remain diagnostic-only.
 - **Physical Route Latency Limit**: AudioTrack latency APIs stop at the Android output boundary. Unreported downstream latency added by a soundbar or AVR after HDMI/ARC still requires a route/user offset outside the scheduler model.
 
 ## Debug Tips

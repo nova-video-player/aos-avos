@@ -26,6 +26,33 @@ int sub_engine_feed(SUB_ENGINE *eng, const uint8_t *data, int size, int64_t pts_
 void sub_engine_flush(SUB_ENGINE *eng);
 void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h);
 
+// --- TRACK-GENERATION TOKEN ---
+// open_track()/close_track() each bump an internal counter. Meant for feed
+// sources that run asynchronously and across multiple calls relative to the
+// currently-open track -- concretely, stream_sub_ext.c's SRT/VTT parse-worker
+// pool, which streams a file's cues (or replays a cached list) cue-by-cue on
+// a background thread, checkpointing only periodically. Between checkpoints,
+// the user can switch tracks: open_track() swaps in a new backend, but the
+// old worker -- unaware -- can keep calling sub_engine_feed()/flush(), which
+// would silently land in the NEW backend (feed) or wipe out cues the NEW
+// worker already fed it (flush), since both simply operate on "whatever
+// backend is currently active" with no notion of which track a given call
+// was FOR.
+//
+// Usage: capture the token once via sub_engine_get_track_generation() right
+// before starting a feed pass, then pass that same fixed value to every
+// _gen() call made during that pass. Once open_track()/close_track() moves
+// the engine on to a different track, the token goes stale and every _gen()
+// call using it becomes a silent no-op instead of touching the new backend.
+//
+// Plain sub_engine_feed()/flush() above are unaffected and remain the right
+// choice for synchronous, single-threaded callers (e.g. internal/embedded
+// tracks fed directly off stream_sub_dec_thread) that can't overlap a track
+// switch this way in the first place.
+uint64_t sub_engine_get_track_generation(SUB_ENGINE *eng);
+int  sub_engine_feed_gen(SUB_ENGINE *eng, uint64_t token, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms);
+void sub_engine_flush_gen(SUB_ENGINE *eng, uint64_t token);
+
 typedef int64_t (*sub_engine_clock_fn)(void *ctx);
 void sub_engine_start(SUB_ENGINE *eng, sub_engine_clock_fn clock_fn, void *clock_ctx);
 void sub_engine_stop(SUB_ENGINE *eng);

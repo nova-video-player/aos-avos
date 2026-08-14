@@ -5,7 +5,12 @@
 
 typedef struct SUB_RENDERER SUB_RENDERER;
 
-SUB_RENDERER *sub_render_gl_create(void);
+// `engine` is stored into r->engine BEFORE the render thread is created, so
+// the thread's very first loop iteration already sees a valid pointer --
+// there is no window where an unlocked r->engine read on the render thread
+// can race a separate, later publication call. There is no setter for
+// r->engine after creation; pass the real engine pointer here up front.
+SUB_RENDERER *sub_render_gl_create(void *engine);
 void          sub_render_gl_destroy(SUB_RENDERER *r);
 
 void sub_render_gl_attach_surface(SUB_RENDERER *r, ANativeWindow *window);

@@ -28,14 +28,6 @@ struct SUB_RENDERER {
     void            *engine;
 };
 
-void sub_render_gl_set_engine(SUB_RENDERER *r, void *engine) {
-    if (r) {
-        pthread_mutex_lock(&r->lock);
-        r->engine = engine;
-        pthread_mutex_unlock(&r->lock);
-    }
-}
-
 static GLuint compile_shader(GLenum type, const char *source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, NULL);
@@ -344,12 +336,18 @@ static void* egl_render_thread(void* arg) {
     return NULL;
 }
 
-SUB_RENDERER *sub_render_gl_create(void) {
+SUB_RENDERER *sub_render_gl_create(void *engine) {
     SUB_RENDERER *r = calloc(1, sizeof(SUB_RENDERER));
     pthread_mutex_init(&r->lock, NULL);
     r->running    = 1;
     r->attrib_pos = -1;
     r->attrib_tex = -1;
+    // Assign BEFORE pthread_create(): the render thread's loop reads
+    // r->engine without the lock (it's only ever unlocked-read there, and
+    // this is the only write, so this ordering is what actually makes that
+    // safe). Passing it in up front means the thread's first iteration
+    // already observes the real pointer instead of racing a later write.
+    r->engine = engine;
     pthread_create(&r->thread, NULL, egl_render_thread, r);
     return r;
 }

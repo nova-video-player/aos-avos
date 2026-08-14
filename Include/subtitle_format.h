@@ -144,6 +144,18 @@ typedef struct uni_sub_t
 	pthread_mutex_t parse_mutex;	// guards parse_state + every parse-result field listed in the enum comment above
 	int   clean_tags;	// saved from subtitle_get_converted() for the deferred format->parse() call in the worker
 	int   lang_index;	// title_langs[i] index for multi-language files (SMI/IDX), or -1 for single-language
+
+	// Opaque owner back-pointer, set once by stream_sub_ext.c right after this
+	// uni_sub is produced by subtitle_get_converted()/subtitle_append_new_converted()
+	// (before it's ever handed to subtitle_ensure_parsed_async()). subtitle_formats.c
+	// itself never reads or writes this field -- it exists purely so the
+	// registered subtitle_parse_enqueue_fn/subtitle_parse_priority_fn callbacks
+	// (which have no STREAM* parameter, by design, so this file stays
+	// decoupled from STREAM/SUB_PRIV) can recover the ACTUAL stream this job
+	// belongs to instead of guessing via a process-wide "most recently
+	// active stream" pointer -- the guess is wrong the moment two STREAMs
+	// are ever alive at once. NULL until stream_sub_ext.c stamps it.
+	void *owner_ctx;
 } uni_sub;
 
 typedef struct converted_subs_t

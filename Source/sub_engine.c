@@ -12,7 +12,6 @@
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_srt_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_gfx_create(void);
-extern void sub_render_gl_set_engine(SUB_RENDERER *r, void *engine);
 
 /* Canonical SUB_FORMAT_* (av.h, 12 values, codec/container identity) ->
  * SUB_FMT_ID (sub_types.h, 3 values, engine backend selector) mapping.
@@ -63,6 +62,8 @@ struct SUB_ENGINE {
     pthread_mutex_t lock;
     pthread_cond_t  wake_cond;
     uint64_t wakeup_generation; // <--- NEW: Predicate counter
+    uint64_t track_generation;  // bumped by open_track()/close_track(); see
+                                 // sub_engine_get_track_generation() in sub_engine.h
 };
 
 // Internal helper for safe wakeups
@@ -78,8 +79,12 @@ SUB_ENGINE *sub_engine_create(void) {
     pthread_mutex_init(&eng->lock, NULL);
     pthread_cond_init(&eng->wake_cond, NULL);
 
-    eng->renderer = sub_render_gl_create();
-    sub_render_gl_set_engine(eng->renderer, eng);
+    // Pass eng straight into create() so r->engine is set before the render
+    // thread is spawned -- see sub_render_gl_create()'s doc comment. The old
+    // create()-then-set_engine() sequence left a window where the freshly
+    // created thread's first loop iterations could read r->engine as NULL
+    // (or race the plain-pointer write) before this second call landed.
+    eng->renderer = sub_render_gl_create(eng);
     eng->style    = sub_style_create();
     return eng;
 }
@@ -275,6 +280,8 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *old_backend = eng->active_backend;
     eng->active_backend = backend;
+    eng->track_generation++; // invalidates every in-flight sub_engine_*_gen()
+                              // token captured against the track we're replacing
     pthread_mutex_unlock(&eng->lock);
 
     if (old_backend) {
@@ -302,6 +309,7 @@ void sub_engine_close_track(SUB_ENGINE *eng) {
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
     eng->active_backend = NULL;
+    eng->track_generation++; // same reasoning as open_track() above
     if (backend) {
         backend->close(backend);
         free(backend);
@@ -333,6 +341,48 @@ void sub_engine_flush(SUB_ENGINE *eng) {
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
     if (backend && backend->flush) backend->flush(backend);
     broadcast_wake_locked(eng); // <--- WAKE THE GL THREAD
+    pthread_mutex_unlock(&eng->lock);
+}
+
+uint64_t sub_engine_get_track_generation(SUB_ENGINE *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->lock);
+    uint64_t gen = eng->track_generation;
+    pthread_mutex_unlock(&eng->lock);
+    return gen;
+}
+
+int sub_engine_feed_gen(SUB_ENGINE *eng, uint64_t token, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->lock);
+    if (token != eng->track_generation) {
+        // This call belongs to a track that isn't the one currently open on
+        // this engine anymore (open_track()/close_track() moved on since the
+        // caller captured `token`) -- drop it silently instead of routing a
+        // stale worker's cues into whatever track has replaced it.
+        pthread_mutex_unlock(&eng->lock);
+        return 0;
+    }
+    SUB_FORMAT_BACKEND *backend = eng->active_backend;
+    int ret = 0;
+    if (backend && backend->feed) {
+        ret = backend->feed(backend, data, size, pts_ms, duration_ms);
+    }
+    broadcast_wake_locked(eng);
+    pthread_mutex_unlock(&eng->lock);
+    return ret;
+}
+
+void sub_engine_flush_gen(SUB_ENGINE *eng, uint64_t token) {
+    if (!eng) return;
+    pthread_mutex_lock(&eng->lock);
+    if (token != eng->track_generation) {
+        pthread_mutex_unlock(&eng->lock);
+        return;
+    }
+    SUB_FORMAT_BACKEND *backend = eng->active_backend;
+    if (backend && backend->flush) backend->flush(backend);
+    broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
 }
 
@@ -391,10 +441,23 @@ void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out) {
 }
 
 // --- NEW: Safe Polling Implementation ---
+//
+// Deliberately does NOT bail out just because eng->is_paused is set.
+// sub_engine_wait_event() already stops TIMED polling while paused (it
+// hardcodes timeout_ms = -1 instead of consulting get_timeout_ms(), so the
+// 16ms libass animation tick and PGS/VobSub's normal wake schedule never
+// fire while paused) -- the ONLY way this thread wakes while paused is an
+// explicit broadcast_wake_locked() call: a style/resize setter, a
+// pause/unpause toggle, or a feed/flush. Every one of those is a genuine
+// invalidation that should still produce one fresh frame at the current
+// (frozen, since clock_fn is expected to return the same value while
+// paused) pts -- e.g. so a font-size change while paused is visible
+// immediately instead of only appearing after the user unpauses. Bailing
+// out here unconditionally, as before, silently dropped that render.
 SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
     if (!eng) return NULL;
     pthread_mutex_lock(&eng->lock);
-    if (!eng->active_backend || !eng->clock_fn || eng->is_paused) {
+    if (!eng->active_backend || !eng->clock_fn) {
         pthread_mutex_unlock(&eng->lock);
         return NULL;
     }

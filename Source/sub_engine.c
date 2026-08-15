@@ -12,6 +12,7 @@
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_srt_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_gfx_create(void);
+extern void sub_render_gl_set_engine(SUB_RENDERER *r, void *engine);
 
 struct SUB_ENGINE {
     SUB_RENDERER         *renderer;
@@ -27,6 +28,7 @@ struct SUB_ENGINE {
 SUB_ENGINE *sub_engine_create(void) {
     SUB_ENGINE *eng = calloc(1, sizeof(SUB_ENGINE));
     eng->renderer = sub_render_gl_create();
+    sub_render_gl_set_engine(eng->renderer, eng);
     eng->style    = sub_style_create();
     pthread_mutex_init(&eng->lock, NULL);
     return eng;
@@ -51,7 +53,7 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
 }
 
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w, int video_h, const uint8_t *codec_private, int codec_private_size) {
-    sub_engine_close_track(eng);
+    if (!eng) return -1;
 
     SUB_FORMAT_BACKEND *backend;
     if (format_id == SUB_FMT_SSA) {
@@ -77,43 +79,79 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FORMAT_ID format_id, int video_w,
         return rc;
     }
 
+    // Atomically swap the new backend in for whatever was active, in a single
+    // lock hold from "read what's currently active" to "install the new one".
+    // This used to be sub_engine_close_track(eng) called up front, followed
+    // *later* (after the possibly-slow backend->open() above) by a separate
+    // lock/assign. That gap let two threads calling open_track() close
+    // together race: e.g. a just-closing video's subtitle-decode thread
+    // finishing its last loop iteration right as the next video's
+    // subtitle-decode thread opens its own first track. Whichever thread's
+    // create+open finished last would stomp active_backend without closing
+    // what the other thread had just installed -- leaking a backend and
+    // silently leaving the WRONG one (e.g. the previous video's) active, with
+    // nothing left to trigger a correction. Doing the swap itself as one
+    // lock-protected step closes that gap, the same way close_track() does.
     pthread_mutex_lock(&eng->lock);
+    SUB_FORMAT_BACKEND *old_backend = eng->active_backend;
     eng->active_backend = backend;
     pthread_mutex_unlock(&eng->lock);
+
+    if (old_backend) {
+        old_backend->close(old_backend);
+        free(old_backend);
+    }
+
+    // Drop any cached frame from the previous track
+    sub_render_gl_clear(eng->renderer);
 
     return 0;
 }
 
 void sub_engine_close_track(SUB_ENGINE *eng) {
+    if (!eng) return;
+    // Close + free the backend while STILL holding eng->lock. Every other
+    // function that touches active_backend (feed/flush/feed_bitmap/poll_frame,
+    // below) now also holds this same lock for the entire duration of its call
+    // into the backend, so a backend can never be freed here while another
+    // thread — in practice the EGL render thread, continuously polling — is
+    // still mid-call into that exact pointer. That was a real use-after-free
+    // race before: this function used to copy the pointer, unlock, and only
+    // then close()+free() it, while poll_frame()/feed()/etc. could already be
+    // running on that same backend on another thread.
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
     eng->active_backend = NULL;
-    pthread_mutex_unlock(&eng->lock);
-
     if (backend) {
         backend->close(backend);
         free(backend);
     }
+    pthread_mutex_unlock(&eng->lock);
+
     // Command the GL thread to dump memory and clear the screen safely
     sub_render_gl_clear(eng->renderer);
 }
 
 int sub_engine_feed(SUB_ENGINE *eng, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms) {
+    if (!eng) return 0;
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
-    pthread_mutex_unlock(&eng->lock);
-
+    int ret = 0;
     if (backend && backend->feed) {
-        return backend->feed(backend, data, size, pts_ms, duration_ms);
+        // Held across the call so close_track() can't free this backend
+        // out from under us mid-feed (see sub_engine_close_track).
+        ret = backend->feed(backend, data, size, pts_ms, duration_ms);
     }
-    return 0;
+    pthread_mutex_unlock(&eng->lock);
+    return ret;
 }
 
 void sub_engine_flush(SUB_ENGINE *eng) {
+    if (!eng) return;
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
-    pthread_mutex_unlock(&eng->lock);
     if (backend && backend->flush) backend->flush(backend);
+    pthread_mutex_unlock(&eng->lock);
 }
 
 void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h) {
@@ -169,10 +207,14 @@ SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
         return NULL;
     }
     int64_t pts = eng->clock_fn(eng->clock_ctx);
-    SUB_FORMAT_BACKEND *be = eng->active_backend;
+    // render_at() now runs with eng->lock still held (see sub_engine_close_track)
+    // instead of releasing the lock first and calling through a copied pointer —
+    // this was the main use-after-free window: close_track() on another thread
+    // (e.g. the next video opening) could free the backend in between.
+    SUB_FRAME *frame = eng->active_backend->render_at(eng->active_backend, pts);
     pthread_mutex_unlock(&eng->lock);
 
-    return be->render_at(be, pts);
+    return frame;
 }
 
 // A global free that doesn't rely on backends, preventing UAF during teardowns
@@ -195,12 +237,12 @@ int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int heig
 
     pthread_mutex_lock(&eng->lock);
     SUB_FORMAT_BACKEND *backend = eng->active_backend;
-    pthread_mutex_unlock(&eng->lock);
-
+    int ret = -1;
     if (backend && backend->feed_bitmap) {
-        return backend->feed_bitmap(backend, pixels, width, height, pitch, colorspace, x_offset, y_offset, pts_ms, duration_ms);
+        ret = backend->feed_bitmap(backend, pixels, width, height, pitch, colorspace, x_offset, y_offset, pts_ms, duration_ms);
     }
-    return -1;
+    pthread_mutex_unlock(&eng->lock);
+    return ret;
 }
 
 void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode) {

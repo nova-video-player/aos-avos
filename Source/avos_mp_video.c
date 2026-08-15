@@ -365,8 +365,11 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 
 	stream_set_volume(video->s, 100, 100);
 	// NEW: Start the subtitle engine clock
-	if (g_sub_engine) {
-		sub_engine_start(g_sub_engine, engine_clock_cb, video->s); // Pass video->s instead of video
+	video->s->sub_engine = (void*)g_sub_engine;
+
+	// Use the isolated instance
+	if (video->s->sub_engine) {
+		sub_engine_start((SUB_ENGINE*)video->s->sub_engine, engine_clock_cb, video->s);
 	}
 
 	return AVOS_ERR_OK;
@@ -383,13 +386,25 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	MPLOG();
 
-	// NEW: Stop the subtitle engine
-	if (g_sub_engine) sub_engine_stop(g_sub_engine);
+	// Stop the subtitle engine clock FIRST: its clock_ctx is the raw STREAM*
+	// (video->s) that stream_delete() frees below, so the render thread must
+	// stop dereferencing it (via engine_clock_cb) before that happens.
+	if (video->s && video->s->sub_engine) sub_engine_stop((SUB_ENGINE*)video->s->sub_engine);
 	if (video->s) {
 		AV_set_state(AV_STOPPED, 0, 0, NULL, NULL);
 		stream_stop(video->s);
 		stream_delete(&video->s);
 	}
+	// Close the subtitle track only AFTER the stream -- and its background
+	// subtitle-decode thread (stream_sub_dec_thread in stream_subtitle.c) --
+	// is fully torn down. Closing it earlier (right after sub_engine_stop, as
+	// the first pass at this fix did) left a window where that thread could
+	// still be mid-loop and call back into sub_engine_open_track()/feed()
+	// with this video's own subtitle data, re-populating g_sub_engine's
+	// active track right after we'd just cleared it -- so the next video
+	// could still inherit stale state. Waiting until the stream (and its
+	// thread) is actually gone removes that window.
+	if (video->s && video->s->sub_engine) sub_engine_close_track((SUB_ENGINE*)video->s->sub_engine);
 
 	return AVOS_ERR_OK;
 }
@@ -405,7 +420,7 @@ void stream_un_pause_from_jni( STREAM *s, int was_paused );
 int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	// NEW: Unpause the subtitle engine
-	if (g_sub_engine) sub_engine_set_paused(g_sub_engine, 0);
+	if (video->s && video->s->sub_engine) sub_engine_set_paused((SUB_ENGINE*)video->s->sub_engine, 0);
 	if (stream_is_paused(video->s))
 		stream_un_pause_from_jni(video->s, 0);
 	else if (!is_stream_pauseable(mp, video))
@@ -416,7 +431,7 @@ int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video)
 int avos_mp_video_pause(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	// NEW: Pause the subtitle engine
-	if (g_sub_engine) sub_engine_set_paused(g_sub_engine, 1);
+	if (video->s && video->s->sub_engine) sub_engine_set_paused((SUB_ENGINE*)video->s->sub_engine, 1);
 	if (is_stream_pauseable(mp, video))
 		stream_pause(video->s);
 	else
@@ -504,7 +519,7 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 		video->send_sub = 0;
 		*ret = 1;
 		// Clear the screen if track is disabled
-		if (g_sub_engine) sub_engine_close_track(g_sub_engine);
+		if (video->s && video->s->sub_engine) sub_engine_close_track((SUB_ENGINE*)video->s->sub_engine);
 	} else {
 		video->send_sub = 1;
 		*ret = stream_set_subtitle_stream(video->s, track) == 0 ? 1 : 0;

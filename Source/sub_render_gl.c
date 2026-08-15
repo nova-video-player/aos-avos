@@ -12,8 +12,6 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-extern SUB_ENGINE *g_sub_engine;
-
 struct SUB_RENDERER {
     ANativeWindow  *window;
     pthread_t       thread;
@@ -27,7 +25,16 @@ struct SUB_RENDERER {
     GLuint           gl_texture;
     GLint            attrib_pos;
     GLint            attrib_tex;
+    void            *engine;
 };
+
+void sub_render_gl_set_engine(SUB_RENDERER *r, void *engine) {
+    if (r) {
+        pthread_mutex_lock(&r->lock);
+        r->engine = engine;
+        pthread_mutex_unlock(&r->lock);
+    }
+}
 
 static GLuint compile_shader(GLenum type, const char *source) {
     GLuint shader = glCreateShader(type);
@@ -151,8 +158,8 @@ static void* egl_render_thread(void* arg) {
         // Even if the 3D Mode deactivated the GPU Surface, we MUST continue
         // to poll the clock so the memory frames update for the CPU Blender!
         SUB_FRAME *new_frame = NULL;
-        if (g_sub_engine) {
-            new_frame = sub_engine_poll_frame(g_sub_engine);
+        if (r->engine) {
+            new_frame = sub_engine_poll_frame((SUB_ENGINE*)r->engine);
         }
 
         pthread_mutex_lock(&r->lock);

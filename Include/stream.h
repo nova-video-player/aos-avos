@@ -990,6 +990,7 @@ typedef struct STREAM {
 	int		fps_start;
 	int		fps_count;
 	void		*surface_handle;
+	void *sub_engine;
 
 } STREAM;
 #define STREAM_POS_MAX 1000

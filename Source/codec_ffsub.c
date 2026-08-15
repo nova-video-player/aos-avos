@@ -91,8 +91,9 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 
 	// --- NATIVE OPENGL UPGRADE ---
 	// Safely initialize the hardware GFX track for PGS and DVD subtitles
-	extern SUB_ENGINE *g_sub_engine;
-	if (g_sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
+	//extern SUB_ENGINE *g_sub_engine;
+	STREAM *stream = (STREAM *)ctx;
+	if (stream && stream->sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
 		int w = 1920;
 		int h = 1080;
 		STREAM *stream = (STREAM *)ctx;
@@ -100,7 +101,7 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 			if (stream->video->width > 0) w = stream->video->width;
 			if (stream->video->height > 0) h = stream->video->height;
 		}
-		sub_engine_open_track(g_sub_engine, SUB_FMT_GFX, w, h, NULL, 0);
+		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, SUB_FMT_GFX, w, h, NULL, 0);
 	}
 
 	return 0;

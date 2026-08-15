@@ -22,7 +22,7 @@
 #include "atime.h"
 #include "util.h"
 #include "sub_engine.h"
-extern SUB_ENGINE *g_sub_engine;
+// extern SUB_ENGINE *g_sub_engine;
 // NOTE: the subtitle engine clock is registered once in avos_mp_video_open()
 // (engine_clock_cb -> stream_get_current_time) and lives for the whole stream
 // session. This file no longer owns or re-registers a clock -- see the removed
@@ -149,9 +149,9 @@ static void _get_next_int_sub( STREAM *s, int time )
 
 			if (!s->subtitle->gfx) {
 				// IT IS TEXT: Initialize the OpenGL C-Engine!
-				if (g_sub_engine) {
+				if (s->sub_engine) {
 					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
-					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
+					sub_engine_open_track((SUB_ENGINE*)s->sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
 					// NOTE: do NOT call sub_engine_start() here. avos_mp_video_open() already
 					// registered the engine clock once (engine_clock_cb -> stream_get_current_time),
 					// and that registration stays valid for the stream's entire lifetime, including
@@ -200,7 +200,7 @@ serprintf("cannot allocate subtitle frame!\r\n");
 
 				if (!s->subtitle->gfx) {
 					// FAST LANE: Pure Text straight from the demuxer to OpenGL!
-					if (g_sub_engine) {
+					if (s->sub_engine) {
 						int duration = 0;
 						uint8_t *payload = s->sub_buffer.data;
 						int payload_size = s->cdata_sub.size;
@@ -210,7 +210,7 @@ serprintf("cannot allocate subtitle frame!\r\n");
 							payload += sizeof(int);
 							payload_size -= sizeof(int);
 						}
-						sub_engine_feed(g_sub_engine, payload, payload_size, s->cdata_sub.time, duration);
+						sub_engine_feed((SUB_ENGINE*)s->sub_engine, payload, payload_size, s->cdata_sub.time, duration);
 					}
 					s->cdata_sub.valid = 0; // Packet consumed!
 				} else {
@@ -237,9 +237,9 @@ static void _get_next_ext_sub( STREAM *s, int time )
 		if( !s->sub_dec && !s->subtitle_frame ) {
 			if (!s->subtitle->gfx) {
 				// IT IS EXTERNAL TEXT: Initialize OpenGL C-Engine!
-				if (g_sub_engine) {
+				if (s->sub_engine) {
 					int engine_fmt = (s->subtitle->format == SUB_FORMAT_SSA) ? SUB_FMT_SSA : SUB_FMT_SRT;
-					sub_engine_open_track(g_sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
+					sub_engine_open_track((SUB_ENGINE*)s->sub_engine, engine_fmt, s->video ? s->video->width : 0, s->video ? s->video->height : 0, s->subtitle->extraData2, s->subtitle->extraDataSize2);
 					// NOTE: see matching comment in _get_next_int_sub() above -- the engine
 					// clock is registered once in avos_mp_video_open() and must not be
 					// re-registered here.
@@ -291,9 +291,9 @@ static void _get_next_ext_sub( STREAM *s, int time )
 			if( stream_sub_ext_get_subtitle_data( s, &f, time ) ) return;
 
 			if( f && f->data[0] ) {
-				if (g_sub_engine) {
+				if (s->sub_engine) {
 					int text_len = strlen((char*)f->data[0]);
-					sub_engine_feed(g_sub_engine, f->data[0], text_len, f->time, f->duration);
+					sub_engine_feed((SUB_ENGINE*)s->sub_engine, f->data[0], text_len, f->time, f->duration);
 				}
 			}
 		}

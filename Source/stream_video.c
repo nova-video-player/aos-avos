@@ -737,6 +737,7 @@ DBGS serprintf("stream_open_video_dec\r\n");
 	}
 	while( prio ) {
 		int try_prio = prio;
+		int decoder_owned_sink = 0;
 		// reset previous error states
 		s->video_error           = VE_NO_ERROR;
 		s->video_error_qualifier = VEQ_NONE;
@@ -789,6 +790,7 @@ DBGS stream_show_rc( &s->video_rc );
 		if( !s->video_sink ) {
 			if (s->video_dec->get_sink) {
 				s->video_sink = s->video_dec->get_sink(s->video_dec);
+				decoder_owned_sink = s->video_sink != NULL;
 			} else {
 				s->video_sink = stream_get_default_video_sink(s);
 			}
@@ -881,6 +883,17 @@ next:
 			}
 			s->video_dec->destroy( s->video_dec );
 			s->video_dec = NULL;
+		}
+		// A sink returned by get_sink() may reference decoder-private state
+		// (sfdec/sfdec2 do). Match the normal stop order by deleting it after
+		// decoder close, then clear it before trying another decoder.
+		if (decoder_owned_sink && s->video_sink) {
+			if (s->video_sink->delete) {
+				s->video_sink->delete(s->video_sink);
+			}
+			s->video_sink = NULL;
+			s->use_sink_frames = 0;
+			s->vtime_post_sink = 0;
 		}
 	} 
 ErrorExit:

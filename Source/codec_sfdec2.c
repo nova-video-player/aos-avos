@@ -2065,6 +2065,12 @@ void sfdec2_android_sync_on_pause( STREAM *s, int paused )
 		return;
 	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
 		return;
+	// The sink's private state is owned by the decoder. An open-error cleanup
+	// must not let a stale sink reach this hook after that decoder was destroyed.
+	if( !s->video_dec || !s->video_dec->is_open ||
+	    !s->video_dec->name || strcmp( s->video_dec->name, "sfdec2" ) != 0 ||
+	    s->video_dec->priv != s->video_sink->priv )
+		return;
 
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );

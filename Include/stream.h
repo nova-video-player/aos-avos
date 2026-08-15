@@ -839,6 +839,18 @@ typedef struct STREAM {
 	// per-frame block in _get_next_int_sub(), so a flush there is naturally refilled by the
 	// next packet with no separate re-feed step required.
 	int		subtitle_ext_needs_refeed;
+
+	// -------------------------------------------------------------------
+	// External-subtitle lifetime guard (for _owner_acquire() / _release()).
+	// Stored in STREAM, not SUB_PRIV, to protect the subtitle_priv pointer
+	// itself. If embedded in SUB_PRIV, a race condition during teardown
+	// (stream_sub_ext_close) could cause a use-after-free if the struct is
+	// freed just before a caller acquires the lock. Tied to the STREAM
+	// lifecycle: initialized in stream_init(), destroyed in stream_close().
+	pthread_mutex_t	subtitle_owner_lock;
+	pthread_cond_t	subtitle_owner_cond;
+	int		subtitle_owner_refs;	// callers currently inside an _owner_acquire()/_owner_release() pair
+	int		subtitle_owner_closing;	// set while THIS stream's current subtitle_priv is being torn down; blocks new acquires until reset
 	
 	// current subtitle chunk
 	STREAM_CDATA	cdata_sub;

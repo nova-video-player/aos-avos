@@ -102,24 +102,26 @@ typedef struct SUB_PRIV {
 
 	SUB_PARSE_WORKER *worker;	// NULL until the first track is queued;
 					// see _worker_ensure_started() below
-
-	// -------------------------------------------------------------------
-	// Per-stream owner lifetime guard, used by _owner_acquire()/_owner_release()
-	// below. Replaces the old process-wide "most recently active
-	// stream/worker" globals: subtitle_parse_enqueue_fn/priority_fn callbacks
-	// now resolve their target via sub->owner_ctx (a STREAM*, stamped by
-	// _queue_all_tracks()) straight back to THIS SUB_PRIV, instead of a
-	// shared guess that was only correct under a single-active-stream
-	// assumption. This guard exists because that resolution --
-	// STREAM* -> s->subtitle_priv -> ->worker -- still needs protecting
-	// against stream_sub_ext_close() freeing `p`/`worker` concurrently;
-	// it's just scoped to one stream's SUB_PRIV now instead of the whole
-	// process, so unrelated streams never contend with each other.
-	pthread_mutex_t owner_lock;
-	pthread_cond_t  owner_cond;
-	int             owner_refs;	// callers currently inside an acquire/release pair
-	int             owner_closing;	// set by stream_sub_ext_close() before teardown; blocks new acquires
 } SUB_PRIV;
+
+// -----------------------------------------------------------------------------
+// Per-stream owner lifetime guard, used by _owner_acquire()/_owner_release()
+// below. Replaces the old process-wide "most recently active stream/worker"
+// globals: subtitle_parse_enqueue_fn/priority_fn callbacks now resolve their
+// target via sub->owner_ctx (a STREAM*, stamped by _queue_all_tracks())
+// straight back to THIS stream's SUB_PRIV, instead of a shared guess that
+// was only correct under a single-active-stream assumption. What's left to
+// guard is that resolution -- STREAM* -> s->subtitle_priv -> ->worker --
+// against stream_sub_ext_close() freeing `subtitle_priv`/`worker`
+// concurrently.
+//
+// This guard (subtitle_owner_lock/cond/refs/closing) lives on STREAM
+// itself, NOT inside SUB_PRIV -- see the doc comment on those fields in
+// stream.h for why: a lock a caller can only reach BY FIRST dereferencing
+// the very pointer it's meant to protect can't protect that dereference.
+// Scoped to one stream (not the whole process), so unrelated streams never
+// contend with each other.
+// -----------------------------------------------------------------------------
 
 static void _adjust_timing_for_track( STREAM *s, uni_sub *sub );
 
@@ -140,8 +142,10 @@ typedef struct _STREAMING_POLL_CTX {
 	STREAM  *s;
 	uni_sub *job;
 	int      stale;
-	uint64_t track_gen; // engine track-generation token captured once at the
-	                     // start of this feed pass; see sub_engine_get_track_generation()
+	uint64_t track_gen; // engine track-generation token this pass is pinned
+	                     // to; fixed at track-selection time -- see
+	                     // uni_sub::track_gen's doc comment in
+	                     // subtitle_format.h -- not re-derived per pass
 } _STREAMING_POLL_CTX;
 
 // -----------------------------------------------------------------------------
@@ -308,10 +312,23 @@ static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 	                     p->subs->converted[ s->subtitle->stream ] == subs;
 	if( !still_current ) return 2;
 
-	// Captured once, here, before either path below starts -- both are long,
-	// checkpointed passes that a track switch can race (see
-	// sub_engine_get_track_generation()'s doc comment in sub_engine.h).
-	uint64_t token = s->sub_engine ? sub_engine_get_track_generation( (SUB_ENGINE*)s->sub_engine ) : 0;
+	// Fixed at track-SELECTION time, not discovered here: subs->track_gen
+	// was stamped by stream_sub_ext_set_track_generation() synchronously,
+	// on the selecting thread, right after the sub_engine_open_track()
+	// call that made this track active -- BEFORE this job could possibly
+	// be enqueued onto the worker thread this function now runs on (see
+	// uni_sub::track_gen's doc comment in subtitle_format.h). This used to
+	// be a fresh, separate sub_engine_get_track_generation() call made
+	// right here instead: a real TOCTOU against the still_current check
+	// just above -- a track switch landing in the gap between that check
+	// and this (former) call could hand this pass a NEWER generation than
+	// the track it just confirmed itself still selected for, letting a
+	// stale worker's cues/flush pass the engine's own token check and land
+	// on the wrong (new) backend as if they belonged to it. Reading a value
+	// fixed before this job ever entered the queue closes that gap
+	// entirely -- there is no later point at which it could observe a
+	// different generation than the one this track actually opened with.
+	uint64_t token = subs->track_gen;
 
 	// Fast path -- see the caching comment above. Skips the file entirely.
 	if( subs->first ) {
@@ -559,53 +576,79 @@ serprintf( "SUB_PRIV: failed to create any subtitle parse worker threads\n" );
 // helpers resolve straight from that STREAM* to its own SUB_PRIV/worker --
 // no cross-stream guessing possible. What's left to guard is the same
 // lifetime hazard as before (stream_sub_ext_close() freeing SUB_PRIV out
-// from under a concurrent resolve), just scoped to the owning stream's own
-// SUB_PRIV::owner_lock/owner_refs instead of a process-wide lock, so
-// unrelated streams never contend with each other.
+// from under a concurrent resolve) -- guarded now by s->subtitle_owner_lock
+// (a STREAM field, not a SUB_PRIV one -- see its doc comment in stream.h),
+// scoped to the owning stream so unrelated streams never contend with each
+// other.
 // -----------------------------------------------------------------------------
 
-// Snapshot `s`'s worker (may be NULL) and mark this SUB_PRIV "in use". Every
-// caller MUST pair a successful (non-zero) return with exactly one
-// _owner_release(s) call, including on every early-return path, before it
-// stops touching *w_out. Returns 0 if `s` has no live SUB_PRIV to resolve
-// against (e.g. owner_ctx was never stamped, or the stream already closed) --
-// callers must not touch *w_out in that case, and have nothing to release.
-static int _owner_acquire( STREAM *s, SUB_PARSE_WORKER **w_out )
-{
-	if( !s ) return 0;
-	SUB_PRIV *p = s->subtitle_priv;
-	if( !p ) return 0;
+// Snapshot `s`'s worker (may be NULL) and mark this stream's subtitle_priv
+// "in use". Tri-state, not boolean: _worker_enqueue()/_worker_prioritize()'s
+// two failure modes need different fallback handling (see their call
+// sites), and folding both into one lock hold -- rather than a successful/
+// failed _owner_acquire() followed by a SEPARATE, later, re-locked "was it
+// closing?" check -- matters: two separate lock acquisitions leave a gap
+// where stream_sub_ext_close() could finish (and reset subtitle_owner_closing
+// back to 0 for the NEXT SUB_PRIV's lifecycle -- see that reset's own
+// comment) in between them, making an acquire that genuinely failed because
+// the owner WAS closing look, by the time of the second check, like it was
+// never owned at all. One lock hold makes that observation atomic instead.
+//
+// _OWNER_ACQUIRED: *w_out set, caller MUST pair this with exactly one
+// _owner_release(s) call, including on every early-return path.
+// _OWNER_CLOSING: owner exists but is actively tearing its subtitle state
+// down right now -- there is no safe "parse/feed against `s`" to fall back
+// to, since that's exactly the state being freed concurrently; caller
+// should cancel the job instead.
+// _OWNER_NONE: nothing to resolve against at all (owner_ctx was never
+// stamped, i.e. `s` itself is NULL) -- a direct synchronous parse/feed is
+// the only way this job ever completes, since nothing else owns it.
+//
+// Locking s->subtitle_owner_lock BEFORE even looking at s->subtitle_priv is
+// what makes this safe against a concurrent stream_sub_ext_close(): that
+// lock's lifetime is the STREAM's own, so unlike a lock that lived inside
+// SUB_PRIV, there's no window where close() could have already destroyed
+// the very lock this function is about to take -- it belongs to `s`, which
+// is guaranteed valid for the whole of this call, not to `*s->subtitle_priv`,
+// which is exactly what's being read/invalidated here.
+typedef enum { _OWNER_ACQUIRED, _OWNER_CLOSING, _OWNER_NONE } _owner_status;
 
-	pthread_mutex_lock( &p->owner_lock );
-	if( p->owner_closing ) {
+static _owner_status _owner_acquire( STREAM *s, SUB_PARSE_WORKER **w_out )
+{
+	if( !s ) return _OWNER_NONE;
+
+	pthread_mutex_lock( &s->subtitle_owner_lock );
+	if( s->subtitle_owner_closing ) {
 		// stream_sub_ext_close() has already committed to tearing this
-		// SUB_PRIV down (and is possibly already blocked waiting for
-		// owner_refs to drain) -- refuse the new acquire rather than
-		// extend that wait indefinitely or hand back a worker that's
-		// about to be stopped mid-use.
-		pthread_mutex_unlock( &p->owner_lock );
-		return 0;
+		// stream's SUB_PRIV down (and is possibly already blocked waiting
+		// for subtitle_owner_refs to drain) -- refuse the new acquire
+		// rather than extend that wait indefinitely or hand back a worker
+		// that's about to be (or already was) stopped/freed.
+		pthread_mutex_unlock( &s->subtitle_owner_lock );
+		return _OWNER_CLOSING;
 	}
-	*w_out = p->worker;
-	p->owner_refs++;
-	pthread_mutex_unlock( &p->owner_lock );
-	return 1;
+	if( !s->subtitle_priv ) {
+		pthread_mutex_unlock( &s->subtitle_owner_lock );
+		return _OWNER_NONE;
+	}
+	*w_out = ((SUB_PRIV *)s->subtitle_priv)->worker; // subtitle_priv is `void*`
+	                                                  // in stream.h (SUB_PRIV
+	                                                  // is private to this
+	                                                  // file) -- needs the cast
+	s->subtitle_owner_refs++;
+	pthread_mutex_unlock( &s->subtitle_owner_lock );
+	return _OWNER_ACQUIRED;
 }
 
 static void _owner_release( STREAM *s )
 {
-	if( !s || !s->subtitle_priv ) return; // can't happen if _owner_acquire()
-	                                        // succeeded and close() hasn't
-	                                        // freed subtitle_priv yet -- it
-	                                        // can't, since close() blocks on
-	                                        // owner_refs before freeing.
-	SUB_PRIV *p = s->subtitle_priv;
-	pthread_mutex_lock( &p->owner_lock );
-	p->owner_refs--;
-	if( p->owner_refs == 0 ) {
-		pthread_cond_broadcast( &p->owner_cond );
+	if( !s ) return;
+	pthread_mutex_lock( &s->subtitle_owner_lock );
+	s->subtitle_owner_refs--;
+	if( s->subtitle_owner_refs == 0 ) {
+		pthread_cond_broadcast( &s->subtitle_owner_cond );
 	}
-	pthread_mutex_unlock( &p->owner_lock );
+	pthread_mutex_unlock( &s->subtitle_owner_lock );
 }
 
 // Shared "no active worker"/"queue full" fallback for _worker_enqueue()/_worker_prioritize(). subtitle_do_parse() alone is wrong for streaming (SRT/VTT) tracks since format->parse() is NULL for them -- it would mark them FAILED without ever feeding. `s` may be NULL if sub->owner_ctx was never stamped, in which case a streaming track genuinely can't be fed and the fallback is a real FAILED.
@@ -622,19 +665,44 @@ static void _synchronous_parse_fallback( STREAM *s, uni_sub *sub )
 	}
 }
 
+// Drops a job that must NOT be run rather than parsing/feeding it -- used
+// instead of _synchronous_parse_fallback() when _owner_acquire() returns
+// _OWNER_CLOSING (see that enum's comment): there is no safe "parse against
+// `s`" to fall back to there, since `s`'s subtitle state is exactly what's
+// being freed concurrently. Marks a definite terminal state so anything
+// polling SUBT_PARSE_* (_poll_parse_state() and friends) sees FAILED rather
+// than hanging in QUEUED forever; harmless either way since the uni_sub
+// itself is about to be freed by that same teardown.
+static void _cancel_job( uni_sub *sub )
+{
+	pthread_mutex_lock( &sub->parse_mutex );
+	sub->parse_state = SUBT_PARSE_FAILED;
+	pthread_mutex_unlock( &sub->parse_mutex );
+}
+
 static void _worker_enqueue( uni_sub *sub )
 {
 	STREAM *owner = (STREAM *)sub->owner_ctx;
 	SUB_PARSE_WORKER *w = NULL;
 
-	if( !_owner_acquire( owner, &w ) ) {
-		// Either owner_ctx was never stamped (called before any
+	_owner_status st = _owner_acquire( owner, &w );
+	if( st == _OWNER_CLOSING ) {
+		// The owning stream is actively tearing its subtitle state down
+		// right now (stream_sub_ext_close() mid-drain) -- there is no safe
+		// "parse synchronously against `owner`" to fall back to here,
+		// since that would touch exactly the state being freed
+		// concurrently. Cancel the job instead of racing the teardown.
+DBG serprintf("_worker_enqueue: owner is closing, dropping job\n");
+		_cancel_job( sub );
+		return;
+	}
+	if( st == _OWNER_NONE ) {
+		// owner_ctx was never stamped (called before any
 		// _queue_all_tracks() ever ran for this sub -- shouldn't happen
 		// in practice, since stamping always precedes handing a sub to
-		// subtitle_ensure_parsed_async()), or the owning stream has
-		// already closed. Either way there's no SUB_PRIV left to resolve
-		// a worker against, so fall back to a direct synchronous
-		// parse/feed right here rather than dropping the job.
+		// subtitle_ensure_parsed_async()) -- there's no SUB_PRIV that ever
+		// existed to resolve a worker against, so fall back to a direct
+		// synchronous parse/feed right here rather than dropping the job.
 		// subtitle_ensure_parsed_async() already transitioned this track
 		// to QUEUED before calling us, so we own running it. owner may
 		// itself be NULL (never stamped); _synchronous_parse_fallback()
@@ -682,7 +750,14 @@ static void _worker_prioritize( uni_sub *sub )
 	STREAM *owner = (STREAM *)sub->owner_ctx;
 	SUB_PARSE_WORKER *w = NULL;
 
-	if( !_owner_acquire( owner, &w ) ) {
+	_owner_status st = _owner_acquire( owner, &w );
+	if( st == _OWNER_CLOSING ) {
+		// See the identical branch in _worker_enqueue() above.
+DBG serprintf("_worker_prioritize: owner is closing, dropping job\n");
+		_cancel_job( sub );
+		return;
+	}
+	if( st == _OWNER_NONE ) {
 DBG serprintf("_worker_prioritize: no owning stream/worker, parsing synchronously\n");
 		_synchronous_parse_fallback( owner, sub );
 		return;
@@ -735,7 +810,7 @@ serprintf("_worker_prioritize: queue full, parsing synchronously\n");
 	_owner_release( owner );
 }
 
-// Signals every pool thread to exit and joins each. Called from stream_sub_ext_close(), AFTER the caller has already unpublished and drained SUB_PRIV::owner_lock (see that function) -- so by the time we get here, no _worker_enqueue()/_worker_prioritize() call can still be holding a reference that resolves to this `w`, and it's safe to tear it down unconditionally. Jobs still queued are simply abandoned -- no "drain the queue first" wait, since that would reintroduce the blocking-on-parse this worker exists to avoid. In-flight jobs finishing after tstate flips to EXIT is fine: each only touches its own `job` (about to be freed regardless) and w->stream (null-checked in _parse_worker_thread against a racing close()).
+// Signals every pool thread to exit and joins each. Called from stream_sub_ext_close(), AFTER the caller has already unpublished and drained s->subtitle_owner_lock's refs (see that function) -- so by the time we get here, no _worker_enqueue()/_worker_prioritize() call can still be holding a reference that resolves to this `w`, and it's safe to tear it down unconditionally. Jobs still queued are simply abandoned -- no "drain the queue first" wait, since that would reintroduce the blocking-on-parse this worker exists to avoid. In-flight jobs finishing after tstate flips to EXIT is fine: each only touches its own `job` (about to be freed regardless) and w->stream (null-checked in _parse_worker_thread against a racing close()).
 static void _worker_stop( SUB_PARSE_WORKER *w )
 {
 	if( !w ) return;
@@ -917,33 +992,32 @@ static int _stream_sub_ext_check_core( STREAM *s, subtitle_files *files )
 	if( !files )
 		return 1;
 
-	int is_new_priv = !s->subtitle_priv;
-	if( is_new_priv ) {
-		s->subtitle_priv = amalloc( sizeof( SUB_PRIV ) );
-		if( !s->subtitle_priv ) {
-			subtitle_free_files( files );
-			return 1;
-		}
+	if( s->subtitle_priv ) {
+		// A live SUB_PRIV already exists -- this is stream_sub_ext_check()
+		// re-invoked directly, without an intervening stream_sub_ext_close()
+		// (the normal path, via stream_sub_ext_update(), always closes
+		// first). Tear it down through the exact same full lifecycle
+		// stream_sub_ext_close() uses everywhere else -- waiting out the
+		// discovery worker, draining any in-flight _owner_acquire()
+		// callers, stopping the parse-worker pool, and freeing
+		// p->files/p->subs -- rather than a hand-rolled shortcut here. A
+		// bare memset() used to stand in for all of that: it leaked the
+		// worker pool (its threads kept right on running against a
+		// queue/subs list this function was about to replace out from
+		// under them, with no _worker_stop() ever called), leaked
+		// p->files/p->subs outright, and clobbered subtitle_owner_refs/
+		// owner_closing while a concurrent _owner_acquire() could still be
+		// live against them.
+		stream_sub_ext_close( s );
+	}
+
+	s->subtitle_priv = amalloc( sizeof( SUB_PRIV ) );
+	if( !s->subtitle_priv ) {
+		subtitle_free_files( files );
+		return 1;
 	}
 	SUB_PRIV *p = s->subtitle_priv;
-	// Every other call path that reaches here on an already-live SUB_PRIV
-	// goes through stream_sub_ext_close() first (see stream_sub_ext_update()),
-	// which destroys owner_lock/owner_cond before freeing `p`. The one
-	// direct path, stream_sub_ext_check() re-invoked on a stream that
-	// already has a subtitle_priv without an intervening close(), predates
-	// this guard and still reaches this memset -- so destroy the old
-	// mutex/cond here too before they're zeroed and re-initialized, rather
-	// than assume that path never happens. Safe even if !is_new_priv and
-	// no worker was ever started: owner_refs is guaranteed 0 whenever
-	// nothing is mid-acquire, which holds here since this thread is the
-	// only one that drives this SUB_PRIV's lifecycle.
-	if( !is_new_priv ) {
-		pthread_mutex_destroy( &p->owner_lock );
-		pthread_cond_destroy( &p->owner_cond );
-	}
 	memset( p, 0, sizeof( SUB_PRIV ) );
-	pthread_mutex_init( &p->owner_lock, NULL );
-	pthread_cond_init( &p->owner_cond, NULL );
 	p->prev_max = s->av.subs_max;
 	p->files = files;
 
@@ -1127,23 +1201,29 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 		// racing _worker_enqueue()/_worker_prioritize()/
 		// _synchronous_parse_fallback() call for one of this stream's own
 		// tracks) has been released, before touching p->worker again.
-		// Setting owner_closing alone only stops NEW acquires -- it does
-		// nothing for a thread that already snapshotted p->worker a moment
-		// earlier and hasn't called _owner_release() yet. Without this
-		// wait, that thread could still be dereferencing p->worker (queue
-		// state, w->stream, etc.) after _worker_stop() below frees it.
-		// Bounded: nothing new can start an acquire against THIS SUB_PRIV
-		// once owner_closing is set, so this only waits out whatever calls
-		// (for this stream's own tracks) were already in flight at this
-		// instant -- and since owner_ctx always points back to its own
-		// stream, an unrelated stream's in-flight fallback call can never
-		// be holding a reference here to begin with.
-		pthread_mutex_lock( &p->owner_lock );
-		p->owner_closing = 1;
-		while( p->owner_refs > 0 ) {
-			pthread_cond_wait( &p->owner_cond, &p->owner_lock );
+		// Setting subtitle_owner_closing alone only stops NEW acquires --
+		// it does nothing for a thread that already snapshotted p->worker
+		// a moment earlier and hasn't called _owner_release() yet. Without
+		// this wait, that thread could still be dereferencing p->worker
+		// (queue state, w->stream, etc.) after _worker_stop() below frees
+		// it. Bounded: nothing new can start an acquire against THIS
+		// stream's subtitle state once subtitle_owner_closing is set, so
+		// this only waits out whatever calls (for this stream's own
+		// tracks) were already in flight at this instant -- and since
+		// owner_ctx always points back to its own stream, an unrelated
+		// stream's in-flight fallback call can never be holding a
+		// reference here to begin with.
+		//
+		// subtitle_owner_lock/cond/refs/closing live on `s` itself, not on
+		// `p` -- see their doc comment in stream.h -- so unlike before,
+		// nothing here needs to (or may) init/destroy them: they were set
+		// up once for this STREAM's whole lifetime back in stream_init().
+		pthread_mutex_lock( &s->subtitle_owner_lock );
+		s->subtitle_owner_closing = 1;
+		while( s->subtitle_owner_refs > 0 ) {
+			pthread_cond_wait( &s->subtitle_owner_cond, &s->subtitle_owner_lock );
 		}
-		pthread_mutex_unlock( &p->owner_lock );
+		pthread_mutex_unlock( &s->subtitle_owner_lock );
 
 		// Stop the parse worker, before freeing the uni_sub entries it might still be touching -- subtitle_do_parse() writes into a uni_sub's fields with no awareness that close() might run concurrently; freeing under an in-flight parse would be a use-after-free. _worker_stop() joins every pool thread, so this can block up to the slowest in-flight job's remaining time (they already run concurrently, so this isn't their sum); queued-but-not-started jobs are simply abandoned. A one-time, bounded wait at teardown, not a recurring stall -- thread cancellation was considered and rejected since killing a thread mid-fopen()/malloc() risks leaks/corruption, same reasoning as every other thread teardown in this codebase. Safe to call now unconditionally: the drain above already guarantees no _worker_enqueue()/_worker_prioritize() call can still be resolving against this worker.
 		_worker_stop( p->worker );
@@ -1159,10 +1239,20 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 			subtitle_free_files( p->files );
 		if( p->subs )
 			subtitle_free_converted( p->subs );
-		pthread_mutex_destroy( &p->owner_lock );
-		pthread_cond_destroy( &p->owner_cond );
 		afree( s->subtitle_priv );
 		s->subtitle_priv = NULL;
+
+		// Teardown is fully complete -- reset the latch so a FUTURE
+		// SUB_PRIV on this same STREAM (the next video, or a fresh
+		// stream_sub_ext_check()) can be acquired against again.
+		// subtitle_owner_closing is a per-SUB_PRIV-lifecycle latch even
+		// though it now lives on the (reused, longer-lived) STREAM, so it
+		// must not stay set past the teardown it was raised for, or every
+		// _owner_acquire() for this stream would fail forever after the
+		// very first close().
+		pthread_mutex_lock( &s->subtitle_owner_lock );
+		s->subtitle_owner_closing = 0;
+		pthread_mutex_unlock( &s->subtitle_owner_lock );
 	}
 }
 
@@ -1321,11 +1411,13 @@ int stream_sub_ext_force_streaming_refeed( STREAM *s )
 // _is_ffdec_bitmap() is true.
 int stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 {
+    if( !s || !s->subtitle || !pframe || !*pframe ) return 1;
 	int rst_time = TS_TO_RST_TIME(time, int);
 	SUB_PRIV *p = s->subtitle_priv;
-	if( !p ) return 1;
+	if( !p || !p->subs ) return 1;
 
 	int stream = s->subtitle->stream;
+	if( stream < 0 || stream >= p->subs->cnt ) return 1;
 	if( stream != p->stream ) {
 		p->stream = stream;
 DBG serprintf("sub_ext_gfx: stream now %d\r\n", p->stream);
@@ -1380,6 +1472,46 @@ int stream_sub_ext_get_engine_fmt( STREAM *s )
 	int track_idx = s->av.subs;
 	if( track_idx < 0 || track_idx >= SUB_TRACK_MAX ) return -1;
 	return p->engine_fmt[track_idx];
+}
+
+// *************************
+//
+// stream_sub_ext_set_track_generation
+//
+// Stamps the engine track-generation token sub_engine_open_track() just
+// returned (its `out_generation` out-param -- see sub_engine.h) onto the
+// currently-selected external track's uni_sub -- see uni_sub::track_gen's
+// doc comment in subtitle_format.h. Called from stream_subtitle.c's
+// _get_next_ext_sub(), synchronously, on the same (selecting) thread, right
+// after the open_track() call that made this track active and BEFORE
+// stream_sub_ext_feed_engine() (called immediately after, same thread) can
+// enqueue this track's streaming feed job onto the background parse-worker
+// pool -- so by the time that job could possibly run on the worker thread,
+// this write has already happened-before it via the job queue's own
+// mutex/cond, same as everything else handed to a queued job.
+//
+// Deliberately indexed the same way _do_streaming_feed() and friends
+// resolve "the currently selected external track" (s->subtitle->stream into
+// p->subs->converted[]), not stream_sub_ext_get_engine_fmt()'s s->av.subs
+// into p->engine_fmt[] -- those are two different indices into two
+// different arrays; see the comment on SUB_PRIV's engine_fmt field.
+//
+// No-op if there's no live SUB_PRIV, or the current track index doesn't
+// resolve to a real, converted uni_sub right now -- callers don't need to
+// pre-check either; this is exactly the same "still current?" question
+// _do_streaming_feed() itself asks before ever reading track_gen back.
+//
+// *************************
+void stream_sub_ext_set_track_generation( STREAM *s, uint64_t token )
+{
+	if( !s || !s->subtitle ) return;
+	SUB_PRIV *p = s->subtitle_priv;
+	if( !p || !p->subs ) return;
+	int stream = s->subtitle->stream;
+	if( stream < 0 || stream >= p->subs->cnt ) return;
+	uni_sub *subs = p->subs->converted[stream];
+	if( !subs ) return;
+	subs->track_gen = token;
 }
 
 #endif	// CONFIG_SUBTITLES

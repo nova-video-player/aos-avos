@@ -175,8 +175,10 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
 
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,
                            const uint8_t *codec_private, int codec_private_size,
-                           const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count) {
+                           const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count,
+                           uint64_t *out_generation) {
     if (!eng) return -1;
+    if (out_generation) *out_generation = 0; // default until the swap below actually succeeds
 
     // Use the actual reported surface size when known, for every format. This used to branch
     // per format_id (SRT/GFX got the surface size, SSA was locked to the raw video frame), but
@@ -282,6 +284,10 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     eng->active_backend = backend;
     eng->track_generation++; // invalidates every in-flight sub_engine_*_gen()
                               // token captured against the track we're replacing
+    if (out_generation) *out_generation = eng->track_generation; // same lock
+                              // hold as the bump above -- see this param's
+                              // doc comment in sub_engine.h for why that
+                              // atomicity is the whole point
     pthread_mutex_unlock(&eng->lock);
 
     if (old_backend) {

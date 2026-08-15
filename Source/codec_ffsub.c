@@ -89,7 +89,11 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 			if (stream->video->width > 0) w = stream->video->width;
 			if (stream->video->height > 0) h = stream->video->height;
 		}
-		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, sub_fmt_from_format(sub->format), w, h, NULL, 0, NULL, 0);
+		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, sub_fmt_from_format(sub->format), w, h, NULL, 0, NULL, 0, NULL);
+		// GFX/bitmap track (PGS/VobSub), opened synchronously here off the codec's own open() call --
+		// fed via sub_engine_feed_bitmap(), not the checkpointed _gen() token system, so there's no
+		// long-lived job to pin a generation token to; see sub_engine_open_track()'s doc comment
+		// in sub_engine.h and the matching internal-track call sites in stream_subtitle.c.
 	}
 
 	return 0;

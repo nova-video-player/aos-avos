@@ -263,7 +263,10 @@ static void _get_next_int_sub( STREAM *s, int time )
 						s->video ? s->video->height : 0,
 						s->subtitle->extraData2,
 						s->subtitle->extraDataSize2,
-						embedded_fonts, embedded_fonts_count);
+						embedded_fonts, embedded_fonts_count,
+						NULL); // internal track, fed synchronously off this
+						       // thread only -- no checkpointed job to pin
+						       // a generation token to; see sub_engine.h
 					// NOTE: do NOT call sub_engine_start() here. avos_mp_video_open() already
 					// registered the engine clock once (engine_clock_cb -> stream_get_current_time),
 					// and that registration stays valid for the stream's entire lifetime, including
@@ -288,7 +291,8 @@ static void _get_next_int_sub( STREAM *s, int time )
 						s->video ? s->video->width  : 0,
 						s->video ? s->video->height : 0,
 						NULL, 0,
-						embedded_fonts, embedded_fonts_count);
+						embedded_fonts, embedded_fonts_count,
+						NULL); // internal track -- see the CASE 1 call above
 				}
 
 			} else if( _is_ffdec_bitmap(fmt) ) {
@@ -410,13 +414,23 @@ static void _get_next_ext_sub( STREAM *s, int time )
 
 				SUB_EMBEDDED_FONT embedded_fonts[ATTACHED_FONT_MAX];
 				int embedded_fonts_count = _bridge_embedded_fonts( s, embedded_fonts, ATTACHED_FONT_MAX );
+				uint64_t track_gen = 0;
 				sub_engine_open_track(
 					(SUB_ENGINE*)s->sub_engine,
 					engine_fmt,
 					s->video ? s->video->width  : 0,
 					s->video ? s->video->height : 0,
 					NULL, 0, // no codec_private for external files
-					embedded_fonts, embedded_fonts_count);
+					embedded_fonts, embedded_fonts_count,
+					&track_gen);
+
+				// Pin this track's generation token to its uni_sub now, on
+				// this same (selecting) thread, BEFORE stream_sub_ext_feed_engine()
+				// below can enqueue its streaming feed job onto the
+				// background parse-worker pool -- see
+				// stream_sub_ext_set_track_generation()'s doc comment in
+				// stream_sub_ext.c.
+				stream_sub_ext_set_track_generation( s, track_gen );
 
 				// Bulk-feed the full cue list now; clear the refeed flag BEFORE the call so that if a streaming feed gets interrupted and sets it back to 1, that survives for the refeed branch below to pick up.
 				_needs_refeed_set( s, 0 );
@@ -692,6 +706,20 @@ void stream_sub_ext_wait_for_discovery( STREAM *s )
 {
 	SUB_DISCOVERY_WORKER *w = _discovery_worker;
 	if( !w ) return;
+
+	// Self-deadlock guard: _discovery_worker_thread() runs
+	// _stream_check_subtitles_sync(target) with w->busy=1 and w->target=target
+	// for the whole call -- and that call's own full-rebuild path
+	// (stream_sub_ext_update() -> stream_sub_ext_close()) reaches this exact
+	// function, for that same `s == target`, from further down the SAME call
+	// stack. Without this check, that nested call would see
+	// `w->target == s && w->busy` and block waiting for w->busy to clear --
+	// which can't happen until this very call frame returns. A thread can
+	// never legitimately be waiting on a scan that is its own in-progress
+	// call, so skip the wait whenever we're already running ON the discovery
+	// worker's thread.
+	if( w->thread_started && pthread_equal( pthread_self(), w->thread ) )
+		return;
 
 	pthread_mutex_lock( &w->mutex );
 	while( w->target == s && ( w->pending || w->busy ) ) {

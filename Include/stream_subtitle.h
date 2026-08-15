@@ -22,6 +22,16 @@
 int  stream_sub_ext_check( STREAM *s );
 // Preferred periodic re-check: one incremental scan, picks the cheapest outcome itself. Returns 0=no change, >0=tracks appended live, -1=full rebuild ran.
 int  stream_sub_ext_update( STREAM *s );
+// Stamps the engine track-generation token sub_engine_open_track() just
+// returned (its `out_generation` out-param -- see sub_engine.h) onto the
+// currently-selected external track, synchronously, on the calling
+// (selecting) thread -- called right after that open_track() and BEFORE
+// stream_sub_ext_feed_engine() can enqueue that track's streaming feed job
+// onto the background parse-worker pool. Closes a race where the worker
+// would otherwise discover the generation itself later, possibly after a
+// subsequent track switch already moved the engine on. No-op if there's no
+// live SUB_PRIV or the current track index isn't a valid, converted one.
+void stream_sub_ext_set_track_generation( STREAM *s, uint64_t token );
 // Syncs with stream_subtitle.c's discovery worker before stream_sub_ext_close() tears down subtitle_priv.
 void stream_sub_ext_wait_for_discovery( STREAM *s );
 void stream_sub_ext_close( STREAM *s );

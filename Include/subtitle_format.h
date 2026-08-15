@@ -156,6 +156,24 @@ typedef struct uni_sub_t
 	// active stream" pointer -- the guess is wrong the moment two STREAMs
 	// are ever alive at once. NULL until stream_sub_ext.c stamps it.
 	void *owner_ctx;
+
+	// Engine track-generation token this track was opened with -- see
+	// sub_engine_get_track_generation()'s doc comment in sub_engine.h.
+	// Stamped exactly once per selection, synchronously, by
+	// stream_sub_ext_set_track_generation() (stream_sub_ext.c) right after
+	// the selecting thread's sub_engine_open_track() call for this track
+	// returns -- BEFORE this track's streaming feed job can possibly be
+	// enqueued onto the background parse-worker pool. A checkpointed feed
+	// pass for a streaming (SRT/VTT) track (_do_streaming_feed() and
+	// friends, in stream_sub_ext.c) reads this fixed value instead of
+	// calling sub_engine_get_track_generation() itself, later, from the
+	// worker thread -- that used to leave a window where a track switch
+	// racing the worker's own read could hand it a NEWER generation than
+	// the one this track actually opened with, letting a stale track's
+	// cues (or flush) land on the wrong (new) backend as if they belonged
+	// to it. Meaningless (0, its zero-init value) for non-streaming tracks
+	// and for a streaming track that has never been the selected one.
+	uint64_t track_gen;
 } uni_sub;
 
 typedef struct converted_subs_t

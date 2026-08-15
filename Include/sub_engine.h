@@ -18,9 +18,26 @@ void        sub_engine_destroy(SUB_ENGINE *eng);
 // (e.g. bitmap subtitle tracks). Same synchronous-only lifetime contract as
 // codec_private above: only needs to stay valid for the duration of this
 // call -- see SUB_EMBEDDED_FONT's doc comment in sub_format.h.
+//
+// `out_generation`, if non-NULL, is filled -- on success (return 0) -- with
+// the track-generation token this newly-opened track now has, i.e. exactly
+// what sub_engine_get_track_generation() would return if called immediately
+// after this returns, but captured atomically as part of the same open/swap
+// instead of by a second, separate, later call. Callers about to hand this
+// track off to a long-lived, checkpointed feed job (see the
+// TRACK-GENERATION TOKEN section below) should capture it HERE and store it
+// with the job itself, rather than calling sub_engine_get_track_generation()
+// afterwards from wherever that job actually runs -- a separate later call
+// can race a concurrent track switch and pick up a NEWER generation than
+// the one this open actually produced, silently reattaching the job to the
+// wrong track. Pass NULL if the caller has no such job (e.g. internal
+// embedded tracks fed synchronously, single-threaded, off
+// stream_sub_dec_thread -- see the token section's own note on this).
+// Left unfilled (untouched) if `eng` is NULL; set to 0 on any other failure.
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,
                            const uint8_t *codec_private, int codec_private_size,
-                           const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count);
+                           const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count,
+                           uint64_t *out_generation);
 void sub_engine_close_track(SUB_ENGINE *eng);
 int sub_engine_feed(SUB_ENGINE *eng, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms);
 void sub_engine_flush(SUB_ENGINE *eng);
@@ -39,11 +56,23 @@ void sub_engine_resize_video(SUB_ENGINE *eng, int video_w, int video_h);
 // backend is currently active" with no notion of which track a given call
 // was FOR.
 //
-// Usage: capture the token once via sub_engine_get_track_generation() right
-// before starting a feed pass, then pass that same fixed value to every
+// Usage: capture the token once, then pass that same fixed value to every
 // _gen() call made during that pass. Once open_track()/close_track() moves
 // the engine on to a different track, the token goes stale and every _gen()
 // call using it becomes a silent no-op instead of touching the new backend.
+//
+// Preferred capture point: sub_engine_open_track()'s `out_generation`
+// out-param, read by whichever thread actually selects/opens the track, and
+// stored with the job (e.g. on the SRT/VTT parse-worker's job struct) right
+// then -- BEFORE that job can possibly be enqueued/observed by another
+// thread. A later, separate sub_engine_get_track_generation() call made
+// from wherever the job actually runs (e.g. a background worker thread) has
+// a gap: the very track switch this token exists to detect can land between
+// "this job is still the selected one" being checked and that separate call
+// actually reading the generation, handing the job a NEWER token than the
+// track it was really opened against and defeating the whole mechanism.
+// sub_engine_get_track_generation() below remains available for callers
+// with no such gap to worry about.
 //
 // Plain sub_engine_feed()/flush() above are unaffected and remain the right
 // choice for synchronous, single-threaded callers (e.g. internal/embedded

@@ -337,14 +337,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 				pos = strchr(pos, ',');
 				if (pos) pos++;
 			}
-			// Extract text zone and convert \N to \n
-			if (pos != NULL) {
+			// Extract text zone
+			if (pos != NULL)
 				strnZcpy(dst, pos, max - 1);
-				while ((pos = strstr(dst, "\\N")) != NULL) {
-					pos[0] = ' ';
-					pos[1] = '\n';
-				}
-			}
 		} else if (rect->type == SUBTITLE_BITMAP) {
 			// Check if the bitmap rect is not empty and contains non-black pixels
 			DBGS serprintf("codec_ffsub: blend bitmap rect\n");

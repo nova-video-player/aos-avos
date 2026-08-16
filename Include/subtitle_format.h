@@ -173,6 +173,16 @@ typedef struct uni_sub_t
 	// cues (or flush) land on the wrong (new) backend as if they belonged
 	// to it. Meaningless (0, its zero-init value) for non-streaming tracks
 	// and for a streaming track that has never been the selected one.
+	//
+	// A genuinely cross-thread field, not just cross-call: this SAME
+	// uni_sub is reused across re-selections of its track (switch away,
+	// switch back re-stamps the SAME object), so the write above can land
+	// concurrently with _do_streaming_feed()'s read of it on the worker
+	// thread if a job from the earlier selection is still queued or
+	// running when the re-stamp happens. Both sides take parse_mutex
+	// around their single touch of this field -- a plain unguarded
+	// uint64_t read/write pair here would be a real data race (and on a
+	// 32-bit target, not even guaranteed non-torn).
 	uint64_t track_gen;
 } uni_sub;
 

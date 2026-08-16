@@ -19,6 +19,7 @@
 
 #include "types.h"
 
+#include <stdint.h>
 #include <time.h>
 #include <errno.h>
 
@@ -32,6 +33,7 @@ time_t secure_time( time_t *t );
 time_t user_time  ( time_t *t );
 
 int atime( void );			// "archos" time in ms
+int64_t atime64( void );		// monotonic time in ms without 32-bit rollover
 
 int time_update_time( void );
 void time_init_time( void );

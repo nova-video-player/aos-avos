@@ -31,6 +31,7 @@ volatile ULONG 	m_time = 0;	// monotonic time in 1/1000s
 static   UINT64	n_time = 0;	// system time in nanoseconds
 
 static INT64	time_ref = 0;
+static pthread_mutex_t time_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define TIME_STR_LEN 30
 
@@ -70,12 +71,9 @@ void atime_print_tm( const char *msg, struct tm *time_tm )
 	_print_time( msg, time_tm, "(UNKNOWN)" );
 }
 
-int time_update_time( void )
+static INT64 _time_update_time( void )
 {
 	struct timespec tv;
-	static pthread_mutex_t _mutex = PTHREAD_MUTEX_INITIALIZER;
-	
-	pthread_mutex_lock( &_mutex );
 
 	clock_gettime(CLOCK_MONOTONIC, &tv );
 	
@@ -86,9 +84,16 @@ int time_update_time( void )
 
 	//serprintf("%u %u %u %u\r\n", s_time, d_time, c_time, m_time ); 
 
-	pthread_mutex_unlock( &_mutex );
-
 	return (n_time - time_ref) / 100000;
+}
+
+int time_update_time( void )
+{
+	pthread_mutex_lock( &time_mutex );
+	INT64 result = _time_update_time();
+	pthread_mutex_unlock( &time_mutex );
+
+	return result;
 }
 
 int atime( void )
@@ -97,9 +102,20 @@ int atime( void )
 	return m_time;
 }
 
-void time_init_time( void )
+int64_t atime64( void )
 {
-	time_update_time();
-	time_ref = n_time;
+	pthread_mutex_lock( &time_mutex );
+	_time_update_time();
+	INT64 result = (n_time - time_ref) / 1000000;
+	pthread_mutex_unlock( &time_mutex );
+
+	return result;
 }
 
+void time_init_time( void )
+{
+	pthread_mutex_lock( &time_mutex );
+	_time_update_time();
+	time_ref = n_time;
+	pthread_mutex_unlock( &time_mutex );
+}

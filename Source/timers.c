@@ -40,7 +40,7 @@
 
 /* Note: Elements are stored as a sorted linked list and data is used as the object pool.
    An id of -1 denotes an unused element. The linked list is formed as a ring where dummy 
-   is the first and last element. Since dummy.timeout == INT32_MAX, it can serve as a sentinel.
+   is the first and last element. Since dummy.timeout == INT64_MAX, it can serve as a sentinel.
 */
 
 /**
@@ -62,7 +62,7 @@ void Timers_init( Timers *obj )
 {
 	obj->dummy.id = -1;
 	obj->dummy.next = &obj->dummy;
-	obj->dummy.timeout = INT32_MAX;
+	obj->dummy.timeout = INT64_MAX;
 
 	int i;
 	for( i = 0; i < obj->size; i++ ) {
@@ -103,7 +103,7 @@ static int Timers_internalAdd( Timers *obj, void (*onTimeout_nolistener)(), void
 
 	int res= -1;
 	if( obj->cnt < obj->size ) {
-		ULONG tm = atime();
+		int64_t tm = atime64();
 
 		// find an unused element
 		Timer *nt = NULL;
@@ -295,7 +295,7 @@ void Timers_remove(Timers *obj, int *id )
 	pthread_mutex_lock( &obj->mutex );
 
 	Timer *before = &obj->dummy;
-	while( before->next->timeout < INT32_MAX ) {
+	while( before->next->timeout < INT64_MAX ) {
 		if( before->next->id == *id ) {
 			before->next->id = -1;
 			_remove( obj, before );
@@ -319,7 +319,7 @@ void Timers_Remove( Timers *obj, int *id )
 // Triggers any pending timers. Gets called by the main loop for gui_timers.
 void Timers_trigger( Timers *obj )
 {
-	ULONG tm = atime();
+	int64_t tm = atime64();
 
 	Timer *before = &obj->dummy;
 
@@ -348,15 +348,18 @@ void Timers_trigger( Timers *obj )
 	pthread_mutex_unlock( &obj->mutex );
 }
 
-// returns the time the next timeout will occur.
-int Timers_nextTimeout( Timers *obj ) {
+// returns whether a timer exists and writes the time it will occur.
+int Timers_nextTimeout( Timers *obj, int64_t *timeout ) {
 	pthread_mutex_lock( &obj->mutex );
 
-	int res = obj->cnt != 0 ? obj->dummy.next->timeout : 0;
+	int have_timer = obj->cnt != 0;
+	if( have_timer && timeout ) {
+		*timeout = obj->dummy.next->timeout;
+	}
 
 	pthread_mutex_unlock( &obj->mutex );
 
-	return res;
+	return have_timer;
 }
 
 // returns whether the given object is registered as a listener for any timer.
@@ -365,7 +368,7 @@ int Timers_haveListener(Timers *obj, void *listener)
 	if( !inited ) return 0;
 
 	Timer *before = &obj->dummy;
-	while( before->next->timeout < INT32_MAX ) {
+	while( before->next->timeout < INT64_MAX ) {
 		if( before->next->ctx == listener ) {
 			serprintf( "Timers_haveListener: listener exists, was added by %s\n", before->next->caller );
 			return 1;
@@ -382,8 +385,8 @@ static void Timers_dump( Timers *obj )
 	serprintf("Timers (%i):\n", obj->cnt);
 
 	Timer *cur = obj->dummy.next;
-	while( cur->timeout < INT32_MAX ) {
-		serprintf("  id: %5i  int %8d  next_to %8d  cb %08X  ctx %08X  [%s]\n", cur->id, cur->interval, cur->timeout,  cur->callback?cur->callback:cur->callback_ctx, cur->ctx, cur->caller);
+	while( cur->timeout < INT64_MAX ) {
+		serprintf("  id: %5i  int %8d  next_to %8lld  cb %08X  ctx %08X  [%s]\n", cur->id, cur->interval, (long long)cur->timeout,  cur->callback?cur->callback:cur->callback_ctx, cur->ctx, cur->caller);
 		cur = cur->next;
 	}
 	serprintf("\n");

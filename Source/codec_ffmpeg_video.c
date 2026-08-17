@@ -50,6 +50,21 @@ static int _ff_fake         = 0;
 static int _ff_deinterlace  = 1;
 static int _ff_deinterlacing_max_height = 600;
 
+/* AVCodecContext owns extradata; video properties retain ownership of theirs. */
+static int ffmpeg_video_copy_extradata( AVCodecContext *ctx, const void *data, int size )
+{
+	if( !data || size <= 0 )
+		return 0;
+
+	ctx->extradata = av_mallocz( (size_t)size + AV_INPUT_BUFFER_PADDING_SIZE );
+	if( !ctx->extradata )
+		return 1;
+
+	memcpy( ctx->extradata, data, size );
+	ctx->extradata_size = size;
+	return 0;
+}
+
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_TOGGLE("ffca", _ff_force_cached );
 DECLARE_DEBUG_TOGGLE("ffdr", _ff_do_render );
@@ -319,14 +334,11 @@ serprintf("cannot find codec\r\n");
 		vctx->codec_tag = codec_tag;
 	}
 	
-	if(!no_extra) {
-		if( dec->video->extraDataSize ) {
-			vctx->extradata      = dec->video->extraData;
-			vctx->extradata_size = dec->video->extraDataSize;
-		} else {
-			vctx->extradata      = dec->video->extraData2;
-			vctx->extradata_size = dec->video->extraDataSize2;
-		}
+	if(!no_extra && ffmpeg_video_copy_extradata( vctx,
+			dec->video->extraDataSize ? dec->video->extraData : dec->video->extraData2,
+			dec->video->extraDataSize ? dec->video->extraDataSize : dec->video->extraDataSize2 ) ) {
+		serprintf( "cannot allocate codec extradata\r\n" );
+		goto ErrorExit;
 	}
 	vctx->thread_count = _ff_thread_count ? _ff_thread_count : device_get_cpu_count();
 	
@@ -334,10 +346,6 @@ serprintf("cannot find codec\r\n");
 serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
-
-	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
-	vctx->extradata      = NULL;
-	vctx->extradata_size = 0;
 
 DBGS serprintf("name %s  type %d  id %d  extra %d  threads %d\r\n", vcodec->name, vcodec->type, vcodec->id, vctx->extradata_size, vctx->thread_count);
 	p->vframe = av_frame_alloc();

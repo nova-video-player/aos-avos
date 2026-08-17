@@ -60,6 +60,21 @@ DECLARE_DEBUG_TOGGLE("forf", _force_realloc_fail);
 #define DBGCV4 	if(Debug[DBG_CV] > 3 )
 #define DBGCV5 	if(Debug[DBG_CV] > 4 )
 
+/* AVCodecContext frees extradata, therefore it must not borrow stream memory. */
+static int lavc_async_copy_extradata( AVCodecContext *ctx, const void *data, int size )
+{
+	if( !data || size <= 0 )
+		return 0;
+
+	ctx->extradata = av_mallocz( (size_t)size + AV_INPUT_BUFFER_PADDING_SIZE );
+	if( !ctx->extradata )
+		return 1;
+
+	memcpy( ctx->extradata, data, size );
+	ctx->extradata_size = size;
+	return 0;
+}
+
 #ifdef LOG
 void av_log_cb(void*, int, const char*, va_list);
 #endif
@@ -144,19 +159,16 @@ serprintf("cannot find codec\r\n");
 	vctx->coded_width    = dec->video->width;
 	vctx->coded_height   = dec->video->height;
 	
-	if(!no_extra) {
-		vctx->extradata      = dec->video->extraData;
-		vctx->extradata_size = dec->video->extraDataSize;
+	if(!no_extra && lavc_async_copy_extradata( vctx, dec->video->extraData,
+			dec->video->extraDataSize ) ) {
+		serprintf( "cannot allocate codec extradata\r\n" );
+		goto ErrorExit;
 	}
 	
 	if (avcodec_open2(vctx, vcodec, NULL) < 0) {
 serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
-
-	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
-	vctx->extradata      = NULL;
-	vctx->extradata_size = 0;
 
 DBGS serprintf("name %s  type %d  id %d \r\n", vcodec->name, vcodec->type, vcodec->id);
 	p->vframe = av_frame_alloc();

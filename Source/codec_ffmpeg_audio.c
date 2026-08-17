@@ -82,6 +82,25 @@ static void update_audio_channel_mask( AUDIO_PROPERTIES *audio, const AVChannelL
 // Channel map built in convert_to_stereo()
 static int channel_map[8] = { CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED };
 
+/*
+ * AVCodecContext owns extradata and frees it from avcodec_free_context().
+ * Stream properties do not transfer ownership, so copy their payload instead
+ * of lending it to FFmpeg. This also provides FFmpeg's required zero padding.
+ */
+static int ffmpeg_audio_copy_extradata( AVCodecContext *ctx, const void *data, int size )
+{
+	if( !data || size <= 0 )
+		return 0;
+
+	ctx->extradata = av_mallocz( (size_t)size + AV_INPUT_BUFFER_PADDING_SIZE );
+	if( !ctx->extradata )
+		return 1;
+
+	memcpy( ctx->extradata, data, size );
+	ctx->extradata_size = size;
+	return 0;
+}
+
 //
 //	AUDIO
 //
@@ -273,13 +292,10 @@ serprintf("cannot find codec\r\n");
 	av_channel_layout_default(&actx->ch_layout, audio->channels);
 	actx->ch_layout.nb_channels    = audio->channels;
 
-	if( audio->extraDataSize2 ) {
-		actx->extradata      = audio->extraData2;
-		actx->extradata_size = audio->extraDataSize2;
-	} else {
-		actx->extradata      = audio->extraData;
-		actx->extradata_size = audio->extraDataSize;
-	}
+	if( ffmpeg_audio_copy_extradata( actx,
+			audio->extraDataSize2 ? audio->extraData2 : audio->extraData,
+			audio->extraDataSize2 ? audio->extraDataSize2 : audio->extraDataSize ) )
+		goto ErrorExit;
 
 	if (avcodec_open2(actx, acodec, NULL) < 0) {
 serprintf("cannot open codec\r\n");
@@ -318,13 +334,14 @@ serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, a
 		}
 	}
 	
-	av_free(aframe);
+	av_frame_free( &aframe );
+	avcodec_free_context( &actx );
 
 	return 0;
 
 ErrorExit2:
 	if ( aframe ) {
-		av_free(aframe);
+		av_frame_free( &aframe );
 	}
 
 ErrorExit:
@@ -405,12 +422,11 @@ DBGS serprintf("codec_ffmpeg_audio: audio->request_channels=%d on entry\r\n", au
 	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
 DBGCA2  serprintf("requested channel layout: %s for %d channel(s)\r\n", layout_desc, p->actx->ch_layout.nb_channels);
 
-	if( audio->extraDataSize2 ) {
-		p->actx->extradata      = audio->extraData2;
-		p->actx->extradata_size = audio->extraDataSize2;
-	} else {
-		p->actx->extradata      = audio->extraData;
-		p->actx->extradata_size = audio->extraDataSize;
+	if( ffmpeg_audio_copy_extradata( p->actx,
+			audio->extraDataSize2 ? audio->extraData2 : audio->extraData,
+			audio->extraDataSize2 ? audio->extraDataSize2 : audio->extraDataSize ) ) {
+		serprintf( "cannot allocate codec extradata\r\n" );
+		goto ErrorExit;
 	}
 
 	// Open codec
@@ -418,10 +434,6 @@ DBGCA2  serprintf("requested channel layout: %s for %d channel(s)\r\n", layout_d
 serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
-
-	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
-	p->actx->extradata      = NULL;
-	p->actx->extradata_size = 0;
 
 	if( need_parser ) {
 		p->aparser = av_parser_init(p->actx->codec_id);

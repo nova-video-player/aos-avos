@@ -19,8 +19,7 @@ struct SUB_RENDERER {
     int             surface_height;
     int             ui_mode; // 0 = 2D, 1 = SBS, 2 = TB
     const SUB_FRAME *current_frame;
-    int              pending_clear;
-    int              pending_resize;
+    int              pending_redraw; // unified "something changed, redraw regardless"
     GLuint           gl_program;
     GLuint           gl_texture;
     GLint            attrib_pos;
@@ -195,17 +194,8 @@ static void* egl_render_thread(void* arg) {
         }
 
         pthread_mutex_lock(&r->lock);
-        if (r->pending_clear) {
-            // sub_render_gl_clear() already dropped r->current_frame to NULL on
-            // whatever thread called it (track switch/close/seek) — that thread
-            // can't itself force this loop to redraw, so it leaves this flag for
-            // us to notice and swap a blank frame instead of leaving whatever was
-            // last drawn frozen on the physical surface.
-            r->pending_clear = 0;
-            needs_redraw = 1;
-        }
-        if (r->pending_resize) {          // NEW
-            r->pending_resize = 0;
+        if (r->pending_redraw) {
+            r->pending_redraw = 0;
             needs_redraw = 1;
         }
         if (new_frame != NULL && new_frame != r->current_frame) {
@@ -400,11 +390,8 @@ void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
     pthread_mutex_lock(&r->lock);
     r->surface_width  = width;
     r->surface_height = height;
-    r->pending_resize = 1; // <--- FIX: Ensure static frames redraw
     pthread_mutex_unlock(&r->lock);
-    if (r->engine) {
-        sub_engine_force_wake((SUB_ENGINE*)r->engine); // wake it if it's parked
-    }
+    sub_render_gl_invalidate_cache(r);
 }
 
 void sub_render_gl_set_ui_mode(SUB_RENDERER *r, int mode) {
@@ -419,23 +406,23 @@ void sub_render_gl_clear(SUB_RENDERER *r) {
     pthread_mutex_lock(&r->lock);
     SUB_FRAME *to_free = (SUB_FRAME*)r->current_frame;
     r->current_frame = NULL;
-    r->pending_clear = 1; // tell the render loop it must swap a blank frame,
-                           // not just silently note "nothing new" and go back to sleep
     pthread_mutex_unlock(&r->lock);
 
     if (to_free) {
         sub_engine_release_frame((SUB_ENGINE*)r->engine, to_free);
     }
-    // The render thread may be parked indefinitely in sub_engine_wait_event()
-    // (idle backends now return get_timeout_ms() == -1) -- wake it so it
-    // actually notices pending_clear on this iteration instead of staying
-    // asleep with the last-drawn subtitle still sitting on the physical surface.
-    if (r->engine) {
-        sub_engine_force_wake((SUB_ENGINE*)r->engine);
-    }
+    sub_render_gl_invalidate_cache(r);
 }
 
-void sub_render_gl_invalidate_cache(SUB_RENDERER *r) {}
+void sub_render_gl_invalidate_cache(SUB_RENDERER *r) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->pending_redraw = 1;
+    pthread_mutex_unlock(&r->lock);
+    if (r->engine) {
+        sub_engine_force_wake((SUB_ENGINE*)r->engine); // wake it if it's parked
+    }
+}
 
 // --- HYBRID 3D BRIDGE FAST CPU BLENDER ---
 int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_h, int dst_stride) {

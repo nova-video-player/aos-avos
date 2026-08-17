@@ -169,8 +169,8 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
     eng->surface_w = width;
     eng->surface_h = height;
     pthread_mutex_unlock(&eng->lock);
+    sub_engine_resize_video(eng, width, height); // Tells Libass to wrap text to the new 3D box!
     sub_render_gl_resize(eng->renderer, width, height);
-    sub_engine_resize_video(eng, width, height); // <--- Tells Libass to wrap text to the new 3D box!
 }
 
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,

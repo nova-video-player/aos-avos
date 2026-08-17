@@ -310,8 +310,8 @@ static int load_embedded_fonts(ASS_Library *lib, const SUB_EMBEDDED_FONT *fonts,
 }
 
 // Synchronizes Java UI changes safely without corrupting the original ASS track!
-static void sync_styles(SSA_BACKEND *ctx) {
-    if (!ctx->user_style_ptr || !ctx->track) return;
+static int sync_styles(SSA_BACKEND *ctx) {
+    if (!ctx->user_style_ptr || !ctx->track) return 0;
 
     SUB_USER_STYLE u;
     memset(&u, 0, sizeof(SUB_USER_STYLE));
@@ -323,7 +323,7 @@ static void sync_styles(SSA_BACKEND *ctx) {
 
     if (u.serial == ctx->last_serial) {
         free(u.font_family);
-        return;
+        return 0;
     }
     ctx->last_serial = u.serial;
 
@@ -466,7 +466,6 @@ static void sync_styles(SSA_BACKEND *ctx) {
                 // MarginV is measured from the top for top-aligned styles (7/8/9) — applying it
                 // unconditionally pushed those styles' text down from the top instead of up from
                 // the bottom, which is what the vertical-offset slider visually looked like.
-                if (u.margin_bottom > 0) {
                     if (style->Alignment >= 1 && style->Alignment <= 3) {
                         if (ctx->video_h > 0 && ctx->track->PlayResY > 0) {
                             float scale_ratio = (float)ctx->track->PlayResY / (float)ctx->video_h;
@@ -478,7 +477,6 @@ static void sync_styles(SSA_BACKEND *ctx) {
                             style->MarginV = u.margin_bottom;
                         }
                     }
-                }
 
 
             } else if (u.override_mode == 2) {
@@ -494,6 +492,7 @@ static void sync_styles(SSA_BACKEND *ctx) {
     }
 
     free(u.font_family);
+    return 1;
 }
 
 // libass message verbosity levels (from ass_types.h): 0=FATAL 1=ERR 2=WARN
@@ -707,7 +706,15 @@ static SUB_FRAME *ssa_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
     SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
     pthread_mutex_lock(&ctx->lock);
     // --- APPLY LIVE SLIDER UPDATES ---
-    sync_styles(ctx);
+    int styles_changed = sync_styles(ctx);
+
+    // Wiggle the frame height by 1 pixel to force Libass to flush its layout
+    // cache. This is required because we mutated the ASS_Track styles natively
+    // and Libass won't recalculate MarginV layout positions otherwise.
+    if (styles_changed && ctx->video_w > 0 && ctx->video_h > 0) {
+        ass_set_frame_size(ctx->renderer, ctx->video_w, ctx->video_h + 1);
+        ass_set_frame_size(ctx->renderer, ctx->video_w, ctx->video_h);
+    }
 
     int change = 0;
     ASS_Image *imgs = ass_render_frame(ctx->renderer, ctx->track, pts_ms, &change);

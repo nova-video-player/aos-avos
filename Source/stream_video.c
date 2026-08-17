@@ -3906,7 +3906,17 @@ DBGS serprintf("stream_continue\r\n");
 			return 1;
 		}
 	}
-	return 0;
+	/*
+	 * A failed codec recovery can leave video marked valid after
+	 * stream_close_video_dec() has destroyed and cleared s->video_dec.  Do not
+	 * let the player continue through the rest of its current iteration in that
+	 * terminal state: the async path would otherwise dereference the cleared
+	 * decoder in put_out()/get_out().
+	 *
+	 * Successful recovery clears video_error and already returns above so the
+	 * new decoder is first used on a fresh player iteration.
+	 */
+	return s->video_error ? 1 : 0;
 }
 
 // *****************************************************************************
@@ -4429,6 +4439,14 @@ static void _stream_player_async( STREAM *s )
 		// leave here if no video
 		return;
 	}
+	if( !s->video_dec ) {
+		/*
+		 * Decoder fallback destroys the failed decoder before trying its
+		 * replacement.  If every replacement fails, the engine can observe this
+		 * short terminal state until the end/error notification is consumed.
+		 */
+		return;
+	}
 	
 	if( s->video_flush ) {
 		s->video_flush = 0;
@@ -4454,6 +4472,10 @@ static void _stream_player_async( STREAM *s )
 	
 	// do we stop?
 	if( _check_end( s ) ) {
+		return;
+	}
+	/* _check_end() may have attempted and failed decoder recovery. */
+	if( !s->video_dec ) {
 		return;
 	}
 

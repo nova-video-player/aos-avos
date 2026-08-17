@@ -678,6 +678,7 @@ typedef struct STREAM {
 	
 	pthread_t 	parser_thread_handle;
 	THREAD_STATE	parser_tstate;
+	volatile int	parser_interrupt;
 	
 	pthread_t 	sub_thread_handle;
 	THREAD_STATE	sub_tstate;

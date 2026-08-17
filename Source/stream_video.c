@@ -4684,8 +4684,13 @@ static int _seek_pause( STREAM *s )
 	s->seek_paused     = 1;
 	s->sync_audio      = 0;
 	s->sync_video      = 0;
-	
+
+	// FFmpeg may be blocked in av_read_frame() while the parser thread is
+	// RUNNING. Make its interrupt callback return so the parser can reach
+	// thread_state_ack() and honor this IDLE request.
+	s->parser_interrupt = 1;
 	thread_state_set( &s->parser_tstate,  THREAD_IDLE );
+	s->parser_interrupt = 0;
 	if( s->audio->valid )
 		thread_state_set( &s->audio_tstate,  THREAD_IDLE );
 

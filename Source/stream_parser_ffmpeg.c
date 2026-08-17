@@ -815,7 +815,7 @@ DBGP serprintf("\r\n");
 static int ffmpeg_interrupt_cb(void *ctx)
 {
 	STREAM *s = (STREAM*)ctx;
-	return s && stream_abort( s ) ? 1 : 0;
+	return s && (s->parser_interrupt || stream_abort( s )) ? 1 : 0;
 }
 
 static void parse_PID_from_query( STREAM *s )
@@ -1225,6 +1225,14 @@ DBGP serprintf("FFMPEG: sleep\r\n");
 	AVPacket packet = { 0 };
 	// Read new packet
 	if (av_read_frame( fmt, &packet) < 0) {
+		// A seek first asks the parser thread to become idle. Interrupt a
+		// potentially blocking FFmpeg read so the thread can acknowledge that
+		// state transition. This is not EOF: the async seek will reposition the
+		// same format context before allowing parsing to run again.
+		if (s->parser_interrupt) {
+			DBG serprintf("FFMPEG: read interrupted for parser state change\n");
+			return 0;
+		}
 		if( !s->video_parse_end ) {
 DBGP serprintf("FFMPEG: end\r\n");
 			s->video_parse_end = 1;
@@ -1292,6 +1300,8 @@ static int _parse( STREAM *s)
 	// load chunk aggressively, try more often ...
 	int i;
 	for( i = 0; i < 5; i ++ ) {
+		if (s->parser_interrupt)
+			return 0;
 		if( _parse_once( s, NULL ) ) {
 			return 1;
 		}

@@ -42,6 +42,8 @@ enum {
 	ASYNC_CMD_WAIT = 0,
 	ASYNC_CMD_OPEN,
 	ASYNC_CMD_SEEK,
+	ASYNC_CMD_START,
+	ASYNC_CMD_PAUSE,
 	ASYNC_CMD_EXIT,
 };
 
@@ -70,6 +72,8 @@ struct avos_mp {
 		pthread_cond_t cond;
 		async_cmd_t cur_cmd;
 		async_cmd_t next_cmd;
+		int pending_transport;
+		uint32_t transport_generation;
 	} async;
 
 	struct {
@@ -394,6 +398,66 @@ static int avos_mp_seek_common(avos_mp_t *mp, uint32_t msec)
 	return AVOS_ERR_OK;
 }
 
+static int avos_mp_transport_common(avos_mp_t *mp, int command)
+{
+	if (!mp->media || (mp->type != TYPE_VID && mp->type != TYPE_AUD))
+		return AVOS_ERR_CRITICAL;
+
+	if (mp->type == TYPE_VID) {
+		int ret = command == ASYNC_CMD_START ?
+			avos_mp_video_start(mp, (avos_mp_video_t *)mp->media) :
+			avos_mp_video_pause(mp, (avos_mp_video_t *)mp->media);
+		return ret == AVOS_ERR_OK ? AVOS_ERR_OK : AVOS_ERR;
+	}
+
+	int ret = command == ASYNC_CMD_START ?
+		avos_mp_audio_start(mp, (avos_mp_audio_t *)mp->media) :
+		avos_mp_audio_pause(mp, (avos_mp_audio_t *)mp->media);
+	return ret == AVOS_ERR_OK ? AVOS_ERR_OK : AVOS_ERR;
+}
+
+static int avos_mp_transport_isplaying(avos_mp_t *mp, int *isplaying)
+{
+	if (!mp->media || (mp->type != TYPE_VID && mp->type != TYPE_AUD))
+		return AVOS_ERR_CRITICAL;
+
+	if (mp->type == TYPE_VID)
+		return avos_mp_video_isplaying(mp, (avos_mp_video_t *)mp->media, isplaying);
+
+	return avos_mp_audio_isplaying(mp, (avos_mp_audio_t *)mp->media, isplaying);
+}
+
+static void async_transport_complete(avos_mp_t *mp, int command,
+		uint32_t generation, int command_ret)
+{
+	int actual_isplaying = command == ASYNC_CMD_PAUSE;
+	int actual_ret = AVOS_ERR_OK;
+
+	if (command_ret != AVOS_ERR_OK)
+		actual_ret = avos_mp_transport_isplaying(mp, &actual_isplaying);
+
+	pthread_mutex_lock(&mp->async.mtx);
+	int is_latest = generation == mp->async.transport_generation;
+	if (is_latest) {
+		if (command_ret == AVOS_ERR_OK)
+			mp->last.isplaying = command == ASYNC_CMD_START;
+		else if (actual_ret == AVOS_ERR_OK)
+			mp->last.isplaying = actual_isplaying;
+		// If the actual state cannot be queried, restore the state expected
+		// before the failed transition instead of leaving a false confirmation.
+		else
+			mp->last.isplaying = command == ASYNC_CMD_PAUSE;
+	}
+	pthread_mutex_unlock(&mp->async.mtx);
+
+	if (command_ret != AVOS_ERR_OK) {
+		MPLOG("async transport command %d failed%s", command,
+		    is_latest ? "" : " (superseded)");
+		if (is_latest)
+			avos_mp_sendevent(mp, MEDIA_ERROR, MEDIA_ERROR_UNKNOWN, 0);
+	}
+}
+
 static void *async_thread(void *ctx)
 {
 	int loop = 1;
@@ -405,20 +469,31 @@ static void *async_thread(void *ctx)
 			avos_mp_sendevent(mp, MEDIA_SEEK_COMPLETE,
 			    mp->async.next_cmd.id == ASYNC_CMD_SEEK ? 1 /* seek pending */ : 0, 0);
 		}
-		if (mp->async.next_cmd.id == ASYNC_CMD_WAIT) {
+		if (mp->async.next_cmd.id == ASYNC_CMD_WAIT &&
+		    mp->async.pending_transport == ASYNC_CMD_WAIT) {
 			// signal async thread is done for now
 			mp->async.cur_cmd.id = ASYNC_CMD_WAIT;
 			mp->async.cur_cmd.arg = 0;
 			pthread_cond_broadcast(&mp->async.cond);
 			// wait for a new cmd
-			while (mp->async.next_cmd.id == ASYNC_CMD_WAIT)
+			while (mp->async.next_cmd.id == ASYNC_CMD_WAIT &&
+			       mp->async.pending_transport == ASYNC_CMD_WAIT)
 				pthread_cond_wait(&mp->async.cond, &mp->async.mtx);
 		}
-		mp->async.cur_cmd = mp->async.next_cmd;
-		mp->async.next_cmd.id = ASYNC_CMD_WAIT;
-		mp->async.next_cmd.arg = 0;
+		if (mp->async.next_cmd.id != ASYNC_CMD_WAIT) {
+			// Seeks and lifecycle commands take precedence. The latest requested
+			// transport state is retained and applied immediately afterwards.
+			mp->async.cur_cmd = mp->async.next_cmd;
+			mp->async.next_cmd.id = ASYNC_CMD_WAIT;
+			mp->async.next_cmd.arg = 0;
+		} else {
+			mp->async.cur_cmd.id = mp->async.pending_transport;
+			mp->async.cur_cmd.arg = (int)mp->async.transport_generation;
+			mp->async.pending_transport = ASYNC_CMD_WAIT;
+		}
+		async_cmd_t command = mp->async.cur_cmd;
 		pthread_mutex_unlock(&mp->async.mtx);
-		switch (mp->async.cur_cmd.id) {
+		switch (command.id) {
 			case ASYNC_CMD_OPEN:
 				if (avos_mp_open_common(mp) == AVOS_ERR_OK)
 					avos_mp_sendevent(mp, MEDIA_PREPARED, 0, 0);
@@ -426,8 +501,15 @@ static void *async_thread(void *ctx)
 					avos_mp_sendevent(mp, MEDIA_ERROR, 0, 0);
 				break;
 			case ASYNC_CMD_SEEK:
-				avos_mp_seek_common(mp, mp->async.cur_cmd.arg);
+				avos_mp_seek_common(mp, command.arg);
 				break;
+			case ASYNC_CMD_START:
+			case ASYNC_CMD_PAUSE: {
+				int ret = avos_mp_transport_common(mp, command.id);
+				async_transport_complete(mp, command.id,
+				    (uint32_t)command.arg, ret);
+				break;
+			}
 			case ASYNC_CMD_EXIT:
 				loop = 0;
 				break;
@@ -445,7 +527,9 @@ static int async_cmd_wait(avos_mp_t *mp)
 	if (mp->async.cur_cmd.id == ASYNC_CMD_EXIT) {
 		ret = 1;
 	} else {
-		while (mp->async.cur_cmd.id != ASYNC_CMD_WAIT) {
+		while (mp->async.cur_cmd.id != ASYNC_CMD_WAIT ||
+		       mp->async.next_cmd.id != ASYNC_CMD_WAIT ||
+		       mp->async.pending_transport != ASYNC_CMD_WAIT) {
 			MPLOGV("WARNING: waiting for async thread");
 			pthread_cond_wait(&mp->async.cond, &mp->async.mtx);
 		}
@@ -460,16 +544,57 @@ static int async_cmd_is_running(avos_mp_t *mp)
 	int ret;
 
 	pthread_mutex_lock(&mp->async.mtx);
-	ret = mp->async.cur_cmd.id != ASYNC_CMD_WAIT ? 1 : 0;
+	ret = mp->async.cur_cmd.id != ASYNC_CMD_WAIT ||
+	      mp->async.next_cmd.id != ASYNC_CMD_WAIT ||
+	      mp->async.pending_transport != ASYNC_CMD_WAIT;
 	pthread_mutex_unlock(&mp->async.mtx);
 	return ret;
+}
+
+static int async_cmd_get_cached_isplaying(avos_mp_t *mp, int *isplaying)
+{
+	int running;
+
+	pthread_mutex_lock(&mp->async.mtx);
+	running = mp->async.cur_cmd.id != ASYNC_CMD_WAIT ||
+		  mp->async.next_cmd.id != ASYNC_CMD_WAIT ||
+		  mp->async.pending_transport != ASYNC_CMD_WAIT;
+	if (running)
+		*isplaying = mp->last.isplaying;
+	pthread_mutex_unlock(&mp->async.mtx);
+	return running;
 }
 
 static int async_cmd_add(avos_mp_t *mp, int id, int arg)
 {
 	pthread_mutex_lock(&mp->async.mtx);
+	if (id == ASYNC_CMD_WAIT || id == ASYNC_CMD_EXIT) {
+		mp->async.pending_transport = ASYNC_CMD_WAIT;
+		// Invalidate an in-flight transport result during close/destroy so it
+		// cannot restore state or report an obsolete failure.
+		mp->async.transport_generation++;
+	}
 	mp->async.next_cmd.id = id;
 	mp->async.next_cmd.arg = arg;
+	pthread_cond_broadcast(&mp->async.cond);
+	pthread_mutex_unlock(&mp->async.mtx);
+	return AVOS_ERR_OK;
+}
+
+static int async_cmd_set_transport(avos_mp_t *mp, int command)
+{
+	if (!mp->media || (mp->type != TYPE_VID && mp->type != TYPE_AUD))
+		return AVOS_ERR_CRITICAL;
+
+	pthread_mutex_lock(&mp->async.mtx);
+	if (mp->async.cur_cmd.id == ASYNC_CMD_EXIT ||
+	    mp->async.next_cmd.id == ASYNC_CMD_EXIT) {
+		pthread_mutex_unlock(&mp->async.mtx);
+		return AVOS_ERR_CRITICAL;
+	}
+	mp->async.transport_generation++;
+	mp->async.pending_transport = command;
+	mp->last.isplaying = command == ASYNC_CMD_START;
 	pthread_cond_broadcast(&mp->async.cond);
 	pthread_mutex_unlock(&mp->async.mtx);
 	return AVOS_ERR_OK;
@@ -766,24 +891,18 @@ static int avos_mp_close(avos_mp_t *mp)
 static int avos_mp_start(avos_mp_t *mp)
 {
 	MPLOG();
-	async_cmd_wait(mp);
-	AVOS_MP_COMMON(start, mp);
-	return AVOS_ERR_OK;
+	return async_cmd_set_transport(mp, ASYNC_CMD_START);
 }
 
 static int avos_mp_pause(avos_mp_t *mp)
 {
 	MPLOG();
-	async_cmd_wait(mp);
-	AVOS_MP_COMMON(pause, mp);
-	return AVOS_ERR_OK;
+	return async_cmd_set_transport(mp, ASYNC_CMD_PAUSE);
 }
 
 static int avos_mp_isplaying(avos_mp_t *mp, int *ret)
 {
-	if (async_cmd_is_running(mp)) {
-		*ret = mp->last.isplaying;
-	} else {
+	if (!async_cmd_get_cached_isplaying(mp, ret)) {
 		AVOS_MP_COMMON(isplaying, mp, ret);
 		mp->last.isplaying = *ret;
 	}

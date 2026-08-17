@@ -276,6 +276,8 @@ DBGS serprintf("stream_init\r\n" );
 	pthread_mutex_init( &s->codec_mutex,       NULL );
 	pthread_mutex_init( &s->video_done_mutex,  NULL );
 	pthread_mutex_init( &s->audio_sink_mutex,  NULL );
+	// Serializes video-sink calls from the audio thread with sink teardown.
+	pthread_mutex_init( &s->video_sink_mutex,  NULL );
 	pthread_mutex_init( &s->anchor_mutex,      NULL );
 	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
 	
@@ -580,10 +582,13 @@ extern void _stream_resync( STREAM *s );
 
 static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
 {
-	if( !s || !s->video_sink || !s->video_sink->put_time || audio_time_ts < 0 )
+	if( !s || audio_time_ts < 0 )
 		return;
 
-	s->video_sink->put_time( s->video_sink, audio_time_ts );
+	pthread_mutex_lock( &s->video_sink_mutex );
+	if( s->video_sink && s->video_sink->is_open && s->video_sink->put_time )
+		s->video_sink->put_time( s->video_sink, audio_time_ts );
+	pthread_mutex_unlock( &s->video_sink_mutex );
 	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d av_delay=%d\n",
 		audio_time_ts, audio_time_ts, stream_sync_av_delay( s ) );
 }

@@ -184,6 +184,7 @@ static void 	_stream_player_async( STREAM *s );
 static int  	_stream_wait_for_idle( STREAM *s, int timeout );
 static void 	_stream_play_n_frames( STREAM *s, int n, int time, int old_time );
 static void 	_do_stuff( STREAM *s );
+static void 	_stream_close_video_sink( STREAM *s, int delete_sink );
 static void 	*_parser_thread( void *data );
 static void 	*_player_thread( void *data );
 static void 	*_decode_thread( void *data );
@@ -726,7 +727,6 @@ DBGS serprintf("stream_open_video_dec\r\n");
 		goto ErrorExit;
 	}
 
-	pthread_mutex_init( &s->video_sink_mutex, NULL );
 	int prio = stream_force_prio ? stream_force_prio : get_cpu_priority(s);
 	int forced;
 	if (prio == STREAM_CPU_ANY) {
@@ -787,6 +787,7 @@ DBGS stream_show_rc( &s->video_rc );
 		
 		// Initialize the video sink
 		// no caller provided sink, use standard
+		pthread_mutex_lock( &s->video_sink_mutex );
 		if( !s->video_sink ) {
 			if (s->video_dec->get_sink) {
 				s->video_sink = s->video_dec->get_sink(s->video_dec);
@@ -797,6 +798,8 @@ DBGS stream_show_rc( &s->video_rc );
 		}
 		if( !s->video_sink ) {
 serprintf("stream: no video sink!\r\n");
+			pthread_mutex_unlock( &s->video_sink_mutex );
+			goto next;
 		}
 		s->video_sink->ctx = s;
 serprintf("VID_SNK: [%s]\n", s->video_sink->name);	
@@ -812,6 +815,7 @@ DBGS serprintf("stream: resize to sink!\r\n");
 
 		if( _allocate_video_buffers( s ) ) {
 serprintf("could not allocate video_buffers!r\n");
+			pthread_mutex_unlock( &s->video_sink_mutex );
 			goto next;
 		}
 
@@ -826,11 +830,13 @@ DBGS serprintf("slideshow!\r\n" );
 			int num_frames = s->video_rc.num_frames;
 			if( s->video_sink->open( s->video_sink, s->video, s, num_frames, &s->video_rc ) ) {
 serprintf("error, could not open video sink!\r\n");
+				pthread_mutex_unlock( &s->video_sink_mutex );
 				goto next;
 			}
 			s->put_time_mode = (s->video_sink->put_time != NULL);
 			serprintf("put_time_mode=%d (sink=%s)\n", s->put_time_mode, s->video_sink->name);
 		}
+		pthread_mutex_unlock( &s->video_sink_mutex );
 		if ( s->video->valid) {
 			if( s->use_sink_frames ) {
 				pthread_mutex_lock( &s->video_sink_mutex );
@@ -871,10 +877,12 @@ next:
 		}
 		// Close the video sink to stop and join its threads
 		if (s->video_sink) {
+			pthread_mutex_lock( &s->video_sink_mutex );
 			if (s->video_sink->is_open) {
 				s->video_sink->close(s->video_sink);
 			}
 			s->put_time_mode = 0;
+			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
 		// Close and destroy the decoder (safe now that sink threads are joined)
 		if (s->video_dec) {
@@ -888,12 +896,14 @@ next:
 		// (sfdec/sfdec2 do). Match the normal stop order by deleting it after
 		// decoder close, then clear it before trying another decoder.
 		if (decoder_owned_sink && s->video_sink) {
+			pthread_mutex_lock( &s->video_sink_mutex );
 			if (s->video_sink->delete) {
 				s->video_sink->delete(s->video_sink);
 			}
 			s->video_sink = NULL;
 			s->use_sink_frames = 0;
 			s->vtime_post_sink = 0;
+			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
 	} 
 ErrorExit:
@@ -1053,6 +1063,31 @@ static int stream_restart_audio_as_pcm( STREAM *s, const char *reason )
 //	stream_close_video_dec
 //
 // *****************************************************************************
+static void _stream_close_video_sink( STREAM *s, int delete_sink )
+{
+	if( !s )
+		return;
+
+	/*
+	 * stream_sync_audio() calls video_sink->put_time() on the audio thread.
+	 * Keep close/delete and clearing the published pointer in one critical
+	 * section so that thread cannot enter a sink after its private locks have
+	 * been destroyed.
+	 */
+	pthread_mutex_lock( &s->video_sink_mutex );
+	if( s->video_sink && s->video_sink->is_open ) {
+		s->video_sink->close( s->video_sink );
+	}
+	if( delete_sink && s->video_sink ) {
+		if( s->video_sink->delete ) {
+			s->video_sink->delete( s->video_sink );
+		}
+		s->video_sink = NULL;
+		s->put_time_mode = 0;
+	}
+	pthread_mutex_unlock( &s->video_sink_mutex );
+}
+
 static void stream_close_video_dec( STREAM *s )
 {
 	// Clean up the decoder frames first (while frames are still allocated and valid)
@@ -1063,9 +1098,7 @@ static void stream_close_video_dec( STREAM *s )
 		}
 	}
 	// Close the video sink to stop and join its threads
-	if( s->video_sink && s->video_sink->is_open ) {
-		s->video_sink->close( s->video_sink );
-	}
+	_stream_close_video_sink( s, 0 );
 	// Close and destroy the decoder (safe now that sink threads are joined)
 	if( s->video_dec) {
 		s->video_dec->close( s->video_dec );
@@ -2637,8 +2670,10 @@ DBGS serprintf("stream_resize\r\n");
 			msec_sleep( 300 );
 		}
 		if( s->video_sink ) {
+			pthread_mutex_lock( &s->video_sink_mutex );
 			s->video_sink->close( s->video_sink );
 			s->video_sink->open( s->video_sink, s->video, s, 0, &s->video_rc );
+			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
 		if ( s->video->valid ) {
 			// FIXME: hangs without this
@@ -2648,10 +2683,16 @@ DBGS serprintf("stream_resize\r\n");
 			stream_un_pause( s, !s->paused_internal );
 			s->paused_internal = 0;
 		}
-	} else if( s->video_sink->resize ) {
-		if (s->video_sink->resize( s->video_sink, s->video ) == 1 && stream_is_paused( s ))
+	} else {
+		int resized = 0;
+		pthread_mutex_lock( &s->video_sink_mutex );
+		if( s->video_sink && s->video_sink->is_open && s->video_sink->resize ) {
+			resized = s->video_sink->resize( s->video_sink, s->video );
+		}
+		pthread_mutex_unlock( &s->video_sink_mutex );
+		if( resized == 1 && stream_is_paused( s ) )
 			_stream_redraw( s );
-	}	
+	}
 	
 
 	return 0;
@@ -2697,16 +2738,7 @@ serprintf("STP: not open!\r\n");
 	}
 
 	// stop video sink (after decoder cleanup so sink-owned frames remain valid)
-	if( s->video_sink) {
-		if( s->video_sink->is_open ) {
-			s->video_sink->close( s->video_sink );
-		}
-		if( s->video_sink->delete ) {
-			s->video_sink->delete( s->video_sink );
-		}
-		s->video_sink = NULL;
-		s->put_time_mode = 0;
-	}
+	_stream_close_video_sink( s, 1 );
 
 	// stop audio decoder
 	stream_close_audio_dec( s );
@@ -2738,6 +2770,7 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 
 	// The sfdec2 render thread can query stream timing state. Destroy these
 	// locks only after every decoder/sink component has stopped and joined.
+	pthread_mutex_destroy( &s->video_sink_mutex );
 	pthread_mutex_destroy( &s->anchor_mutex );
 	pthread_mutex_destroy( &s->mode2_heard_mutex );
 	
@@ -4387,16 +4420,7 @@ serprintf("error preparing decoder in realloc!\n");
 
 static int _handle_video_codec_error( STREAM *s )
 {
-	if (s->video_sink) {
-		if (s->video_sink->is_open) {
-			s->video_sink->close(s->video_sink);
-			if( s->video_sink->delete ) {
-				s->video_sink->delete( s->video_sink );
-			}
-			s->video_sink = NULL;
-		}
-		s->put_time_mode = 0;
-	}
+	_stream_close_video_sink( s, 1 );
 
 	int cpu = s->video_dec->cpu;	
 

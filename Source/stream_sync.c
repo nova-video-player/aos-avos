@@ -122,8 +122,16 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 	}
 	if( refresh_sink )
 		sfdec2_refresh_sched_anchor( s );
-	if( s->video_sink && s->video_sink->put_time )
+	/*
+	 * The audio decoder thread publishes this anchor while decoder recovery or
+	 * resize can close the renderer on another thread.  Keep the method call
+	 * under the close/delete lock so sink_close() cannot destroy the renderer's
+	 * private mutex between this check and put_time().
+	 */
+	pthread_mutex_lock( &s->video_sink_mutex );
+	if( s->video_sink && s->video_sink->is_open && s->video_sink->put_time )
 		s->video_sink->put_time( s->video_sink, sink_ref_time );
+	pthread_mutex_unlock( &s->video_sink_mutex );
 	__atomic_store_n( &s->vid_ref_time, vid_ref_time, __ATOMIC_RELEASE );
 	__atomic_store_n( &s->sink_ref_time, sink_ref_time, __ATOMIC_RELEASE );
 	pthread_mutex_unlock( &s->anchor_mutex );
@@ -132,15 +140,23 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 
 int stream_sync_anchor_seed_from_sink( STREAM *s, int vid_ref_time )
 {
-	if( !s || !s->video_sink || !s->video_sink->get_time )
+	if( !s )
 		return 0;
 
 	pthread_mutex_lock( &s->anchor_mutex );
+	pthread_mutex_lock( &s->video_sink_mutex );
 	if( __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) != -1 ) {
+		pthread_mutex_unlock( &s->video_sink_mutex );
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
+	if( !s->video_sink || !s->video_sink->is_open || !s->video_sink->get_time ) {
+		pthread_mutex_unlock( &s->video_sink_mutex );
 		pthread_mutex_unlock( &s->anchor_mutex );
 		return 0;
 	}
 	int sink_time = s->video_sink->get_time( s->video_sink );
+	pthread_mutex_unlock( &s->video_sink_mutex );
 	__atomic_store_n( &s->vid_ref_time, vid_ref_time, __ATOMIC_RELEASE );
 	__atomic_store_n( &s->sink_ref_time, sink_time - vid_ref_time, __ATOMIC_RELEASE );
 	pthread_mutex_unlock( &s->anchor_mutex );
@@ -443,7 +459,16 @@ static int stream_calc_lwma(int current, int *history, int *count)
 
 static int _stream_is_sink_driven(STREAM *s)
 {
-	return s && s->video_sink && s->video_sink->put_time;
+	int sink_driven = 0;
+
+	if( !s )
+		return 0;
+
+	/* The audio thread uses this predicate while codec recovery may delete the sink. */
+	pthread_mutex_lock( &s->video_sink_mutex );
+	sink_driven = s->video_sink && s->video_sink->is_open && s->video_sink->put_time;
+	pthread_mutex_unlock( &s->video_sink_mutex );
+	return sink_driven;
 }
 
 // True only while audio is genuinely not yet ready to anchor/sync:
@@ -1958,9 +1983,12 @@ int stream_sync_av_delay( STREAM *s )
 	if (s->audio_sink && !s->audio_sink_open) {
 		return 0;
 	}
-	if (s->video_sink && !s->video_sink->is_open) {
+	pthread_mutex_lock( &s->video_sink_mutex );
+	int video_sink_not_open = s->video_sink && !s->video_sink->is_open;
+	pthread_mutex_unlock( &s->video_sink_mutex );
+	if (video_sink_not_open) {
 		return 0;
-	} 
+	}
 	
 	// audio data passes through decoder, filters, and sink
 	// world time audio decoder delay not dependant on audio speed
@@ -2035,7 +2063,10 @@ int stream_sync_av_delay( STREAM *s )
 		video_delay = 0;
 	} else {
 		// we sample before the sink, so the video frames have to pass through the sink
-	  	video_delay = ( s->video_sink && s->video_sink->delay )  ? s->video_sink->delay( s->video_sink ) : 0;
+		pthread_mutex_lock( &s->video_sink_mutex );
+		video_delay = ( s->video_sink && s->video_sink->is_open && s->video_sink->delay ) ?
+			s->video_sink->delay( s->video_sink ) : 0;
+		pthread_mutex_unlock( &s->video_sink_mutex );
  	}
 	if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 		// In sample-based sync, the audio sink's sample counter is the master clock.
@@ -2609,9 +2640,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
 
 			int force_passthrough_reanchor =
-				(passthrough_mode > 0) && 
-				s->video_sink &&
-				s->video_sink->put_time &&
+				(passthrough_mode > 0) && _stream_is_sink_driven( s ) &&
 				(sink_ref_time == -1 || s->sync_a_time == -1);
 
 			if (diag_log) {

@@ -24,3 +24,4 @@ void sub_render_gl_set_ui_mode(SUB_RENDERER *r, int mode);
 // --- HYBRID 3D BRIDGE ---
 // Extracts the current frame into an Android CPU Bitmap for the Java 3D Shader
 int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_h, int dst_stride);
+void sub_render_gl_wait_for_generation(SUB_RENDERER *r, uint64_t target_generation, int timeout_ms);

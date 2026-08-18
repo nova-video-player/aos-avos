@@ -20,6 +20,8 @@ struct SUB_RENDERER {
     int             ui_mode; // 0 = 2D, 1 = SBS, 2 = TB
     const SUB_FRAME *current_frame;
     int              pending_redraw; // unified "something changed, redraw regardless"
+    uint64_t         applied_generation; // highest wakeup_generation this thread has finished a poll+store pass for
+    pthread_cond_t   frame_cond;         // broadcast whenever applied_generation advances
     GLuint           gl_program;
     GLuint           gl_texture;
     GLint            attrib_pos;
@@ -206,6 +208,14 @@ static void* egl_render_thread(void* arg) {
             needs_redraw = 1; // <--- 3. FORCE REDRAW ON NEW FRAME
         }
 
+        // This iteration's poll_frame() (above) has now run and r->current_frame reflects
+        // its result, so anything that was true when loop_generation was sampled at the top
+        // of this iteration -- e.g. a style change whose force_wake() bump was already
+        // visible at that point -- is guaranteed to be reflected here. Stamp and broadcast so
+        // sub_render_gl_wait_for_generation() callers (the 3D pull path) can unblock.
+        r->applied_generation = loop_generation;
+        pthread_cond_broadcast(&r->frame_cond);
+
         int w = r->surface_width;
         int h = r->surface_height;
         const SUB_FRAME *frame_to_draw = r->current_frame;
@@ -329,6 +339,7 @@ static void* egl_render_thread(void* arg) {
 SUB_RENDERER *sub_render_gl_create(void *engine) {
     SUB_RENDERER *r = calloc(1, sizeof(SUB_RENDERER));
     pthread_mutex_init(&r->lock, NULL);
+    pthread_cond_init(&r->frame_cond, NULL);
     r->running    = 1;
     r->attrib_pos = -1;
     r->attrib_tex = -1;
@@ -364,6 +375,7 @@ void sub_render_gl_destroy(SUB_RENDERER *r) {
     // no backend vtable to route through.
     if (leftover) sub_engine_free_frame(leftover);
     pthread_mutex_destroy(&r->lock);
+    pthread_cond_destroy(&r->frame_cond);
     free(r);
 }
 
@@ -422,6 +434,34 @@ void sub_render_gl_invalidate_cache(SUB_RENDERER *r) {
     if (r->engine) {
         sub_engine_force_wake((SUB_ENGINE*)r->engine); // wake it if it's parked
     }
+}
+
+// Blocks the calling thread -- typically a JNI call arriving on the Java UI thread --
+// until the render thread has completed a poll+store pass stamped with a
+// loop_generation >= target_generation, or until timeout_ms elapses, whichever comes
+// first. This is what closes the race in the 3D hybrid pull path: force_wake() only
+// guarantees the render thread will eventually notice a style change, not that it
+// already has by the time fill_bitmap() runs on another thread. Never blocks
+// indefinitely -- a wedged or slow render thread just means the caller falls through
+// and draws whatever's currently cached, rather than hanging the UI thread.
+void sub_render_gl_wait_for_generation(SUB_RENDERER *r, uint64_t target_generation, int timeout_ms) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    if (r->applied_generation >= target_generation) {
+        pthread_mutex_unlock(&r->lock);
+        return;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long long nsec = ts.tv_nsec + ((long long)timeout_ms * 1000000LL);
+    ts.tv_sec += nsec / 1000000000LL;
+    ts.tv_nsec = nsec % 1000000000LL;
+    while (r->applied_generation < target_generation) {
+        if (pthread_cond_timedwait(&r->frame_cond, &r->lock, &ts) != 0) {
+            break; // timed out (or spurious wake past deadline) -- bail, don't hang the caller
+        }
+    }
+    pthread_mutex_unlock(&r->lock);
 }
 
 // --- HYBRID 3D BRIDGE FAST CPU BLENDER ---

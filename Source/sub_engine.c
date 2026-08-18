@@ -615,6 +615,28 @@ void sub_engine_force_wake(SUB_ENGINE *eng) {
     pthread_mutex_unlock(&eng->lock);
 }
 
+// Like sub_engine_force_wake(), but atomically returns the generation the bump landed
+// on, so the caller can hand that exact number to sub_engine_wait_for_render() and know
+// unambiguously which generation it's waiting for -- doing the bump and the read as two
+// separate locked calls would leave a window for another wake to sneak in between them.
+uint64_t sub_engine_force_wake_and_get_generation(SUB_ENGINE *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->lock);
+    broadcast_wake_locked(eng);
+    uint64_t gen = eng->wakeup_generation;
+    pthread_mutex_unlock(&eng->lock);
+    return gen;
+}
+
+// Blocks (bounded by timeout_ms) until the render thread has produced at least one
+// frame reflecting every style/state change made before this call -- see
+// sub_render_gl_wait_for_generation() for the actual mechanism. Safe to call from any
+// thread, including a JNI call on the Java UI thread.
+void sub_engine_wait_for_render(SUB_ENGINE *eng, uint64_t target_generation, int timeout_ms) {
+    if (!eng || !eng->renderer) return;
+    sub_render_gl_wait_for_generation(eng->renderer, target_generation, timeout_ms);
+}
+
 // Add the getter for the render thread
 uint64_t sub_engine_get_generation(SUB_ENGINE *eng) {
     if (!eng) return 0;

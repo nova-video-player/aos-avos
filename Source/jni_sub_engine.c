@@ -70,6 +70,38 @@ JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngi
     return has_subs ? JNI_TRUE : JNI_FALSE;
 }
 
+// Same pull as nativeFillBitmap, but forces a fresh render and blocks (bounded) until the
+// render thread has actually applied it before reading pixels. Deliberately a SEPARATE
+// entry point rather than folding this into nativeFillBitmap: the plain version above stays
+// cheap for the normal once-per-video-frame pull (VideoEffectRenderer.onFrameAvailable,
+// called 30-60x/sec during playback), while this one is reserved for the explicit "redraw
+// right now" path (SubtitleEngine.redraw3DIfNeeded(), fired on style changes, which are
+// infrequent user-driven UI events) where paying for the wait is worth the guarantee.
+JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSyncFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject jbitmap) {
+    SUB_ENGINE *eng = get_engine(handle);
+    if (!eng) return JNI_FALSE;
+
+    // 50ms is well above the render thread's normal wake latency (a mutex + broadcast +
+    // context switch) and still cheap enough not to be felt as jank in the rare case it's
+    // actually hit (e.g. the render thread is briefly starved under load).
+    uint64_t target_gen = sub_engine_force_wake_and_get_generation(eng);
+    sub_engine_wait_for_render(eng, target_gen, /*timeout_ms=*/50);
+
+    AndroidBitmapInfo info;
+    void* pixels;
+
+    if (AndroidBitmap_getInfo(env, jbitmap, &info) < 0) return JNI_FALSE;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+    if (AndroidBitmap_lockPixels(env, jbitmap, &pixels) < 0) return JNI_FALSE;
+
+    memset(pixels, 0, info.stride * info.height);
+
+    int has_subs = sub_engine_fill_bitmap(eng, pixels, info.width, info.height, info.stride);
+
+    AndroidBitmap_unlockPixels(env, jbitmap);
+    return has_subs ? JNI_TRUE : JNI_FALSE;
+}
+
 // --- TYPOGRAPHY & MASTER CONTROL ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontSize(JNIEnv *env, jobject thiz, jlong handle, jfloat pt) {

@@ -22,7 +22,7 @@ extern "C" {
     /* ── 3D Hybrid Render Bridge ── */
     JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject bitmap);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetUIMode(JNIEnv *env, jobject thiz, jlong handle, jint mode);
-
+    JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSyncFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject jbitmap);
     /* ── Typography & Master Control ── */
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontSize(JNIEnv *env, jobject thiz, jlong handle, jfloat pt);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontScale(JNIEnv *env, jobject thiz, jlong handle, jfloat scale);

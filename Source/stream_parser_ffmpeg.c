@@ -183,7 +183,7 @@ typedef struct FF_PRIV
 	
 	int 		need_key;
 	int 		last_audio_time;
-	
+
 	int		apid;
 	int		vpid;
 
@@ -1211,16 +1211,27 @@ DBGP serprintf("FFMPEG: wake\r\n");
 		}
 	}
 
-	if( ff_p->aq.mem_used + ff_p->vq.mem_used + ff_p->sq.mem_used > ff_p->buffer_size ) {
+	int mem_used = ff_p->aq.mem_used + ff_p->vq.mem_used + ff_p->sq.mem_used;
+
+	// If the audio queue is empty while the audio stream is still valid and
+	// not yet at EOF, video packets have been monopolizing the shared buffer
+	// and starving audio. Keep demuxing past the normal buffer_size cap in
+	// that case instead of deadlocking with audio starved forever - memory
+	// stays bounded because starved video packets are discarded rather than
+	// queued below (see the video routing branch), not by capping how far
+	// we search.
+	int audio_starved = s->audio->valid && ff_p->aq.packets == 0 && !s->audio_parse_end;
+
+	if( mem_used > ff_p->buffer_size && !audio_starved ) {
 DBGP2 serprintf("FFMPEG full %d %d %d %d\r\n", ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, ff_p->buffer_size);
 		if( s->time_parsed > stream_drive_wake_sleep && !(ff_p->flags & STREAM_PARSER_FILE_NONLOCAL) ) {
 			// time to sleep
 DBGP serprintf("FFMPEG: sleep\r\n");
 			ff_p->sleeping = 1;
 		}
-		return 0;		
-	}	
-	
+		return 0;
+	}
+
 	// Read the next packet, skipping all packets that aren't for this stream
 	AVPacket packet = { 0 };
 	// Read new packet
@@ -1248,7 +1259,36 @@ DBGP3 serprintf("%8d/%8d/%8d  %4d/%4d/%4d  ",
 DBGP2 serprintf("pkt [%4d] st %d  size %10d  pos %8lld  %08X  ", 
 			ff_p->packet_count++, stream, packet.size, packet.pos, packet.data );
 	
+	// Packet-routing accounting, gated behind DBGP (Debug[DBG_PARSER]).
+	// Reports periodically how packets are being routed to the
+	// audio/video/subtitle queues, so a demuxer that stops producing audio
+	// packets (or misroutes them) after a seek is visible in a capture with
+	// DBG_PARSER enabled.
+	static int _rt_audio_pkts, _rt_video_pkts, _rt_sub_pkts, _rt_discard_pkts, _rt_video_search_pkts;
+	static int _rt_discard_logged;
+	static int _rt_last_log_ms;
+DBGP {
+		int now_ms = atime();
+		if( _rt_last_log_ms == 0 )
+			_rt_last_log_ms = now_ms;
+		if( now_ms - _rt_last_log_ms >= 2000 ) {
+			serprintf("FFMPEG_ROUTE: a=%d v=%d s=%d discard=%d vsearch=%d  aq=%d/%d vq=%d/%d  a_stream=%d v_stream=%d\n",
+				_rt_audio_pkts, _rt_video_pkts, _rt_sub_pkts, _rt_discard_pkts, _rt_video_search_pkts,
+				ff_p->aq.packets, ff_p->aq.mem_used, ff_p->vq.packets, ff_p->vq.mem_used,
+				s->audio->valid ? s->audio->stream : -1, s->video->valid ? s->video->stream : -1 );
+			_rt_audio_pkts = _rt_video_pkts = _rt_sub_pkts = _rt_discard_pkts = _rt_video_search_pkts = 0;
+			_rt_last_log_ms = now_ms;
+		}
+	}
+
 	if( s->audio->valid && stream == s->audio->stream ) {
+		_rt_audio_pkts++;
+		if( ff_p->aq.packets == 0 && mem_used > ff_p->buffer_size ) {
+			// This packet arrived while searching past buffer_size for audio
+			// (see audio_starved above / the video routing branch below).
+DBGP		serprintf("AUDIO_SEARCH_HIT: overflow=%d bytes vq=%d/%d\n",
+				mem_used - ff_p->buffer_size, ff_p->vq.packets, ff_p->vq.mem_used);
+		}
 		DBG serprintf("FFMPEG:AUDIO pkt st=%d pts=%lld dts=%lld pos=%lld size=%d seek=%d\n",
 			stream,
 			(long long)GET_AUDIO_TS( packet.pts ),
@@ -1263,22 +1303,45 @@ DBGC1 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X  %d\r\n"
 		if( timestamp )
 			*timestamp = GET_AUDIO_TS( packet.pts );
 	} else if( s->video->valid && stream == s->video->stream ) {
+		_rt_video_pkts++;
 DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
 DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
-		// add video packet
-		_add_packet( &ff_p->vq, &packet );
-		if( timestamp )
-			*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
+		if( audio_starved && ff_p->vq.mem_used > ff_p->buffer_size && !( packet.flags & AV_PKT_FLAG_KEY ) ) {
+			// Audio is starved and video already fills the buffer on its own:
+			// keep demuxing to search for the next audio packet, but stop
+			// queuing further non-key video so memory doesn't grow unbounded
+			// while we search - no matter how far the search has to go.
+			// Keyframes are still queued so playback can resync cleanly once
+			// audio is found.
+			_rt_video_search_pkts++;
+		} else {
+			// add video packet
+			_add_packet( &ff_p->vq, &packet );
+			if( timestamp )
+				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
+		}
 	} else if( s->subtitle->valid && stream == s->subtitle->stream ) {
+		_rt_sub_pkts++;
 DBGP2 serprintf("SUBTITLE   dts/pts %8lld/%8lld  ", GET_SUB_TS( packet.dts ), GET_SUB_TS( packet.pts ) );
-DBGP2 DumpLine( packet.data, 16, 16 );		
+DBGP2 DumpLine( packet.data, 16, 16 );
 		// add subtitle packet
 		_add_packet( &ff_p->sq, &packet );
 		if( timestamp )
 			*timestamp = GET_SUB_TS( packet.pts );
 	} else {
+		_rt_discard_pkts++;
+		// A packet that doesn't match any known stream index. Should be rare
+		// (e.g. extra streams we don't decode). Log the first few occurrences
+		// with the actual index, since a stream suddenly becoming misrouted
+		// here would explain audio packets vanishing.
+		if( _rt_discard_logged < 5 ) {
+			_rt_discard_logged++;
+DBGP		serprintf("FFMPEG_ROUTE_DISCARD: stream=%d a_valid=%d a_stream=%d v_valid=%d v_stream=%d s_valid=%d s_stream=%d\n",
+				stream, s->audio->valid, s->audio->stream, s->video->valid, s->video->stream,
+				s->subtitle->valid, s->subtitle->stream );
+		}
 DBGP2 serprintf("\r\n");
 		if( timestamp )
 			*timestamp = -1;

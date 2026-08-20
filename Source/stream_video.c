@@ -5253,9 +5253,9 @@ serprintf("PNF: not open!\r\n");
 
 	s->play_n_video_frames = n;
 	s->play_n_video_time   = (s->video_dec && s->video_dec->seek && !s->seek_force_video_drop) ? -1 : time;
-	if( old_time > time ) {
-		// seek back
-		s->play_n_old_time = old_time; 
+	if( old_time >= 0 && old_time > time ) {
+		// seek back (old_time == -1 means "no known prior position", not a real target)
+		s->play_n_old_time = old_time;
 	} else {
 		s->play_n_old_time = 0;
 	}

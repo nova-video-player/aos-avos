@@ -541,7 +541,6 @@ Java_com_archos_medialib_LibAvos_nativeSetAudioTransformer(JNIEnv *env, jobject 
 jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out_width, uint32_t out_height)
 {
     jintArray array;
-    jint *ints;
     size_t ints_len;
 
     LOGV("avos_bitmap: %dx%d - %d -> %dx%d\n",
@@ -566,13 +565,18 @@ jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out
     array = (*env)->NewIntArray(env, (jsize)ints_len);
     if (!array)
         return NULL;
-    ints = (*env)->GetIntArrayElements(env, array, NULL);
-    if (!ints) {
+    // Use SetIntArrayRegion instead of GetIntArrayElements: on large frames
+    // (up to 8K source resolution) GetIntArrayElements can fail to allocate
+    // its pinned/copy buffer under memory pressure, and that failure throws
+    // a C++ exception inside ART that cannot unwind through this JNI code,
+    // aborting the process. SetIntArrayRegion reports the same out-of-memory
+    // condition as a normal pending Java exception instead.
+    (*env)->SetIntArrayRegion(env, array, 0, (jsize)ints_len, (const jint *)avos_bitmap->data);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
         (*env)->DeleteLocalRef(env, array);
         return NULL;
     }
-    memcpy(ints, avos_bitmap->data, avos_bitmap->data_size);
-    (*env)->ReleaseIntArrayElements(env, array, ints, 0);
 
     jobject jBitmap = (*env)->CallStaticObjectMethod(env, fields.AvosBitmapHelperClazz,
                                        fields.AvosBitmapHelper_createRGBBitmapMethod,

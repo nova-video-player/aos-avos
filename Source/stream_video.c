@@ -4714,6 +4714,15 @@ static void _seek_init( STREAM *s )
 	s->seek_video_target_ts = 0;
 	s->seek_video_ready_ts = STREAM_NO_PTS_VALUE;
 
+	// video_end is a one-way latch (stream_video.c/_get_next_chunk, _check_end)
+	// that is otherwise never cleared. A single premature/transient parser EOF
+	// (e.g. a momentary I/O hiccup misclassified as end-of-stream mid-file) can
+	// set it once and then, since stream_audio.c unconditionally drops every
+	// audio chunk while it's set, permanently silence audio for the rest of the
+	// session even though later seeks resume parsing normally. audio_end has its
+	// own reset on every seek via stream_audio_flush() - mirror that here.
+	s->video_end = 0;
+
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;
 	}

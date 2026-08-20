@@ -213,8 +213,8 @@ static void _stream_atempo_ledger_append_hold(STREAM *s, int nframes, int sample
 	entry->block_ts_start = (int)(s->atempo_ledger_next_ts_us / 1000);
 	entry->block_nframes = nframes;
 	entry->rate = sample_rate;
-	entry->block_rst_start = (int)(s->atempo_ledger_next_rst_us / 1000);
-	entry->block_rst_span = 0;
+	entry->block_rst_start_us = s->atempo_ledger_next_rst_us;
+	entry->block_rst_span_us = 0;
 	entry->block_is_hold = 1;
 	entry->block_media_frames = 0;
 	s->atempo_ledger_write = (s->atempo_ledger_write + 1) % STREAM_ATEMPO_LEDGER_SIZE;
@@ -250,7 +250,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 	// in the wrapper FIFO.  Option A (live ns_in-ring delta) is kept as the fallback
 	// on map miss, and its media_cursor is advanced every block so it stays current.
 	// 1:1 (TS-slope) is the final fallback so the ledger never stalls.
-	entry->block_rst_start = (int)(s->atempo_ledger_next_rst_us / 1000);
+	entry->block_rst_start_us = s->atempo_ledger_next_rst_us;
 	entry->block_is_hold = 0;
 	entry->block_media_frames = 0;
 	{
@@ -307,7 +307,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 			}
 		}
 		(void)span_source;
-		entry->block_rst_span = (int)(block_rst_span_us / 1000);
+		entry->block_rst_span_us = block_rst_span_us;
 		s->atempo_ledger_next_rst_us += block_rst_span_us;
 	}
 	s->atempo_ledger_write = (s->atempo_ledger_write + 1) % STREAM_ATEMPO_LEDGER_SIZE;
@@ -342,7 +342,7 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		// Roll back the media/RST cursor too so a cancelled (zero-write) reserve does
 		// not leave the RST clock ahead.  next_rst_us rolls by the chosen span;
 		// media_cursor (the Option-A pointer) rolls by the live A delta we advanced.
-		s->atempo_ledger_next_rst_us -= (int64_t)entry->block_rst_span * 1000;
+		s->atempo_ledger_next_rst_us -= entry->block_rst_span_us;
 		if( s->atempo_ledger_media_valid ) {
 			s->atempo_ledger_media_cursor -= entry->block_media_frames;
 		}
@@ -364,15 +364,14 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		s->atempo_ledger_next_ts_us += _stream_atempo_ledger_frames_to_us(delta, sample_rate);
 		// Scale this block's media/RST span by the written/reserved ratio so the RST
 		// slope stays consistent on a partial write, and roll the RST cursor + media
-		// cursor by the same shrink/grow.  block_rst_span (chosen source) drives
+		// cursor by the same shrink/grow. block_rst_span_us (chosen source) drives
 		// next_rst_us; block_media_frames (live A delta) drives media_cursor.
-		int old_span_ms = entry->block_rst_span;
-		int new_span_ms = reserved_frames > 0
-			? (int)(((int64_t)old_span_ms * written_frames) / reserved_frames)
-			: old_span_ms;
-		int span_diff_ms = new_span_ms - old_span_ms;
-		entry->block_rst_span = new_span_ms;
-		s->atempo_ledger_next_rst_us += (int64_t)span_diff_ms * 1000;
+		int64_t old_span_us = entry->block_rst_span_us;
+		int64_t new_span_us = reserved_frames > 0
+			? (old_span_us * written_frames) / reserved_frames
+			: old_span_us;
+		entry->block_rst_span_us = new_span_us;
+		s->atempo_ledger_next_rst_us += new_span_us - old_span_us;
 		if( s->atempo_ledger_media_valid ) {
 			INT64 old_media_frames = entry->block_media_frames;
 			INT64 new_media_frames = reserved_frames > 0

@@ -1320,10 +1320,11 @@ static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup( STREAM *s, UINT64 play
 			// Media/RST interpolation: prorate the block's media span across its
 			// output frames (RST slope differs from the 1:1 TS slope by tempo).
 			if( entry->block_nframes > 0 ) {
-				r.heard_rst = entry->block_rst_start +
-					(int)((delta_frames * (UINT64)entry->block_rst_span) / (UINT64)entry->block_nframes);
+				int64_t rst_us = entry->block_rst_start_us +
+					((int64_t)delta_frames * entry->block_rst_span_us) / entry->block_nframes;
+				r.heard_rst = (int)(rst_us / 1000);
 			} else {
-				r.heard_rst = entry->block_rst_start;
+				r.heard_rst = (int)(entry->block_rst_start_us / 1000);
 			}
 			r.block_start = entry->output_frames_start;
 			r.block_ts = entry->block_ts_start;
@@ -1337,7 +1338,7 @@ static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup( STREAM *s, UINT64 play
 	UINT64 newest_end = newest_entry->output_frames_start + (UINT64)newest_entry->block_nframes;
 	if( playhead < oldest_entry->output_frames_start ) {
 		r.heard = oldest_entry->block_ts_start;
-		r.heard_rst = oldest_entry->block_rst_start;
+		r.heard_rst = (int)(oldest_entry->block_rst_start_us / 1000);
 		r.block_start = oldest_entry->output_frames_start;
 		r.block_ts = oldest_entry->block_ts_start;
 		r.block_nframes = oldest_entry->block_nframes;
@@ -1349,12 +1350,12 @@ static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup( STREAM *s, UINT64 play
 		UINT64 delta_after = playhead - newest_end;
 		r.heard = block_end_ts + (int)((delta_after * 1000) / (UINT64)rate);
 		// Extend the media/RST clock at the newest block's RST slope.
+		int64_t rst_us = newest_entry->block_rst_start_us + newest_entry->block_rst_span_us;
 		if( newest_entry->block_nframes > 0 ) {
-			r.heard_rst = newest_entry->block_rst_start + newest_entry->block_rst_span +
-				(int)((delta_after * (UINT64)newest_entry->block_rst_span) / (UINT64)newest_entry->block_nframes);
-		} else {
-			r.heard_rst = newest_entry->block_rst_start + newest_entry->block_rst_span;
+			rst_us += ((int64_t)delta_after * newest_entry->block_rst_span_us) /
+				newest_entry->block_nframes;
 		}
+		r.heard_rst = (int)(rst_us / 1000);
 		r.block_start = newest_entry->output_frames_start;
 		r.block_ts = newest_entry->block_ts_start;
 		r.block_nframes = newest_entry->block_nframes;

@@ -153,12 +153,12 @@ typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
 	int	block_nframes;
 	int	rate;
 	// Media/RST span of this output block, advanced from af_atempo media-consumed
-	// deltas (ns_in - ring) at reserve time.  block_rst_start is the media position
-	// at block start; block_rst_span is the media ms this block spans.
-	int	block_rst_start;
-	int	block_rst_span;
+	// deltas at reserve time. Keep both coordinates in microseconds so partial
+	// AudioTrack writes cannot cumulatively discard sub-millisecond fractions.
+	int64_t	block_rst_start_us;
+	int64_t	block_rst_span_us;
 	// Live Option-A media-frame delta (ns_in - ring) advanced into media_cursor for
-	// this block, tracked separately from block_rst_span because the span may be
+	// this block, tracked separately because the RST span may be
 	// sourced from the Option-B production map while media_cursor stays the A pointer.
 	INT64	block_media_frames;
 	// 1 when this block is an output-side manual-delay hold (inserted silence):

@@ -68,6 +68,30 @@ extern void avfilter_atempo_get_state(AVFilterContext *ctx,
                                   int64_t *ns_in,
                                   int64_t *ns_out,
                                   double *tempo);
+extern void avfilter_atempo_get_state_v2(AVFilterContext *ctx,
+                                     int *ring_size,
+                                     int64_t *pos_in,
+                                     int64_t *pos_out,
+                                     int64_t *ns_in,
+                                     int64_t *ns_out,
+                                     double *tempo,
+                                     int64_t *media_out) __attribute__((weak));
+
+static void atempo_get_state(AVFilterContext *ctx,
+	int *ring_size, int64_t *pos_in, int64_t *pos_out,
+	int64_t *ns_in, int64_t *ns_out, double *tempo, int64_t *media_out)
+{
+	if (media_out) {
+		*media_out = -1;
+	}
+	if (avfilter_atempo_get_state_v2) {
+		avfilter_atempo_get_state_v2(ctx, ring_size, pos_in, pos_out,
+			ns_in, ns_out, tempo, media_out);
+	} else {
+		avfilter_atempo_get_state(ctx, ring_size, pos_in, pos_out,
+			ns_in, ns_out, tempo);
+	}
+}
 
 #define DBGA DBG_IF(Debug[DBG_AUD])
 #define DBG DBG_IF(Debug[DBG_AUD])
@@ -84,6 +108,11 @@ extern void avfilter_atempo_get_state(AVFilterContext *ctx,
 // burst; 64 covers well over a second of bursts, far more than the consumer
 // ledger's lookahead window.
 #define ATEMPO_OMAP_SIZE 64
+
+// Retire persistent wrapper-FIFO surplus gradually. Keep one expected output
+// block as a cushion for af_atempo's bursty production and move at most 5 ms
+// of additional PCM downstream per filter call.
+#define ATEMPO_FIFO_DRAIN_MAX_MS 5
 
 struct ctx {
 	AVFilterGraph *filter_graph;
@@ -120,9 +149,9 @@ struct ctx {
 	int tempo_change_seq;               // diagnostic sequence for runtime tempo changes
 	int post_tempo_marker_pending;      // first output block after tempo command not yet logged
 
-	// Option B production-time output->media map.  Each drain burst records the
-	// media (af_atempo ns_in - ring) consumed to produce that burst of output
-	// samples, keyed by the cumulative OUTPUT-sample index of the wrapper stream.
+	// Option B production-time output->media map. Each drain burst records the
+	// media frontier represented by that burst of output samples, keyed by the
+	// cumulative OUTPUT-sample index of the wrapper stream.
 	// The wrapper FIFO preserves order, so the cumulative output-sample index used
 	// when samples are produced into the wrapper FIFO is the same index observed
 	// later when those samples are read from the wrapper FIFO; an entry keyed at
@@ -140,7 +169,7 @@ struct ctx {
 	int    omap_head;                   // index of oldest live entry
 	int    omap_count;                  // number of live entries
 	UINT64 omap_write_cursor;           // cumulative output samples WRITTEN to FIFO
-	INT64  omap_prev_media;             // last (ns_in - ring) sampled
+	INT64  omap_prev_media;             // last emitted-media frontier sampled
 	int    omap_prev_valid;             // prev_media initialised
 };
 
@@ -831,39 +860,50 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	if (drained_samples > 0 && ctx->atempo_ctx) {
 		int af_ring = -1;
 		int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
+		int64_t af_media_out = -1;
 		double af_tempo = 0.0;
-		avfilter_atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
-			&af_ns_in, &af_ns_out, &af_tempo);
-		atempo_omap_push(ctx, drained_samples, (INT64)af_ns_in - (INT64)af_ring);
+		atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+			&af_ns_in, &af_ns_out, &af_tempo, &af_media_out);
+		// New FFmpeg builds expose the media position represented by the actual
+		// output frontier. Older builds leave the sentinel untouched, retaining
+		// the ns_in-ring approximation as a compatible fallback.
+		INT64 media_now = af_media_out >= 0
+			? (INT64)af_media_out
+			: (INT64)af_ns_in - (INT64)af_ring;
+		atempo_omap_push(ctx, drained_samples, media_now);
 	}
 
-    // Read from FIFO to fill output frame using the expected output duration
-    int input_samples = ctx->in_frame->nb_samples;
-    int available_samples = av_audio_fifo_size(ctx->fifo);
-    int target_samples = input_samples;
+	// Read the expected output duration for this input block. Runtime tempo
+	// transitions can leave a persistent surplus because af_atempo produces
+	// complete WSOLA fragments rather than exactly input/speed samples per call.
+	// Keep one target-sized burst cushion and retire older surplus gradually into
+	// AudioTrack, where normal backpressure and the presented-frame ledger pace it.
+	int input_samples = ctx->in_frame->nb_samples;
+	int available_samples = av_audio_fifo_size(ctx->fifo);
+	int target_samples = input_samples;
 
-    if (ctx->filter_initialized && fabsf(speed) > 0.0001f) {
-        float expected = (float)input_samples / speed;
-        target_samples = (int)(expected + 0.5f);
-    }
+	if (ctx->filter_initialized && fabsf(speed) > 0.0001f) {
+		float expected = (float)input_samples / speed;
+		target_samples = (int)(expected + 0.5f);
+	}
 
-    if (target_samples < 0) {
-        target_samples = 0;
-    }
+	if (target_samples < 0) {
+		target_samples = 0;
+	}
 
-    int samples_to_read = MIN(target_samples, available_samples);
+	int surplus_drain = 0;
+	if (target_samples > 0 && available_samples > target_samples * 2) {
+		int max_drain = MAX(1,
+			(ctx->sample_rate * ATEMPO_FIFO_DRAIN_MAX_MS) / 1000);
+		surplus_drain = MIN(available_samples - target_samples * 2, max_drain);
+	}
+	int samples_to_read = MIN(target_samples + surplus_drain, available_samples);
 	int fifo_after_push = available_samples;
 
-	// Keep wrapper output bounded to the expected output duration for this input
-	// chunk. FFmpeg can emit bursty output after runtime tempo changes, but
-	// draining the whole FIFO here turns those bursts into audio-time jumps and
-	// persistent A/V drift. Leave any extra samples buffered; the normal per-call
-	// cadence will absorb them. The speed-change FIFO reset handles stale backlog.
-
-    // If backlog grows significantly (e.g., during start-up), drain what we can
-    if (available_samples > 0 && samples_to_read <= 0) {
-        samples_to_read = available_samples;
-    }
+	// If the filter has output but the expected duration rounded to zero, drain it.
+	if (available_samples > 0 && samples_to_read <= 0) {
+		samples_to_read = available_samples;
+	}
 
     if (samples_to_read > 0) {
         int bytes_needed = samples_to_read * bytes_per_sample;
@@ -907,21 +947,23 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		}
 		ctx->total_output_samples += (UINT64)samples_to_read;
 	}
-	DBGA serprintf("atempo_flow: speed=%.3f in=%d target=%d drained_frames=%d drained_samples=%d fifo_before=%d fifo_after_push=%d out=%d fifo_after_read=%d\n",
-		speed, input_samples, target_samples, drained_frames, drained_samples,
+	DBGA serprintf("atempo_flow: speed=%.3f in=%d target=%d surplus_drain=%d drained_frames=%d drained_samples=%d fifo_before=%d fifo_after_push=%d out=%d fifo_after_read=%d\n",
+		speed, input_samples, target_samples, surplus_drain, drained_frames, drained_samples,
 		fifo_before_push, fifo_after_push, samples_to_read, fifo_after_read);
 	DBGA {
 		int af_ring = -1;
 		int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
+		int64_t af_media_out = -1;
 		double af_tempo = 0.0;
 		if (ctx->atempo_ctx) {
-			avfilter_atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
-				&af_ns_in, &af_ns_out, &af_tempo);
+			atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+				&af_ns_in, &af_ns_out, &af_tempo, &af_media_out);
 		}
-		serprintf("atempo_internal: tempo=%.3f ring=%d pos_in=%lld pos_out=%lld ns_in=%lld ns_out=%lld rate=%d\n",
+		serprintf("atempo_internal: tempo=%.3f ring=%d pos_in=%lld pos_out=%lld ns_in=%lld ns_out=%lld media_out=%lld rate=%d\n",
 			af_tempo, af_ring,
 			(long long)af_pos_in, (long long)af_pos_out,
-			(long long)af_ns_in, (long long)af_ns_out, ctx->sample_rate);
+			(long long)af_ns_in, (long long)af_ns_out,
+			(long long)af_media_out, ctx->sample_rate);
 	}
 	DBG serprintf("atempo: filter speed=%.3f in=%d samples out=%d samples fifo=%d\n",
 		speed, ctx->in_frame->nb_samples, samples_to_read, fifo_after_read);
@@ -1161,9 +1203,10 @@ int stream_filter_audio_atempo_get_audit_state(STREAM_FILTER_AUDIO *f, INT64 *ns
 	}
 	int af_ring = -1;
 	int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
+	int64_t af_media_out = -1;
 	double af_tempo = 0.0;
-	avfilter_atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
-		&af_ns_in, &af_ns_out, &af_tempo);
+	atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+		&af_ns_in, &af_ns_out, &af_tempo, &af_media_out);
 	if (ns_in) {
 		*ns_in = (INT64)af_ns_in;
 	}

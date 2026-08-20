@@ -1089,6 +1089,9 @@ static void _audio_decode( STREAM *s )
 		int chunk_pts = STREAM_NO_PTS_VALUE;
 decode_next_chunk:
 		// no more audio in this chunk, then look for next
+		{
+		int starve_start_ms = atime();
+		int starve_last_log_ms = starve_start_ms;
 		while( s->audio_buffer_size <= 0 && !_abort( s ) ){
 
 			STREAM_CDATA cdata = { 0 };
@@ -1137,6 +1140,25 @@ serprintf("audio flush\r\n");
 					out_of_audio = 1;
 //serprintf("_OOA_");
 				}
+				if( !s->audio_parse_end ) {
+					// Genuinely no audio chunk available yet (not normal end-of-stream drain).
+					// Always-on (not gated behind DBGS): this only fires while audio is
+					// actually starved, so it's naturally rate-limited to abnormal
+					// conditions, and it's the clearest single signal for the
+					// stream_parser_ffmpeg.c starvation deadlock / video_end latch classes
+					// of bug - visible in a plain field capture without needing to
+					// pre-enable DBG_STREAM.
+					int now_ms = atime();
+					if( now_ms - starve_last_log_ms >= 1000 ) {
+						starve_last_log_ms = now_ms;
+						STREAM_PARSER_STATS _pst;
+						STREAM_PARSER_STATS *pst = s->parser->get_stats ? s->parser->get_stats( s, &_pst ) : NULL;
+						serprintf("AUDIO_STARVED: waiting=%d ms epoch=%d audio_time=%d video_time=%d aq=%d vq=%d buf=%d/%d\n",
+							now_ms - starve_start_ms, s->seek_epoch, s->audio_time, s->video_time,
+							pst ? pst->audio_chunks : -1, pst ? pst->video_chunks : -1,
+							pst ? pst->buffer_used   : -1, pst ? pst->buffer_size  : -1);
+					}
+				}
 				// no more chunks, wait....
 				stream_yield_RT();
 				continue;
@@ -1152,6 +1174,31 @@ DBGV serprintf("drop audio chunk: time %d\r\n", cdata.time );
 				if( cdata.time != STREAM_NO_PTS_VALUE && cdata.time < 0 ) {
 					// drop this shit!
 DBGV serprintf("audio in the past! %d\r\n", cdata.time );
+					// A packet with a valid but negative pts is silently
+					// dropped here regardless of seek_audio_drop -
+					// if this repeats indefinitely (e.g. the audio found
+					// after skipping a huge run of video lands on a pts that
+					// normalizes to negative, perhaps due to a discontinuity
+					// in this specific file), audio_time can get stuck at -1
+					// forever with no other visible symptom. Log periodically
+					// so that case is visible with DBG_STREAM enabled.
+DBGS {					static int _neg_first_ms = 0;
+					static int _neg_last_ms  = 0;
+					static int _neg_count    = 0;
+					static int _neg_epoch    = -1;
+					if( _neg_epoch != s->seek_epoch ) {
+						_neg_epoch    = s->seek_epoch;
+						_neg_first_ms = atime();
+						_neg_last_ms  = 0;
+						_neg_count    = 0;
+					}
+					_neg_count++;
+					int now_ms = atime();
+					if( now_ms - _neg_last_ms >= 1000 ) {
+						serprintf("AUDIO_PTS_NEGATIVE: waiting=%d ms count=%d time=%d epoch=%d\n",
+							now_ms - _neg_first_ms, _neg_count, cdata.time, s->seek_epoch);
+						_neg_last_ms = now_ms;
+					} }
 					continue;
 				}
 				if( !s->seek_audio_drop && s->seek_epoch > 0 && s->audio_time < 0 &&
@@ -1174,11 +1221,57 @@ DBGV serprintf("audio in the past! %d\r\n", cdata.time );
 					cdata.time < s->seek_audio_target_ts ) {
 					DBG serprintf("AUDIO_SEEK_DROP: time=%d target=%d\n",
 						cdata.time, s->seek_audio_target_ts);
+					// Catching up from a large pts gap
+					// between audio and the seek target can look exactly like
+					// a hang (no sound, no progress) without DBG_STREAM
+					// enabled. Log periodically so that case is visible.
+DBGS {					static int _asd_target    = 0;
+					static int _asd_first_ms  = 0;
+					static int _asd_last_ms   = 0;
+					static int _asd_count     = 0;
+					if( _asd_target != s->seek_audio_target_ts ) {
+						_asd_target   = s->seek_audio_target_ts;
+						_asd_first_ms = atime();
+						_asd_last_ms  = 0;
+						_asd_count    = 0;
+					}
+					_asd_count++;
+					int now_ms = atime();
+					if( now_ms - _asd_last_ms >= 1000 ) {
+						serprintf("AUDIO_SEEK_CATCHUP: waiting=%d ms count=%d time=%d target=%d gap=%d\n",
+							now_ms - _asd_first_ms, _asd_count, cdata.time,
+							s->seek_audio_target_ts, s->seek_audio_target_ts - cdata.time);
+						_asd_last_ms = now_ms;
+					} }
 					continue;
 				}
 				if( s->seek_audio_drop && cdata.time == STREAM_NO_PTS_VALUE ) {
 					DBG serprintf("AUDIO_SEEK_DROP_SKIP: no pts, target=%d\n",
 						s->seek_audio_target_ts);
+					// A packet with no pts falls through without
+					// clearing seek_audio_drop and without ever setting
+					// audio_time below - if this repeats indefinitely (e.g.
+					// after skipping a large run of video while searching for
+					// audio), audio_time can get stuck at -1 forever even
+					// though audio chunks keep arriving. Log periodically so
+					// that case is visible with DBG_STREAM enabled.
+DBGS {					static int _nopts_target   = 0;
+					static int _nopts_first_ms = 0;
+					static int _nopts_last_ms  = 0;
+					static int _nopts_count    = 0;
+					if( _nopts_target != s->seek_audio_target_ts ) {
+						_nopts_target   = s->seek_audio_target_ts;
+						_nopts_first_ms = atime();
+						_nopts_last_ms  = 0;
+						_nopts_count    = 0;
+					}
+					_nopts_count++;
+					int now_ms = atime();
+					if( now_ms - _nopts_last_ms >= 1000 ) {
+						serprintf("AUDIO_SEEK_NOPTS: waiting=%d ms count=%d target=%d\n",
+							now_ms - _nopts_first_ms, _nopts_count, s->seek_audio_target_ts);
+						_nopts_last_ms = now_ms;
+					} }
 				}
 				if( s->seek_audio_drop && cdata.time != STREAM_NO_PTS_VALUE &&
 					cdata.time >= s->seek_audio_target_ts ) {
@@ -1273,7 +1366,8 @@ DBGS serprintf("~");
 					file_write( s->dump_audio_fd, s->audio_buffer, s->audio_buffer_size );
 				}
 			}
-		} 
+		}
+		}
 
 		if( s->speed != STREAM_SPEED_NORMAL ) {
 			// we play SLOW video, eat up all the audio that is behind us

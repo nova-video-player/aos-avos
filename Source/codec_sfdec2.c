@@ -953,7 +953,15 @@ static void *videosink_thread(void *ctx)
 			    !seek_preview &&
 			    (s->audio_time < 0 || p->hold_audio_until_ms != 0)) {
 				if (p->hold_audio_until_ms == 0) {
+					// stream_get_anchor_delay_ms() can lock s->video_sink_mutex.
+					// Other threads lock video_sink_mutex first and then call back
+					// into this decoder (e.g. stream_sync_anchor_publish() ->
+					// videosink_put_time()), which locks p->locked.mtx. Drop
+					// p->locked.mtx here to avoid an ABBA lock-order inversion
+					// between the two mutexes.
+					pthread_mutex_unlock(&p->locked.mtx);
 					int anchor_delay_ms = stream_get_anchor_delay_ms(s, 1);
+					pthread_mutex_lock(&p->locked.mtx);
 					int hold_ms = anchor_delay_ms > 0 ? anchor_delay_ms + 200 : 500;
 					int hold_start_ms = atime();
 					p->hold_audio_start_ms = hold_start_ms;
@@ -1012,7 +1020,10 @@ static void *videosink_thread(void *ctx)
 			if (p->render_offset_ns == -1) {
 				// Anchor Initialization
 				if (passthrough == 2 && have_audio_time) {
+					// See lock-order note above: drop p->locked.mtx around the call.
+					pthread_mutex_unlock(&p->locked.mtx);
 					int delay_for_pt = stream_get_anchor_delay_ms(s, 1);
+					pthread_mutex_lock(&p->locked.mtx);
 					int max_forward_lead_ms = delay_for_pt + 300;
 					if (max_forward_lead_ms < 500) {
 						max_forward_lead_ms = 500;
@@ -1055,16 +1066,31 @@ static void *videosink_thread(void *ctx)
 					}
 					p->render_offset_ns = now_ns - heard_ts * 1000000LL;
 					p->render_offset_from_audio = 1;
+					// stream_get_anchor_delay_ms()/stream_sync_av_delay() can lock
+					// s->video_sink_mutex; compute them (only when this debug print
+					// actually fires) with p->locked.mtx dropped, see lock-order note
+					// above. Guarded by the same condition as DBGSI2 so this has no
+					// effect when the debug flag is off.
+					int dbg_raw_delay = -1, dbg_smooth_delay = -1;
+					DBGSI2 {
+						pthread_mutex_unlock(&p->locked.mtx);
+						dbg_raw_delay = s ? stream_get_anchor_delay_ms(s, 1) : -1;
+						dbg_smooth_delay = s ? stream_sync_av_delay(s) : -1;
+						pthread_mutex_lock(&p->locked.mtx);
+					}
 					DBGSI2 serprintf("android_sync anchor_diag(init): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
 						s ? s->audio_time : -1, (long long)heard_ts,
 						used_put_time ? "put_time" : "recompute",
 						p->venc_put_time, put_age_ms,
-						s ? stream_get_anchor_delay_ms(s, 1) : -1,
-						s ? stream_sync_av_delay(s) : -1, (long long)p->render_offset_ns);
+						dbg_raw_delay,
+						dbg_smooth_delay, (long long)p->render_offset_ns);
 					DBGSI serprintf("android_sync: init render_offset from audio_time=%d heard_ts=%lld offset=%lld\n",
 						s->audio_time, (long long)heard_ts, (long long)p->render_offset_ns);
 				} else {
+					// See lock-order note above: drop p->locked.mtx around the call.
+					pthread_mutex_unlock(&p->locked.mtx);
 					int anchor_delay_ms = s ? stream_get_anchor_delay_ms(s, 1) : 0;
+					pthread_mutex_lock(&p->locked.mtx);
 					p->render_offset_ns = now_ns + (INT64)anchor_delay_ms * 1000000LL - (INT64)f->time * 1000000LL;
 					p->render_offset_from_audio = 0;
 					DBGSI serprintf("android_sync: init render_offset static fallback=%d offset=%lld\n",
@@ -1102,12 +1128,23 @@ static void *videosink_thread(void *ctx)
 				p->mode2_dynamic_fast_slew = mode2_dynamic_active;
 				p->mode2_dynamic_settle_frames = 0;
 				p->pending_seek_reanchor = 0;
-				DBGSI2 serprintf("android_sync anchor_diag(reanchor): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
-					s ? s->audio_time : -1, (long long)heard_ts,
-					used_put_time ? "put_time" : "recompute",
-					p->venc_put_time, put_age_ms,
-					s ? stream_get_anchor_delay_ms(s, 1) : -1,
-					s ? stream_sync_av_delay(s) : -1, (long long)p->render_offset_ns);
+				{
+					// See lock-order note above: compute with p->locked.mtx dropped,
+					// only when this debug print actually fires.
+					int dbg_raw_delay = -1, dbg_smooth_delay = -1;
+					DBGSI2 {
+						pthread_mutex_unlock(&p->locked.mtx);
+						dbg_raw_delay = s ? stream_get_anchor_delay_ms(s, 1) : -1;
+						dbg_smooth_delay = s ? stream_sync_av_delay(s) : -1;
+						pthread_mutex_lock(&p->locked.mtx);
+					}
+					DBGSI2 serprintf("android_sync anchor_diag(reanchor): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld\n",
+						s ? s->audio_time : -1, (long long)heard_ts,
+						used_put_time ? "put_time" : "recompute",
+						p->venc_put_time, put_age_ms,
+						dbg_raw_delay,
+						dbg_smooth_delay, (long long)p->render_offset_ns);
+				}
 				DBGSI serprintf("android_sync: reanchor from audio_time=%d heard_ts=%lld offset=%lld\n",
 					s->audio_time, (long long)heard_ts, (long long)p->render_offset_ns);
 			} else if (have_audio_time &&
@@ -1125,12 +1162,21 @@ static void *videosink_thread(void *ctx)
 						heard_ts = f->time;
 					}
 					p->target_offset_ns = now_ns - heard_ts * 1000000LL;
+					// See lock-order note above: compute with p->locked.mtx dropped,
+					// only when this debug print actually fires.
+					int dbg_raw_delay = -1, dbg_smooth_delay = -1;
+					DBGSI2 {
+						pthread_mutex_unlock(&p->locked.mtx);
+						dbg_raw_delay = s ? stream_get_anchor_delay_ms(s, 1) : -1;
+						dbg_smooth_delay = s ? stream_sync_av_delay(s) : -1;
+						pthread_mutex_lock(&p->locked.mtx);
+					}
 					DBGSI2 serprintf("android_sync anchor_diag(slew_target): a_time=%d heard_ts=%lld src=%s put_ts=%d put_age=%d raw_delay=%d smooth_delay=%d off=%lld target=%lld fast=%d settle=%d\n",
 						s ? s->audio_time : -1, (long long)heard_ts,
 						used_put_time ? "put_time" : "recompute",
 						p->venc_put_time, put_age_ms,
-						s ? stream_get_anchor_delay_ms(s, 1) : -1,
-						s ? stream_sync_av_delay(s) : -1,
+						dbg_raw_delay,
+						dbg_smooth_delay,
 						(long long)p->render_offset_ns, (long long)p->target_offset_ns,
 						p->mode2_dynamic_fast_slew,
 						p->mode2_dynamic_settle_frames);

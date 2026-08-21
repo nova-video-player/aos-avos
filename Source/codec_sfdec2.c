@@ -872,10 +872,9 @@ static void *videosink_thread(void *ctx)
 				consumed = 1;
 				break;
 			}
-			// Seek preview is queued before stream_video advances seek_epoch.
-			// The asynchronous renderer may still own that buffer after the
-			// production target becomes ready. Reject it here before it can
-			// consume the one-shot seek reanchor and anchor on the preview PTS.
+			// A rapid seek can leave the asynchronous renderer owning a buffer
+			// from the previous generation. Reject it before it can consume the
+			// one-shot seek reanchor and anchor on a stale PTS.
 			if( s && f->epoch != s->seek_epoch ) {
 				f = frame_q_get(&p->locked.venc_q);
 				consumed = 1;

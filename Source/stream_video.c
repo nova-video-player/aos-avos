@@ -4537,12 +4537,31 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 			}	
 
 			if( s->play_n_video_frames && s->play_n_video_time != -1 ) {
-				if(( s->play_n_old_time && out_frame->time >= s->play_n_old_time   ) || // seek back
-				   (!s->play_n_old_time && out_frame->time <  s->play_n_video_time )) { // seek forward
+				int discard_seek_frame = out_frame->epoch != s->seek_epoch;
+				if( s->play_n_old_time ) {
+					// A backward seek used to accept any frame below the old position.
+					// Delayed MediaCodec output just below that position could therefore
+					// terminate the one-frame preview while still showing the old scene.
+					// Allow a codec-reorder window around the achieved seek timestamp,
+					// rather than requiring an exact timestamp match.
+					int tolerance_ms = 100;
+					if( s->video && s->video->msPerFrame > 0 ) {
+						int reorder_frames = MAX( 2, s->video->reorder_depth + 1 );
+						tolerance_ms = MAX( tolerance_ms,
+							reorder_frames * s->video->msPerFrame );
+					}
+					int tolerance_ts = RST_TO_TS_DELTA( tolerance_ms, int );
+					discard_seek_frame |= (INT64)out_frame->time >
+						(INT64)s->play_n_video_time + tolerance_ts;
+				} else {
+					discard_seek_frame |= out_frame->time < s->play_n_video_time;
+				}
+				if( discard_seek_frame ) {
 					// discard the frame to decode queue
 					if( s->play_n_video_frames == 10 ) {
-						DBG serprintf("SEEK_DROP: frame_ts=%d target_ts=%d old_ts=%d\n",
-							out_frame->time, s->play_n_video_time, s->play_n_old_time);
+						DBG serprintf("SEEK_DROP: frame_ts=%d target_ts=%d old_ts=%d frame_epoch=%d seek_epoch=%d\n",
+							out_frame->time, s->play_n_video_time, s->play_n_old_time,
+							out_frame->epoch, s->seek_epoch);
 					}
 DBGQ serprintf("DIS %08d|%08d|%08d [%2d<", out_frame->time, s->play_n_video_time, s->play_n_old_time, out_frame->index );
 					frame_q_put( &s->decode_q, out_frame );
@@ -4996,6 +5015,12 @@ serprintf("STUFF_ZERO!\n");
 			s->audio_stuff_zero = 1;
 		}
 	}
+	// Start the new generation before the parser and decoder resume. Seek preview
+	// frames then belong to the same epoch as subsequent playback, while delayed
+	// output from the previous seek remains distinguishable and can be discarded.
+	if( s->video->valid ) {
+		s->seek_epoch++;
+	}
 	if( s->video_dec) {
 		// A newly opened async decoder has no pre-seek frames to discard. Some
 		// MediaCodec implementations lose the first GOP when flushed before their
@@ -5047,7 +5072,6 @@ serprintf("STUFF_ZERO!\n");
 			_stream_play_n_frames( s, 10, sc.time, old_time );
 		}
 		s->seek_skip_initial_play = 0;
-		s->seek_epoch++;
 		s->seek_frame = 0;
 	}
 

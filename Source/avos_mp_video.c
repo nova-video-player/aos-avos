@@ -403,6 +403,12 @@ int avos_mp_video_seek(avos_mp_t *mp, avos_mp_video_t *video, uint32_t pos)
 	return AVOS_ERR_OK;
 }
 
+void avos_mp_video_supersede_seek_preview(avos_mp_video_t *video)
+{
+	if (video && video->s)
+		stream_seek_preview_supersede(video->s);
+}
+
 int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret)
 {
 	*ret = stream_get_current_time(video->s, &video->last_duration);

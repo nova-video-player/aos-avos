@@ -125,6 +125,7 @@ int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_video_pause(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_video_isplaying(avos_mp_t *mp, avos_mp_video_t *video, int *ret);
 int avos_mp_video_seek(avos_mp_t *mp, avos_mp_video_t *video, uint32_t msec);
+void avos_mp_video_supersede_seek_preview(avos_mp_video_t *video);
 int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
 int avos_mp_video_getduration(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
 int avos_mp_video_getaudiosessionid(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
@@ -788,6 +789,11 @@ static int async_cmd_add(avos_mp_t *mp, int id, int arg)
 		// cannot restore state or report an obsolete failure.
 		mp->async.transport_generation++;
 	}
+	if ((id == ASYNC_CMD_SEEK || id == ASYNC_CMD_WAIT || id == ASYNC_CMD_EXIT) &&
+	    mp->async.cur_cmd.id == ASYNC_CMD_SEEK &&
+	    mp->type == TYPE_VID && mp->media) {
+		avos_mp_video_supersede_seek_preview((avos_mp_video_t *)mp->media);
+	}
 	mp->async.next_cmd.id = id;
 	mp->async.next_cmd.arg = arg;
 	pthread_cond_broadcast(&mp->async.cond);
@@ -806,6 +812,11 @@ static int async_cmd_set_transport(avos_mp_t *mp, int command)
 	    mp->async.next_cmd.id == ASYNC_CMD_EXIT) {
 		pthread_mutex_unlock(&mp->async.mtx);
 		return AVOS_ERR_CRITICAL;
+	}
+	if (command == ASYNC_CMD_PAUSE &&
+	    mp->async.cur_cmd.id == ASYNC_CMD_SEEK &&
+	    mp->type == TYPE_VID && mp->media) {
+		avos_mp_video_supersede_seek_preview((avos_mp_video_t *)mp->media);
 	}
 	mp->async.transport_generation++;
 	mp->async.pending_transport = command;

@@ -893,6 +893,9 @@ typedef struct STREAM {
 	volatile int	seek_video_ready_ts;	// first current-epoch video frame admitted after seek
 	int		seek_force_video_drop;
 	int		seek_skip_initial_play;
+	int		seek_preview_refining;	// exact preview pass after the immediate keyframe preview
+	int		seek_preview_superseded;	// atomically set when a newer async seek is queued
+	int		seek_preview_refine_deadline_ms;	// wall-clock deadline for partial preview fallback
 	int		seek_use_target_sync;
 	int		seek_target_sync_time;
 	int		seek_frame;
@@ -1042,6 +1045,7 @@ int	stream_seek_time ( STREAM *s, int time,  int dir, int flags );
 int	stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir, int flags );
 int	stream_seek_pos  ( STREAM *s, int pos,   int dir, int flags );
 int	stream_seek_frame( STREAM *s, int frame, int dir, int force_reload );
+void	stream_seek_preview_supersede( STREAM *s );
 int	stream_set_speed( STREAM *s, STREAM_SPEED speed );
 int	stream_set_audio_stream( STREAM *s, int audio_stream );
 int	stream_refresh_audio_stream( STREAM *s );

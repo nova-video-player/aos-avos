@@ -71,6 +71,8 @@
 #define DBG DBG_IF(Debug[DBG_STREAM])
 #define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
 
+#define SEEK_PREVIEW_PARTIAL_MARGIN_MS 75
+
 int 		stream_zero_fill   = 1;
 
 int 		stream_max_delay   = 1;
@@ -182,7 +184,7 @@ static int  	_stream_seek_real( STREAM *s, int time, int pos, int dir, int flags
 static void 	_stream_player_sync( STREAM *s );
 static void 	_stream_player_async( STREAM *s );
 static int  	_stream_wait_for_idle( STREAM *s, int timeout );
-static void 	_stream_play_n_frames( STREAM *s, int n, int time, int old_time );
+static int  	_stream_play_n_frames( STREAM *s, int n, int time, int old_time );
 static void 	_do_stuff( STREAM *s );
 static void 	_stream_close_video_sink( STREAM *s, int delete_sink );
 static void 	*_parser_thread( void *data );
@@ -4538,7 +4540,27 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 
 			if( s->play_n_video_frames && s->play_n_video_time != -1 ) {
 				int discard_seek_frame = out_frame->epoch != s->seek_epoch;
-				if( s->play_n_old_time ) {
+				if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) ) {
+					// The refinement pass consumes keyframe preroll until it reaches
+					// the same timestamp floor used by resumed playback. Near its
+					// deadline, admit the closest newer frame reached so a long GOP does
+					// not leave the original keyframe as the final scrub preview.
+					int below_target = out_frame->time < s->play_n_video_time;
+					int deadline_ms = __atomic_load_n(
+						&s->seek_preview_refine_deadline_ms, __ATOMIC_ACQUIRE );
+					int accept_partial = below_target && deadline_ms > 0 &&
+						out_frame->epoch == s->seek_epoch &&
+						!__atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) &&
+						atime() >= deadline_ms - SEEK_PREVIEW_PARTIAL_MARGIN_MS &&
+						out_frame->time >= s->video_time;
+					if( accept_partial ) {
+						DBG serprintf("SEEK_PREVIEW_REFINE_PARTIAL: frame=%d target=%d remaining=%d epoch=%d\n",
+							out_frame->time, s->play_n_video_time,
+							s->play_n_video_time - out_frame->time, out_frame->epoch);
+					} else {
+						discard_seek_frame |= below_target;
+					}
+				} else if( s->play_n_old_time ) {
 					// A backward seek used to accept any frame below the old position.
 					// Delayed MediaCodec output just below that position could therefore
 					// terminate the one-frame preview while still showing the old scene.
@@ -4942,6 +4964,10 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int had_audio_epoch = old_audio_time >= 0 && old_sink_ref_time >= 0;
 	int preserve_mode2_frontier = had_audio_epoch || inherited_mode2_frontier;
 
+	__atomic_store_n( &s->seek_preview_superseded, 0, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->seek_preview_refining, 0, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0, __ATOMIC_RELEASE );
+
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
 		return 1;
@@ -5069,7 +5095,20 @@ serprintf("STUFF_ZERO!\n");
 			stream_sync_init( s, (drops_armed && time >= 0) ? target_ts : sc.time );
 		}
 		if( !s->seek_skip_initial_play ) {
-			_stream_play_n_frames( s, 10, sc.time, old_time );
+			int preview_shown = _stream_play_n_frames( s, 10, sc.time, old_time );
+			if( preview_shown && !first_start && time >= 0 && old_time > target_ts &&
+			    target_ts > sc.time &&
+			    !__atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) ) {
+				// The keyframe preview provides immediate scrub feedback. Refine it
+				// only while this remains the newest request, so key-repeat seeking
+				// never serializes behind decoding a complete GOP for every step.
+				DBG serprintf("SEEK_PREVIEW_REFINE: achieved=%d requested=%d old=%d\n",
+					sc.time, target_ts, old_time);
+				__atomic_store_n( &s->seek_preview_refining, 1, __ATOMIC_RELEASE );
+				s->play_n_video_one = 1;
+				_stream_play_n_frames( s, 10, target_ts, old_time );
+				__atomic_store_n( &s->seek_preview_refining, 0, __ATOMIC_RELEASE );
+			}
 		}
 		s->seek_skip_initial_play = 0;
 		s->seek_frame = 0;
@@ -5187,6 +5226,13 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
 }
 
+void stream_seek_preview_supersede( STREAM *s )
+{
+	if( s ) {
+		__atomic_store_n( &s->seek_preview_superseded, 1, __ATOMIC_RELEASE );
+	}
+}
+
 int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir, int flags )
 {
 	if( s ) {
@@ -5268,7 +5314,7 @@ serprintf("SFR: not open!\r\n");
 //	_stream_play_n_frames
 //
 // *****************************************************************************
-static void _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
+static int _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 {
 	char hms_buf[32];
 	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
@@ -5279,7 +5325,14 @@ serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
 	
 	if( !s || !s->open ) {
 serprintf("PNF: not open!\r\n");
-		return;
+		return 0;
+	}
+	if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) ) {
+		__atomic_store_n( &s->seek_preview_refine_deadline_ms, timeout,
+			__ATOMIC_RELEASE );
+	} else {
+		__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0,
+			__ATOMIC_RELEASE );
 	}
 
 	_stream_resync( s );
@@ -5294,21 +5347,36 @@ serprintf("PNF: not open!\r\n");
 	}
 	
 	// wait for it to play
+	int refine_superseded = 0;
 	while( s->play_n_video_frames && atime() < timeout ) {
+		if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) &&
+		    __atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) ) {
+			refine_superseded = 1;
+			break;
+		}
 		//serprintf("-");
 		stream_yield();
 	}
-	if( s->play_n_video_frames ) {
-		// Seek decode did not converge in time. Clear one-shot seek state so
-		// playback can continue instead of staying stuck in seek-drop mode.
-		DBG serprintf("SEEK_PNF_TIMEOUT: target_ts=%d old_ts=%d video_time=%d audio_time=%d left=%d\n",
-			time, old_time, s->video_time, s->audio_time, s->play_n_video_frames);
+	int preview_shown = !s->play_n_video_frames;
+	if( !preview_shown ) {
+		if( refine_superseded ) {
+			DBG serprintf("SEEK_PREVIEW_REFINE_SUPERSEDED: target_ts=%d old_ts=%d video_time=%d\n",
+				time, old_time, s->video_time);
+		} else {
+			// Seek decode did not converge in time. Clear one-shot seek state so
+			// playback can continue instead of staying stuck in seek-drop mode.
+			DBG serprintf("SEEK_PNF_TIMEOUT: target_ts=%d old_ts=%d video_time=%d audio_time=%d left=%d\n",
+				time, old_time, s->video_time, s->audio_time, s->play_n_video_frames);
+		}
 		s->play_n_video_frames = 0;
+		s->play_n_video_one = 0;
 		s->play_n_video_time = -1;
 		s->play_n_old_time = 0;
 	}
 
 	_stream_wait_for_idle( s, 1000 );
+	__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0, __ATOMIC_RELEASE );
+	return preview_shown;
 }
 
 // *****************************************************************************

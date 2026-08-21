@@ -106,6 +106,12 @@ typedef struct priv {
 	VIDEO_FRAME *frames[SFDEC_MAX_FRAMES];
 	int num_frames;
 	int reorder_pts;
+	int pts_reorder_depth;
+	int repair_decode_order_pts;
+	int pts_input_monotonic;
+	int pts_input_seen;
+	int pts_input_last;
+	int pts_repair_logged;
 
 	struct XDM_ctx XDM_ctx;
 
@@ -1454,12 +1460,26 @@ DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.
 		int out_type;
 		int out_ID;
 
-		if( p->reorder_pts ) {
+		int fifo_time = -1;
+		if( p->repair_decode_order_pts ) {
+			fifo_time = XDM_ts_get( &p->XDM_ctx );
+		}
+		if( p->repair_decode_order_pts &&
+		    p->pts_input_seen > p->pts_reorder_depth &&
+		    p->pts_input_monotonic && fifo_time != -1 ) {
+			out_time = fifo_time;
+			if( !p->pts_repair_logged ) {
+				CLOG("decode-order PTS repair active: depth=%d seen=%d decoder_ts=%d fifo_ts=%d",
+					p->pts_reorder_depth,
+					p->pts_input_seen, time, fifo_time);
+				p->pts_repair_logged = 1;
+			}
+		} else if( p->reorder_pts ) {
 			// get reordered TS
 			out_time = time;
 		} else {
 			// no reordering, just use the ts_ queue
-			out_time = XDM_ts_get( &p->XDM_ctx );
+			out_time = p->repair_decode_order_pts ? fifo_time : XDM_ts_get( &p->XDM_ctx );
 		}
 		ret = XDM_id_get( &p->XDM_ctx, time, &out_type, &out_ID );
 
@@ -1677,6 +1697,20 @@ retry_decoder_open:
 			p->reorder_pts = 0;
 		}
 	}
+	// Some malformed HEVC streams declare B-frame reordering but carry decode-order
+	// PTS (missing composition offsets). Preserve submitted timestamps in a FIFO so
+	// they can replace non-monotonic MediaCodec output timestamps for that case.
+	// Correctly muxed B-frame input becomes non-monotonic and keeps decoder PTS.
+	p->pts_reorder_depth = video->reorder_depth;
+	p->repair_decode_order_pts = effective_format == VIDEO_FORMAT_HEVC &&
+		p->pts_reorder_depth > 0;
+	p->pts_input_monotonic = 1;
+	p->pts_input_seen = 0;
+	p->pts_input_last = INT_MIN;
+	p->pts_repair_logged = 0;
+	if( p->repair_decode_order_pts ) {
+		CLOG("decode-order PTS repair armed: depth=%d", p->pts_reorder_depth);
+	}
 
 	if (sfdec_start(p->sfdec) != 0) {
 		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",
@@ -1868,7 +1902,14 @@ CLOG("error!");
 	if( ret > 0 ) {
 DBGCV CLOG("%c %8d: %d/%d", frame_type(d->type), d->time, ret, d->size);
 		XDM_id_put( &p->XDM_ctx,  d->time, d->type, d->user_ID );
-		if( !p->reorder_pts ) {
+		if( p->repair_decode_order_pts ) {
+			if( p->pts_input_seen > 0 && d->time < p->pts_input_last ) {
+				p->pts_input_monotonic = 0;
+			}
+			p->pts_input_last = d->time;
+			p->pts_input_seen++;
+		}
+		if( !p->reorder_pts || p->repair_decode_order_pts ) {
 			XDM_ts_put( &p->XDM_ctx, d->time );
 		}
 	}
@@ -1953,6 +1994,10 @@ DBGCV	CLOG();
 
 	XDM_id_flush( &p->XDM_ctx );
 	XDM_ts_flush( &p->XDM_ctx );
+	p->pts_input_monotonic = 1;
+	p->pts_input_seen = 0;
+	p->pts_input_last = INT_MIN;
+	p->pts_repair_logged = 0;
 	int codec_flushed = sfdec_flush(p->sfdec) == 0;
 	sfdec_seek_reset( p->sfdec );
 DBGCV CLOG("MediaCodec seek reset");

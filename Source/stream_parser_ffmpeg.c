@@ -500,6 +500,7 @@ serprintf("FF: parse H264 SPS\n");
 				video->aspect_from_container = st->sample_aspect_ratio.num > 0 &&
 						st->sample_aspect_ratio.den > 0;
 				video->bytesPerSec = codecpar->bit_rate / 8;
+				video->reorder_depth = codecpar->video_delay;
 
 				video->color_primaries = codecpar->color_primaries;
 				video->color_trc       = codecpar->color_trc;

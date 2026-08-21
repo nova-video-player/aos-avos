@@ -647,6 +647,7 @@ typedef struct _video_props {
 	
 	// for PTS/DTS issues:
 	int	reorder_pts;
+	int	reorder_depth;
 	
 	// for H264
 	H264_SPS sps;	

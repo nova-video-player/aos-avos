@@ -253,6 +253,11 @@ DBGS serprintf("stream_delete: %08X\r\n", s ? (long)*s : -1 );
 	// be done, same as mode2_heard_mutex's own deferred destroy.
 	pthread_mutex_destroy( &(*s)->subtitle_owner_lock );
 	pthread_cond_destroy(  &(*s)->subtitle_owner_cond );
+	// subtitle_table_lock (stream.h): same deferred-destroy reasoning as
+	// subtitle_owner_lock above -- stream_stop()'s stream_sub_ext_close()
+	// waits for the discovery worker before returning, and that happens
+	// after stream_close() but before here, so it's safe to destroy now.
+	pthread_mutex_destroy( &(*s)->subtitle_table_lock );
 	afree( *s );
 	*s = NULL;
 	return 0;
@@ -287,6 +292,7 @@ DBGS serprintf("stream_init\r\n" );
 	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
 	pthread_mutex_init( &s->subtitle_owner_lock, NULL );
 	pthread_cond_init(  &s->subtitle_owner_cond, NULL );
+	pthread_mutex_init( &s->subtitle_table_lock, NULL );
 	
 	ref_count ++;
 	return 0;
@@ -1743,6 +1749,8 @@ void stream_show_short_props( STREAM *s )
 			);
 		}
 	}
+	// Locked -- debug output only, but see subtitle_table_lock (stream.h).
+	pthread_mutex_lock( &s->subtitle_table_lock );
 	if( s->subtitle->valid ) {
 		int i;
 		for( i = 0; i < s->av.subs_max; i++ ) {
@@ -1758,6 +1766,7 @@ void stream_show_short_props( STREAM *s )
 			);
 		}
 	}
+	pthread_mutex_unlock( &s->subtitle_table_lock );
 }
 
 // *****************************************************************************

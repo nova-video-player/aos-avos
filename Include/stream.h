@@ -851,6 +851,36 @@ typedef struct STREAM {
 	pthread_cond_t	subtitle_owner_cond;
 	int		subtitle_owner_refs;	// callers currently inside an _owner_acquire()/_owner_release() pair
 	int		subtitle_owner_closing;	// set while THIS stream's current subtitle_priv is being torn down; blocks new acquires until reset
+
+	// Guards the live subtitle track table as one unit: which slots exist
+	// (av.subs_max), their content (av.sub[i]'s fields), and which one is
+	// selected (av.subs, subtitle). One lock rather than two, since reads
+	// like subtitle->valid need both the pointer and its target stable
+	// together. Writers are stream_sub_ext.c's _add_menu_entries() and
+	// stream_sub_ext_close(), both on the discovery-worker thread; readers
+	// needing it are stream_set_subtitle_stream() and
+	// avos_mp_video_setsubtitletrack() (JNI thread) -- stream_sub_dec_thread
+	// doesn't need it, already covered by the sub_tstate idle rendezvous.
+	//
+	// Without this lock, a manual track switch (JNI thread) racing the
+	// discovery worker's autoscan/rebuild could produce a torn (av.subs,
+	// subtitle) snapshot, or get silently reverted by the rescan's
+	// post-rebuild reselect.
+	//
+	// Lifecycle mirrors subtitle_owner_lock: init in stream_init(),
+	// destroy in stream_delete() -- NOT stream_close() -- since the
+	// discovery worker can still be mid-scan when stream_close() runs.
+	// stream_stop()'s later stream_sub_ext_close() ->
+	// stream_sub_ext_wait_for_discovery() is what guarantees it's done,
+	// and that happens after stream_close() but before stream_delete().
+	pthread_mutex_t	subtitle_table_lock;
+
+	// Bumped by every writer of (av.subs, subtitle) under subtitle_table_lock.
+	// _stream_check_subtitles_sync() snapshots this before its (potentially
+	// slow) rescan and rechecks it before its post-rebuild reselect write;
+	// if it moved, a manual switch happened mid-scan and the reselect is
+	// skipped instead of reverting that fresher choice.
+	uint64_t	subtitle_select_generation;
 	
 	// current subtitle chunk
 	STREAM_CDATA	cdata_sub;

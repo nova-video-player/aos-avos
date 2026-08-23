@@ -138,7 +138,16 @@ static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
 	// --- NATIVE OPENGL UPGRADE ---
 	// ALL subtitle formats (Text and Bitmap) are now handled natively by the GPU compositor.
 	// Explicitly abort sending any JNI payload to the legacy Java SubtitleManager.
-	int fmt = video->s->av.sub[video->s->av.subs].format;
+	//
+	// fmt/gfx snapshotted together under subtitle_table_lock (stream.h) --
+	// previously two separate unlocked re-indexes of av.sub[av.subs],
+	// letting a track switch in between mix fields from two tracks.
+	pthread_mutex_lock( &video->s->subtitle_table_lock );
+	int sub_idx = video->s->av.subs;
+	int fmt     = video->s->av.sub[sub_idx].format;
+	int is_gfx  = video->s->av.sub[sub_idx].gfx;
+	pthread_mutex_unlock( &video->s->subtitle_table_lock );
+
 	if (fmt == SUB_FORMAT_SSA      ||  // raw text -> C engine
 		fmt == SUB_FORMAT_TEXT     ||  // raw text -> C engine
 		fmt == SUB_FORMAT_WEBVTT   ||  // ffdec text -> C engine
@@ -150,7 +159,7 @@ static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
 	sub_frame = stream_get_current_subtitle(video->s);
 	sub_time = sub_frame->time - SUBTITLE_SEND_OFFSET;
 
-	if (video->s->av.sub[video->s->av.subs].gfx) {
+	if (is_gfx) {
 		msg = avos_msg_new_bitmap_subtitle(0, sub_time, sub_frame->duration, (IMAGE *)sub_frame);
 	} else {
 		msg = avos_msg_new_text_subtitle(0, sub_time, sub_frame->duration, sub_frame->data[0]);
@@ -540,7 +549,15 @@ int avos_mp_video_checksubtitles(avos_mp_t *mp, avos_mp_video_t *video)
 
 int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int track, int *ret)
 {
-	if (track < 0 || track >= video->s->av.subs_max) {
+	// Locked snapshot of av.subs_max (subtitle_table_lock, stream.h) --
+	// stream_set_subtitle_stream() rechecks this itself, so a value gone
+	// stale by then is still caught there.
+	int subs_max;
+	pthread_mutex_lock( &video->s->subtitle_table_lock );
+	subs_max = video->s->av.subs_max;
+	pthread_mutex_unlock( &video->s->subtitle_table_lock );
+
+	if (track < 0 || track >= subs_max) {
 		video->send_sub = 0;
 		*ret = 1;
 		// Clear the screen if track is disabled

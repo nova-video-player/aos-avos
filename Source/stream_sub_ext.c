@@ -950,6 +950,10 @@ static subtitle_files *get_subtitle_files_incremental( STREAM *s, subtitle_files
 static void _add_menu_entries( STREAM *s, SUB_PRIV *p, int start_idx )
 {
 	int i;
+	// Locked for the whole loop, not per-entry: valid/av.subs_max are set
+	// before name/path within one entry, so a reader needs the whole batch
+	// atomic. See subtitle_table_lock in stream.h.
+	pthread_mutex_lock( &s->subtitle_table_lock );
 	for( i = start_idx; i < p->subs->cnt; i++ ) {
 		if( !p->subs->converted[i] ) continue;
 		if( s->av.subs_max >= SUB_TRACK_MAX ) break;
@@ -994,6 +998,7 @@ DBGS serprintf("has palette!\n");
 			strnZcpy( sub->path, conv->spex->filename, MAX_NAME_LEN );
 		}
 	}
+	pthread_mutex_unlock( &s->subtitle_table_lock );
 }
 
 // Kicks off async parsing for every unstarted track in p->subs->converted[start_idx..cnt), right after the menu is (re)built -- so all discovered files start parsing on the background worker before the user picks a track. Non-blocking: subtitle_ensure_parsed_async() just enqueues and returns, so this doesn't hold up video start.
@@ -1263,11 +1268,15 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 		p->worker = NULL;
 
 		int i;
+		// Locked (subtitle_table_lock, stream.h); scoped to just this
+		// loop, not held across _worker_stop()'s join above.
+		pthread_mutex_lock( &s->subtitle_table_lock );
 		for (i = p->prev_max; i < s->av.subs_max; ++i) {
 			SUB_PROPERTIES *sub = s->av.sub + i;
 			memset(sub, 0, sizeof(SUB_PROPERTIES));
 		}
 		s->av.subs_max = p->prev_max;
+		pthread_mutex_unlock( &s->subtitle_table_lock );
 		if( p->files )
 			subtitle_free_files( p->files );
 		if( p->subs )

@@ -552,11 +552,19 @@ serprintf("ScS: not open!\r\n");
 
 	char prev_extsub[MAX_NAME_LEN + 1];
 	int has_prev_extsub = 0;
-	int prev_sub = s->av.subs;
+	int prev_sub;
+	uint64_t start_gen;
+	// Locked: av.subs/subtitle must describe the same track, and start_gen
+	// is the TOCTOU guard for the reselect below -- see subtitle_table_lock
+	// in stream.h.
+	pthread_mutex_lock( &s->subtitle_table_lock );
+	prev_sub = s->av.subs;
+	start_gen = s->subtitle_select_generation;
 	if (s->subtitle && s->subtitle->valid && s->subtitle->ext) {
 		strncpy(prev_extsub, s->subtitle->path, MAX_NAME_LEN);
 		has_prev_extsub = 1;
 	}
+	pthread_mutex_unlock( &s->subtitle_table_lock );
 
 	int was_paused = stream_pause( s );
 	thread_state_set( &s->engine_tstate, THREAD_IDLE );
@@ -599,10 +607,20 @@ DBGS serprintf("stream_check_subtitles, ext subtitles rebuilt\r\n");
 			}
 		}
 	}
-	s->av.subs = prev_sub;
-	if (s->av.subs >= s->av.subs_max)
-		s->av.subs = 0;
-	s->subtitle = s->av.sub + s->av.subs;
+	// If the generation moved, a manual switch happened during the rescan
+	// and already set a fresher selection -- skip this write rather than
+	// silently reverting it. See subtitle_table_lock in stream.h.
+	pthread_mutex_lock( &s->subtitle_table_lock );
+	if( s->subtitle_select_generation == start_gen ) {
+		s->av.subs = prev_sub;
+		if (s->av.subs >= s->av.subs_max)
+			s->av.subs = 0;
+		s->subtitle = s->av.sub + s->av.subs;
+		s->subtitle_select_generation++;
+	} else {
+DBGS serprintf("stream_check_subtitles, subtitle selection changed during rescan -- not reverting to pre-scan track %d\r\n", prev_sub);
+	}
+	pthread_mutex_unlock( &s->subtitle_table_lock );
 
 	s->subtitle_changed = 1;
 
@@ -742,12 +760,23 @@ serprintf("SsS: not open!\r\n");
 		return 1;
 	}
 	
-	if( !s->subtitle->valid ) {
+	// Locked: both read the live subtitle table (stream.h's
+	// subtitle_table_lock), racing the discovery worker's rebuild. The
+	// `sub_stream == s->av.subs` check just below is left unlocked --
+	// its return is commented out, so a stale read there only affects
+	// a log line.
+	int not_valid, out_of_range;
+	pthread_mutex_lock( &s->subtitle_table_lock );
+	not_valid   = !s->subtitle->valid;
+	out_of_range = ( sub_stream >= s->av.subs_max );
+	pthread_mutex_unlock( &s->subtitle_table_lock );
+
+	if( not_valid ) {
 serprintf("SsS: not sub!\r\n");
 		return 1;
 	}
 
-	if( sub_stream >= s->av.subs_max ) {
+	if( out_of_range ) {
 serprintf("SsS: sub_stream > av.subs_max\n");	
 		return 1;
 	}
@@ -780,8 +809,14 @@ serprintf("SsS: sub_stream already set\n");
 	if( s->sub_engine )
 		sub_engine_close_track( (SUB_ENGINE*)s->sub_engine );
 
+	// Locked -- the other side of subtitle_table_lock's race (stream.h);
+	// the generation bump lets _stream_check_subtitles_sync()'s reselect
+	// detect this write and back off instead of reverting it.
+	pthread_mutex_lock( &s->subtitle_table_lock );
 	s->av.subs  = sub_stream;
 	s->subtitle = s->av.sub + s->av.subs;
+	s->subtitle_select_generation++;
+	pthread_mutex_unlock( &s->subtitle_table_lock );
 	
 	// run threads again
 	thread_state_set( &s->engine_tstate, THREAD_RUNNING );

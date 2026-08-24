@@ -575,7 +575,14 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
         free(ctx);
         return -1;
     }
-    ass_configure_prune(ctx->track, 3000);
+
+    /*
+     * DISABLED: libass event pruning breaks backward seeking for external text tracks (SRT/VTT/SSA).
+     * Since these tracks are bulk-fed into the engine exactly once at track open, pruning permanently
+     * destroys past events. Keeping the full track resident in memory is required for seamless
+     * seeking in any direction.
+     */
+    // ass_configure_prune(ctx->track, 3000);
 
     if (params->codec_private && params->codec_private_size > 0) {
         ass_process_codec_private(ctx->track, (char *)params->codec_private, params->codec_private_size);

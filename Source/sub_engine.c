@@ -517,9 +517,14 @@ void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode) {
     sub_render_gl_set_ui_mode(eng->renderer, mode);
 }
 
-int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride) {
+int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride, uint64_t *out_generation) {
     if (!eng || !eng->renderer) return 0;
-    return sub_render_gl_fill_bitmap(eng->renderer, pixels, w, h, stride);
+    return sub_render_gl_fill_bitmap(eng->renderer, pixels, w, h, stride, out_generation);
+}
+
+uint64_t sub_engine_get_frame_generation(SUB_ENGINE *eng) {
+    if (!eng || !eng->renderer) return 0;
+    return sub_render_gl_get_frame_generation(eng->renderer);
 }
 
 // sub_engine_feed_raw

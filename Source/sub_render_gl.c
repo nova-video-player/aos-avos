@@ -21,6 +21,7 @@ struct SUB_RENDERER {
     const SUB_FRAME *current_frame;
     int              pending_redraw; // unified "something changed, redraw regardless"
     uint64_t         applied_generation; // highest wakeup_generation this thread has finished a poll+store pass for
+    uint64_t         frame_generation;   // bumped only when current_frame is swapped for genuinely new content -- see sub_render_gl_get_frame_generation()
     pthread_cond_t   frame_cond;         // broadcast whenever applied_generation advances
     GLuint           gl_program;
     GLuint           gl_texture;
@@ -205,6 +206,7 @@ static void* egl_render_thread(void* arg) {
                 sub_engine_release_frame((SUB_ENGINE*)r->engine, (SUB_FRAME*)r->current_frame);
             }
             r->current_frame = new_frame;
+            r->frame_generation++; // content genuinely changed -- see field doc in the struct
             needs_redraw = 1; // <--- 3. FORCE REDRAW ON NEW FRAME
         }
 
@@ -413,6 +415,14 @@ void sub_render_gl_set_ui_mode(SUB_RENDERER *r, int mode) {
     pthread_mutex_unlock(&r->lock);
 }
 
+uint64_t sub_render_gl_get_frame_generation(SUB_RENDERER *r) {
+    if (!r) return 0;
+    pthread_mutex_lock(&r->lock);
+    uint64_t gen = r->frame_generation;
+    pthread_mutex_unlock(&r->lock);
+    return gen;
+}
+
 void sub_render_gl_clear(SUB_RENDERER *r) {
     if (!r) return;
     pthread_mutex_lock(&r->lock);
@@ -465,12 +475,17 @@ void sub_render_gl_wait_for_generation(SUB_RENDERER *r, uint64_t target_generati
 }
 
 // --- HYBRID 3D BRIDGE FAST CPU BLENDER ---
-int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_h, int dst_stride) {
+int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_h, int dst_stride, uint64_t *out_generation) {
     if (!r) return 0;
     int has_subs = 0;
 
     pthread_mutex_lock(&r->lock);
     const SUB_FRAME *frame = r->current_frame;
+    // Stamped in the same critical section as the blend below, so a concurrent frame
+    // swap (egl_render_thread bumping frame_generation and replacing current_frame)
+    // can't land between "we blended frame X" and "we reported X's generation" --
+    // the caller always gets the generation of the exact frame it just read.
+    if (out_generation) *out_generation = r->frame_generation;
 
     if (frame && frame->events) {
         has_subs = 1;

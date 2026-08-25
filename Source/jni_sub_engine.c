@@ -64,7 +64,7 @@ JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngi
     // Fast clear the frame to transparent
     memset(pixels, 0, info.stride * info.height);
 
-    int has_subs = sub_engine_fill_bitmap(eng, pixels, info.width, info.height, info.stride);
+    int has_subs = sub_engine_fill_bitmap(eng, pixels, info.width, info.height, info.stride, NULL);
 
     AndroidBitmap_unlockPixels(env, jbitmap);
     return has_subs ? JNI_TRUE : JNI_FALSE;
@@ -96,10 +96,22 @@ JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngi
 
     memset(pixels, 0, info.stride * info.height);
 
-    int has_subs = sub_engine_fill_bitmap(eng, pixels, info.width, info.height, info.stride);
+    int has_subs = sub_engine_fill_bitmap(eng, pixels, info.width, info.height, info.stride, NULL);
 
     AndroidBitmap_unlockPixels(env, jbitmap);
     return has_subs ? JNI_TRUE : JNI_FALSE;
+}
+
+// Cheap pre-check for the 3D CPU-blend path: lets Java skip the clear+blend+lockCanvas/post
+// entirely (in nativeFillBitmap/nativeSyncFillBitmap and the Canvas work around them) when
+// the subtitle content hasn't actually changed since the last draw, rather than repeating
+// that work on every one of the 30-60 onFrameAvailable() calls/sec regardless of whether
+// anything is different on screen. See sub_render_gl_get_frame_generation()'s doc comment
+// for exactly what this does and doesn't count as "changed".
+JNIEXPORT jlong JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeGetSubtitleGeneration(JNIEnv *env, jobject thiz, jlong handle) {
+    SUB_ENGINE *eng = get_engine(handle);
+    if (!eng) return 0;
+    return (jlong) sub_engine_get_frame_generation(eng);
 }
 
 // --- TYPOGRAPHY & MASTER CONTROL ---

@@ -118,11 +118,17 @@ int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int heig
 void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode);
 
 // --- HYBRID 3D BRIDGE ---
-int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride);
+int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride, uint64_t *out_generation);
 int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size); // for external ASS/SSA raw file buffer
 void sub_engine_wait_for_render(SUB_ENGINE *eng, uint64_t target_generation, int timeout_ms);
 uint64_t sub_engine_force_wake_and_get_generation(SUB_ENGINE *eng);
-void sub_engine_wait_for_render(SUB_ENGINE *eng, uint64_t target_generation, int timeout_ms);
+
+// Current content-change generation for the 3D CPU-blend path -- see
+// sub_render_gl_get_frame_generation() for the exact semantics (bumps only on
+// genuinely new subtitle content, not on every poll/wake). Callers on the Java/JNI
+// side can check this cheaply before paying for a fill_bitmap() call at all, when
+// they only care whether anything changed since their last draw.
+uint64_t sub_engine_get_frame_generation(SUB_ENGINE *eng);
 
 void sub_frame_ref(SUB_FRAME *frame);
 void sub_frame_unref(SUB_FRAME *frame);

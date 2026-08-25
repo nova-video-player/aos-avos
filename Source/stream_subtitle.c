@@ -760,15 +760,26 @@ serprintf("SsS: not open!\r\n");
 		return 1;
 	}
 	
-	// Locked: both read the live subtitle table (stream.h's
-	// subtitle_table_lock), racing the discovery worker's rebuild. The
-	// `sub_stream == s->av.subs` check just below is left unlocked --
+	// Locked: read through the live subtitle table (stream.h's
+	// subtitle_table_lock), racing the discovery worker's rebuild. Beyond
+	// the valid/bounds gate, also capture the REQUESTED track's own
+	// identity (ext + path) here -- this is what a discovery rebuild can
+	// invalidate during the teardown below, and what gets re-resolved
+	// right before the commit instead of trusting this snapshot blindly.
+	// The `sub_stream == s->av.subs` check just below is left unlocked --
 	// its return is commented out, so a stale read there only affects
 	// a log line.
 	int not_valid, out_of_range;
+	int req_ext = 0;
+	char req_path[MAX_NAME_LEN + 1] = { 0 };
 	pthread_mutex_lock( &s->subtitle_table_lock );
 	not_valid   = !s->subtitle->valid;
 	out_of_range = ( sub_stream >= s->av.subs_max );
+	if( !out_of_range ) {
+		req_ext = s->av.sub[sub_stream].ext;
+		if( req_ext )
+			strncpy( req_path, s->av.sub[sub_stream].path, MAX_NAME_LEN );
+	}
 	pthread_mutex_unlock( &s->subtitle_table_lock );
 
 	if( not_valid ) {
@@ -809,21 +820,58 @@ serprintf("SsS: sub_stream already set\n");
 	if( s->sub_engine )
 		sub_engine_close_track( (SUB_ENGINE*)s->sub_engine );
 
-	// Locked -- the other side of subtitle_table_lock's race (stream.h);
-	// the generation bump lets _stream_check_subtitles_sync()'s reselect
-	// detect this write and back off instead of reverting it.
+	// Locked -- re-resolve, don't just re-check, before committing.
+	// Everything above ran unlocked and can take a while (pause, idle
+	// rendezvous, decoder/engine teardown); a full discovery rebuild can
+	// run entirely inside that window and shrink av.subs_max or replace
+	// whatever's at sub_stream with a different file. A bare bounds
+	// re-check isn't enough to catch the second case, so for an external
+	// track we re-resolve by path -- same continuity logic
+	// _stream_check_subtitles_sync() already uses for ITS prev-track
+	// lookup -- rather than trusting the index captured above. Internal
+	// tracks skip this: their indices are never touched by an external
+	// rebuild, so the bound alone is sufficient. If the track can no
+	// longer be found, the switch fails here rather than committing a
+	// stale/wrong index and bumping the generation over it -- which would
+	// also wrongly tell _stream_check_subtitles_sync()'s reselect to defer
+	// to a selection that was never actually valid.
+	int resolved = sub_stream;
+	int found = 1;
 	pthread_mutex_lock( &s->subtitle_table_lock );
-	s->av.subs  = sub_stream;
-	s->subtitle = s->av.sub + s->av.subs;
-	s->subtitle_select_generation++;
+	if( sub_stream >= s->av.subs_max ) {
+		found = 0;
+	} else if( req_ext ) {
+		found = 0;
+		if( s->av.sub[sub_stream].ext && !strncmp( s->av.sub[sub_stream].path, req_path, MAX_NAME_LEN ) ) {
+			found = 1;	// still at the same index, common case
+		} else {
+			int i;
+			for( i = 0; i < s->av.subs_max; i++ ) {
+				if( s->av.sub[i].ext && !strncmp( s->av.sub[i].path, req_path, MAX_NAME_LEN ) ) {
+					resolved = i;
+					found = 1;
+					break;
+				}
+			}
+		}
+	}
+	if( found ) {
+		s->av.subs  = resolved;
+		s->subtitle = s->av.sub + s->av.subs;
+		s->subtitle_select_generation++;
+	}
 	pthread_mutex_unlock( &s->subtitle_table_lock );
-	
+
 	// run threads again
 	thread_state_set( &s->engine_tstate, THREAD_RUNNING );
 	thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
 
 	stream_un_pause( s, was_paused );
 
+	if( !found ) {
+DBGS serprintf("stream_set_subtitle_stream, requested track %d no longer present after a concurrent rescan -- switch aborted, previous selection left in place\r\n", sub_stream );
+		return 1;
+	}
 	// External tracks are fed to the engine independent of demuxer position and get picked up on the next sub_tstate tick, so reseeking for them just costs a demux/decode restart. Only internal/embedded tracks need the demuxer repositioned, since their cues arrive as demuxed packets.
 	if( !s->subtitle->ext ) {
 		// FIXME: there should be a better way without seek jumping

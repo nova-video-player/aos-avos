@@ -33,8 +33,6 @@ extern int libavos_get_ac3_recoding_enabled(void);
 
 #define MPLOG(fmt, ...) serprintf("%p|%s: " fmt "\n", mp, __FUNCTION__, ##__VA_ARGS__)
 
-#define SUBTITLE_SEND_OFFSET (-100)
-
 static int64_t engine_clock_cb(void *ctx) {
 	STREAM *s = (STREAM *)ctx; // Cast the context directly to the STREAM pointer
 	if (!s) return 0;
@@ -60,7 +58,6 @@ struct avos_mp_video {
 	int last_pauseable;
 	int last_duration;
 	int buffered_pos;
-	int send_sub;
 	int width;
 	int height;
 	int aspect_n;
@@ -124,50 +121,6 @@ static void send_metadata(avos_mp_t *mp, avos_mp_video_t *video, int notify)
 	}
 }
 
-static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
-{
-	int sub_time;
-	VIDEO_FRAME *sub_frame;
-	avos_msg_t *msg = NULL;
-
-	DBG MPLOG();
-
-	if (!video->send_sub)
-		return;
-
-	// --- NATIVE OPENGL UPGRADE ---
-	// ALL subtitle formats (Text and Bitmap) are now handled natively by the GPU compositor.
-	// Explicitly abort sending any JNI payload to the legacy Java SubtitleManager.
-	//
-	// fmt/gfx snapshotted together under subtitle_table_lock (stream.h) --
-	// previously two separate unlocked re-indexes of av.sub[av.subs],
-	// letting a track switch in between mix fields from two tracks.
-	pthread_mutex_lock( &video->s->subtitle_table_lock );
-	int sub_idx = video->s->av.subs;
-	int fmt     = video->s->av.sub[sub_idx].format;
-	int is_gfx  = video->s->av.sub[sub_idx].gfx;
-	pthread_mutex_unlock( &video->s->subtitle_table_lock );
-
-	if (fmt == SUB_FORMAT_SSA      ||  // raw text -> C engine
-		fmt == SUB_FORMAT_TEXT     ||  // raw text -> C engine
-		fmt == SUB_FORMAT_WEBVTT   ||  // ffdec text -> C engine
-		fmt == SUB_FORMAT_MOV_TEXT ||  // ffdec text -> C engine
-		fmt == SUB_FORMAT_DVD_GFX  ||  // ffdec bitmap -> C engine
-		fmt == SUB_FORMAT_PGS) {       // ffdec bitmap -> C engine
-		return;
-	}
-	sub_frame = stream_get_current_subtitle(video->s);
-	sub_time = sub_frame->time - SUBTITLE_SEND_OFFSET;
-
-	if (is_gfx) {
-		msg = avos_msg_new_bitmap_subtitle(0, sub_time, sub_frame->duration, (IMAGE *)sub_frame);
-	} else {
-		msg = avos_msg_new_text_subtitle(0, sub_time, sub_frame->duration, sub_frame->data[0]);
-	}
-	if (msg)
-		avos_mp_sendevent_data(mp, MEDIA_SUBTITLE, 0, 0, msg);
-}
-
 static int is_stream_seekable(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	int new_seekable;
@@ -219,9 +172,6 @@ static void stream_msg_cb(STREAM *s, STREAM_MESSAGE message)
 	case STREAM_SUB_PROPS_CHANGED:
 	case STREAM_DECODER_CHANGED:
 		send_metadata(mp, video, 1);
-		break;
-	case STREAM_SUBTITLE_CHANGED:
-		send_subtitle(mp, video);
 		break;
 	default:
 		break;
@@ -278,7 +228,6 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	const char *subtitle_path = device_config_get_subtitlepath();
 	int decoder = device_config_get_decoder();
 
-	video->send_sub = 1;
 	if (!(video->s = stream_new())) {
 		MPLOG("error: stream_new");
 		afree(video);
@@ -329,7 +278,6 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 
 	stream_set_max_video_dimensions(video->s, VIDEO_MAX_WIDTH, VIDEO_MAX_HEIGHT);
 	stream_set_message_cb(video->s, stream_msg_cb);
-	stream_set_subtitle_offset(video->s, SUBTITLE_SEND_OFFSET);
 	stream_set_stop_handler(video->s, stream_stop_handler);
 	stream_set_abort_handler(video->s, stream_abort_handler);
 	stream_set_progress_handler(video->s, stream_progress_handler);
@@ -558,12 +506,10 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 	pthread_mutex_unlock( &video->s->subtitle_table_lock );
 
 	if (track < 0 || track >= subs_max) {
-		video->send_sub = 0;
 		*ret = 1;
 		// Clear the screen if track is disabled
 		if (video->s && video->s->sub_engine) sub_engine_close_track((SUB_ENGINE*)video->s->sub_engine);
 	} else {
-		video->send_sub = 1;
 		*ret = stream_set_subtitle_stream(video->s, track) == 0 ? 1 : 0;
 		// DO NOT open the track here! stream_subtitle.c will natively open it
 		// when the first packet arrives. (Closing the *previous* track is no
@@ -576,7 +522,7 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 
 int avos_mp_video_setsubtitledelay(avos_mp_t *mp, avos_mp_video_t *video, int delay)
 {
-	stream_set_subtitle_offset(video->s, delay + SUBTITLE_SEND_OFFSET);
+	stream_set_subtitle_offset(video->s, delay);
 	return AVOS_ERR_OK;
 }
 

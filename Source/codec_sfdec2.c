@@ -1726,7 +1726,19 @@ retry_decoder_open:
 		goto err;
 	}
 
-	p->num_frames = sfdec_max_frames;
+	int requested_frames = sfdec_max_frames;
+	if( p->repair_decode_order_pts ) {
+		// The read thread holds one frame wrapper while MediaCodec waits for
+		// enough input to satisfy its reorder depth. Keep additional wrappers
+		// available for those inputs or high-depth HEVC can deadlock before its
+		// first output buffer is produced.
+		requested_frames = MAX( requested_frames, p->pts_reorder_depth + 2 );
+	}
+	p->num_frames = MIN( requested_frames, SFDEC_MAX_FRAMES );
+	if( p->num_frames != sfdec_max_frames ) {
+		CLOG("frame pool expanded: configured=%d reorder_depth=%d allocated=%d",
+			sfdec_max_frames, p->pts_reorder_depth, p->num_frames);
+	}
 	if (stream_alloc_frames( &p->frames, video->width, video->height, video->colorspace, STREAM_MEM_ANDROID, &p->num_frames) != 0) {
 		CLOG("stream_alloc_frames failed");
 		goto err;

@@ -404,6 +404,15 @@ void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
     pthread_mutex_lock(&r->lock);
     r->surface_width  = width;
     r->surface_height = height;
+    // Force the native buffer to this size synchronously. Without this,
+    // glViewport() below assumes a buffer size that SurfaceFlinger hasn't
+    // necessarily allocated yet -- buffer resize isn't guaranteed to be
+    // synchronous with this JNI call, so subs briefly draw stretched into
+    // the old buffer until a later redraw happens to land after it catches
+    // up.
+    if (r->window) {
+        ANativeWindow_setBuffersGeometry(r->window, width, height, 0);
+    }
     pthread_mutex_unlock(&r->lock);
     sub_render_gl_invalidate_cache(r);
 }

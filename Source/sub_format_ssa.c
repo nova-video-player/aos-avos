@@ -800,6 +800,10 @@ static int ssa_resize(SUB_FORMAT_BACKEND *be, int w, int h) {
     // ASS/SSA -- preserves the author's intended aspect/positioning). So
     // this can just be a direct, format-agnostic passthrough; no separate
     // destination-rect tracking needed.
+    DBG serprintf("SUB_DEBUG: ssa_resize called with w=%d, h=%d (old: %d, %d)\n", w, h, ctx->video_w, ctx->video_h);
+    if (ctx->video_w != w || ctx->video_h != h) {
+        DBG serprintf("SUB_DEBUG: Canvas changed.\n");
+    }
     ctx->video_w = w;
     ctx->video_h = h;
     ass_set_frame_size(ctx->renderer, w, h);

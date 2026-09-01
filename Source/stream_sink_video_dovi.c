@@ -55,6 +55,14 @@ typedef struct {
 	volatile int venc_run;
 	volatile int venc_flushing;
 	volatile int venc_busy;	/* 1: the thread holds a frame (dequeue..put) */
+	volatile int venc_flush_gen;	/* bumped by sink_flush under the lock; the
+				 * venc thread re-checks it after every unlock window
+				 * (render/present run unclocked) and abandons its
+				 * held frame if a flush rebuilt the pool underneath
+				 * it - the rebuild owns every pool frame from that
+				 * point, so a recycled put would double-list it
+				 * (the measured 'frame_q_put FATAL already in
+				 * [dec]' wedge). */
 } priv_t;
 
 /* current presentation clock: TS anchored by the last put_time call,
@@ -98,6 +106,11 @@ static void *dovi_venc_thread( void *ctx )
 			continue;
 
 		p->venc_busy = 1;
+		/* generation at dequeue: a flush that rebuilds the pool while
+		 * this iteration runs (render/present unlock the mutex) must
+		 * abandon the frame instead of recycling it - the rebuild
+		 * already re-listed every pool frame. */
+		int my_gen = p->venc_flush_gen;
 
 		/* mpv gpu-next pacing model (draw_frame / flip_page split):
 		 * render IMMEDIATELY on arrival (upload + pl_render_image +
@@ -188,6 +201,13 @@ static void *dovi_venc_thread( void *ctx )
 				}
 				dovi_gl_present(p->gl);
 				pthread_mutex_lock( &p->venc_mutex );
+				/* flush raced this iteration (present ran unclocked): the
+				 * rebuild owns the pending frame - drop the reference,
+				 * do not put it back */
+				if( p->venc_flush_gen != my_gen ) {
+					p->pending_frame = NULL;
+					goto flushed_away;
+				}
 				/* the presented frame returns to the pool for reuse */
 				frame_q_put( &p->get_q, p->pending_frame );
 				p->pending_frame = NULL;
@@ -196,8 +216,14 @@ static void *dovi_venc_thread( void *ctx )
 			goto endloop_skip;	/* frame stays pending; recycled after present */
 		}
 endloop:
+		/* flush raced this iteration (render ran unclocked): the rebuild
+		 * owns this frame - its payloads were consumed by the render, so
+		 * dropping the reference (not putting it back) is the correct recycle */
+		if( p->venc_flush_gen != my_gen )
+			goto flushed_away;
 		frame_q_put( &p->get_q, frame );
 endloop_skip:
+flushed_away:
 		p->venc_busy = 0;
 		pthread_cond_broadcast( &p->venc_cond );
 	}
@@ -240,6 +266,8 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	frame_q_init(&p->venc_q, "dovi_venc");
 	pthread_mutex_init(&p->venc_mutex, NULL);
 	pthread_cond_init(&p->venc_cond, NULL);
+	p->venc_flushing = 0;	/* a close/re-open cycle leaves it set */
+	p->venc_flush_gen = 0;
 
 	/* pre-queue all frames as free (mirrors android2's sink_open): the
 	 * stream's _queue_sink_frames pulls them via sink->get into decode_q,
@@ -403,6 +431,16 @@ static int sink_flush(STREAM_SINK_VIDEO *sink)
 	 * already in [dec]' wedging the whole pool). */
 	pthread_mutex_lock(&p->venc_mutex);
 	p->venc_flushing = 1;
+	/* bump the generation FIRST: if the thread is mid-iteration (its
+	 * render/present run with the mutex released, and a 4K FEL present
+	 * can legitimately block >50ms on the swapchain fence), it will see
+	 * the new generation when it re-locks and abandon its held frame
+	 * instead of recycling it into the freshly rebuilt pool - that put
+	 * would double-list the frame (the measured 'frame_q_put FATAL
+	 * already in [dec]' wedge). The generation makes the bounded wait
+	 * below purely an optimization: even if it times out, the thread's
+	 * late puts are now harmless no-op references, never queue writes. */
+	p->venc_flush_gen++;
 	pthread_cond_broadcast(&p->venc_cond);
 	while (p->venc_busy && p->venc_run) {
 		struct timespec ts;
@@ -410,7 +448,8 @@ static int sink_flush(STREAM_SINK_VIDEO *sink)
 		ts.tv_nsec += 50 * 1000000L;
 		if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
 		if (pthread_cond_timedwait(&p->venc_cond, &p->venc_mutex, &ts) == ETIMEDOUT)
-			break;	// thread stuck: proceed rather than deadlock
+			break;	// thread stuck: safe now - the generation check keeps
+				// its late recycles out of the rebuilt pool
 	}
 
 	/* the thread parks with at most one rendered-but-unpresented frame
@@ -469,11 +508,17 @@ static int sink_get_time(STREAM_SINK_VIDEO *sink)
 static int sink_put_time(STREAM_SINK_VIDEO *sink, int time)
 {
 	priv_t *p = sink->priv;
+	/* under the mutex: venc_put_time + venc_ref_time form one anchor
+	 * pair; the venc thread reads both unlocked, so a torn update would
+	 * pace one present off the new time against the old wall base */
+	pthread_mutex_lock(&p->venc_mutex);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
 	/* re-anchor also lifts any flush hold so pacing resumes from the new
 	 * anchor (seek: engine re-anchors after flushing) */
 	p->venc_flushing = 0;
+	pthread_cond_broadcast(&p->venc_cond);
+	pthread_mutex_unlock(&p->venc_mutex);
 	return 0;
 }
 

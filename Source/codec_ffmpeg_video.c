@@ -945,9 +945,17 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 			codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
 		}
 	}
-	
-	av_frame_free((AVFrame**)&src->priv);
-	src->dec = NULL;
+	if( src->priv && src->dec == dec ) {
+		av_frame_free((AVFrame**)&src->priv);
+		/* paired EL clone (dovi zero-copy path), same ownership point as
+		 * the BL: ~3MB/frame if the render hook is ever reached with an
+		 * unpaired EL (unreachable on the dovi pipeline today - the
+		 * sink consumes both frames - but the symmetric free keeps the
+		 * contract total like the cleanup path does) */
+		if (src->handle[1])
+			av_frame_free((AVFrame**)&src->handle[1]);
+		src->dec = NULL;
+	}
 	
 	pthread_mutex_unlock( &p->mutex );
 

@@ -78,18 +78,6 @@ extern STREAM_SINK_VIDEO *stream_sink_video_dovi_new(void *surface);
 #define TAG "DOVI_HW"
 
 #define DVHW_PENDING_MAX 64
-/* AImageReader pool depth. mpv's hwdec_aimagereader uses 5 because its
- * total in-flight frames ~= reader capacity. Our dovi sink owns a 14-frame
- * pool and the stream engine lets decode run ahead of the paced presenter
- * (that slack is what absorbs SMB/network jitter), so during burst catch-up
- * up to 14 frames each holding an acquired AImage can be alive at once.
- * With a 5-slot reader every frame beyond the 5th BLOCKS the codec2 render
- * pipeline until the presenter drains one - the decoder's output rate then
- * collapses to the sink drain rate (measured on SMB Cape Fear: visible
- * 10-15 fps while local playback is perfect). One reader slot per sink
- * frame removes the cap entirely; the reader only materializes buffers
- * as the codec actually renders, so steady-state memory is unchanged. */
-#define DVHW_MAX_IMAGES  14
 #define DVHW_INPUT_TIMEOUT_US 100000
 #define DVHW_EL_INPUT_TIMEOUT_US 0	/* EL feed must never block: its input
 					 * queue fills while the BL paces the engine; outputs are
@@ -99,28 +87,17 @@ extern STREAM_SINK_VIDEO *stream_sink_video_dovi_new(void *surface);
 					 * fed-vs-drained budget may run this many
 					 * AUs ahead of the 1:1 BL pace */
 
-/* AImageReader/AHardwareBuffer entry points (API 26+), resolved at runtime
- * so libavos.so still loads on older devices (mpv loads them the same way) */
-typedef media_status_t (*PFN_AImageReader_newWithUsage)(int32_t width,
-	int32_t height, int32_t format, uint64_t usage, int32_t maxImages,
-	AImageReader **reader);
-typedef media_status_t (*PFN_AImageReader_getWindow)(AImageReader *reader,
-	ANativeWindow **window);
-typedef media_status_t (*PFN_AImageReader_acquireLatestImage)(AImageReader *reader,
-	AImage **image);
-typedef media_status_t (*PFN_AImage_getHardwareBuffer)(const AImage *image,
-	AHardwareBuffer **buffer);
+/* AImage entry points (API 26+), resolved at runtime so libavos.so still
+ * loads on older devices. Only AImage_delete stays live (dvhw_frame_release
+ * frees stale recycled-frame images from the pre-buffer-mode era of the
+ * pool); the former AImageReader surface pipeline was removed with the
+ * OES path - the BL now decodes in MediaCodec buffer mode like mpv's
+ * mediacodec-copy. */
 typedef void (*PFN_AImage_delete)(AImage *image);
-typedef void (*PFN_AImageReader_delete)(AImageReader *reader);
 
 static struct {
 	void *lib_mediandk;
-	PFN_AImageReader_newWithUsage      newWithUsage;
-	PFN_AImageReader_getWindow         getWindow;
-	PFN_AImageReader_acquireLatestImage acquireLatest;
-	PFN_AImage_getHardwareBuffer       getHwBuffer;
 	PFN_AImage_delete                  imageDelete;
-	PFN_AImageReader_delete            readerDelete;
 	int loaded;
 } dvhw_api;
 
@@ -135,23 +112,11 @@ static int dvhw_api_load(void)
 		return 1;
 	}
 
-	dvhw_api.newWithUsage = (PFN_AImageReader_newWithUsage)
-		dlsym(dvhw_api.lib_mediandk, "AImageReader_newWithUsage");
-	dvhw_api.getWindow = (PFN_AImageReader_getWindow)
-		dlsym(dvhw_api.lib_mediandk, "AImageReader_getWindow");
-	dvhw_api.acquireLatest = (PFN_AImageReader_acquireLatestImage)
-		dlsym(dvhw_api.lib_mediandk, "AImageReader_acquireLatestImage");
-	dvhw_api.getHwBuffer = (PFN_AImage_getHardwareBuffer)
-		dlsym(dvhw_api.lib_mediandk, "AImage_getHardwareBuffer");
 	dvhw_api.imageDelete = (PFN_AImage_delete)
 		dlsym(dvhw_api.lib_mediandk, "AImage_delete");
-	dvhw_api.readerDelete = (PFN_AImageReader_delete)
-		dlsym(dvhw_api.lib_mediandk, "AImageReader_delete");
 
-	if (!dvhw_api.newWithUsage || !dvhw_api.getWindow ||
-	    !dvhw_api.acquireLatest || !dvhw_api.getHwBuffer ||
-	    !dvhw_api.imageDelete || !dvhw_api.readerDelete) {
-		serprintf(TAG ": AImageReader entry points incomplete\n");
+	if (!dvhw_api.imageDelete) {
+		serprintf(TAG ": AImage entry points incomplete\n");
 		dlclose(dvhw_api.lib_mediandk);
 		dvhw_api.lib_mediandk = NULL;
 		return 1;
@@ -170,8 +135,6 @@ typedef struct {
 
 typedef struct {
 	AMediaCodec	*codec;
-	AImageReader	*reader;
-	ANativeWindow	*window;
 	int	width, height;
 	int	nal_length_size;
 	dvhw_pending	pending[DVHW_PENDING_MAX];
@@ -196,6 +159,8 @@ typedef struct {
 	int	el_drain_count;		/* EL frames emitted by the decoder (reorder lag tracking) */
 	int	bl_fed_count;		/* BL AUs queued to the BL codec (EL feed pacing master) */
 	int	el_seen;		/* EL emitted >=1 frame since last flush (warm-up gate, mpv 3b4caf0) */
+	int	el_exhausted;		/* parser has no more EL packets (EOF tail evidence,
+				 * probed in dvhw_el_feed; cleared on flush) */
 	AVFrame		*el_q[DVHW_PENDING_MAX];
 	int	el_q_count;
 	int	el_nal_length_size;
@@ -284,56 +249,9 @@ static void dvhw_frame_release(dovi_hw_frame *f)
 }
 
 static void dvhw_frame_release(dovi_hw_frame *f);
-static void dvhw_release_reader(PRIV *p);
-
-typedef struct {
-	AImageReader *reader;		// process-lifetime cache: see dvhw_get_reader
-	ANativeWindow *window;
-} dvhw_reader_cache_t;
 
 static void dvhw_el_q_clear(PRIV *p);
 static void dvhw_bl_q_clear(PRIV *p);
-
-static dvhw_reader_cache_t dvhw_reader_cache;
-
-/* The AImageReader outlives any single decoder: destroying it races the
- * codec2 async render pipeline on some vendors (Samsung Android 16
- * ~AImageReader decStrong crash), so we keep it for the process lifetime
- * and only drain queued images when a stream goes away (mpv keeps its
- * hwdec reader for the whole VO lifetime for the same reason). */
-static int dvhw_get_reader(PRIV *p)
-{
-	AImage *img;
-	media_status_t st;
-	int n;
-
-	if (!dvhw_reader_cache.reader) {
-		st = dvhw_api.newWithUsage(16, 16, AIMAGE_FORMAT_PRIVATE,
-		                           AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
-		                           DVHW_MAX_IMAGES, &dvhw_reader_cache.reader);
-		if (st != AMEDIA_OK || !dvhw_reader_cache.reader) {
-			serprintf(TAG ": AImageReader_newWithUsage failed (%d)\n", st);
-			return 1;
-		}
-		st = dvhw_api.getWindow(dvhw_reader_cache.reader, &dvhw_reader_cache.window);
-		if (st != AMEDIA_OK || !dvhw_reader_cache.window) {
-			serprintf(TAG ": AImageReader_getWindow failed (%d)\n", st);
-			dvhw_api.readerDelete(dvhw_reader_cache.reader);
-			dvhw_reader_cache.reader = NULL;
-			return 1;
-		}
-	}
-	/* drain images left over by a previous stream so the codec starts
-	 * with a clean queue */
-	for (n = 0; n < DVHW_MAX_IMAGES; n++) {
-		if (dvhw_api.acquireLatest(dvhw_reader_cache.reader, &img) != AMEDIA_OK || !img)
-			break;
-		dvhw_api.imageDelete(img);
-	}
-	p->reader = dvhw_reader_cache.reader;
-	p->window = dvhw_reader_cache.window;
-	return 0;
-}
 
 static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
                      int *pneed_flush, int *pneed_reorder)
@@ -514,27 +432,7 @@ fail:
 	}
 	dvhw_el_q_clear(p);
 	dvhw_bl_q_clear(p);
-	dvhw_release_reader(p);
 	return 1;
-}
-
-static void dvhw_release_reader(PRIV *p)
-{
-	/* The reader+window are cached process-wide (dvhw_get_reader): never
-	 * destroy them here, just drain any image still queued so the next
-	 * stream starts clean. Destroying races the codec2 async render
-	 * pipeline on some vendors (Samsung Android 16 ~AImageReader crash). */
-	AImage *img;
-	int n;
-	if (p->reader) {
-		for (n = 0; n < DVHW_MAX_IMAGES; n++) {
-			if (dvhw_api.acquireLatest(p->reader, &img) != AMEDIA_OK || !img)
-				break;
-			dvhw_api.imageDelete(img);
-		}
-	}
-	p->reader = NULL;
-	p->window = NULL;
 }
 
 // ************************************************************
@@ -576,7 +474,9 @@ static AVFrame *dvhw_copy_yuv420(AMediaCodec *codec, ssize_t index,
 	int y, x;
 
 	if (!src)
-		return NULL;
+		goto done;	/* release the dequeued output slot (an early return here
+			 * would permanently lose one of the codec's fixed output
+			 * buffers and wedge output after N failures) */
 	if (stride <= 0)
 		stride = width;
 	if (slice_height <= 0)
@@ -681,7 +581,6 @@ static int dvhw_close(STREAM_DEC_VIDEO *dec)
 	}
 	dvhw_el_q_clear(p);
 	dvhw_bl_q_clear(p);
-	dvhw_release_reader(p);
 	dvhw_pending_clear(p);
 	dec->is_open = 0;
 	return 0;
@@ -717,67 +616,6 @@ static int dvhw_cleanup(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **frames, int num_fra
 	return 0;
 }
 
-// dequeue one rendered frame from the AImageReader and attach it to avos_frame
-static int dvhw_take_output(PRIV *p, VIDEO_FRAME *avos_frame,
-                            AMediaCodecBufferInfo *info, STREAM_DEC_VIDEO *dec)
-{
-	AImage *image = NULL;
-	AHardwareBuffer *ahb = NULL;
-	dovi_hw_frame *hw;
-	int tries;
-
-	// releaseOutputBuffer(render=true) queues the frame to the reader
-	// surface; the image may need a moment to become available
-	for (tries = 0; tries < 25; tries++) {
-		if (dvhw_api.acquireLatest(p->reader, &image) == AMEDIA_OK && image)
-			break;
-		usleep(2000);
-	}
-	if (!image) {
-		serprintf(TAG ": no AImage after releaseOutputBuffer\n");
-		return 0;
-	}
-	if (dvhw_api.getHwBuffer(image, &ahb) != AMEDIA_OK || !ahb) {
-		serprintf(TAG ": AImage_getHardwareBuffer failed\n");
-		dvhw_api.imageDelete(image);
-		return 0;
-	}
-
-	hw = (dovi_hw_frame *) acalloc(1, sizeof(dovi_hw_frame));
-	if (!hw) {
-		dvhw_api.imageDelete(image);
-		return 0;
-	}
-	hw->image = image;
-	hw->ahb = ahb;
-	hw->width = p->width;
-	hw->height = p->height;
-	dvhw_pending_take(p, info->presentationTimeUs, &hw->rpu, &hw->rpu_size);
-	hw->release = dvhw_frame_release;
-
-	/* the frame slot may still hold the previous stream cycle's image
-	 * (frames are recycled through the queues on seek/flush without passing
-	 * through the sink's render path): release it here or the reader's
-	 * buffer pool slowly starves across seeks */
-	if (avos_frame->handle[0] && avos_frame->handle[0] != (void *) hw)
-		dvhw_frame_release((dovi_hw_frame *) avos_frame->handle[0]);
-	avos_frame->dec = dec;
-	avos_frame->handle[0] = hw;
-	avos_frame->valid = 1;
-	avos_frame->error = 0;
-	avos_frame->pts = info->presentationTimeUs / 1000;
-	/* presentation time from the codec output, converted back to the engine
-	 * time domain: MediaCodec emits buffers in DISPLAY order, so with
-	 * B-frames the output pts (queued at input with the chunk pts) is the
-	 * only correct source for avos_frame->time — the input chunk time that
-	 * the engine left on the frame slot is DECODE order (codec_ffmpeg_video
-	 * does the same reassignment from the reordered vframe). */
-	avos_frame->time = (int) (info->presentationTimeUs / 1000);
-	avos_frame->type = (info->flags & 0x1) ? 0 : 2;	// BUFFER_FLAG_KEY_FRAME
-	avos_frame->interlaced = 0;
-	avos_frame->top_field_first = 0;
-	return 1;
-}
 
 
 // av_buffer_create free callback: frees the AVDOVIMetadata struct
@@ -821,6 +659,11 @@ static uint8_t *dvhw_hvcc_params_annexb(const uint8_t *hvcc, int size,
 			if (pos + 2 > size)
 				return NULL;
 			int nal = (hvcc[pos] << 8) | hvcc[pos + 1];
+			if (pos + 2 + nal > size)
+				return NULL;	/* declared NAL longer than the buffer:
+					 * malformed/corrupt extradata - reject instead of
+					 * over-reading in pass 2's memcpy (FFmpeg's hvcC
+					 * parser bounds-checks every NAL length) */
 			pos += 2 + nal;
 			total += 4 + (size_t) nal;
 		}
@@ -929,6 +772,27 @@ static void dvhw_el_feed(STREAM_DEC_VIDEO *dec)
 	 * mpv f_enhancement_pair polls its EL filter pin on every frame
 	 * regardless of input pacing. */
 	int el_gated = (p->el_fed_count >= p->bl_fed_count + DVHW_EL_CATCHUP);
+	/* parser-side EL exhaustion probe: when not gated, attempt one
+	 * pull; if the parser has none left, remember it - dvhw_fel_emit's
+	 * EOF-tail policy needs 'no future EL exists' as an input (drain
+	 * == fed alone is NOT proof mid-file: the EL feed is catch-up
+	 * paced, so between AUs the counts can transiently match while
+	 * later EL packets are still coming). */
+	if (!el_gated) {
+		/* reuse the feed-loop's stack packet pattern (declared
+		 * uninitialized like el_pkt below; the parser fills or leaves
+		 * it untouched on failure - either way nothing to unref when
+		 * it returns non-zero, matching the el_pkt handling below) */
+		AVPacket probe, *pprobe = &probe;
+		if (s->parser->get_dovi_el_packet(s, (void *) pprobe) != 0) {
+			p->el_exhausted = 1;
+		} else {
+			/* parser still has EL packets: return the probe to its
+			 * queue semantics - unref the pulled copy */
+			av_packet_unref(&probe);
+			p->el_exhausted = 0;
+		}
+	}
 	if (el_gated)
 		goto drain_el;
 	while (!el_gated && s->parser->get_dovi_el_packet(s, &el_pkt) == 0) {
@@ -1114,6 +978,18 @@ static AVFrame *dvhw_fel_emit(PRIV *p, AVFrame **el_out)
 		goto emit;	/* proven absent: EL jumped past this BL */
 	if (p->bl_q_count >= 4 && p->el_seen)
 		goto emit;	/* queue pressure, EL warm */
+	/* EL fully drained AND the parser has no more EL packets (probed
+	 * in dvhw_el_feed, cleared on flush): the parked BLs' ELs will never
+	 * arrive - emit BL-only, mpv's el_eof give-up (f_enhancement_pair.c:
+	 * EOF drains the pending queue as BL-only). Without this the last
+	 * 1-3 frames of every FEL file stay parked forever (their ELs are
+	 * still inside the EL codec's reorder window when the AU stream
+	 * ends) and the file end truncates. drain==fed alone is not proof
+	 * mid-file (feed is catch-up paced), hence the el_exhausted gate. */
+	if (p->el_seen && p->el_exhausted &&
+	    p->el_drain_count >= p->el_fed_count &&
+	    p->el_q_count == 0)
+		goto emit;
 	return NULL;
 emit:
 	memmove(&p->bl_q[0], &p->bl_q[1],
@@ -1173,6 +1049,14 @@ static int dvhw_decode2(STREAM_DEC_VIDEO *dec, UCHAR *data, int size,
 				au_consumed = 1;
 				p->bl_fed_count++;
 			}
+		} else {
+			/* oversized AU or no backing buffer: leaving au_consumed=0
+			 * would make the engine re-feed the identical AU forever
+			 * (measured livelock shape: ~10Hz with the dequeue timeout
+			 * as the stall). Consume and drop like the timeout path. */
+			au_consumed = 1;
+			serprintf(TAG ": AU too large for input buffer (%d > %d), dropping\n",
+			          clean_size, (int) buf_size);
 		}
 	} else {
 		serprintf(TAG ": no input buffer, dropping AU\n");
@@ -1265,10 +1149,19 @@ static int dvhw_decode2(STREAM_DEC_VIDEO *dec, UCHAR *data, int size,
 				/* park the BL frame: its EL partner may still be in the EL
 				 * codec pipeline (async reorder lag); dvhw_fel_emit pairs */
 				if (p->bl_q_count >= 4) {
-					av_frame_free(&p->bl_q[0]);
-					memmove(&p->bl_q[0], &p->bl_q[1],
-					        3 * sizeof(p->bl_q[0]));
-					p->bl_q_count--;
+					/* mpv holds pending BLs through the EL warm-up (QUEUE_MAX=8
+				 * + set_extra_hw_frames) and only drops with affirmative
+				 * stale-EL evidence; dropping unconditionally here would
+				 * eat the first frames after every seek on a cold EL codec.
+					 * Once the EL has produced at least one frame (el_seen),
+					 * pressure-dropping the oldest BL matches the emit-side
+					 * policy. */
+					if (p->el_seen) {
+						av_frame_free(&p->bl_q[0]);
+						memmove(&p->bl_q[0], &p->bl_q[1],
+						        3 * sizeof(p->bl_q[0]));
+						p->bl_q_count--;
+					}
 				}
 				p->bl_q[p->bl_q_count++] = bl;
 			}
@@ -1335,6 +1228,7 @@ static int dvhw_flush(STREAM_DEC_VIDEO *dec)
 	dvhw_el_q_clear(p);
 	dvhw_bl_q_clear(p);
 	dvhw_pending_clear(p);
+	p->el_exhausted = 0;	/* seek: the parser refills the EL queue */
 	return 0;
 }
 

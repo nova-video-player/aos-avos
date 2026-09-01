@@ -187,7 +187,7 @@ static void stream_msg_cb(STREAM *s, STREAM_MESSAGE message)
 		 * falling back to msPerFrame-derived rate. 0 = unknown. */
 		{
 			int milli_fps = 0;
-			if (video->msPerFrame != vp->msPerFrame || video->milli_fps != (vp->frame_rate_num > 0 ? (int)((int64_t)vp->frame_rate_num * 1000 / vp->frame_rate_den) : 0)) {
+			if (video->msPerFrame != vp->msPerFrame || video->milli_fps != (vp->frame_rate_num > 0 && vp->frame_rate_den > 0 ? (int)((int64_t)vp->frame_rate_num * 1000 / vp->frame_rate_den) : 0)) {
 				video->msPerFrame = vp->msPerFrame;
 				if (vp->frame_rate_num > 0 && vp->frame_rate_den > 0)
 					video->milli_fps = (int)((int64_t)vp->frame_rate_num * 1000 / vp->frame_rate_den);

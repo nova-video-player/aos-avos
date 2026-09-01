@@ -1287,11 +1287,18 @@ static int dvhw_decode2(STREAM_DEC_VIDEO *dec, UCHAR *data, int size,
 				avos_frame->priv = (void*) bl_emit;
 				avos_frame->valid = 1;
 				avos_frame->error = 0;
+			/* geometry: the engine compares these against s->video->width
+				 * to emit VIDEO_SIZE_CHANGED -> Java onVideoSizeChanged drives
+				 * SurfaceController.setVideoSize (initial layout AND the
+				 * aspect-ratio button). Without them mVideoWidth stays 0,
+				 * updateSurface() early-returns and the AR switch is dead. */
+				avos_frame->width  = bl_emit->width;
+				avos_frame->height = bl_emit->height;
 			avos_frame->pts = bl_emit->pts;
 			avos_frame->time = (int) bl_emit->pts;
 			avos_frame->type = 2;
 			avos_frame->interlaced = 0;
-			avos_frame->top_field_first = 0;
+				avos_frame->top_field_first = 0;
 			decoded = 1;
 			*pout_frame = avos_frame;
 		}

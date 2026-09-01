@@ -646,7 +646,8 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			surface_handle,
 			extradata, extradata_size,
 			&pts_reorder, NULL, 0, 0,
-			video->color_primaries, video->color_trc, video->color_space, video->color_range);
+			video->color_primaries, video->color_trc, video->color_space, video->color_range,
+			video->dv_profile, video->dv_level);
 
 	if (!p->sfdec) {
 		CLOG("sfdec_new failed");

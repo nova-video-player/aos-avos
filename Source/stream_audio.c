@@ -1129,24 +1129,38 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
 						DBG serprintf("audio_start_commit: audio_time=%d\n", s->audio_time);
 					}
-					// Update audio time based on actual written output (not decoded bytes).
-					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
-						if( output_time_ms >= 0 && time_den > 0 ) {
-							int64_t chunk_time_ms = (output_time_ms * size_written) / time_den;
-							if( use_atempo ) {
-								_add_audio_time( s, (int)chunk_time_ms );
-							} else {
-								_add_audio_time( s, RST_TO_TS_DELTA((int)chunk_time_ms, int) );
-							}
-						} else if( s->audio->bytesPerSec ) {
-							int chunk_time_ms = (int)((int64_t)size_written * 1000 / s->audio->bytesPerSec);
-							if( use_atempo ) {
-								_add_audio_time( s, chunk_time_ms );
-							} else {
-								_add_audio_time( s, RST_TO_TS_DELTA(chunk_time_ms, int) );
-							}
-						}
-					}
+								// Update audio time based on actual written output (not decoded bytes).
+								if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
+									// Exact written-sample accounting: derive the duration in
+									// microseconds from the written byte counts (NOT from
+									// output_time_ms, which is already truncated to whole ms)
+									// and carry the remainder so tiny AUs cannot zero the
+									// advance (TrueHD minor frames: 40 samples @48kHz = 833us
+									// per AU froze audio_time at the startup anchor and
+									// stalled video sync). mpv AO written-samples clock parity.
+									if( time_den > 0 && time_bytes > 0 &&
+										bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
+										int64_t chunk_us = ( (int64_t)time_bytes * 1000000 * size_written ) /
+										                 ( (int64_t)bytes_per_sample * channels * sample_rate * time_den ) +
+											s->audio_time_carry_us;
+										int chunk_ms = (int)(chunk_us / 1000);
+										s->audio_time_carry_us = (int)(chunk_us - (int64_t)chunk_ms * 1000);
+										if( chunk_ms > 0 ) {
+												if( use_atempo ) {
+													_add_audio_time( s, chunk_ms );
+												} else {
+													_add_audio_time( s, RST_TO_TS_DELTA(chunk_ms, int) );
+												}
+										}
+									} else if( s->audio->bytesPerSec ) {
+										int chunk_time_ms = (int)((int64_t)size_written * 1000 / s->audio->bytesPerSec);
+										if( use_atempo ) {
+												_add_audio_time( s, chunk_time_ms );
+										} else {
+											_add_audio_time( s, RST_TO_TS_DELTA(chunk_time_ms, int) );
+										}
+									}
+								}
 					// If delay becomes valid after resume, rebase once using measured delay.
 					// On Sabrina, the first "valid" timestamp can be unstable; wait for a small
 					// success streak before snapping to avoid visible jitter.

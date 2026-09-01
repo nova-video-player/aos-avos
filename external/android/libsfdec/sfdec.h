@@ -89,7 +89,8 @@ sfdec_t*	sfdec_new(sfdec_type_t type,
 		    void *surface_handle,
 		    void *extradata, size_t extradata_size,
 		    int *pts_reorder, const char* codec_name, int video_frame_rate_den, int video_frame_rate_num,
-		    int color_primaries, int color_trc, int color_space, int color_range);
+		    int color_primaries, int color_trc, int color_space, int color_range,
+		    int dv_profile, int dv_level);
 
 void		sfdec_delete(sfdec_t *sfdec);
 int		sfdec_start(sfdec_t *);

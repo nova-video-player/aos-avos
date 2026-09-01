@@ -810,6 +810,11 @@ serprintf("error, could not cleanup video dec!\n");
 			if (s->video_sink->is_open) {
 				s->video_sink->close(s->video_sink);
 			}
+			// destroy the sink so a retry re-runs sink selection (a decoder
+			// provided sink that failed to open must not be reused, otherwise
+			// the default-sink fallback can never engage)
+			s->video_sink->delete(s->video_sink);
+			s->video_sink = NULL;
 			s->put_time_mode = 0;
 		}
 	} 

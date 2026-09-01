@@ -27,6 +27,9 @@
 
 #include "jni.h"
 
+/* libavos.c */
+extern int libavos_get_dolby_vision_mode(void);
+
 /*
  * Android only:
  * read /system/etc/media_codecs.xml using MediaCodecList c++ class in order to
@@ -179,6 +182,11 @@ int acodecs_is_supported(int format, int is_video, int is_sw_allowed)
 	const char *types[4] = { NULL, NULL, NULL, NULL };
 
 	DBG serprintf("acodecs_is_supported(%d, is_video %d)\n", format, is_video);
+
+	// Dolby Vision tone-map mode: the device DV decoder is not used; the base
+	// layer is decoded as plain HEVC (MediaCodec or software) and processed on
+	// the GPU. Report support based on the HEVC decoder instead of the DV one
+	// so the HW tone-map path stays selectable on non-DV hardware.
 	// to have the disable SW fake HW codec in Android via CodecDiscovery
 	// you need to have a types array entry declared
 	if (is_video) {
@@ -203,7 +211,10 @@ int acodecs_is_supported(int format, int is_video, int is_sw_allowed)
 			types[0] = "video/hevc";
 			break;
 		case VIDEO_FORMAT_DOLBY_VISION:
-			types[0] = "video/dolby-vision";
+			if (libavos_get_dolby_vision_mode() != 0)
+				types[0] = "video/hevc";	// tone-map: BL decoded as plain HEVC
+			else
+				types[0] = "video/dolby-vision";
 			break;
 		}
 	} else {

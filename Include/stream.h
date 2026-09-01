@@ -266,6 +266,9 @@ typedef int (*PARSER_CALC_RATE)      ( struct STREAM *s );
 typedef int (*PARSER_SET_AUDIO_STREAM)( struct STREAM *s, int audio_stream );
 typedef int (*PARSER_GET_AUDIO_CDATA)( struct STREAM *s, CLEVER_BUFFER *buffer, STREAM_CDATA *cdata );
 typedef int (*PARSER_GET_VIDEO_CDATA)( struct STREAM *s, struct CBE *cbe,       STREAM_CDATA *cdata );
+/* Dolby Vision tone-map mode: pull the next enhancement-layer packet (AVPacket*).
+ * Returns 0 and fills the packet (caller must av_packet_unref) or 1 when empty. */
+typedef int (*PARSER_GET_DOVI_EL_PACKET)( struct STREAM *s, void *pkt );
 typedef int (*PARSER_GET_SUBTITLE_CDATA)( struct STREAM *s, CLEVER_BUFFER *buffer, STREAM_CDATA *cdata );
 typedef struct STREAM_CHUNK * 
          (*PARSER_PEEK_N_AUDIO_CHUNK)( struct STREAM *s, int n, UINT8 **data );
@@ -292,6 +295,7 @@ typedef struct stream_parser_str {
 	PARSER_CALC_RATE 	calc_rate;
 	PARSER_GET_AUDIO_CDATA 	get_audio_cdata;
 	PARSER_GET_VIDEO_CDATA 	get_video_cdata;
+	PARSER_GET_DOVI_EL_PACKET get_dovi_el_packet;
 	PARSER_GET_SUBTITLE_CDATA get_subtitle_cdata;
 	PARSER_PEEK_N_AUDIO_CHUNK peek_n_audio_chunk;
 	PARSER_SEEK_TIME	seek_time;
@@ -474,6 +478,12 @@ typedef struct STREAM {
 	int 		audio_time;
 	int 		audio_ref_time;
 	int 		audio_samples;
+	// CDATA-mode sub-millisecond carry: audio_time advances in whole ms, but
+	// streams with tiny AUs (TrueHD minor frames = 40 samples @48kHz = 0.83ms)
+	// truncate every chunk to 0ms in integer-ms math and freeze the clock.
+	// Written-sample duration is accumulated in microseconds and the whole-ms
+	// part is applied on each write (mpv AO written-samples clock parity).
+	int		audio_time_carry_us;
 	UINT64		audio_pos;
 	
 	int 		video_time;

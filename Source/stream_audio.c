@@ -38,6 +38,7 @@ int get_android_sync(void);
 
 #define DBG DBG_IF(Debug[DBG_STREAM])
 #define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
+#define DBG3 DBG_IF(Debug[DBG_STREAM] > 2)
 #define ERR if( 1 )
 
 #ifdef CONFIG_STREAM
@@ -49,9 +50,13 @@ void stream_audio_samplerate_changed( STREAM *s );
 
 static int zero_time = 200;
 static int stream_audio_chunk = 4096;
+static int stream_audio_pcm_accum_ms = 40;
 static int ac3_sink_configured = 0;  // Track if sink is configured for AC3 passthrough
 static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when AC3 recoding starts
 static int audio_format_configured = -1;  // Track audio format to avoid redundant passthrough reconfigurations
+static int startup_anchor_log_count = 0;  // Cap startup anchor diagnostics per playback
+static int startup_write_log_count = 0;   // Cap first-write diagnostics per playback
+static int atempo_gate_log_count = 0;     // Cap atempo runtime gating diagnostics per playback
 extern int stream_audio_paused;
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
@@ -67,6 +72,7 @@ static int stream_audio_format_supports_passthrough(int format)
 	case WAVE_FORMAT_DTS:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS_HD_MA:
+	case WAVE_FORMAT_TRUEHD:
 		return 1;
 	default:
 		return 0;
@@ -254,6 +260,8 @@ void stream_audio_flush( STREAM *s )
 {
 	s->audio_buffer_size = 0;
 	s->audio_end = 0;
+	s->audio_time_remainder_us = 0;
+	s->pcm_accum_size = 0;
 	
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
@@ -320,6 +328,35 @@ static int _abort( STREAM *s )
 		return 0;
 serprintf("_audio_abort!\r\n");		
 	return 1;
+}
+
+static int _pcm_accum_target_bytes(const AUDIO_FRAME *frame)
+{
+	if( !frame || !frame->channels || !frame->bits || !frame->samplesPerSec ) {
+		return 0;
+	}
+	int bytes_per_sample = frame->bits / 8;
+	if( bytes_per_sample <= 0 ) {
+		return 0;
+	}
+	int bytes_per_sec = frame->samplesPerSec * frame->channels * bytes_per_sample;
+	int target = (bytes_per_sec * stream_audio_pcm_accum_ms) / 1000;
+	// Keep a practical lower bound even for low-rate content.
+	if( target < 4096 ) {
+		target = 4096;
+	}
+	return target;
+}
+
+static void _pcm_accum_flush_to_sink(STREAM *s)
+{
+	if( !s || s->pcm_accum_size <= 0 ) {
+		return;
+	}
+	// Pre-filter accumulator cannot be written directly to sink: it would bypass
+	// atempo/compress/JNI filters. Drop tail on teardown/flush boundaries.
+	DBG serprintf("stream_audio: pcm_accum drop on end size=%d\n", s->pcm_accum_size);
+	s->pcm_accum_size = 0;
 }
 
 extern int DEBUG_delay;
@@ -392,7 +429,16 @@ static void _audio_decode( STREAM *s )
 	if( s->paused || stream_audio_paused ) {
 		s->audio_resume_pending = 1;
 		s->audio_resume_valid_pending = 0;
-		s->video_resume_frame_primed = 0;
+		// Only arm the video hold for real pause/resume, not during seek preview.
+		// Seek sets seek_paused before paused, so this distinguishes the two cases.
+		// Arming the hold during seek would block every preview frame behind audio
+		// readiness, destroying smooth scrubbing feedback.
+		if( !s->seek_paused ) {
+			s->video_hold_for_delay = 1;
+			s->video_hold_for_resume_audio = 1;
+		}
+		s->manual_audio_delay_applied_ms = 0;
+		s->pcm_accum_size = 0;
 	}
 
 	if( s->audio->valid && (!(s->paused || stream_audio_paused) || s->play_n_audio_frames ) ) {
@@ -402,6 +448,7 @@ static void _audio_decode( STREAM *s )
 			int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 			if( s->audio_sink->syncable( s ) && !passthrough ) {
 				s->audio_sink->flush( s );
+				s->manual_audio_delay_applied_ms = 0;
 				s->audio_sink->preload( s );
 				/* AudioTrack.pause()+flush leaves the track paused; resume playback so subsequent writes succeed. */
 				s->audio_sink->start( s );
@@ -416,6 +463,7 @@ static void _audio_decode( STREAM *s )
 			s->play_n_audio_frames --;
 		}
 		
+decode_next_chunk:
 		// no more audio in this chunk, then look for next
 		while( s->audio_buffer_size <= 0 && !_abort( s ) ){
 			
@@ -435,6 +483,7 @@ serprintf("audio flush\r\n");
 							memset( s->audio_buffer, 0, s->audio_buffer_size );
 						} else {
 							if( s->audio_sink ) {
+								_pcm_accum_flush_to_sink( s );
 								// end, signal to the sink that we are finished
 								s->audio_sink->end( s );
 							}
@@ -545,10 +594,14 @@ DBGA serprintf(" [[%d]] ", s->audio_ref_time);
 					}
 				}
 
-				while( !_abort( s ) && stream_sync_audio( s, s->audio_time ) ) {
+				// While accumulating tiny PCM batches, avoid repeatedly re-anchoring put_time
+				// with unchanged audio_time (dt=0); sync will be updated when a batch is written.
+				if( s->pcm_accum_size == 0 ) {
+					while( !_abort( s ) && stream_sync_audio( s, s->audio_time ) ) {
 DBGS serprintf("~");
-					msec_sleep( 10 );
-					stream_yield_RT();
+						msec_sleep( 10 );
+						stream_yield_RT();
+					}
 				}
 
 				out_of_audio = 0;
@@ -601,6 +654,16 @@ DBGS serprintf("~");
 serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				s->audio->sourceSamples = s->audio->samplesPerSec;
 				s->audio->samplesPerSec = audio_frame.samplesPerSec;
+				if( s->audio->channels && s->audio->bitsPerSample ) {
+					s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
+				}
+				if( s->audio->bytesPerFrame == 0 ) {
+					int floor_channels = s->audio->channels ? s->audio->channels : 2;
+					s->audio->bytesPerFrame = floor_channels * 2; // assume 16-bit PCM
+				}
+				if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
+					s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
+				}
 				stream_audio_samplerate_changed( s );		
 			}
 		
@@ -634,9 +697,6 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 		s->audio_buffer      += decoded;
 		s->audio_buffer_size -= decoded;
 
-		// Save decoded bytes for audio time accounting AFTER filtering
-		int decoded_bytes = decoded;
-
 		if( s->sync_mode == STREAM_SYNC_SAMPLES ) {
 			if( audio_frame.error ) {
 serprintf(" ae! ");
@@ -658,6 +718,89 @@ serprintf(" ae! ");
 	int original_bits = 0;
 	int frame_channels = 0;
 	int use_atempo = 0;
+	int using_pcm_accum = 0;
+
+		// Pre-filter PCM accumulation: only when atempo is active.
+		// Coalesces tiny decoder output so atempo WSOLA runs on larger batches.
+		// Without atempo, frames pass straight through to avoid unnecessary
+		// latency and the risk of dropping accumulated PCM on empty frames.
+		int atempo_will_run = (s->audio_filter_atempo != NULL &&
+			audio_interface_is_audio_speed_enabled() &&
+			audio_interface_is_using_atempo() &&
+			passthrough != 1 && passthrough != 2);
+		int pcm_eligible = (atempo_will_run &&
+			!passthrough_active &&
+			!ac3_recoding &&
+			!audio_frame.error &&
+			audio_frame.size > 0 &&
+			audio_frame.format == WAVE_FORMAT_PCM &&
+			audio_frame.channels > 0 &&
+			audio_frame.bits > 0 &&
+			audio_frame.samplesPerSec > 0);
+
+		if( pcm_eligible ) {
+			if( s->pcm_accum_size > 0 &&
+				(s->pcm_accum_format   != audio_frame.format ||
+				 s->pcm_accum_channels != audio_frame.channels ||
+				 s->pcm_accum_bits     != audio_frame.bits ||
+				 s->pcm_accum_rate     != audio_frame.samplesPerSec) ) {
+				DBG serprintf("stream_audio: pcm_accum reset on format change (%04X/%dch/%db/%dHz -> %04X/%dch/%db/%dHz)\n",
+					s->pcm_accum_format, s->pcm_accum_channels, s->pcm_accum_bits, s->pcm_accum_rate,
+					audio_frame.format, audio_frame.channels, audio_frame.bits, audio_frame.samplesPerSec);
+				s->pcm_accum_size = 0;
+			}
+
+			if( s->pcm_accum_size == 0 ) {
+				s->pcm_accum_format = audio_frame.format;
+				s->pcm_accum_channels = audio_frame.channels;
+				s->pcm_accum_bits = audio_frame.bits;
+				s->pcm_accum_rate = audio_frame.samplesPerSec;
+			}
+
+			if( s->pcm_accum_capacity < s->pcm_accum_size + audio_frame.size ) {
+				int new_cap = MAX( s->pcm_accum_capacity * 2, s->pcm_accum_size + audio_frame.size );
+				unsigned char *new_buf = arealloc( s->pcm_accum_data, new_cap );
+				if( !new_buf ) {
+					DBG serprintf("stream_audio: pcm_accum alloc failed (%d), fallback to direct frame\n", new_cap);
+				} else {
+					s->pcm_accum_data = new_buf;
+					s->pcm_accum_capacity = new_cap;
+				}
+			}
+
+			if( s->pcm_accum_data && s->pcm_accum_capacity >= s->pcm_accum_size + audio_frame.size ) {
+				memcpy( s->pcm_accum_data + s->pcm_accum_size, audio_frame.data, audio_frame.size );
+				s->pcm_accum_size += audio_frame.size;
+
+				int pcm_accum_target = _pcm_accum_target_bytes( &audio_frame );
+				if( s->pcm_accum_size < pcm_accum_target ) {
+					// Keep decoding in this call to avoid thread-loop overhead
+					// and produce a steady batch cadence for tiny-frame codecs.
+					goto decode_next_chunk;
+				}
+
+				audio_frame.data = s->pcm_accum_data;
+				audio_frame.size = s->pcm_accum_size;
+				audio_frame.format = s->pcm_accum_format;
+				audio_frame.channels = s->pcm_accum_channels;
+				audio_frame.bits = s->pcm_accum_bits;
+				audio_frame.samplesPerSec = s->pcm_accum_rate;
+				using_pcm_accum = 1;
+			}
+		} else if( s->pcm_accum_size > 0 ) {
+			// Non-eligible frame arrived while PCM was accumulated.
+			// Flush the pending PCM through the normal filter/sink path
+			// instead of dropping it, which would cause silent playback.
+			DBG serprintf("stream_audio: pcm_accum flush pending=%d (next format=%04X passthrough_active=%d ac3_recoding=%d)\n",
+				s->pcm_accum_size, audio_frame.format, passthrough_active, ac3_recoding);
+			audio_frame.data = s->pcm_accum_data;
+			audio_frame.size = s->pcm_accum_size;
+			audio_frame.format = s->pcm_accum_format;
+			audio_frame.channels = s->pcm_accum_channels;
+			audio_frame.bits = s->pcm_accum_bits;
+			audio_frame.samplesPerSec = s->pcm_accum_rate;
+			using_pcm_accum = 1;
+		}
 
 		if( s->audio_sink ) {
 			AUDIO_PROPERTIES *sink_props = stream_audio_get_sink_props( s );
@@ -669,8 +812,8 @@ serprintf(" ae! ");
 				original_rate = s->audio->samplesPerSec;
 				original_bits = s->audio->bitsPerSample;
 
-				DBG serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d active=%d recoding=%d\n",
-					audio_frame.format, audio_frame.size, passthrough, passthrough_active, ac3_recoding);
+					DBG3 serprintf("stream_audio: decoded frame fmt=%04X size=%d passthrough=%d active=%d recoding=%d\n",
+						audio_frame.format, audio_frame.size, passthrough, passthrough_active, ac3_recoding);
 
 				// For AC3 recoding, always run filters on ALL decoded formats
 				// This provides consistent audio boost/night mode for all sources
@@ -683,14 +826,23 @@ serprintf(" ae! ");
 				// 2. User selected atempo (not AudioTrack PlaybackParams)
 				// 3. NOT in passthrough mode 1 or 2 (compressed audio to receiver)
 				use_atempo = (s->audio_filter_atempo != NULL);
-				if (!audio_interface_is_audio_speed_enabled()) {
+				int audio_speed_enabled = audio_interface_is_audio_speed_enabled();
+				int using_atempo_pref = audio_interface_is_using_atempo();
+				if (!audio_speed_enabled) {
 					use_atempo = 0;  // Audio speed feature disabled
 				}
-				if (!audio_interface_is_using_atempo()) {
+				if (!using_atempo_pref) {
 					use_atempo = 0;  // User chose AudioTrack-based speed
 				}
 				if (passthrough == 1 || passthrough == 2) {
 					use_atempo = 0;  // Passthrough mode active
+				}
+				if (atempo_gate_log_count < 10) {
+					DBG2 serprintf("stream_audio: atempo_gate[%d] filter=%p speed_enabled=%d using_atempo_pref=%d passthrough=%d frame_size=%d use=%d speed=%.3f\n",
+						atempo_gate_log_count, s->audio_filter_atempo, audio_speed_enabled,
+						using_atempo_pref, passthrough, audio_frame.size, use_atempo,
+						audio_interface_get_audio_speed());
+					atempo_gate_log_count++;
 				}
 
 				if (use_atempo && audio_frame.size > 0) {
@@ -756,8 +908,8 @@ serprintf(" ae! ");
 				// 4. JNI filter always runs
 				s->audio_filter_jni->filter( s->audio_filter_jni, &audio_frame );
 
-				DBG serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
-					audio_frame.format, audio_frame.size);
+					DBG3 serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
+						audio_frame.format, audio_frame.size);
 
 				// Check if filter changed the audio format or layout (e.g., PCM -> AC3 recoding)
 				int expected_format = sink_props ? sink_props->format : original_format;
@@ -832,6 +984,13 @@ serprintf(" ae! ");
 						}
 						if( s->audio->channels && s->audio->bitsPerSample ) {
 							s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
+						}
+						if( s->audio->bytesPerFrame == 0 ) {
+							int floor_channels = s->audio->channels ? s->audio->channels : 2;
+							s->audio->bytesPerFrame = floor_channels * 2; // assume 16-bit PCM
+						}
+						if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
+							s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
 						}
 					}
 					// For AC3 recoding: s->audio keeps the original source format/channels/bits
@@ -1011,25 +1170,25 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// Prepare per-chunk audio time accounting (updated after write).
 				// We compute the duration once here, but only advance audio_time once
 				// we actually write to the sink, so output holds don't advance the clock.
-				int time_bytes = 0;
-				int time_den = 0;
-				int bytes_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits) / 8;
+				int bits_per_sample = (audio_frame.bits ? audio_frame.bits : original_bits);
+				if (bits_per_sample == 0) bits_per_sample = 16;
+				int bytes_per_sample = bits_per_sample / 8;
 				int channels = audio_frame.channels ? audio_frame.channels : original_channels;
+				if (channels == 0) channels = 2;
 				int sample_rate = audio_frame.samplesPerSec ? audio_frame.samplesPerSec : original_rate;
-				int64_t output_time_ms = -1;
-				if( s->sync_mode != STREAM_SYNC_SAMPLES && !s->audio->vbr && audio_frame.size > 0 &&
-					bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
-					// For AC3 recoding, use fakeSize (PCM-equivalent) to compute timing.
-					int effective_size = (ac3_recoding && audio_frame.fakeSize > 0) ?
-						audio_frame.fakeSize : audio_frame.size;
-					int output_samples = effective_size / (bytes_per_sample * channels);
-					output_time_ms = (int64_t)output_samples * 1000 / sample_rate;
-					time_bytes = effective_size;
-					time_den = audio_frame.size;
-				}
+				if (sample_rate == 0) sample_rate = 48000;
+
+				// For A/V sync scaling, we need the PCM-equivalent duration of written data.
+				// In passthrough, compressed payload size does not represent played duration
+				// (notably EAC3 mode 2 system encapsulation), so prefer fakeSize when available.
+				int64_t effective_size = ((audio_frame.fakeSize > 0) &&
+					(ac3_recoding || passthrough_active)) ?
+					audio_frame.fakeSize : audio_frame.size;
+				int64_t bytes_per_sec = (int64_t)sample_rate * channels * bytes_per_sample;
 
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
+				int total_size = audio_frame.size;
 				while( size > 0 ) {
 					if( _abort( s ) ) {
 						return;
@@ -1048,6 +1207,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 							s->audio_start_target_ts = s->audio_start_pts - anchor_delay;
 							if( s->audio_start_target_ts < 0 ) s->audio_start_target_ts = 0;
+							if (startup_anchor_log_count < 5) {
+								DBG2 serprintf("startup_anchor_target[%d]: pts=%d video=%d anchor=%d static=%d target=%d put_time=%d sync_mode=%d\n",
+									startup_anchor_log_count, s->audio_start_pts, s->video_time,
+									anchor_delay, static_latency, s->audio_start_target_ts,
+									s->put_time_mode, s->sync_mode);
+								startup_anchor_log_count++;
+							}
 						}
 						int diff = s->video_time - s->audio_start_target_ts;
 						if( diff < -150 ) {
@@ -1057,10 +1223,42 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							continue;
 						}
 					}
-					audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
+					// Do not split compressed passthrough bursts. IEC61937 / raw codec frames
+					// must reach AudioTrack atomically; chunking them into generic PCM-sized
+					// writes can break HAL parsing and lead to dead/broken passthrough tracks.
+					if( passthrough_active || ac3_recoding ) {
+						audio_frame.size = size;
+					} else {
+						audio_frame.size = MIN( stream_audio_chunk * s->audio->channels, size );
+					}
+
+					// android_sync=0 cannot sustain large negative AV offsets by video pacing alone.
+					// Apply user negative AV delay as additional audio hold (silence insertion).
+					if( !get_android_sync() && s->put_time_mode && s->audio_sink ) {
+						int passthrough = s->audio_sink->get_passthrough ? s->audio_sink->get_passthrough( s ) : 0;
+						int target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
+						s->manual_audio_delay_target_ms = target_ms;
+						if( !passthrough ) {
+							if( s->manual_audio_delay_applied_ms < target_ms ) {
+								int add_ms = target_ms - s->manual_audio_delay_applied_ms;
+								DBG serprintf("manual_audio_delay_hold: av_delay=%d target=%d applied=%d add=%d\n",
+									s->av_delay, target_ms, s->manual_audio_delay_applied_ms, add_ms);
+								_wait( s, add_ms );
+								s->manual_audio_delay_applied_ms = target_ms;
+							} else if( s->manual_audio_delay_applied_ms > target_ms ) {
+								// We cannot pull already queued audio back in time; shrink target
+								// so future holds follow the latest user setting.
+								DBG serprintf("manual_audio_delay_reduce: av_delay=%d target=%d applied=%d\n",
+									s->av_delay, target_ms, s->manual_audio_delay_applied_ms);
+								s->manual_audio_delay_applied_ms = target_ms;
+							}
+						} else {
+							s->manual_audio_delay_applied_ms = 0;
+						}
+					}
 
 					// no error, output PCM
-					DBG serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
+					DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
 					int can_write_retries = 0;
 					while( !s->audio_sink->can_write( s, audio_frame.size ) ) {
 						can_write_retries++;
@@ -1076,7 +1274,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( _abort( s ) ) {
 						return;
 					}
-					DBG serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
+					DBG3 serprintf("stream_audio: calling sink->write with frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
 					if( s->audio_resume_pending ) {
 						DBG serprintf("stream_audio: first audio output after resume (audio_time=%d video_time=%d seek_epoch=%d t=%d)\n",
@@ -1096,19 +1294,43 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							DBG serprintf("resume_rebase_invalid_delay: audio_time %d -> %d (video=%d latency=%d)\n",
 								old_audio_time, s->audio_time, s->video_time, static_latency);
 						}
-						s->audio_resume_valid_pending = 1;
+						// Do not arm delay-valid rebase for passthrough/system-encapsulation:
+						// AudioTrack delay validity does not represent true encoded pipeline latency.
+						s->audio_resume_valid_pending = passthrough_active ? 0 : 1;
 						s->audio_resume_pending = 0;
 					}
 					int size_written = s->audio_sink->write( s, &audio_frame );
-					DBG serprintf("stream_audio: sink->write returned %d\n", size_written);
+					DBG3 serprintf("stream_audio: sink->write returned %d\n", size_written);
+					if (startup_write_log_count < 5) {
+						DBG2 serprintf("startup_write[%d]: before_time=%d video=%d fmt=%04X req=%d wrote=%d effective_size=%lld bytes_per_sec=%lld ref=%d start_pending=%d resume_pending=%d\n",
+							startup_write_log_count, s->audio_time, s->video_time, audio_frame.format,
+							audio_frame.size, size_written, (long long)effective_size, (long long)bytes_per_sec,
+							s->audio_ref_time, s->audio_start_pending, s->audio_resume_pending);
+						startup_write_log_count++;
+					}
 
 					if( _abort( s ) ) {
 						return;
 					}
 					if( size_written <= 0 ) {
 						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
+						if( s->video_hold_for_resume_audio ) {
+							DBG serprintf("stream_audio: releasing video hold on write failure (pt=%d recode=%d)\n",
+								passthrough_active, ac3_recoding);
+							s->video_hold_for_resume_audio = 0;
+						}
 						size = 0;
 						break;
+					}
+					if( s->video_hold_for_resume_audio ) {
+						DBG serprintf("stream_audio: first resumed audio write committed (%d bytes, pt=%d recode=%d)\n",
+							size_written, passthrough_active, ac3_recoding);
+						s->video_hold_for_resume_audio = 0;
+					}
+					if( (passthrough_active || ac3_recoding) && size_written < audio_frame.size ) {
+						DBG serprintf("stream_audio: passthrough short write %d/%d fmt=%04X pt=%d recode=%d, dropping burst remainder\n",
+							size_written, audio_frame.size, audio_frame.format, passthrough_active, ac3_recoding);
+						size = 0;
 					}
 					if( s->audio_start_pending && s->audio_start_pts != STREAM_NO_PTS_VALUE ) {
 						int start_time = s->audio_start_pts;
@@ -1123,48 +1345,59 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								// Align heard audio to current video time at startup.
 								start_time = s->video_time + anchor_delay;
 							}
+							if (startup_anchor_log_count < 5) {
+								DBG2 serprintf("startup_anchor_commit[%d]: pts=%d video=%d anchor=%d static=%d start=%d put_time=%d sync_mode=%d\n",
+									startup_anchor_log_count, s->audio_start_pts, s->video_time,
+									anchor_delay, static_latency, start_time,
+									s->put_time_mode, s->sync_mode);
+								startup_anchor_log_count++;
+							}
 						}
 						_set_audio_time( s, start_time );
 						s->audio_start_pending = 0;
 						s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
-						DBG serprintf("audio_start_commit: audio_time=%d\n", s->audio_time);
+						DBG serprintf("audio_start_commit: audio_time=%d ref=%d samples=%d\n",
+							s->audio_time, s->audio_ref_time, s->audio_samples);
 					}
-								// Update audio time based on actual written output (not decoded bytes).
-								if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
-									// Exact written-sample accounting: derive the duration in
-									// microseconds from the written byte counts (NOT from
-									// output_time_ms, which is already truncated to whole ms)
-									// and carry the remainder so tiny AUs cannot zero the
-									// advance (TrueHD minor frames: 40 samples @48kHz = 833us
-									// per AU froze audio_time at the startup anchor and
-									// stalled video sync). mpv AO written-samples clock parity.
-									if( time_den > 0 && time_bytes > 0 &&
-										bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
-										int64_t chunk_us = ( (int64_t)time_bytes * 1000000 * size_written ) /
-										                 ( (int64_t)bytes_per_sample * channels * sample_rate * time_den ) +
-											s->audio_time_carry_us;
-										int chunk_ms = (int)(chunk_us / 1000);
-										s->audio_time_carry_us = (int)(chunk_us - (int64_t)chunk_ms * 1000);
-										if( chunk_ms > 0 ) {
-												if( use_atempo ) {
-													_add_audio_time( s, chunk_ms );
-												} else {
-													_add_audio_time( s, RST_TO_TS_DELTA(chunk_ms, int) );
-												}
-										}
-									} else if( s->audio->bytesPerSec ) {
-										int chunk_time_ms = (int)((int64_t)size_written * 1000 / s->audio->bytesPerSec);
-										if( use_atempo ) {
-												_add_audio_time( s, chunk_time_ms );
-										} else {
-											_add_audio_time( s, RST_TO_TS_DELTA(chunk_time_ms, int) );
-										}
-									}
+					// Update audio time based on actual written output (not decoded bytes).
+					if( s->sync_mode != STREAM_SYNC_SAMPLES ) {
+						int64_t chunk_time_us = 0;
+						// Byte-ratio timing is valid for PCM-like fixed-rate outputs.
+						// Keep VBR and incomplete-metadata paths on conservative fallback timing.
+						int use_rational_timing = (!s->audio->vbr &&
+							audio_frame.size > 0 &&
+							bytes_per_sample > 0 &&
+							channels > 0 &&
+							sample_rate > 0 &&
+							bytes_per_sec > 0 &&
+							total_size > 0);
+
+						if( use_rational_timing ) {
+							chunk_time_us = ((int64_t)size_written * effective_size * 1000000) /
+								((int64_t)total_size * bytes_per_sec);
+						} else if( s->audio->bytesPerSec > 0 ) {
+							chunk_time_us = ((int64_t)size_written * 1000000) / s->audio->bytesPerSec;
+						}
+
+						if( chunk_time_us > 0 ) {
+							s->audio_time_remainder_us += chunk_time_us;
+							int add_ms = (int)(s->audio_time_remainder_us / 1000);
+							s->audio_time_remainder_us %= 1000;
+
+							if( add_ms > 0 ) {
+								if( use_atempo ) {
+									_add_audio_time( s, add_ms );
+								} else {
+									_add_audio_time( s, RST_TO_TS_DELTA(add_ms, int) );
 								}
+							}
+						}
+					}
 					// If delay becomes valid after resume, rebase once using measured delay.
 					// On Sabrina, the first "valid" timestamp can be unstable; wait for a small
 					// success streak before snapping to avoid visible jitter.
 					if( s->audio_resume_valid_pending && s->audio_ctx &&
+						!passthrough_active &&
 						s->video_time >= 0 && s->audio_time >= 0 &&
 						audio_interface_is_delay_valid( s->audio_ctx ) &&
 						audio_interface_get_delay_valid_streak( s->audio_ctx ) >= 3 ) {
@@ -1204,7 +1437,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 #endif
 							s->audio_samples += (passthrough_active ? audio_frame.fakeSize : size_written) / bpf;
-							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)s->audio->samplesPerSec;
+							// Use actual source sample rate for sync when passthrough is inactive.
+							// TrueHD passthrough forces 192kHz container rate, but actual content is 48k/96k.
+							// When decoding to PCM, use decoded frame rate if available (most reliable),
+							// else fallback to the currently configured rate.
+							int sync_rate = s->audio->samplesPerSec;
+							if (!passthrough_active && audio_frame.samplesPerSec > 0) {
+								sync_rate = audio_frame.samplesPerSec;
+							}
+							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)sync_rate;
 							int prev_audio_time = s->audio_time;
 
 							// Check if atempo filter is active - output samples are already in TS domain (physical time)
@@ -1223,8 +1464,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
 									s->audio_ref_time, delta);
 							}
-							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d\n",
-								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta);
+							DBG serprintf("stream_audio SAMPLES: audio_time update prev=%d now=%d using_atempo=%d speed=%.3f delta_ms=%d sync_rate=%d configured_rate=%d\n",
+								prev_audio_time, s->audio_time, use_atempo, audio_interface_get_audio_speed(), delta, sync_rate, s->audio->samplesPerSec);
 							// if size_written < size, we don't want to go out of sync on passthrough
 							audio_frame.fakeSize = 0;
 						}
@@ -1233,7 +1474,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					size             -= size_written;
 					audio_frame.data += size_written;
 				}
-				
+
+				if( using_pcm_accum ) {
+					s->pcm_accum_size = 0;
+				}
+
 				if( s->audio_sink->syncable( s ) && s->audio_sink->can_write( s, size ) ) {
 					if( !_abort( s ) ) {
 						s->audio_yield = 0;
@@ -1243,6 +1488,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 			
 			} else if( s->audio_end ) {
 				// end, signal to the sink that we are finished
+				_pcm_accum_flush_to_sink( s );
 				s->audio_sink->end( s );
 			} else if( audio_frame.error == STREAM_ERROR_FATAL ) {
 				// fatal error, we need to stop
@@ -1261,18 +1507,42 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 void *stream_audio_dec_thread( void *data )
 {
 	STREAM *s = (STREAM *)data;
+	float last_audio_speed = audio_interface_get_audio_speed();
 DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 
 	// Reset AC3 sink configuration flag for new playback session
 	ac3_sink_configured = 0;
+	startup_anchor_log_count = 0;
+	startup_write_log_count = 0;
+	atempo_gate_log_count = 0;
+	s->pcm_accum_size = 0;
 	// Initialize with current format to prevent redundant reconfiguration on first audio thread loop iteration.
 	// The sink was already configured by start() before the audio thread began, so we use the current format
 	// to avoid a redundant set_passthrough call that would recreate the AudioTrack unnecessarily.
 	audio_format_configured = stream_audio_get_sink_props( s )->format;
 
 	while( thread_state_get( &s->audio_tstate ) != THREAD_EXIT ) {
+		float current_audio_speed = audio_interface_get_audio_speed();
+		if( fabsf(current_audio_speed - last_audio_speed) > 0.001f ) {
+			if( s->pcm_accum_size > 0 ) {
+				DBG serprintf("stream_audio: pcm_accum reset on speed change %.3f->%.3f (pending=%d)\n",
+					last_audio_speed, current_audio_speed, s->pcm_accum_size);
+				s->pcm_accum_size = 0;
+			}
+			last_audio_speed = current_audio_speed;
+		}
+
 		AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
 		if( sink && sink->format != audio_format_configured ) {
+			DBG serprintf("stream_audio thread: sink format changed old=%04X new=%04X src_fmt=%04X ac3=%d configured=%d pending=%d pt=%d\n",
+				audio_format_configured, sink->format, s->audio ? s->audio->format : 0,
+				libavos_get_ac3_recoding_enabled(), ac3_sink_configured,
+				ac3_reconfigure_pending, s->audio_sink ? s->audio_sink->get_passthrough(s) : -1);
+			if( s->pcm_accum_size > 0 ) {
+				DBG serprintf("stream_audio: pcm_accum reset on sink format change (%04X->%04X, pending=%d)\n",
+					audio_format_configured, sink->format, s->pcm_accum_size);
+				s->pcm_accum_size = 0;
+			}
 #ifdef CONFIG_SPDIF
 			// In AC3 recoding mode with configured sink, keep it pinned to AC3.
 			// Only update audio_format_configured to stop re-detecting this as a format change.
@@ -1315,6 +1585,12 @@ skip_format_change:
 			stream_yield_RT();
 		}
 	}
+	if( s->pcm_accum_data ) {
+		afree( s->pcm_accum_data );
+		s->pcm_accum_data = NULL;
+	}
+	s->pcm_accum_capacity = 0;
+	s->pcm_accum_size = 0;
 DBGS serprintf("PID[%5d] stream_audio_thread::Exiting\r\n", getpid() );	
  	return NULL;
 }

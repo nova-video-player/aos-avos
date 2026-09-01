@@ -18,6 +18,7 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -41,6 +42,8 @@ void libavos_set_dolby_vision_mode(int mode);
 void libavos_set_dolby_vision_target_nits(float nits);
 void libavos_set_dolby_vision_plane_scaler(int scaler);
 void libavos_set_audio_interface(int audio_interface);
+void libavos_set_audio_decoder(int audio_decoder);
+void libavos_set_mediacodec_audio_capabilities(int64_t capabilities);
 void libavos_set_codepage(int codepage);
 void libavos_set_output_sample_rate(int sample_rate);
 void libavos_set_passthrough(int force_passthrough);
@@ -353,6 +356,14 @@ Java_com_archos_medialib_LibAvos_nativeSetAudioInterface(JNIEnv *env, jobject th
 }
 
 void
+Java_com_archos_medialib_LibAvos_nativeSetAudioDecoder(JNIEnv *env, jobject thiz, jint audio_decoder)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_audio_decoder(audio_decoder);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
 Java_com_archos_medialib_LibAvos_nativeSetCodepage(JNIEnv *env, jobject thiz, jint codepage)
 {
     pthread_mutex_lock(&libavos.mtx);
@@ -381,6 +392,30 @@ Java_com_archos_medialib_LibAvos_nativeSetHdmiSupportedAudioCodecs(JNIEnv *env, 
 {
     pthread_mutex_lock(&libavos.mtx);
     libavos_set_hdmi_supported_audio_codecs(hdmi_audio_codecs_flag);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetMediaCodecAudioCapabilities(JNIEnv *env, jobject thiz, jlong media_codec_audio_capabilities)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_mediacodec_audio_capabilities(media_codec_audio_capabilities);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetSpatializerCapabilities(JNIEnv *env, jobject thiz, jint spatializer_capabilities)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_spatializer_capabilities(spatializer_capabilities);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetSpatializerEnabled(JNIEnv *env, jobject thiz, jboolean enabled)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_spatializer_enabled(enabled ? 1 : 0);
     pthread_mutex_unlock(&libavos.mtx);
 }
 

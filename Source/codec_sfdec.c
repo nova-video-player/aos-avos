@@ -99,6 +99,11 @@ typedef struct priv {
 		int interlaced;
 		int state;
 		int seek_time;
+		int seek_watch_active;
+		int seek_watch_target;
+		int seek_watch_start_ms;
+		int seek_watch_last_output_ms;
+		int seek_watch_restarts;
 	} locked;
 	
 	STREAM_DEC_VIDEO *dec;
@@ -345,6 +350,23 @@ DBGCV3 CLOG("release <-");
 	}
 }
 
+static int _sfdec_restart_codec(priv_t *p)
+{
+	if (!p || !p->sfdec)
+		return -1;
+
+	DBGCV CLOG("watchdog restart: sfdec_stop_input");
+	sfdec_stop_input(p->sfdec);
+	DBGCV CLOG("watchdog restart: sfdec_stop");
+	sfdec_stop(p->sfdec);
+	DBGCV CLOG("watchdog restart: sfdec_start");
+	if (sfdec_start(p->sfdec) != 0) {
+		CLOG("watchdog restart failed: sfdec_start");
+		return -1;
+	}
+	return 0;
+}
+
 static void *videosink_thread(void *ctx)
 {
 	priv_t *p = (priv_t*) ctx;
@@ -425,6 +447,8 @@ static void *videodec_thread(void *ctx)
 {
 	priv_t *p = (priv_t*) ctx;
 	sfdec_read_out_t read_out;
+	const int seek_watchdog_no_output_ms = 500;
+	const int seek_watchdog_startup_grace_ms = 200;
 
 	pthread_mutex_lock(&p->locked.mtx);
 
@@ -477,6 +501,7 @@ DBGCV3 CLOG("sfdec_read, seek: %d->", seek_time);
 		int took = time_update_time() - start;
 
 		pthread_mutex_lock(&p->locked.mtx);
+		int now_ms = atime();
 
 		if (p->locked.seek_time != -1 && seek_time == p->locked.seek_time)
 			p->locked.seek_time = -1;
@@ -488,6 +513,7 @@ DBGCV3 CLOG("sfdec_read <- invalid");
 		if (read_out.flag & SFDEC_READ_BUF) {
 			sfbuf = read_out.buf.sfbuf;
 			time = read_out.buf.time_us / 1000;
+			p->locked.seek_watch_last_output_ms = now_ms;
 DBGCV3 CLOG("sfdec_read <- sfbuf: %p, time_us: %lld", sfbuf, read_out.buf.time_us);
 		}
 		if (read_out.flag & SFDEC_READ_SIZE) {
@@ -500,7 +526,33 @@ DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.
 		}
 
 		if (!sfbuf) {
+			int trigger_restart = 0;
+			if (p->locked.seek_watch_active && p->locked.seek_time == -1) {
+				int since_seek_ms = now_ms - p->locked.seek_watch_start_ms;
+				int no_output_ms = now_ms - p->locked.seek_watch_last_output_ms;
+				int pending_inputs = frame_q_count(&p->locked.dec_q);
+				if (since_seek_ms >= seek_watchdog_startup_grace_ms &&
+				    no_output_ms >= seek_watchdog_no_output_ms &&
+				    pending_inputs > 0 &&
+				    p->locked.seek_watch_restarts == 0) {
+					p->locked.seek_watch_restarts = 1;
+					p->locked.seek_watch_start_ms = now_ms;
+					p->locked.seek_watch_last_output_ms = now_ms;
+					trigger_restart = 1;
+					CLOG("seek watchdog: no output for %d ms after seek target=%d pending=%d -> restart",
+						no_output_ms, p->locked.seek_watch_target, pending_inputs);
+				}
+			}
 			frame_q_put_head(&p->locked.dec_q, f);
+			if (trigger_restart) {
+				pthread_mutex_unlock(&p->locked.mtx);
+				if (_sfdec_restart_codec(p) != 0) {
+					pthread_mutex_lock(&p->locked.mtx);
+					p->locked.error = 1;
+					continue;
+				}
+				pthread_mutex_lock(&p->locked.mtx);
+			}
 			continue;
 		}
 		int out_time;
@@ -533,6 +585,12 @@ DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.
 		} else {
 DBGCV CLOG("\t\t\tout %8d  tim %3d  wait %3d", f->time, took, wait );
 			frame_q_put(&p->locked.out_q, f);
+			if (p->locked.seek_watch_active) {
+				DBGCV CLOG("seek watchdog: recovered target=%d out=%d", p->locked.seek_watch_target, f->time);
+				p->locked.seek_watch_active = 0;
+				p->locked.seek_watch_target = -1;
+				p->locked.seek_watch_restarts = 0;
+			}
 		}
 	}
 	rm_state_l(p, THREAD_STATE_READING);
@@ -554,8 +612,9 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 
 	int hw_type = device_get_hw_type();
 	if (video->format == VIDEO_FORMAT_H264 && video->sps.valid && video->profile >= H264_PROFILE_HIGH10) {
-		CLOG("sf can't do Hi10P, abort");
-		return 1;
+		// Do not hard-block Hi10 here: some devices can still decode via MediaCodec.
+		// If decoder instantiation/start fails, stream_open_video_dec will fall back.
+		CLOG("Hi10P input detected (profile=%d): try sfdec and fallback on runtime failure", video->profile);
 	}
 
 	dec->ctx = ctx;
@@ -683,6 +742,11 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->locked.width = width;
 	p->locked.height = height;
 	p->locked.seek_time = -1;
+	p->locked.seek_watch_active = 0;
+	p->locked.seek_watch_target = -1;
+	p->locked.seek_watch_start_ms = 0;
+	p->locked.seek_watch_last_output_ms = 0;
+	p->locked.seek_watch_restarts = 0;
 	p->locked.run = 1;
 
 	video->colorspace = AV_IMAGE_HW;
@@ -847,6 +911,11 @@ static int videodec_seek(STREAM_DEC_VIDEO *dec, int time)
 	XDM_id_flush( &p->XDM_ctx );
 	XDM_ts_flush( &p->XDM_ctx );
 	p->locked.seek_time = time;
+	p->locked.seek_watch_active = 1;
+	p->locked.seek_watch_target = time;
+	p->locked.seek_watch_start_ms = atime();
+	p->locked.seek_watch_last_output_ms = p->locked.seek_watch_start_ms;
+	p->locked.seek_watch_restarts = 0;
 	pthread_mutex_unlock(&p->locked.mtx);
 
 	sfdec_flush(p->sfdec);

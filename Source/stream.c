@@ -37,6 +37,7 @@
 #ifdef CONFIG_ANDROID
 int get_android_sync(void);
 #endif
+extern int libavos_get_ac3_recoding_enabled(void);
 
 #ifdef CONFIG_STREAM
 #define DBGV DBG_IF(Debug[DBG_VID])
@@ -44,6 +45,7 @@ int get_android_sync(void);
 #define DBGP DBG_IF(Debug[DBG_PARSER])
 
 #define DBG DBG_IF(Debug[DBG_STREAM])
+#define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
 
 static void _free_chapters( STREAM *s );
 static void _free_subtitle_urls( STREAM *s );
@@ -356,16 +358,23 @@ DBGS serprintf("codec_thread joined\r\n");
 //	stream_get_part_name
 //
 // ***********************************************************
-void stream_get_part_name( char *part_name, const char *full_path, int part_num )
+int stream_get_part_name( char *part_name, const char *full_path, int part_num )
 {
-	if( part_name ) {
-		if( part_num > 0 ) {
-			sprintf( part_name, "%s.%d", full_path, part_num + 1 );
-		} else {
-			sprintf( part_name, "%s", full_path );
-		}
-DBGS serprintf("stream_get_part_name( %d ) = %s\r\n", part_num, part_name );
+	int ret;
+	if( !part_name ) {
+		return 1;
 	}
+	if( part_num > 0 ) {
+		ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s.%d", full_path ? full_path : "", part_num + 1 );
+	} else {
+		ret = snprintf( part_name, STREAM_MAX_PATH_LEN + 1, "%s", full_path ? full_path : "" );
+	}
+	if (ret < 0 || ret > STREAM_MAX_PATH_LEN) {
+		part_name[0] = '\0';
+		return 1;
+	}
+DBGS serprintf("stream_get_part_name( %d ) = %s\r\n", part_num, part_name );
+	return 0;
 }
 
 // *****************************************************************************
@@ -379,7 +388,10 @@ int stream_check_parts( const char *full_path )
 	
 	for( num = 1; num < STREAM_MAX_PARTS; num ++ ) {
 		char file[STREAM_MAX_PATH_LEN + 1];
-		stream_get_part_name( file, full_path, num );
+		if( stream_get_part_name( file, full_path, num ) ) {
+DBGP serprintf("part name overflow for %d\r\n", num );
+			break;
+		}
 
 		STAT st;
 		if( !file_stat( file, &st ) ) {
@@ -402,7 +414,10 @@ int stream_parse_parts( STREAM *s )
 	int i;
 	for( i = 0; i < s->num_parts; i ++ ) {
 		char file[STREAM_MAX_PATH_LEN + 1];
-		stream_get_part_name( file, s->src.url, i );
+		if( stream_get_part_name( file, s->src.url, i ) ) {
+			stream_set_error( s, VE_FILE_ERROR );
+			return 1;
+		}
 
 		STAT st;
 		file_stat( file, &st );
@@ -525,6 +540,10 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 		return 1;
 		
 	s->av_delay = av_delay;
+	s->manual_audio_delay_target_ms = (av_delay < 0) ? -av_delay : 0;
+	if( av_delay >= 0 ) {
+		s->manual_audio_delay_applied_ms = 0;
+	}
 	
 	return 0;
 }
@@ -542,8 +561,8 @@ static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_
 		return;
 
 	s->video_sink->put_time( s->video_sink, audio_time_ts );
-	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d\n",
-		audio_time_ts, audio_time_ts );
+	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d av_delay=%d\n",
+		audio_time_ts, audio_time_ts, stream_sync_av_delay( s ) );
 }
 
 static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int heard_ts,
@@ -596,10 +615,24 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	int using_atempo = (s->audio_filter_atempo != NULL);
+	int ac3_recoding = 0;
+	int passthrough = 0;
+#ifdef CONFIG_AUDIO_AC3
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
+#endif
+	if( s && s->audio_sink ) {
+		passthrough = s->audio_sink->get_passthrough( s );
+	}
 	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
 		using_atempo = 0;
 	}
+	if( passthrough || ac3_recoding ) {
+		using_atempo = 0;
+	}
 	audio_interface_set_using_atempo( using_atempo );
+	DBG2 serprintf("stream:stream_set_av_speed gate req=%.3f speed_enabled=%d filter=%p using_atempo_pref=%d effective_using_atempo=%d current_speed=%.3f\n",
+		av_speed, audio_interface_is_audio_speed_enabled(), s->audio_filter_atempo,
+		audio_interface_is_using_atempo(), using_atempo, audio_interface_get_audio_speed());
 
 	int audio_latency_ms = -1;
 	if( s ) {
@@ -1532,8 +1565,11 @@ static void _stream_get_part_name( int argc, char *argv[] )
 	int num    = atoi(argv[2]);
 	char	res[STREAM_MAX_PATH_LEN + 1];
 	
-	stream_get_part_name( res, path, num );
+	if( stream_get_part_name( res, path, num ) ) {
+serprintf("stream_get_part_name( %s, %d ): overflow\r\n", path, num ); 
+	} else {
 serprintf("stream_get_part_name( %s, %d ): %s\r\n", path, num, res ); 
+	}
 }
 
 static void _perform_stream_abort( void )

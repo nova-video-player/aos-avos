@@ -194,12 +194,7 @@ int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, 
 
 int audio_interface_get_delay(audio_ctx_t *ctx)
 {
-	int delay = impl->get_delay(ctx);
-	if (Debug[DBG_AUD]) {
-		serprintf("aud_get_delay: impl=%s ctx=%p delay=%d\n",
-			impl && impl->name ? impl->name : "?", ctx, delay);
-	}
-	return delay;
+	return impl->get_delay(ctx);
 }
 
 int audio_interface_get_latency(audio_ctx_t *ctx)
@@ -224,6 +219,14 @@ int audio_interface_get_delay_valid_streak(audio_ctx_t *ctx)
 		return 0;
 	}
 	return impl->delay_valid_streak(ctx);
+}
+
+int audio_interface_is_startup_hold_active(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->is_startup_hold_active) {
+		return 0;
+	}
+	return impl->is_startup_hold_active(ctx);
 }
 
 void audio_interface_flush_output(audio_ctx_t *ctx) 

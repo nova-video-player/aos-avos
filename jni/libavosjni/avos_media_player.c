@@ -95,6 +95,18 @@ static inline avos_mp_t *get_mp(JNIEnv *env, jobject thiz)
     return mp;
 }
 
+static inline avos_mp_t *get_mp_and_clear(JNIEnv *env, jobject thiz)
+{
+    avos_mp_t *mp;
+    pthread_mutex_lock(&mtx);
+    mp = (avos_mp_t *)(*env)->GetLongField(env, thiz, mp_fields.handle);
+    if (mp) {
+        (*env)->SetLongField(env, thiz, mp_fields.handle, (jlong) 0);
+    }
+    pthread_mutex_unlock(&mtx);
+    return mp;
+}
+
 static inline avos_mp_t *get_mp_or_throw(JNIEnv *env, jobject thiz)
 {
     avos_mp_t *mp = get_mp(env, thiz);
@@ -115,6 +127,18 @@ static inline void *get_surface(JNIEnv *env, jobject thiz)
     void *surface;
     pthread_mutex_lock(&mtx);
     surface = (void *)(*env)->GetLongField(env, thiz, mp_fields.native_window);
+    pthread_mutex_unlock(&mtx);
+    return surface;
+}
+
+static inline void *get_surface_and_clear(JNIEnv *env, jobject thiz)
+{
+    void *surface;
+    pthread_mutex_lock(&mtx);
+    surface = (void *)(*env)->GetLongField(env, thiz, mp_fields.native_window);
+    if (surface) {
+        (*env)->SetLongField(env, thiz, mp_fields.native_window, (jlong) 0);
+    }
     pthread_mutex_unlock(&mtx);
     return surface;
 }
@@ -320,13 +344,12 @@ err:
 static void
 free_native_window(JNIEnv *env, jobject thiz)
 {
-    void *surface = get_surface(env, thiz);
+    void *surface = get_surface_and_clear(env, thiz);
 
     LOGV("free_native_window\n");
 
     if (surface) {
         ANativeWindow_release((ANativeWindow *)surface);
-        set_surface(env, thiz, NULL);
     }
 }
 
@@ -364,7 +387,7 @@ void
 Java_com_archos_medialib_AvosMediaPlayer_nativeRelease(JNIEnv *env, jobject thiz)
 {
     event_ctx_t *event_ctx;
-    avos_mp_t *mp = get_mp(env, thiz);
+    avos_mp_t *mp = get_mp_and_clear(env, thiz);
     if (!mp)
         return;
     LOGV("nativeRelease\n");
@@ -376,8 +399,6 @@ Java_com_archos_medialib_AvosMediaPlayer_nativeRelease(JNIEnv *env, jobject thiz
         event_thread_destroy(env, event_ctx);
 
     free_native_window(env, thiz);
-
-    set_mp(env, thiz, NULL);
 }
 
 void
@@ -388,7 +409,7 @@ Java_com_archos_medialib_AvosMediaPlayer_nativeReset(JNIEnv *env, jobject thiz)
     LOGV("nativeReset\n");
 
     free_native_window(env, thiz);
-    mp = get_mp(env, thiz);
+    mp = get_mp_and_clear(env, thiz);
     if (mp) {
         priv = avos->getpriv(mp);
         avos->destroy(mp);
@@ -704,6 +725,14 @@ Java_com_archos_medialib_AvosMediaPlayer_setAudioTrack(JNIEnv *env, jobject thiz
     if (!mp) return 0;
     CHECK(avos->setaudiotrack(mp, track, &ret));
     return ret;
+}
+
+void
+Java_com_archos_medialib_AvosMediaPlayer_refreshAudioOutput(JNIEnv *env, jobject thiz)
+{
+    avos_mp_t *mp = get_mp_or_throw(env, thiz);
+    if (!mp) return;
+    CHECK(avos->refreshaudiooutput(mp));
 }
 
 void

@@ -109,6 +109,19 @@ Native determines IEC support by inspecting codec flags set by Java:
 - **Mode 1**: IEC61937
   - container rates like 192kHz for EAC3/TrueHD/DTS-HD
   - stereo or 8ch depending on format and IEC 8ch support
+  - compressed IEC bursts are written atomically; they must not be split into
+    PCM-sized chunks
+
+### Passthrough write rules
+
+- Compressed passthrough bursts (direct passthrough and AC3-recoded output) are
+  written as whole bursts, not PCM-sized sub-chunks.
+- If `AudioTrack.write()` accepts only part of a compressed burst, Nova drops
+  the remainder of that burst instead of retrying the tail as if it were PCM.
+  Retrying a tail fragment would corrupt IEC / compressed framing.
+- Passthrough `can_write()` may use exact capacity gating when playback-head
+  accounting is usable, but falls back to the previous permissive behavior if
+  the exact gate stalls on a given track instance.
 
 ### AC3 recoding (Mode 3)
 
@@ -121,6 +134,11 @@ Native determines IEC support by inspecting codec flags set by Java:
 
 - In mode 2 with parser output: send raw codec frames (`ENCODING_AC3` path) and keep timing via `fakeSize`
 - In mode 2 with **no parser** (AC3 recoding path): bypass IEC wrapping and send raw AC3 syncframes directly (`PT_MODE2_NOPARSER` path)
+- During passthrough / AC3 recoding, dynamic AudioTrack delay is disabled and
+  sync uses the static passthrough latency path.
+- `atempo` may still be instantiated for later non-passthrough speed changes,
+  but no samples flow through it in passthrough and its delay is not counted in
+  passthrough / AC3 recoding sync or speed-anchor calculations.
 
 ## State Diagram
 
@@ -162,6 +180,9 @@ Native determines IEC support by inspecting codec flags set by Java:
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
+- **Mode 2 A/V timing**: timing is based on compressed-frame duration via `fakeSize`
+  (PCM-equivalent bytes), not raw payload size. For E-AC3/DD+, parser `frame_size`
+  is preferred when available; fixed 1536-sample fallback is used otherwise.
 
 ## Debug Tips
 

@@ -4,25 +4,31 @@
 
 - **`venc_put_time` (TS)**: The last TS value passed into the video sink as the anchor point.
 - **`venc_ref_time` (WC)**: The monotonic clock sample taken when `venc_put_time` was set. Together, the sink estimates current TS as `venc_put_time + (now_wc - venc_ref_time)` (android_sync=0).
-- **`heard_audio_ts` (TS)**: The audio time that is actually audible at the speakers. Formula: `heard_audio_ts = audio_time - chain_delay_ts - RST_TO_TS_DELTA(av_delay)`, where `chain_delay_ts` is `smoothed_av_delay` if valid, otherwise a fallback delay. When timing is invalid and atempo is active, the fallback includes the atempo chain delay so speed changes remain latency‑aware.
+- **`heard_audio_ts` (TS)**: The audio time that is actually audible at the speakers. Formula: `heard_audio_ts = audio_time - chain_delay_ts`, where `chain_delay_ts` is `smoothed_av_delay` if valid, otherwise a fallback delay. When timing is invalid and atempo is active, the fallback includes the atempo chain delay so speed changes remain latency‑aware.
 - **Monotonic clock variables (WC)**: `CLOCK_MONOTONIC` timestamps are used for wall‑clock pacing because they never jump due to system time changes. They provide stable elapsed‑time deltas for TS↔WC anchoring.
 - **`timeline_map_apply()`**: Installs a single piecewise‑linear mapping between RST and TS at a given anchor `(rst_anchor, ts_anchor, speed)`. Absolute conversions: `ts = ts_anchor + (rst - rst_anchor) / speed`, `rst = rst_anchor + (ts - ts_anchor) * speed`. Duration conversions use `RST_TO_TS_DELTA` / `TS_TO_RST_DELTA`.
 - **`smoothed_av_delay`**: A low‑pass filtered estimate of audio‑video offset (TS) used as a stable proxy for the audible delay. When it is invalid, fall back to `stream_sync_av_delay()`.
 - **Best delay provider**: Audio delay is chosen by a single provider: use stable `AudioTrack.getTimestamp()` when available; otherwise fall back to playback‑head latency, then static latency. Timestamp validity is gated by a streak of advancing samples and outlier rejection; fallback is always available when dynamic timing is unstable.
-- **Delay validity streak (AudioTrack)**: We require a short run of consecutive advancing samples before marking delay as valid. This avoids anchoring on transient/zero playhead values seen on Sabrina/Kirkwood right after resume or seek. Once the streak is met, we allow a one‑time rebase to measured delay.
+- **Delay validity streak (AudioTrack)**: We require a short run of consecutive advancing samples before marking delay as valid. This avoids anchoring on transient/zero playhead values seen on Sabrina/Kirkwood right after resume or seek. The current playhead-based threshold is 3 consecutive advancing queries. Once the streak is met, we allow a one‑time rebase to measured delay.
+- **Sticky cached validity**: throttled/cached delay reads preserve validity when the last trusted dynamic source was playhead-based (`last_good_dynamic_valid`). This avoids flapping between `playhead(stable)` and `cached(throttle)` states on coarse playback-head devices.
+- **Startup-hold escape**: if AudioTrack timestamp reporting stays "successful"
+  but frame positions do not advance after seek/startup, `startup_hold` can
+  exit via a recent playback-head fallback delay instead of waiting forever
+  for timestamp convergence. A bounded timeout provides the same escape if
+  the timestamp path never stabilizes.
 - **`put_time_mode`**: Enabled when a sink exposes `put_time()`. In this mode the sync layer keeps audio as the master (via `heard_audio_ts`) but does not disable sync on early frames; the sink owns TS↔WC pacing.
 
 ## Time Domain Anchors (Single per Sink)
 
-- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor from `heard_audio_ts` (audio_time - chain delay - av_delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards. If delay becomes invalid during steady playback, last‑good delay is held for anchoring so latency compensation does not drop to zero.
+- **android_sync=0** (`codec_sfdec2.c`): Owns single TS↔WC via `venc_put_time` (TS) / `venc_ref_time` (WC). Anchor from `heard_audio_ts` (audio_time - chain delay) in `stream_set_av_speed()`. `videosink_put_time()` may reanchor only on speed change or when drift exceeds a fixed threshold, with grace/monotonic guards. If delay becomes invalid during steady playback, last‑good delay is held for anchoring so latency compensation does not drop to zero. Manual A/V delay does not shift `put_time` anchors. The sync diff includes `s->av_delay`; for negative delay requests, extra audio hold is applied in `stream_audio.c` (non-passthrough).
 
-- **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized at startup. For passthrough=2, timing is treated as unreliable and the sink uses a startup hold plus a residual static latency (no slew) to align with audible time. No local wait/drop pacing is used.
+- **android_sync=1** (`codec_sfdec2.c` + MediaCodec): Always supplies `render_ts_ns` to MediaCodec. A single render offset (TS↔WC) is initialized at startup. For init/reanchor windows, anchor selection is **put_time-authoritative when fresh** (`venc_put_time`), with fallback to recomputed `stream_get_heard_audio_ts()` when stale. Manual A/V delay is applied at final presentation scheduling via a slewed effective value (`render_ts_ns = frame_ts + render_offset + effective_av_delay_ts`) to avoid fast-render bursts after large UI jumps. For passthrough=2, timing is treated as unreliable and the sink uses a startup hold plus a residual static latency (no slew) to align with audible time. No local wait/drop pacing is used.
 
 **Unification**: `stream_set_av_speed()` normally computes `heard_audio_ts`, calls `timeline_map_apply(rst_from_ts(heard_audio_ts), heard_audio_ts, new_speed)` and `video_sink->put_time(heard_audio_ts)`. When delay is invalid, speed‑change anchoring uses **last‑good delay** (adjusted by atempo delta) if available. If no last‑good delay and **android_sync=1**, it falls back to `current_time_ts` and **defers** sink re‑anchoring to avoid visible catch‑up bursts.
 
 ## Heard-Audio Anchor Definition
 
-- `heard_audio_ts = audio_time - stream_sync_av_delay() - RST_TO_TS_DELTA(av_delay)`
+- `heard_audio_ts = audio_time - stream_sync_av_delay()`
 - When timing is **valid**, `heard_audio_ts` uses `s->smoothed_av_delay` (or `_get_anchor_delay_ms()` if no smoothing is available).
 - When timing is **invalid**, heard‑time falls back to the raw AudioTrack delay (playhead/static), and if atempo is active it uses the atempo chain delay so speed changes remain latency‑aware.
 - Negative anchors are generally avoided, but **android_sync=1** may allow a negative internal anchor at startup to keep MediaCodec timing consistent until audio is ready.
@@ -37,7 +43,7 @@
 
 ## Audio Speed Change Flow
 
-1) Compute `heard_audio_ts` (TS) from current audio time minus chain delay and `av_delay`.
+1) Compute `heard_audio_ts` (TS) from current audio time minus chain delay.
 2) Convert to RST: `anchor_rst = TS_TO_RST_TIME(heard_audio_ts)`.
 3) Apply mapping: `timeline_map_apply(anchor_rst, heard_audio_ts, new_speed)`.
 4) Anchor the sink: `video_sink->put_time(heard_audio_ts)` so the TS↔WC anchor matches what is heard.
@@ -50,7 +56,12 @@
 
 - **Sink selection**: On Android, the active video sink is `sfdec2` (`codec_sfdec2.c`). The sink is created via `stream_get_default_video_sink()` but the name logged is `sfdec2`.
 - **android_sync=0**: `codec_sfdec2.c` owns TS↔WC anchoring (`venc_put_time`, `venc_ref_time`) and pacing (blit wait/drop). `stream_sync.c` still computes A/V delay and audio master timing, but the sink uses its own WC anchor to schedule frames.
-- **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from the render offset and always passes it to MediaCodec. The offset starts from static latency and slews toward dynamic delay once timing is valid, except passthrough=2 which uses a startup hold plus residual static latency and skips slew.
+- **android_sync=1**: The sink bypasses its own wait/drop path and delegates scheduling to MediaCodec. `codec_sfdec2.c` computes `render_ts_ns` from the render offset and always passes it to MediaCodec. The offset starts from static latency and slews toward dynamic delay once timing is valid, except passthrough=2 which uses a startup hold plus residual static latency and skips slew. For reanchor windows, fresh `put_time` is preferred over recomputed heard-time to keep cross-thread anchor math consistent.
+  - **passthrough=2 post-seek re-init rule**: if `put_time` immediately resets `render_offset_ns` after the first init pass, startup hold compensation must remain active for the next init pass. This avoids snapping to full static latency before the post-flush audio pipeline has actually refilled.
+  - **passthrough=2 timing source**: audio TS progression uses compressed-frame `fakeSize` as PCM-equivalent duration. `fakeSize` is derived from parser `frame_size` when available, with a conservative 1536-sample fallback. This avoids E-AC3 cadence drift on streams that do not use fixed 1536-sample frames.
+- **Manual A/V delay policy**: keep anchors/diff in physical time; apply user delay at presentation scheduling. In `codec_sfdec2.c`, this is:
+  - `android_sync=1`: `render_ts_ns`, using a slewed `effective_av_delay` toward the UI target.
+  - `android_sync=0`: anchors remain physical in the sink. The sync diff includes `s->av_delay`; negative delay is realized by audio-side hold in `stream_audio.c` (non-passthrough).
 - **put_time_mode**: When the sink provides `put_time()`, the sync layer uses `heard_audio_ts` for the diff calculation but leaves pacing to the sink.
 
 ## In-Flight Data During Speed Changes
@@ -88,9 +99,14 @@
   - When AudioTrack delay later becomes valid (streak threshold), a **second rebase** aligns to the measured delay. This can cause a visible jump but yields accurate alignment.
 - **Resume (android_sync=1)**:
   - The sink continues to render via `render_ts_ns`; no local wait/drop pacing is applied.
-  - While AudioTrack delay is invalid, video can free‑run against its current anchor (timing unavailable). This can show a small initial A/V offset.
-  - When delay becomes valid (streak threshold), a one‑time **delay‑valid rebase** aligns audio_time to `video_time + measured_delay`. This is why A/V appears to converge quickly after start on some devices.
+  - For PCM, while AudioTrack delay is invalid, video can free‑run against its current anchor (timing unavailable). This can show a small initial A/V offset.
+  - For passthrough / AC3 recoding, resume hold is released only after the first resumed audio write commits, not merely when static passthrough delay reports valid.
+  - When delay becomes valid (PCM streak threshold), a one‑time **delay‑valid rebase** aligns audio_time to `video_time + measured_delay`. This is why A/V appears to converge quickly after start on some devices.
+  - On devices where `getTimestamp()` freezes after seek/startup, AudioTrack
+    warmup may promote a recent playback-head fallback delay as valid so this
+    rebase can still happen instead of remaining stuck in startup hold.
 - **Seek**: The UI target is RST. After seek, the parser emits new TS timestamps from the new RST position, and a short convergence window is applied (android_sync=0) to align with `heard_audio_ts`, then the sink is re‑anchored once and gating stops to avoid stutter.
+  - Seek preview (`_stream_play_n_frames`) bypasses the resume hold under `android_sync=1`, so scrubbing keeps immediate image feedback even though real playback resume still uses the hold.
 - **Speed‑change realignment seek**: Uses `stream_seek_time_frame_accurate(rst_target, ts_target, BACKWARD)` so the parser seeks to a keyframe, then `_stream_play_n_frames` drops frames until `ts_target`. Audio chunks are dropped until the same `ts_target`.
 - **Broken audio PTS (post‑seek)**: Some files emit non‑monotonic audio PTS after seek (e.g., audio restarts near 0 while video is at 26s). To avoid a video freeze, `stream_audio.c` guards against large backward jumps after seek: first audio far behind video is rebased to `video_time`, and later backward PTS (>1s) are ignored. This is a minimal safety net for malformed files, not the nominal path.
 
@@ -121,7 +137,9 @@
 - **Static-to-dynamic slew**: initialize offset with static latency, then slew toward dynamic delay when timing becomes valid.
 - **Passthrough=1 (IEC)**: use playback‑head delay when available; fall back to static latency if head position is unstable.
 - **Passthrough=2 startup hold**: hold video until audio_time is valid, then initialize with residual static latency to avoid double‑counting. Slew is event‑driven only (seek/resume/speed).
+  - Keep startup hold compensation across an immediate post-seek offset reset; clear it on normal lifecycle resets (seek/flush/close), not during the first init pass.
   - **Note on Kirkwood (Google streamer 4K)**: long invalid‑delay windows after resume can delay the slew, so the initial offset is static until delay validity is established.
+- **Seek-preview bypass**: the `android_sync=1` resume hold is intentionally skipped while `_stream_play_n_frames()` is showing scrub preview frames; otherwise seek preview can block behind audio readiness and time out.
 
 ## Filters and Time Domains
 

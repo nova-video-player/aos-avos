@@ -18,13 +18,13 @@ Equations
 All times are in milliseconds (TS domain) unless noted.
 
 Core A/V diff (control):
-  diff = (video_time - audio_time) + sync_delay + av_delay
+  diff = (video_time - audio_time) + sync_delay
 
 Audio pipeline delay (ms):
   sync_delay = codec_delay + filter_delay + sink_delay - video_delay
 
 Heard time (estimated):
-  heard_ts = audio_time - sync_delay - av_delay
+  heard_ts = audio_time - sync_delay
 
 Notes:
 - playhead_ms is the output position derived from getPlaybackHeadPosition and is used only
@@ -43,7 +43,13 @@ State Machine Summary
      invalid or during throttle windows.
    - Static latency is no longer injected once last_good is present.
    - Validity is gated by a short streak of advancing samples to avoid
-     false positives after resume/seek (Sabrina/Kirkwood).
+     false positives after resume/seek (Sabrina/Kirkwood). The current
+     playhead-based threshold is 3 consecutive advancing queries.
+   - During `startup_hold`, if `getTimestamp()` keeps returning a
+     non-advancing frame position after seek/startup, the estimator can
+     escape the hold early by promoting a recent sane playback-head
+     fallback delay to valid. A bounded timeout provides the same escape
+     hatch if the timestamp path never converges.
 
 3) Throttle window
    - Use cached delay if valid.
@@ -66,6 +72,16 @@ Notes
 - The diff metrics are control signals, not a direct lipsync meter.
 - In put_time mode, sync uses heard_ts for anchoring and smoothed_av_delay
   for diff alignment (no heard_ts substitution in the diff path).
+- Manual A/V delay is a user offset, not part of the core delay-estimation
+  equations.
+  - `android_sync=1`: applied at final presentation scheduling in
+    `codec_sfdec2.c` when building `render_ts_ns` for MediaCodec. The user
+    target delay is slewed through an effective delay state (bounded per-frame
+    step) to avoid fast-render bursts on large UI changes.
+  - `android_sync=0`: keep sink anchors physical (`put_time` unchanged).
+    The sync diff includes `s->av_delay`; negative delay (video earlier)
+    is implemented as audio-side hold (silence insertion) in
+    `stream_audio.c`.
 - When timing is invalid and atempo is active, heard_ts uses the atempo
   chain delay to keep speed-change anchoring latency-aware.
 - For android_sync=0, if timing becomes invalid during steady playback,
@@ -97,6 +113,8 @@ Rules:
    - android_sync=1:
      - If `delay_valid`, anchor_delay = current dynamic delay (or smoothed).
      - If `delay_valid` is false, do NOT anchor on last_good/static (avoid catch-up bursts).
+     - In sfdec2 reanchor windows, prefer fresh sink `put_time` (`venc_put_time`)
+       as authoritative heard anchor; fallback to recomputed heard-time when stale.
 
 3) Heard delay selection (heard_ts):
    - If `delay_valid`, heard_delay = anchor_delay (smoothed/dynamic).
@@ -112,8 +130,19 @@ Rules:
 5) Resume:
    - android_sync=0: if delay invalid on first audio after resume, rebase to
      static latency; when delay becomes valid (streak), rebase to measured delay.
-   - android_sync=1: free-run while delay invalid; when delay becomes valid
+   - android_sync=1 PCM: free-run while delay invalid; when delay becomes valid
      (streak), a one-time rebase aligns to measured delay.
+   - android_sync=1 passthrough / AC3 recoding: static passthrough delay is
+     considered valid immediately, but video resume hold is released only after
+     the first resumed audio write commits. This avoids anchoring before
+     post-resume compressed output has actually restarted.
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
   - Passthrough mode 2 (raw): playhead/timestamp are unreliable; static only.
+- Cached/throttled AudioTrack delay reads preserve validity when the last
+  trusted source was playhead-based (`last_good_dynamic_valid`), so
+  `cached(throttle)` does not immediately invalidate a newly trusted delay.
+ - `startup_hold` is not allowed to remain permanent on devices with
+   frozen-but-successful `getTimestamp()` reporting. If timestamp-based
+   convergence cannot occur, a recent playback-head fallback delay can be
+   promoted to valid, and a timeout acts as a safety net.

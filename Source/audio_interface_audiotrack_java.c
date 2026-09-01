@@ -38,6 +38,7 @@ extern int spdif_is_passthrough_on(void);
 
 #define DBG DBG_IF(Debug[DBG_AUD])
 #define DBG2 DBG_IF(Debug[DBG_AUD] > 1)
+#define DBG3 DBG_IF(Debug[DBG_AUD] > 2)
 #define ERR  if(1)
 
 #define LOG(fmt, ...) do { serprintf("%s(%p): " fmt "\n", __FUNCTION__, at, ##__VA_ARGS__); } while (0)
@@ -52,6 +53,14 @@ extern int spdif_is_passthrough_on(void);
 
 #ifndef AUDIO_CONTENT_TYPE_MOVIE
 #define AUDIO_CONTENT_TYPE_MOVIE 3
+#endif
+
+#ifndef AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_AUTO
+#define AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_AUTO 0
+#endif
+
+#ifndef AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER
+#define AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER 1
 #endif
 
 typedef unsigned char bool;
@@ -71,8 +80,12 @@ struct audio_ctx {
 	int channel_count;
 	uint32_t latency;
 	int passthrough;
+	int applied_passthrough;
+	int applied_spatialization_behavior;
 	JNIEnv * env;
 	int willDetach;
+	pthread_t attach_thread_id;
+	int attach_thread_id_valid;
 	jobject obj;
 	jbyteArray jbuffer;
 	size_t buf_size;
@@ -115,6 +128,18 @@ struct audio_ctx {
 	uint64_t headpos_last_frames;    // last raw playback head position
 	int headpos_smooth_valid;        // smoothed headpos validity
 	int startup_hold_active;         // clamp to static latency during initial timing warmup
+	int startup_hold_start_ms;       // when startup_hold was last armed (for timeout)
+	int frozen_ts_streak;            // consecutive getTimestamp calls with non-advancing framePosition
+	int startup_latency_log_count;   // cap initial latency diagnostics
+	int startup_delay_log_count;     // cap initial get_delay diagnostics
+	int delay_diag_count;            // throttling counter for aud_at_delay summary
+	int delay_diag_last_ret;         // last reported return value
+	int delay_diag_last_valid;       // last reported delay_valid
+	int delay_diag_last_fallback;    // last reported fallback value
+	int delay_diag_last_ts_use;      // last reported ts_use_timestamp
+	uint64_t can_write_last_playback_frames; // last playhead seen by passthrough can_write gate
+	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
+	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 };
 
 static int audiotrack_log_underruns = 0;
@@ -304,6 +329,28 @@ static inline int call_static_int_method(audio_ctx_t *at, jclass clas, const cha
 	return result;
 }
 
+static int audiotrack_get_requested_spatialization_behavior(audio_ctx_t *at, int output_channels, int track_format)
+{
+	int capabilities = device_config_get_spatializer_capabilities();
+
+	if (device_get_android_api() < 32 || at->passthrough != 0)
+		return -1;
+
+	if (track_format != 2 && track_format != 3)
+		return -1;
+
+	if (output_channels <= 2)
+		return -1;
+
+	if ((capabilities & 1) == 0 || (capabilities & (1 << 1)) == 0)
+		return -1;
+
+	if (device_config_get_spatializer_enabled())
+		return AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_AUTO;
+
+	return AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER;
+}
+
 static inline int call_int_method_current_vm(JNIEnv *jni_env, jclass clas, const char * name, const char * signature, ...)
 {
 	jmethodID method = (*jni_env)->GetStaticMethodID(jni_env, clas, name, signature);
@@ -384,6 +431,15 @@ static audio_ctx_t *audiotrack_open(int mode)
 	at->startup_hold_active = 1;
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
+	at->applied_passthrough = -1;
+	at->applied_spatialization_behavior = -1;
+	at->startup_latency_log_count = 0;
+	at->startup_delay_log_count = 0;
+	at->delay_diag_count = 0;
+	at->delay_diag_last_ret = -1;
+	at->delay_diag_last_valid = -1;
+	at->delay_diag_last_fallback = -1;
+	at->delay_diag_last_ts_use = -1;
 
 	DBG	LOG("mode: %i", mode);
 
@@ -394,8 +450,11 @@ static audio_ctx_t *audiotrack_open(int mode)
 			ERR LOG("ERROR: Attach to JVM failed");
 			return 0;
 		}
-		else
+		else {
 			at->willDetach = 1;
+			at->attach_thread_id = pthread_self();
+			at->attach_thread_id_valid = 1;
+		}
 	}
 
 	at->audiotrackClass = (*at->env)->NewGlobalRef(at->env, (*at->env)->FindClass(at->env, AUDIOTRACK_CLASS_NAME));
@@ -453,10 +512,27 @@ static audio_ctx_t *audiotrack_open(int mode)
 
 static int audiotrack_close(audio_ctx_t **pat)
 {
+	if (!pat || !*pat) return 0;
 	audio_ctx_t *at = *pat;
 
 	if (at->init) {
-		attach_thread(at);
+		// Attach close thread to JVM if not already attached.
+		// Track whether we attached it so we can detach afterwards.
+		int close_thread_attached = 0;
+		JNIEnv *env = NULL;
+		if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
+			if ((*myVm)->AttachCurrentThread(myVm, &env, NULL) == 0) {
+				close_thread_attached = 1;
+			} else {
+				ERR LOG("audiotrack_close: AttachCurrentThread failed, skipping JNI cleanup");
+				at->init = 0;
+				free(at);
+				*pat = NULL;
+				return -1;
+			}
+		}
+		at->env = env;
+
 		int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
 		if (underrun_count > 0)
 			ERR LOG("Underrun count: %d", underrun_count);
@@ -479,12 +555,23 @@ static int audiotrack_close(audio_ctx_t **pat)
 			(*at->env)->DeleteGlobalRef(at->env, at->audioTimestampClass);
 			at->audioTimestampClass = NULL;
 		}
-		//if (at->willDetach)
-		//	(*myVm)->DetachCurrentThread(myVm);
+
+		// Detach the owner thread (from audiotrack_open) if close runs on it
+		if (at->willDetach && at->attach_thread_id_valid &&
+		    pthread_equal(pthread_self(), at->attach_thread_id)) {
+			// Close is on the same thread that opened — detach it.
+			// This also covers the close_thread_attached case since it's the same thread.
+			(*myVm)->DetachCurrentThread(myVm);
+			close_thread_attached = 0; // already detached
+		} else if (close_thread_attached) {
+			// Close is on a different thread that we temporarily attached — detach it
+			(*myVm)->DetachCurrentThread(myVm);
+		}
+
 		at->init = 0;
 	}
 	free(at);
-	pat = NULL;
+	*pat = NULL;
 	return 0;
 }
 
@@ -518,6 +605,12 @@ static void audiotrack_update_latency(audio_ctx_t *at, JNIEnv *env)
 	}
 
 	DBG LOG("audiotrack_update_latency latency: %d ms (track=%d, system=%d, app=%d)", calculated_latency, track_latency, system_latency, app_latency);
+	if (at->startup_latency_log_count < 5) {
+		DBG2 LOG("startup_latency[%d]: format=%04X rate=%d ch=%d frame_size=%zu buf=%zu track=%u system=%u app=%u final=%u",
+			at->startup_latency_log_count, at->format, at->rate, at->channel_count,
+			at->frame_size, at->buf_size, track_latency, system_latency, app_latency, calculated_latency);
+		at->startup_latency_log_count++;
+	}
 
 	at->latency = calculated_latency;
 }
@@ -545,7 +638,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int prev_rate = at->rate;
 	int prev_channels = at->channel_count;
 	int prev_format = at->format;
-	int prev_passthrough = at->passthrough;
+	int prev_applied_passthrough = at->applied_passthrough;
+	int prev_applied_spatialization_behavior = at->applied_spatialization_behavior;
 	size_t prev_frame_size = at->frame_size;
 
 	float as = get_effective_audio_speed();
@@ -555,19 +649,27 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	// For AC3 recoding, force format to WAVE_FORMAT_AC3 regardless of input format
 	// This ensures AudioTrack is created with AC3 format (2000) instead of original format (e.g., EAC3 18247)
 	int ac3_recoding_enabled = libavos_get_ac3_recoding_enabled();
+	int requested_passthrough = at->passthrough;
 	if(ac3_recoding_enabled) {
 		format = WAVE_FORMAT_AC3;
 		// Respect the current passthrough mode selected in native (may be 1 or 2)
-		int pt_mode = spdif_is_passthrough_on();
-		if (pt_mode != 1 && pt_mode != 2) {
-			pt_mode = 1;  // default to IEC if unset
+		requested_passthrough = spdif_is_passthrough_on();
+		if (requested_passthrough != 1 && requested_passthrough != 2) {
+			requested_passthrough = 1;  // default to IEC if unset
 		}
-		at->passthrough = pt_mode;
+		// If IEC is unavailable on the current route, force codec-specific passthrough.
+		if (requested_passthrough == 1 && !get_hdmi_supports_iec()) {
+			requested_passthrough = 2;
+		}
 		channels = 2;  // IEC/codec-specific container is stereo for compressed payload
-		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d", pt_mode, channels );
+		DBG LOG( "AC3 recoding: forcing format to WAVE_FORMAT_AC3 (2000), passthrough mode %d, channels=%d", requested_passthrough, channels );
 	}
+	at->passthrough = requested_passthrough;
 
 	DBG LOG( "rate %d, channels %d, bits %d, format %d, passthrough mode %d, as %f", rate, channels, bits, format, at->passthrough, as );
+	DBG LOG( "audiotrack_set_output_params: enter req_rate=%d req_channels=%d req_bits=%d req_format=%04X passthrough=%d using_atempo=%d speed=%.3f init=%d prev_rate=%d prev_channels=%d prev_format=%04X prev_passthrough=%d prev_frame_size=%zu",
+		rate, channels, bits, format, at->passthrough, using_atempo, as, at->init,
+		prev_rate, prev_channels, prev_format, prev_applied_passthrough, prev_frame_size );
 
 	attach_thread( at );
 
@@ -690,12 +792,14 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		frame_size = (bits / 8) * output_channels;
 	}
 
+	int requested_spatialization_behavior = audiotrack_get_requested_spatialization_behavior(at, output_channels, track_format);
 	int same_config = 0;
 	if (at->init &&
 		prev_rate == rate &&
 		prev_channels == output_channels &&
 		prev_format == format &&
-		prev_passthrough == at->passthrough &&
+		prev_applied_passthrough == at->passthrough &&
+		prev_applied_spatialization_behavior == requested_spatialization_behavior &&
 		prev_frame_size == frame_size) {
 		same_config = 1;
 	}
@@ -705,6 +809,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	at->channel_count = output_channels;
 	at->frame_size = frame_size;
 	channels = output_channels;
+	DBG LOG("audiotrack_set_output_params: resolved out_rate=%d out_channels=%d frame_size=%zu track_format=%d chanmask=0x%x same_config=%d passthrough=%d",
+		rate, output_channels, frame_size, track_format, track_chanmask, same_config, at->passthrough);
 
 	if (same_config) {
 		DBG LOG("audiotrack_set_output_params: reusing existing track (rate=%d ch=%d fmt=%d passthrough=%d speed=%.3f using_atempo=%d)",
@@ -739,12 +845,15 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 						(*at->env)->ExceptionDescribe(at->env);
 						(*at->env)->ExceptionClear(at->env);
 					} else {
-						DBG LOG("audiotrack_set_output_params: PlaybackParams updated on existing track");
+						DBG LOG("audiotrack_set_output_params: PlaybackParams updated on existing track speed=%.3f rate=%d channels=%d frame_size=%zu",
+							as, rate, output_channels, frame_size);
 						return 0;
 					}
 				}
 			}
 		} else {
+			DBG LOG("audiotrack_set_output_params: same_config reuse without speed update using_atempo=%d speed_enabled=%d passthrough=%d api=%d speed=%.3f obj=%p",
+				using_atempo, is_audio_speed_enabled, at->passthrough, device_get_android_api(), as, at->obj);
 			return 0;
 		}
 		// Fall through to recreate if PlaybackParams update failed.
@@ -763,6 +872,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 		at->obj = NULL;
 		at->init = 0;
+		at->applied_passthrough = -1;
+		at->applied_spatialization_behavior = -1;
 		reinit = 1;
 	}
 
@@ -771,6 +882,8 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	int channelConfig = track_chanmask << 2;
 	int audioFormat = track_format;
 	mode = 1; /*MODE_STREAM*/
+	DBG LOG("audiotrack_set_output_params: creating new track reinit=%d speed=%.3f using_atempo=%d passthrough=%d sampleRate=%d channels=%d audioFormat=%d channelConfig=0x%x",
+		reinit, as, using_atempo, at->passthrough, sampleRateInHz, channels, audioFormat, channelConfig);
 
 	// When using atempo filter, AudioTrack always plays at 1.0x, so no need for larger buffers
 	DBG LOG( "audiotrack_set_output_params: track_format=%d, track_chanmask=0x%x, channelConfig=0x%x (format=%d, passthrough=%d, channels=%d)",
@@ -848,6 +961,28 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			(*at->env)->ExceptionDescribe(at->env);
 			(*at->env)->ExceptionClear(at->env);
 			failed = 1;
+		}
+	}
+
+	int applied_spatialization_behavior = -1;
+	if (!failed && requested_spatialization_behavior != -1 && device_get_android_api() >= 32) {
+		jmethodID setSpatializationBehaviorMethod = (*at->env)->GetMethodID(at->env, at->audioAttributesBuilderClass, "setSpatializationBehavior", "(I)Landroid/media/AudioAttributes$Builder;");
+		exception = (*at->env)->ExceptionOccurred(at->env);
+		if (exception) {
+			DBG LOG("audiotrack_set_output_params: setSpatializationBehavior lookup failed");
+			(*at->env)->ExceptionClear(at->env);
+		} else if (setSpatializationBehaviorMethod) {
+			(*at->env)->CallObjectMethod(at->env, audioAttributesBuilder, setSpatializationBehaviorMethod, requested_spatialization_behavior);
+			exception = (*at->env)->ExceptionOccurred(at->env);
+			if (exception) {
+				DBG LOG("audiotrack_set_output_params: setSpatializationBehavior(%d) failed", requested_spatialization_behavior);
+				(*at->env)->ExceptionDescribe(at->env);
+				(*at->env)->ExceptionClear(at->env);
+			} else {
+				applied_spatialization_behavior = requested_spatialization_behavior;
+				DBG LOG("audiotrack_set_output_params: spatialization behavior=%d channels=%d format=%d",
+					applied_spatialization_behavior, output_channels, track_format);
+			}
 		}
 	}
 
@@ -1012,6 +1147,17 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			msec_sleep(100); // give AudioFlinger more time to recover before re-entering
 		}
 
+		// Diagnostic: compare requested compressed config vs actual AudioTrack config.
+		// Some HALs may silently force PCM/stereo while passthrough remains enabled.
+		{
+			int actual_format = call_int_method(at, "getAudioFormat", "()I");
+			int actual_chmask = call_int_method(at, "getChannelConfiguration", "()I");
+			int actual_rate = call_int_method(at, "getSampleRate", "()I");
+			DBG2 LOG("audiotrack_set_output_params: actual AudioTrack format=%d chmask=0x%x rate=%d (requested format=%d chmask=0x%x passthrough=%d channels=%d)",
+				actual_format, actual_chmask, actual_rate,
+				track_format, track_chanmask, at->passthrough, channels);
+		}
+
 		//frame_size reported can be false for compressed formats
 		at->frame_count = at->buf_size / at->frame_size; // number of frames in the buffer
 		DBG LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
@@ -1027,14 +1173,12 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	if(failed)
 		return -1;
 
+	audiotrack_reset_timing(at);
 	audiotrack_update_latency(at, at->env);
 
 	at->init = 1;
-	// Initialize timestamp tracking for dynamic latency calculation
-	at->i_samples_written = 0;
-	at->last_timestamp_ns = 0;
-	at->last_timestamp_frames = 0;
-	at->timestamp_written_offset = 0;
+	at->applied_passthrough = at->passthrough;
+	at->applied_spatialization_behavior = applied_spatialization_behavior;
 	DBG LOG("track created");
 
 	return 0;
@@ -1042,10 +1186,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 
 static int audiotrack_set_passthrough(audio_ctx_t *at, int passthrough)
 {
-	// Store previous passthrough mode to detect mode changes
 	int old_passthrough = at->passthrough;
-
 	at->passthrough = passthrough;
+	DBG LOG("audiotrack_set_passthrough: old=%d new=%d init=%d format=%04X rate=%d ch=%d frame_size=%zu applied=%d error_recovery=%d",
+		old_passthrough, passthrough, at->init, at->format, at->rate,
+		at->channel_count, at->frame_size, at->applied_passthrough, at->in_error_recovery);
 
 	// DO NOT call audiotrack_set_output_params here during format changes!
 	//
@@ -1106,6 +1251,8 @@ ERR		LOG("audiotrack_start: track not valid, error");
 
 	// New playback run: keep startup delay clamp until timing is valid.
 	at->startup_hold_active = 1;
+	at->startup_hold_start_ms = atime();
+	at->frozen_ts_streak = 0;
 
 	JNIEnv *env_local = attach_thread_current_vm();
 	if (!env_local) {
@@ -1159,15 +1306,93 @@ ERR		LOG("track not valid, error");
 
 static int audiotrack_can_write(audio_ctx_t *at, int len)
 {
-	// This function always returns true, which means it never blocks
-	// For AC3 recoding troubleshooting, log when it's called
-	DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (always returns true)",
-		at->format, at->passthrough, len);
+	const int passthrough_stall_fallback_ms = 250;
 
-	// TODO: Consider implementing actual buffer checking using AudioTrack.getPlaybackHeadPosition()
-	// and AudioTrack.getBufferSizeInFrames() to prevent buffer overflows
+	if (!at->init) {
+		ERR LOG("audiotrack_can_write: track not valid, error");
+		return 0;
+	}
 
-	return 1;
+	if (len <= 0) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d -> true",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	// Keep PCM behavior unchanged for now. The passthrough case is the one where
+	// partial writes are structurally unsafe because compressed bursts must be
+	// accepted atomically.
+	if (!at->passthrough) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (pcm fast-path=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	if (at->passthrough_can_write_blind) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (blind fallback=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	if (at->frame_size == 0 || at->frame_count <= 0) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (invalid frame geometry, fallback=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	JNIEnv *env_local = attach_thread_current_vm();
+	if (!env_local) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (no env, fallback=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
+	jint playback_frames = call_int_method_with_env(at, env_local, "getPlaybackHeadPosition", "()I");
+	if (playback_frames < 0) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (playhead unavailable=%d, fallback=true)",
+			at->format, at->passthrough, len, playback_frames);
+		return 1;
+	}
+
+	uint64_t frames_presented = (uint64_t)playback_frames;
+	uint64_t frames_written_adjusted = 0;
+	if (at->i_samples_written > at->timestamp_written_offset) {
+		frames_written_adjusted = at->i_samples_written - at->timestamp_written_offset;
+	}
+
+	int64_t frames_pending = (int64_t)frames_written_adjusted - (int64_t)frames_presented;
+	if (frames_pending < 0) {
+		frames_pending = 0;
+	}
+
+	int64_t frames_requested = ((int64_t)len + (int64_t)at->frame_size - 1) / (int64_t)at->frame_size;
+	int64_t frames_available = (int64_t)at->frame_count - frames_pending;
+	int can_write = (frames_available >= frames_requested);
+	int now_ms = atime();
+
+	if (frames_presented != at->can_write_last_playback_frames) {
+		at->can_write_last_playback_frames = frames_presented;
+		at->can_write_stall_start_ms = 0;
+	} else if (!can_write) {
+		if (!at->can_write_stall_start_ms) {
+			at->can_write_stall_start_ms = now_ms;
+		} else if (now_ms - at->can_write_stall_start_ms >= passthrough_stall_fallback_ms) {
+			at->passthrough_can_write_blind = 1;
+			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled (pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
+				at->format, at->passthrough, len,
+				(long long)frames_pending, (long long)frames_available, (long long)frames_requested);
+			return 1;
+		}
+	} else {
+		at->can_write_stall_start_ms = 0;
+	}
+
+	DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d pending=%lld available=%lld requested=%lld frame_count=%d frame_size=%zu -> %d",
+		at->format, at->passthrough, len,
+		(long long)frames_pending, (long long)frames_available, (long long)frames_requested,
+		at->frame_count, at->frame_size, can_write);
+
+	return can_write;
 }
 
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
@@ -1238,6 +1463,7 @@ static int audiotrack_get_delay(audio_ctx_t *at)
 	const int delay_max_ms = 5000;
 	const int delay_suspect_ms = 2000;
 	const int stable_streak_required = 10;
+	const int playhead_streak_required = 3; // playhead advances in large chunks on some devices
 	const int max_smooth_drift_ms = 1000;
 	const char *src = "unknown";
 	int ret = -1;
@@ -1248,14 +1474,6 @@ static int audiotrack_get_delay(audio_ctx_t *at)
 		src = tag; \
 		ret = (value); \
 		goto done; \
-	} while (0)
-#define AUD_RET0(tag) \
-	do { \
-		if (Debug[DBG_AUD]) { \
-			serprintf("aud_at_delay: src=%s ret=0 latency=%d ts_use=%d streak=%d\n", \
-				tag, at ? at->latency : -1, at ? at->ts_use_timestamp : -1, \
-				at ? at->ts_success_streak : -1); \
-		} \
 	} while (0)
 
 	if (!at->init) {
@@ -1269,7 +1487,7 @@ ERR		LOG("track not valid, error");
 	// Dynamic latency doesn't work because we can't accurately track written vs presented frames
 	// in passthrough due to IEC61937 encapsulation and getPlaybackHeadPosition() limitations
 	if (at->passthrough) {
-DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
+DBG3		LOG("Using static latency for passthrough: %d ms", at->latency);
 		// Treat static passthrough delay as stable/valid for sync gating.
 		if (at->ts_success_streak < stable_streak_required) {
 			at->ts_success_streak = stable_streak_required;
@@ -1284,25 +1502,25 @@ DBG2		LOG("Using static latency for passthrough: %d ms", at->latency);
 	if (!enable_dynamic_audio_delay) {
 
 		// User disabled dynamic latency, use static latency
-DBG2		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
-		// Treat static delay as stable/valid for sync gating.
-		if (at->ts_success_streak < stable_streak_required) {
-			at->ts_success_streak = stable_streak_required;
-		}
+DBG3		LOG("Dynamic latency disabled by user preference, using static latency: %d ms", at->latency);
+		// Do NOT bump ts_success_streak here. Leaving it at 0 prevents
+		// resume_rebase_delay_valid in stream_audio.c from treating static
+		// latency as a "newly measured" delay and firing a bogus audio_time
+		// rebase that leaves render_offset_ns stale in codec_sfdec2.c.
 		at->delay_valid = 1;
 		AUD_RETURN("static(disabled)", at->latency);
 	}
 
 	if (!at->audioTimestamp || !at->getTimestampMethodID || !at->framePositionFieldID || !at->nanoTimeFieldID) {
 		// Fallback to static latency if AudioTimestamp not available
-DBG2		LOG("Using static latency: %d ms", at->latency);
+DBG3		LOG("Using static latency: %d ms", at->latency);
 		at->delay_valid = 1;
 
 		AUD_RETURN("static(no_timestamp)", at->latency);
 	}
 
 	if (at->rate <= 0) {
-DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
+DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 		at->delay_valid = 1;
 
 		AUD_RETURN("static(bad_rate)", at->latency);
@@ -1313,7 +1531,7 @@ DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 	if (at->ts_last_query_ms > 0 && now_ms - at->ts_last_query_ms < timing_query_interval_ms) {
 		// Throttle timing queries; reuse cached values during the stable window.
 		if (at->ts_cached_valid) {
-			at->delay_valid = at->ts_use_timestamp ? 1 : 0;
+			at->delay_valid = (at->ts_use_timestamp || at->last_good_dynamic_valid) ? 1 : 0;
 			AUD_RETURN("cached(throttle)", at->ts_cached_delay_ms);
 		}
 		if (audiotrack_last_good_dynamic(at, now_ms, &at->ts_cached_delay_ms)) {
@@ -1321,12 +1539,12 @@ DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 				AUD_RETURN("static(last_good_zero)", at->latency);
 			}
 			at->ts_cached_valid = 1;
-			at->delay_valid = at->ts_use_timestamp ? 1 : 0;
+			at->delay_valid = (at->ts_use_timestamp || at->last_good_dynamic_valid) ? 1 : 0;
 			AUD_RETURN("last_good(throttle)", at->ts_cached_delay_ms);
 		}
 		// No cached timing; reuse last fallback delay for heard-time only.
 		if (at->last_fallback_delay_ms > 0 && (now_ms - at->last_fallback_ms) < 5000) {
-			if (at->playhead_valid_streak >= 5) {
+			if (at->playhead_valid_streak >= playhead_streak_required) {
 				at->ts_cached_delay_ms = at->last_fallback_delay_ms;
 				at->ts_cached_valid = 1;
 				at->last_good_dynamic_delay_ms = at->last_fallback_delay_ms;
@@ -1340,8 +1558,7 @@ DBG2		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 			AUD_RETURN("fallback(throttle)", at->last_fallback_delay_ms);
 		}
 		at->delay_valid = 0;
-		AUD_RET0("throttle_none");
-		AUD_RETURN("throttle_none", 0);
+		AUD_RETURN("throttle_none", (at->startup_hold_active && at->latency > 0) ? at->latency : 0);
 	}
 
 	// IMPORTANT: Get the JNIEnv for the CURRENT thread, not the cached one
@@ -1397,8 +1614,6 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 			goto done;
 		}
 		at->delay_valid = 0;
-		AUD_RET0("track_null");
-
 		AUD_RETURN("track_null", 0);
 	}
 
@@ -1420,8 +1635,6 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 			goto done;
 		}
 		at->delay_valid = 0;
-		AUD_RET0("exception");
-
 		AUD_RETURN("exception", 0);
 	}
 
@@ -1432,7 +1645,7 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 		at->ts_use_timestamp = 0;
 		at->ts_last_query_ms = now_ms;
 		// If timestamps never stabilize (e.g., Sabrina), promote stable playhead fallback.
-		if (fallback_delay > 0 && at->playhead_valid_streak >= 5) {
+		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required) {
 			at->ts_cached_delay_ms = fallback_delay;
 			at->ts_cached_valid = 1;
 			at->last_good_dynamic_delay_ms = fallback_delay;
@@ -1459,7 +1672,8 @@ DBG2		LOG("getTimestamp returned false, using fallback playback-head latency: %d
 		// No trusted delay; return fallback for heard-time only.
 		at->delay_valid = 0;
 		src = "fallback(ts_false)";
-		ret = (fallback_delay > 0) ? fallback_delay : 0;
+		ret = (at->startup_hold_active && startup_fallback > 0) ? startup_fallback :
+		      (fallback_delay > 0) ? fallback_delay : 0;
 		goto done;
 	}
 
@@ -1475,7 +1689,7 @@ DBG2	LOG("getTimestamp success=%d framePosition=%lld nanoTime=%lld rate=%d ts_us
 DBG2		LOG("Non-positive timestamp values, timing unavailable (framePosition=%lld nanoTime=%lld)",
 			(long long)framePosition, (long long)nanoTime);
 		at->ts_last_query_ms = now_ms;
-		if (fallback_delay > 0 && at->playhead_valid_streak >= 5) {
+		if (fallback_delay > 0 && at->playhead_valid_streak >= playhead_streak_required) {
 			at->ts_cached_delay_ms = fallback_delay;
 			at->ts_cached_valid = 1;
 			at->last_good_dynamic_delay_ms = fallback_delay;
@@ -1503,7 +1717,8 @@ DBG2		LOG("Non-positive timestamp values, timing unavailable (framePosition=%lld
 		// No trusted delay; return fallback for heard-time only.
 		at->delay_valid = 0;
 		src = "fallback(bad_ts)";
-		ret = (fallback_delay > 0) ? fallback_delay : 0;
+		ret = (at->startup_hold_active && startup_fallback > 0) ? startup_fallback :
+		      (fallback_delay > 0) ? fallback_delay : 0;
 		goto done;
 	}
 
@@ -1554,16 +1769,16 @@ DBG2		LOG("Dynamic latency %d ms out of range, fallback to static: %d ms", delay
 			goto done;
 		}
 		at->delay_valid = 0;
-		AUD_RET0("outlier");
-
 		AUD_RETURN("outlier", 0);
 	}
 
 	// Require a streak of advancing timestamps before trusting them to avoid startup jumps.
 	if (nanoTime <= at->last_timestamp_ns || frames_presented <= at->last_timestamp_frames) {
 		at->ts_success_streak = 0;
+		at->frozen_ts_streak++;
 	} else {
 		at->ts_success_streak++;
+		at->frozen_ts_streak = 0;
 	}
 	if (at->ts_success_streak >= stable_streak_required)
 		at->ts_use_timestamp = 1;
@@ -1603,11 +1818,43 @@ DBG2		LOG("delay: latency=%d startup=%d fallback=%d", at->latency, at->startup_h
 			at->startup_hold_active = 0;
 		}
 
-		// Keep startup clamp but return fallback for heard-time only.
-		at->delay_valid = 0;
-		src = "fallback(startup_hold)";
-		ret = (startup_fallback > 0) ? startup_fallback : 0;
-		goto done;
+		if (at->startup_hold_active) {
+			// Fix A: getTimestamp() is returning a frozen framePosition after seek (observed on
+			// Google Streamer 4K).  The two normal exit conditions (delay_ms >= latency-20 and
+			// ts_success_streak >= 30) can never be met because the frozen framePosition prevents
+			// the streak from building and caps delay_ms below the threshold.
+			// Fix B: catch-all timeout in case any other device gets stuck in startup_hold.
+			// In both cases, if a fresh playhead-based delay is available and sane, trust it and
+			// exit the hold so delay_valid can be set and resume_rebase_delay_valid can fire.
+			const int frozen_ts_threshold = 10;
+			const int startup_hold_timeout_ms = 1500;
+			int frozen_escape = (at->frozen_ts_streak >= frozen_ts_threshold);
+			int timeout_escape = (at->startup_hold_start_ms > 0 &&
+			                      (now_ms - at->startup_hold_start_ms) >= startup_hold_timeout_ms);
+			if ((frozen_escape || timeout_escape) &&
+			     fallback_delay > 0 &&
+			     at->last_fallback_ms > 0 &&
+			     (now_ms - at->last_fallback_ms) < 500 &&
+			     fallback_delay >= at->latency / 4) {
+				at->startup_hold_active = 0;
+				at->frozen_ts_streak = 0;
+				at->ts_cached_delay_ms = fallback_delay;
+				at->ts_cached_valid = 1;
+				at->last_good_dynamic_delay_ms = fallback_delay;
+				at->last_good_dynamic_ms = now_ms;
+				at->last_good_dynamic_valid = 1;
+				at->delay_valid = 1;
+				src = frozen_escape ? "playhead(frozen_ts_exit)" : "playhead(startup_hold_timeout)";
+				ret = fallback_delay;
+				goto done;
+			}
+
+			// Keep startup clamp but return fallback for heard-time only.
+			at->delay_valid = 0;
+			src = "fallback(startup_hold)";
+			ret = (startup_fallback > 0) ? startup_fallback : 0;
+			goto done;
+		}
 	}
 
 DBG2	LOG("Dynamic latency: %d ms (written: %llu, presented: %llu, pending: %lld frames)",
@@ -1656,19 +1903,46 @@ DBG2	LOG("delay: latency=%d startup=%d fallback=%d returned=%d", at->latency, at
 	src = "dynamic";
 	ret = delay_ms;
 done:
-DBG2	LOG("get_delay: src=%s ret=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d",
+DBG3	LOG("get_delay: src=%s ret=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d",
 		src, ret, at->latency, fallback_delay, delay_ms, at->ts_use_timestamp,
 		at->ts_success_streak);
 	at->last_delay_ret = ret;
 	at->last_delay_fallback_ms = fallback_delay;
 	at->last_delay_ms = delay_ms;
 	snprintf(at->last_delay_src, sizeof(at->last_delay_src), "%s", src ? src : "unknown");
-	if (Debug[DBG_AUD]) {
+	if (Debug[DBG_AUD] > 2) {
 		serprintf("aud_at_delay: src=%s ret=%d delay_valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d\n",
 			src, ret, at->delay_valid, at->latency, fallback_delay, delay_ms,
 			at->ts_use_timestamp, at->ts_success_streak);
+	} else if (Debug[DBG_AUD] > 1 && at) {
+		int emit = 0;
+		if ((at->delay_diag_count % 100) == 0) {
+			emit = 1;
+		}
+		if (at->delay_diag_last_valid != at->delay_valid ||
+		    at->delay_diag_last_ret != ret ||
+		    at->delay_diag_last_fallback != fallback_delay ||
+		    at->delay_diag_last_ts_use != at->ts_use_timestamp) {
+			emit = 1;
+		}
+		if (emit) {
+			serprintf("aud_at_delay: src=%s ret=%d delay_valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d\n",
+				src, ret, at->delay_valid, at->latency, fallback_delay, delay_ms,
+				at->ts_use_timestamp, at->ts_success_streak);
+		}
+		at->delay_diag_count++;
+		at->delay_diag_last_valid = at->delay_valid;
+		at->delay_diag_last_ret = ret;
+		at->delay_diag_last_fallback = fallback_delay;
+		at->delay_diag_last_ts_use = at->ts_use_timestamp;
 	}
-#undef AUD_RET0
+	if (at && at->startup_delay_log_count < 5) {
+		DBG2 LOG("startup_delay[%d]: src=%s ret=%d valid=%d latency=%d fallback=%d delay=%d ts_use=%d streak=%d hold=%d frozen=%d",
+			at->startup_delay_log_count, src ? src : "unknown", ret, at->delay_valid,
+			at->latency, fallback_delay, delay_ms, at->ts_use_timestamp,
+			at->ts_success_streak, at->startup_hold_active, at->frozen_ts_streak);
+		at->startup_delay_log_count++;
+	}
 #undef AUD_RETURN
 	return ret;
 }
@@ -1729,6 +2003,11 @@ static int audiotrack_get_delay_valid_streak(audio_ctx_t *at)
 {
 	// Sabrina can report late/unstable timestamps; expose streak to gate rebases.
 	return at ? at->ts_success_streak : 0;
+}
+
+static int audiotrack_is_startup_hold_active(audio_ctx_t *at)
+{
+	return at ? at->startup_hold_active : 0;
 }
 
 
@@ -1850,8 +2129,13 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->headpos_last_frames = 0;
 	at->headpos_smooth_valid = 0;
 	at->startup_hold_active = 1;
+	at->startup_hold_start_ms = atime();
+	at->frozen_ts_streak = 0;
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
+	at->can_write_last_playback_frames = 0;
+	at->can_write_stall_start_ms = 0;
+	at->passthrough_can_write_blind = 0;
 }
 
 static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
@@ -1866,6 +2150,9 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 
 	if(audio_interface_is_audio_speed_enabled() && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed path using_atempo=%d passthrough=%d api=%d rate=%d channels=%d format=%04X frame_size=%d buf_size=%d obj=%p current_speed=%.3f",
+			using_atempo, at->passthrough, device_get_android_api(), at->rate, at->channel_count,
+			at->format, at->frame_size, at->buf_size, at->obj, audio_interface_get_audio_speed());
 
 		JNIEnv *myEnv = attach_thread_current_vm();
 		if (*myEnv == NULL) return 0;
@@ -1967,7 +2254,9 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		audiotrack_reset_timing(at);
 		audiotrack_update_latency(at, myEnv);
 	} else {
-		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed no change in audio_speed in passthrough");
+		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed skipped speed=%f speed_enabled=%d using_atempo=%d passthrough=%d api=%d init=%d obj=%p",
+			speed, audio_interface_is_audio_speed_enabled(), using_atempo, at ? at->passthrough : -1,
+			device_get_android_api(), at ? at->init : 0, at ? at->obj : NULL);
 	}
 	return 0;
 }
@@ -2001,6 +2290,7 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.change_audio_speed = audiotrack_change_audio_speed,
 	.delay_valid = audiotrack_is_delay_valid,
 	.delay_valid_streak = audiotrack_get_delay_valid_streak,
+	.is_startup_hold_active = audiotrack_is_startup_hold_active,
 };
 
 #ifdef DEBUG_MSG

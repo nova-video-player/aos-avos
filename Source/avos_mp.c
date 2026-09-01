@@ -102,6 +102,7 @@ int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
 int avos_mp_video_getduration(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
 int avos_mp_video_getaudiosessionid(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret);
 int avos_mp_video_setaudiotrack(avos_mp_t *mp, avos_mp_video_t *video, int track, int *ret);
+int avos_mp_video_refreshaudiooutput(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_video_checksubtitles(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int track, int *ret);
 int avos_mp_video_setsubtitledelay(avos_mp_t *mp, avos_mp_video_t *video, int delay);
@@ -823,6 +824,14 @@ static int avos_mp_setaudiotrack(avos_mp_t *mp, int track, int *ret)
 	return AVOS_ERR_OK;
 }
 
+static int avos_mp_refreshaudiooutput(avos_mp_t *mp)
+{
+	MPLOG();
+	async_cmd_wait(mp);
+	AVOS_MP_VIDEO(refreshaudiooutput, mp);
+	return AVOS_ERR_OK;
+}
+
 static int avos_mp_checksubtitles(avos_mp_t *mp)
 {
 	MPLOG();
@@ -916,6 +925,7 @@ static const avos_mp_handle_t avos_mp_handle = {
 	.islooping = avos_mp_islooping,
 	.getaudiosessionid = avos_mp_getaudiosessionid,
 	.setaudiotrack = avos_mp_setaudiotrack,
+	.refreshaudiooutput = avos_mp_refreshaudiooutput,
 	.checksubtitles = avos_mp_checksubtitles,
 	.setsubtitletrack = avos_mp_setsubtitletrack,
 	.setsubtitledelay = avos_mp_setsubtitledelay,

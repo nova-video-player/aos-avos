@@ -118,11 +118,17 @@ static int can_write( STREAM *s, int len )
 
 static int set_passthrough( STREAM *s, int pass )
 {
+	if( !s->audio_ctx ) {
+		return 0;
+	}
 	return audio_interface_set_passthrough(s->audio_ctx, pass);
 }
 
 static int get_passthrough( STREAM *s )
 {
+	if( !s->audio_ctx ) {
+		return 0;
+	}
 	return audio_interface_get_passthrough(s->audio_ctx);
 }
 

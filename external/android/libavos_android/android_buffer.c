@@ -158,6 +158,8 @@ int android_buffer_setup(android_surface_t *as, int w, int h, int buffer_type, i
 
 int android_buffer_close(android_surface_t *as)
 {
+	if (!as || !as->anw)
+		return -1;
 	if (as->gralloc)
 		native_window_api_disconnect(as->anw, NATIVE_WINDOW_API_MEDIA);
 	return 0;
@@ -166,6 +168,9 @@ int android_buffer_close(android_surface_t *as)
 int android_buffer_setcrop(android_surface_t *as, int ofs_x, int ofs_y, int w, int h)
 {
 	android_native_rect_t crop;
+
+	if (!as || !as->anw)
+		return -1;
 
 	if (as->gralloc) {
 		crop.left = ofs_x;
@@ -206,6 +211,11 @@ int android_buffer_dequeue(android_surface_t *as, void **handle)
 {
 	status_t err = NO_ERROR;
 
+	if (!as || !as->anw) {
+		AVOSLOG("error: surface or window is NULL");
+		return -1;
+	}
+
 	if (as->gralloc) {
 		ANativeWindowBuffer_t *anb;
 		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
@@ -227,6 +237,11 @@ int android_buffer_dequeue(android_surface_t *as, void **handle)
 int android_buffer_dequeue_with_buffer(android_surface_t *as, void **handle, android_buffer_t *buffer)
 {
 	status_t err = NO_ERROR;
+
+	if (!as || !as->anw) {
+		AVOSLOG("error: surface or window is NULL");
+		return -1;
+	}
 
 	if (as->gralloc) {
 		ANativeWindowBuffer_t *anb;
@@ -261,6 +276,11 @@ int android_buffer_queue(android_surface_t *as, void *handle)
 {
 	status_t err = NO_ERROR;
 	ANativeWindowBuffer_t *anb = (ANativeWindowBuffer_t *)handle;
+
+	if (!as || !as->anw) {
+		AVOSLOG("error: surface or window is NULL");
+		return -1;
+	}
 
 	if (as->gralloc) {
 		err = android_buffer_unlock_data(as, anb);

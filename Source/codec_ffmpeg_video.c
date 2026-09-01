@@ -589,6 +589,8 @@ static void _mark( UCHAR *data, int width, int height, int linestep )
 static int map_pixfmt( int pix_fmt )
 {
 	switch( pix_fmt ) {
+	case AV_PIX_FMT_NV12:
+		return PIXFMT_NV12;
 	case AV_PIX_FMT_YUYV422:
 	case AV_PIX_FMT_YUVJ422P:
 		return PIXFMT_YUV422P;
@@ -876,7 +878,14 @@ DBGCV2 serprintf("[   -   ]");
 
 static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, VIDEO_FRAME *src )
 {
+	if( !dec || !src )
+		return 1;
 	PRIV *p = (PRIV*)dec->priv;
+	if( !p || !p->vctx || !src->priv ) {
+		// decoder already cleaned up, skip render
+		src->dec = NULL;
+		return 1;
+	}
 	AVCodecContext *vctx = p->vctx;
 	AVFrame	*avframe = (AVFrame*)src->priv;
 DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );

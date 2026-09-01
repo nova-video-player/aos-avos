@@ -21,6 +21,8 @@
 #include "util.h"
 #include "stream.h"
 
+#include <string.h>
+
 #ifdef CONFIG_ANDROID
 #include "android_config.h"
 int acodecs_is_supported(int format, int is_video, int is_sw_allowed);
@@ -205,7 +207,28 @@ int stream_unregister_dec_audio( int format )
 //	stream_get_audio_dec
 //
 // ************************************************************
-static STREAM_DEC_AUDIO *_get_audio_dec( AUDIO_PROPERTIES *audio )
+enum {
+	AUDIO_DECODER_GROUP_OTHER,
+	AUDIO_DECODER_GROUP_FFMPEG,
+	AUDIO_DECODER_GROUP_MEDIACODEC,
+	AUDIO_DECODER_GROUP_COUNT,
+};
+
+static int _get_audio_decoder_group( const STREAM_DEC_AUDIO *decoder )
+{
+	if( !decoder || !decoder->name ) {
+		return AUDIO_DECODER_GROUP_OTHER;
+	}
+	if( !strcmp( decoder->name, "ffmpeg" ) ) {
+		return AUDIO_DECODER_GROUP_FFMPEG;
+	}
+	if( !strcmp( decoder->name, "MediaCodec" ) ) {
+		return AUDIO_DECODER_GROUP_MEDIACODEC;
+	}
+	return AUDIO_DECODER_GROUP_OTHER;
+}
+
+static int _append_audio_decoders_for_group( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders, int max_decoders, int *count, int group )
 {
 DBGS serprintf("stream_get_audio_dec(%s)\r\n", audio_get_format_name(audio) ); 
 
@@ -213,12 +236,66 @@ DBGS serprintf("stream_get_audio_dec(%s)\r\n", audio_get_format_name(audio) );
 	while( a ) {
 		if( a->format == audio->format && a->max_channels >= audio->channels ) {
 DBGS serprintf("Trying codec %s\n", a->decoder->name);
-			if(!a->decoder->is_supported || a->decoder->is_supported(audio)) {
+			if( _get_audio_decoder_group( a->decoder ) == group &&
+			    (!a->decoder->is_supported || a->decoder->is_supported(audio)) ) {
+				int i;
+				for( i = 0; i < *count; ++i ) {
+					if( decoders[i] == a->decoder ) {
+						break;
+					}
+				}
+				if( i == *count && *count < max_decoders ) {
 DBGS serprintf("Using codec %s\n", a->decoder->name);
-				return (STREAM_DEC_AUDIO*)a->decoder;
+					decoders[*count] = (STREAM_DEC_AUDIO*)a->decoder;
+					(*count)++;
+				}
 			}
 		}
 		a = a->next;
+	}
+	return *count;
+}
+
+int stream_get_audio_decs( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders, int max_decoders )
+{
+	int count = 0;
+	int pref = device_config_get_audio_decoder();
+	int i;
+
+	if( !audio || !decoders || max_decoders <= 0 ) {
+		return 0;
+	}
+
+	_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_OTHER );
+	if( pref == MP_AUDIO_DECODER_MEDIACODEC ) {
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_MEDIACODEC );
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_FFMPEG );
+	} else {
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_FFMPEG );
+		_append_audio_decoders_for_group( audio, decoders, max_decoders, &count, AUDIO_DECODER_GROUP_MEDIACODEC );
+	}
+
+	DBGS serprintf("stream_get_audio_decs: format=%s pref=%d count=%d",
+		audio_get_format_name(audio), pref, count);
+	if( count == 0 ) {
+		DBGS serprintf(" candidates=<none>");
+	} else {
+		DBGS serprintf(" candidates=");
+		for( i = 0; i < count; ++i ) {
+			DBGS serprintf("%s%s", i == 0 ? "" : ",", decoders[i]->name);
+		}
+	}
+	DBGS serprintf("\n");
+
+	return count;
+}
+
+static STREAM_DEC_AUDIO *_get_audio_dec( AUDIO_PROPERTIES *audio )
+{
+	STREAM_DEC_AUDIO *decoders[8];
+	int count = stream_get_audio_decs( audio, decoders, sizeof(decoders) / sizeof(decoders[0]) );
+	if( count > 0 ) {
+		return decoders[0];
 	}
 	return NULL;
 }
@@ -324,15 +401,34 @@ STREAM_DEC_VIDEO *stream_get_new_dec_video( VIDEO_PROPERTIES *video, STREAM_VIDE
 {
 DBGS serprintf("stream_get_new_dec_video( %d [%s], %d, %d x %d  cpu %d  forced %d name %s)\r\n", video->format, video_get_format_name(video), video->subfmt, video->width, video->height, cpu, forced , dec_name);
 	STREAM_REG_DEC_VIDEO *v = _get_dec_video( video, cpu, dec_name );
-	if( v && (forced
+	if( !v ) {
+		serprintf("stream_get_new_dec_video: no candidate format=%d[%s] subfmt=%d %dx%d cpu=%d forced=%d name=%s\n",
+			video->format, video_get_format_name(video), video->subfmt,
+			video->width, video->height, cpu, forced, dec_name ? dec_name : "(any)");
+	}
+	int allow_decode = 0;
 #ifdef CONFIG_ANDROID
-	          || (android_can_hw_run_dec(cpu) && (
-	           ( (cpu!=LIBAV) && ((acodecs_is_supported(video->format, 1, 0) || (device_config_has_pluginlib() && !acodecs_is_supported(video->format, 1, 1) ) ) ) )
-		  || ( cpu==LIBAV)))
+	int can_hw = android_can_hw_run_dec(cpu);
+	int codec_supported = 1;
+	int pluginlib_fallback = 0;
+	if( cpu != LIBAV ) {
+		codec_supported = acodecs_is_supported(video->format, 1, 0);
+		pluginlib_fallback = device_config_has_pluginlib() && !acodecs_is_supported(video->format, 1, 1);
+	}
+	allow_decode = forced || (can_hw && (
+		((cpu != LIBAV) && (codec_supported || pluginlib_fallback)) ||
+		(cpu == LIBAV)
+	));
+	if( v && !allow_decode ) {
+		serprintf("stream_get_new_dec_video: reject name=%s cpu=%d forced=%d can_hw=%d codec_supported=%d pluginlib_fallback=%d format=%d[%s] %dx%d\n",
+			v->name ? v->name : "(null)", cpu, forced, can_hw, codec_supported,
+			pluginlib_fallback, video->format, video_get_format_name(video),
+			video->width, video->height);
+	}
 #else
-		  || 1
+	allow_decode = 1;
 #endif
-	         )
+	if( v && allow_decode
 	) {
 		if( mangler )
 			*mangler = (STREAM_VIDEO_MANGLER*)v->mangler;

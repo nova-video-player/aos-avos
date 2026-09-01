@@ -311,15 +311,73 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			// Set up source data pointers and line sizes
 			const uint8_t *src_data[4] = { rect->data[0], rect->data[1], NULL, NULL };
 			int src_linesize[4] = { rect->linesize[0], 0, 0, 0 };
-			if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX && rect->nb_colors == 4) { // vobsubs with 4 colors palette
-				// vobsubs palette in RGBA format rect->data[1]{transparent background, outline, main text, anti-aliasing or shadow for edges}={0x00000000, 0xCC000000, 0x00000000, 0xBBFEFEFE}
+			if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX && rect->nb_colors == 4) {
 				uint32_t *palette = (uint32_t *)rect->data[1];
-				// swap the semi-transparent black and white: i.e. black_index = 1 (0xCC000000) with white_index = 3 (0xBBFEFEFE)
-				uint32_t tmp = palette[1];
-				palette[1] = palette[3];
-				palette[3] = tmp;
-            }
+				int counts[4] = {0, 0, 0, 0};
+					int dominant_index = -1;
+					int fill_count = -1;
+					int secondary_index = -1;
+					int outline_count = 0x7FFFFFFF;
 
+				// DVD subtitles can reuse the 4 palette slots differently across files.
+				// Count actual bitmap index usage to normalize the dominant visible slot
+				// and avoid relying on a fixed slot order.
+				for (int y = 0; y < rect->h; y++) {
+					const uint8_t *src_row = rect->data[0] + y * rect->linesize[0];
+					for (int x = 0; x < rect->w; x++) {
+						uint8_t idx = src_row[x] & 0x03;
+						counts[idx]++;
+					}
+				}
+
+				for (int c = 0; c < 4; c++) {
+					uint32_t alpha = palette[c] & 0xFF000000;
+
+					if (alpha == 0 || counts[c] == 0)
+						continue;
+
+					if (counts[c] > fill_count) {
+						fill_count = counts[c];
+							dominant_index = c;
+						}
+					}
+
+				for (int c = 0; c < 4; c++) {
+					uint32_t alpha = palette[c] & 0xFF000000;
+
+						if (alpha == 0 || counts[c] == 0 || c == dominant_index)
+							continue;
+
+						if (counts[c] < outline_count) {
+							outline_count = counts[c];
+							secondary_index = c;
+						}
+					}
+
+					if (dominant_index >= 0) {
+						DBGS serprintf("codec_ffsub: dvd gfx normalize counts=[%d,%d,%d,%d] dominant_index=%d dominant_count=%d secondary_index=%d secondary_count=%d\n",
+								counts[0], counts[1], counts[2], counts[3],
+								dominant_index, fill_count, secondary_index,
+								secondary_index >= 0 ? outline_count : -1);
+						for (int c = 0; c < 4; c++) {
+							uint32_t before = palette[c];
+							uint32_t alpha = palette[c] & 0xFF000000;
+
+							if (alpha == 0 || counts[c] == 0)
+								continue;
+
+							if (c == dominant_index) {
+								palette[c] = alpha;
+								DBGS serprintf("codec_ffsub: dvd gfx palette[%d] 0x%08X -> 0x%08X (dominant index -> black)\n",
+										c, before, palette[c]);
+							} else {
+								palette[c] = alpha | 0x00FFFFFF;
+								DBGS serprintf("codec_ffsub: dvd gfx palette[%d] 0x%08X -> 0x%08X (non-dominant visible index -> white)\n",
+										c, before, palette[c]);
+							}
+						}
+				}
+			}
 			// Set up destination data pointers and line sizes
 			uint8_t *dst_data[4] = { frame->data[0] + (rect->y - top) * frame->linestep[0] + (rect->x - left) * 4, NULL, NULL, NULL };
 			int dst_linesize[4] = { frame->linestep[0], 0, 0, 0 };
@@ -358,8 +416,17 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			frame->width = MAX(1920, right); // safer but breaks AR
 			frame->height = MAX(1080, bottom); // safer but breaks AR
 		} else if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX) {
-			frame->width = MAX(720, right); // safer but breaks AR
-			frame->height = MAX(576, bottom); // safer but breaks AR
+			int base_width = 720;
+			int base_height = 576;
+			STREAM *stream = (STREAM *)self->base.ctx;
+			if (stream && stream->video) {
+				if (stream->video->width > 0)
+					base_width = stream->video->width;
+				if (stream->video->height > 0)
+					base_height = stream->video->height;
+			}
+			frame->width = MAX(base_width, right);
+			frame->height = MAX(base_height, bottom);
 		}
 		frame->colorspace = AV_IMAGE_BGRA_32;  // Set the colorspace to BGRA
 		DBGS serprintf("codec_ffsub: decoded sub width=%d, height=%d, size=%d, window=%d,%d,%d,%d\n", frame->width, frame->height, frame->size, frame->window.x, frame->window.y, frame->window.width, frame->window.height);

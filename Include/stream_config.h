@@ -81,6 +81,7 @@ int stream_register_dec_audio_head( STREAM_REG_DEC_AUDIO *reg );
 int stream_register_dec_audio( STREAM_REG_DEC_AUDIO *reg );
 int stream_unregister_dec_audio( int format );
 STREAM_DEC_AUDIO *stream_get_audio_dec( AUDIO_PROPERTIES *audio );
+int stream_get_audio_decs( AUDIO_PROPERTIES *audio, STREAM_DEC_AUDIO **decoders, int max_decoders );
 
 #define STREAM_REGISTER_DEC_AUDIO( fmt, dec, channels ) \
 		static STREAM_REG_DEC_AUDIO _reg_##fmt##dec = { \

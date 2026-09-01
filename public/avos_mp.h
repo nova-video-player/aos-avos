@@ -54,6 +54,7 @@ typedef struct avos_mp_handle_t {
 	int (*getaudiosessionid)(avos_mp_t *mp, int *ret);
 	// video specific
 	int (*setaudiotrack)	(avos_mp_t *mp, int track, int *ret);
+	int (*refreshaudiooutput)(avos_mp_t *mp);
 	int (*checksubtitles)	(avos_mp_t *mp);
 	int (*setsubtitletrack)	(avos_mp_t *mp, int track, int *ret);
 	int (*setsubtitledelay)	(avos_mp_t *mp, int delay);

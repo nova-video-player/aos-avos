@@ -292,7 +292,7 @@ DBGSI serprintf(" ok");
 		
 		p->dropped = 0;
 		
-		if( do_fake == 1 ) {
+		if( do_fake == 1 || !p->venc_run ) {
 			render_or_drop( frame, NULL );
 			frame_q_put(&p->get_q, frame);
 		} else {

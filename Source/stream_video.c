@@ -2870,8 +2870,8 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 		!audio_interface_is_delay_valid( s->audio_ctx ) && s->audio_time < 0 ) {
 		// On Sabrina, AudioTrack timing is invalid right after resume; avoid
 		// running video ahead before first audio output establishes timing.
-		if( !s->video_resume_frame_primed ) {
-			s->video_resume_frame_primed = 1;
+		if( !s->video_hold_for_delay ) {
+			s->video_hold_for_delay = 1;
 			DBG serprintf("video_hold_on_resume: allow first frame_time=%d video_time=%d\n",
 				time, s->video_time);
 		} else {

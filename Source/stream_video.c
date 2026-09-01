@@ -905,6 +905,7 @@ next:
 			s->video_sink = NULL;
 			s->use_sink_frames = 0;
 			s->vtime_post_sink = 0;
+			s->put_time_mode = 0;
 			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
 	} 

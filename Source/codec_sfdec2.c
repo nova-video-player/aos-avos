@@ -42,6 +42,8 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+/* libavos.c: Dolby Vision playback mode (0 = passthrough) */
+extern int libavos_get_dolby_vision_mode(void);
 #endif
 #ifdef CONFIG_STREAM
 
@@ -1519,6 +1521,15 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 		video ? video->level : -1,
 		video ? video->rotation : -1);
 
+	/* Dolby Vision tone-map mode: passthrough to the device DV decoder is
+	 * disabled; the stream falls through to the tone-map decoders (HW HEVC +
+	 * libplacebo, or software HEVC for FEL content). */
+	if (video->format == VIDEO_FORMAT_DOLBY_VISION &&
+	    libavos_get_dolby_vision_mode() != 0) {
+		CLOG("sfdec2: DV tone-map mode, not using passthrough decoder");
+		return 1;
+	}
+
 	int hw_type = device_get_hw_type();
 	if (video->format == VIDEO_FORMAT_H264 && video->sps.valid && video->profile >= H264_PROFILE_HIGH10) {
 		// Do not hard-block Hi10 here: some devices can still decode via MediaCodec.
@@ -1665,7 +1676,8 @@ retry_decoder_open:
 			p->surface_handle,
 			extradata, extradata_size,
 			&pts_reorder, decoder_name, video->frame_rate_den, video->frame_rate_num,
-			video->color_primaries, video->color_trc, video->color_space, video->color_range);
+			video->color_primaries, video->color_trc, video->color_space, video->color_range,
+			video->dv_profile, video->dv_level);
 	apply_rotation(p, video->rotation, width, height, &width, &height);
 
 	if (!p->sfdec) {

@@ -379,18 +379,30 @@ DBGS serprintf("_free_video_buffers\r\n");
 // *****************************************************************************
 static int stream_open_audio_dec( STREAM *s )
 {
-	if( s->audio_dec ) {
-DBGS serprintf("stream_open_audio_dec\r\n");
-		// open the decoder
-		if( s->audio_dec->new && s->audio_dec->new( s->audio ) ) {
-serprintf("error creating audio_dec!\r\n");
-			s->audio_dec = NULL;
-			return 1;
+	STREAM_DEC_AUDIO *decoders[8];
+	int ac3_recoding;
+	int i;
+	int count;
+#ifdef CONFIG_SPDIF
+	int passthrough_mode;
+#else
+	int passthrough_mode = 0;
+#endif
+
+	if( !s->audio_dec ) {
+serprintf("no audio dec found!\r\n");
+		return 1;
 	}
+
+DBGS serprintf("stream_open_audio_dec\r\n");
+
 	// Disable downmixing when AC3 recoding is enabled - we need original multichannel PCM for encoding
-	int ac3_recoding = libavos_get_ac3_recoding_enabled();
+	ac3_recoding = libavos_get_ac3_recoding_enabled();
 DBGS serprintf("stream_open_audio_dec: downmix=%d max_channels=%d ac3_recoding=%d\r\n",
-			stream_audio_downmix, s->audio_max_channels, ac3_recoding);
+		stream_audio_downmix, s->audio_max_channels, ac3_recoding);
+	DBG serprintf("stream_open_audio_dec: input channels=%d rate=%d bits=%d passthrough=%d downmix_pref=%d max_pcm=%d ac3_recoding=%d\n",
+		s->audio->channels, s->audio->samplesPerSec, s->audio->bitsPerSample,
+		spdif_is_passthrough_on(), stream_audio_downmix, s->audio_max_channels, ac3_recoding);
 	if( stream_audio_downmix && !ac3_recoding ) {
 		s->audio->request_channels = s->audio_max_channels;
 DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r\n", s->audio->request_channels);
@@ -399,9 +411,7 @@ DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r
 DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recoding\r\n");
 	}
 #ifdef CONFIG_SPDIF
-	int passthrough_mode = spdif_is_passthrough_on();
-#else
-	int passthrough_mode = 0;
+	passthrough_mode = spdif_is_passthrough_on();
 #endif
 	if( !passthrough_mode && !ac3_recoding ) {
 		int pcm_cap = libavos_get_max_pcm_channels();         // 0 if unknown
@@ -440,15 +450,39 @@ DBGS serprintf("stream_open_audio_dec: request_channels=%d (src=%d, cap=%d)\r\n"
 	desired, s->audio->channels, pcm_cap);
 		}
 	}
-	if( s->audio_dec->open( s->audio ) ) {
-serprintf("error opening audio_dec!\r\n");
-		s->audio_dec = NULL;		
-		return 1;
-	}
+	DBG serprintf("stream_open_audio_dec: final request_channels=%d (src=%d passthrough=%d downmix_pref=%d ac3_recoding=%d)\n",
+		s->audio->request_channels, s->audio->channels, passthrough_mode, stream_audio_downmix, ac3_recoding);
+
+	count = stream_get_audio_decs( s->audio, decoders, sizeof(decoders) / sizeof(decoders[0]) );
+	for( i = 0; i < count; ++i ) {
+		int created = 0;
+		s->audio_dec = decoders[i];
+		DBG serprintf("stream_open_audio_dec: trying decoder %s (%d/%d)\n", s->audio_dec->name, i + 1, count);
+
+		if( s->audio_dec->new ) {
+			if( s->audio_dec->new( s->audio ) ) {
+serprintf("error creating audio_dec %s!\r\n", s->audio_dec->name);
+				s->audio_dec = NULL;
+				continue;
+			}
+			created = 1;
+		}
+		if( s->audio_dec->open( s->audio ) ) {
+serprintf("error opening audio_dec %s!\r\n", s->audio_dec->name);
+			if( created && s->audio_dec->delete ) {
+				s->audio_dec->delete( s->audio );
+			}
+			s->audio_dec = NULL;
+			continue;
+		}
+
+		DBG serprintf("stream_open_audio_dec: decoder opened channels=%d request_channels=%d bytesPerFrame=%d\n",
+			s->audio->channels, s->audio->request_channels,
+			s->audio->channels * s->audio->bitsPerSample / 8);
 		s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
 
 		memset( &s->audio_rc, 0, sizeof( s->audio_rc ) );
-		if( s->audio_dec->get_rc ) {			
+		if( s->audio_dec->get_rc ) {
 			if( !s->audio_dec->get_rc( s->audio, &s->audio_rc ) ) {
 DBGS stream_show_rc( &s->audio_rc );
 			}
@@ -462,10 +496,11 @@ DBGS stream_show_rc( &s->audio_rc );
 			stream_dump_pcm = 0;
 			s->dump_pcm_fd = file_open( HDD_ROOT"audio.pcm", O_WRONLY | O_CREAT | O_TRUNC, 0600 );
 		}
-		
+
 		return 0;
 	}
 serprintf("no audio dec found!\r\n");
+	s->audio_dec = NULL;
 
 	return 1;
 }
@@ -689,23 +724,38 @@ DBGS serprintf("stream_open_video_dec\r\n");
 		forced = 1;
 	}
 	while( prio ) {
+		int try_prio = prio;
 		// reset previous error states
 		s->video_error           = VE_NO_ERROR;
 		s->video_error_qualifier = VEQ_NONE;
 		s->video_error_desc[0]   = '\0';
+		serprintf("stream_open_video_dec: try format=%d[%s] %dx%d subfmt=%d profile=%d prio=%d forced=%d\n",
+			s->video ? s->video->format : -1,
+			s->video ? video_get_format_name(s->video) : "(null)",
+			s->video ? s->video->width : -1,
+			s->video ? s->video->height : -1,
+			s->video ? s->video->subfmt : -1,
+			s->video ? s->video->profile : -1,
+			try_prio, forced);
 		// try to get a video decoder
 		s->video_dec = stream_get_new_dec_video( s->video, &s->video_mangler, prio, forced, stream_force_codec );
 		prio = stream_force_prio ? 0 : prio - 1;
 		
 		if( !s->video_dec) {
+			serprintf("stream_open_video_dec: no decoder candidate at prio=%d, fallback to next\n", try_prio);
 			goto next;
 		}
 		// try to open the decoder
 		if( s->video_dec->open( s->video_dec, s->video, s, &s->video->flush_frames, &s->video->delay_frames ) ) {
 			// no dec
-serprintf("error opening video_dec[%s]!\n", s->video_dec->name);
+serprintf("error opening video_dec[%s] cpu=%d at prio=%d (video_error=%d qual=%d desc=%s), fallback\n",
+				s->video_dec->name, s->video_dec->cpu, try_prio,
+				s->video_error, s->video_error_qualifier,
+				s->video_error_desc[0] ? s->video_error_desc : "(none)");
 			goto next;
 		}
+		serprintf("stream_open_video_dec: selected video_dec[%s] cpu=%d at prio=%d\n",
+			s->video_dec->name, s->video_dec->cpu, try_prio);
 
 		memset( &s->video_rc, 0, sizeof( s->video_rc ) );
 		if( s->video_dec->get_rc ) {			
@@ -795,17 +845,8 @@ DBGS serprintf("stream_open_video_dec: %s/%d/%d done!\r\n", s->video_dec->name, 
 
 		return 0;
 next:
-		if (s->video_dec) {
-			if (s->video_dec->is_open) {
-				// call cleanup if needed
-				if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
-serprintf("error, could not cleanup video dec!\n");
-				}
-				s->video_dec->close( s->video_dec );
-			}
-			s->video_dec->destroy( s->video_dec );
-			s->video_dec = NULL;
-		}
+		// Close the video sink first to join its threads and ensure no
+		// render/convert callbacks reference decoder-owned data
 		if (s->video_sink) {
 			if (s->video_sink->is_open) {
 				s->video_sink->close(s->video_sink);
@@ -816,6 +857,17 @@ serprintf("error, could not cleanup video dec!\n");
 			s->video_sink->delete(s->video_sink);
 			s->video_sink = NULL;
 			s->put_time_mode = 0;
+		}
+		if (s->video_dec) {
+			if (s->video_dec->is_open) {
+				// call cleanup if needed
+				if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
+serprintf("error, could not cleanup video dec!\n");
+				}
+				s->video_dec->close( s->video_dec );
+			}
+			s->video_dec->destroy( s->video_dec );
+			s->video_dec = NULL;
 		}
 	} 
 ErrorExit:
@@ -910,6 +962,12 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 // *****************************************************************************
 static void stream_close_video_dec( STREAM *s )
 {
+	// Close the video sink first to join its threads (venc_thread, copy_thread)
+	// and ensure no render/convert callbacks are in progress that reference
+	// decoder-owned data (AVFrame pointers in frame->priv)
+	if( s->video_sink && s->video_sink->is_open ) {
+		s->video_sink->close( s->video_sink );
+	}
 	if( s->video_dec) {
 DBGS serprintf("stream_close_video_dec\r\n");
 		// call cleanup if needed
@@ -919,9 +977,6 @@ serprintf("error, could not cleanup video dec!\n");
 		s->video_dec->close( s->video_dec );
 		s->video_dec->destroy( s->video_dec );
 		s->video_dec = NULL;
-	}
-	if( s->video_sink && s->video_sink->is_open ) {
-		s->video_sink->close( s->video_sink );
 	}
 
 	_free_video_buffers( s );
@@ -1362,6 +1417,9 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 	// Reset sample counter to prevent sync drift from samples accumulated at old rate
 	s->audio_ref_time = -1;
 	s->audio_samples  = 0;
+	s->audio_time_remainder_us = 0;
+	s->smoothed_av_delay = -1;
+	s->av_delay_history_count = 0;
 
 	// stop audio sink
 	if( s->audio_sink) {
@@ -2861,25 +2919,11 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 //
 // ************************************************************
 
-static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
+static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
 		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
-	if( get_android_sync() && s->audio_resume_pending && s->audio_ctx &&
-		!audio_interface_is_delay_valid( s->audio_ctx ) && s->audio_time < 0 ) {
-		// On Sabrina, AudioTrack timing is invalid right after resume; avoid
-		// running video ahead before first audio output establishes timing.
-		if( !s->video_hold_for_delay ) {
-			s->video_hold_for_delay = 1;
-			DBG serprintf("video_hold_on_resume: allow first frame_time=%d video_time=%d\n",
-				time, s->video_time);
-		} else {
-			DBG serprintf("video_hold_on_resume: skip frame_time=%d video_time=%d (delay invalid)\n",
-				time, s->video_time);
-			return;
-		}
-	}
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;
@@ -2900,16 +2944,25 @@ static void _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 	frame->aspect_n = s->video->aspect_n,
 	frame->aspect_d = s->video->aspect_d;
 	frame->duration = RST_TO_TS_DELTA(s->video->msPerFrame, int);
-				
+	int dec_q_before = frame_q_count( &s->decode_q );
+	int sink_count_before = s->video_sink_count;
+
 	pthread_mutex_lock( &s->video_sink_mutex );
 	s->sink_delay = frame->blit_time - s->video_sink->put( s->video_sink, frame ); 	
 	s->video_sink_count ++;
 	pthread_mutex_unlock( &s->video_sink_mutex );
+	int dec_q_after = frame_q_count( &s->decode_q );
+	int sink_count_after = s->video_sink_count;
+	DBG2 serprintf("_put_frame_q_dbg: frame=%d blit=%d real=%d dec_q=%d->%d sink_count=%d->%d sink_delay=%d put_time_mode=%d av_delay=%d\n",
+		frame->time, frame->blit_time, real_time_calc,
+		dec_q_before, dec_q_after, sink_count_before, sink_count_after,
+		s->sink_delay, s->put_time_mode, s->av_delay);
 DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 	if( s->play_n_video_one ) {
 		s->play_n_video_frames = 0;
 		s->play_n_video_one    = 0;
 	}
+	return 1;
 }
 
 // ************************************************************
@@ -2950,6 +3003,48 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
 		goto Discard;
 	}
+	// For passthrough/AC3 recoding, wait for the first actual audio write
+	// before releasing video.  For PCM, do NOT wait for delay_valid: blocking
+	// video while the audio thread keeps writing lets audio run hundreds of ms
+	// ahead, producing a large initial A/V diff that takes many frames to
+	// converge.  The static/fallback delay is close enough for initial
+	// render_offset anchoring and the sync system self-corrects within a few
+	// frames once dynamic delay stabilises.
+	// Skip the hold during seek preview: play_n_video_frames > 0 means we are in
+	// _stream_play_n_frames() showing scrub thumbnails.  Audio is idle during seek
+	// so delay_valid can never become 1 and the hold just burns the 2-second timeout.
+	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx &&
+	    !s->seek_paused && s->play_n_video_frames <= 0 ) {
+		int hold_wait_ms = 0;
+		int passthrough_active = (s->audio_sink && s->audio_sink->get_passthrough) ?
+			s->audio_sink->get_passthrough( s ) : 0;
+		int ac3_recoding = libavos_get_ac3_recoding_enabled();
+		int wait_for_resume_audio = ((passthrough_active > 0) || ac3_recoding) && s->video_hold_for_resume_audio;
+		// Only hold for passthrough/AC3 resume — PCM skips the wait entirely.
+		if( wait_for_resume_audio ) {
+			while( !_engine_abort( s ) &&
+			       s->audio_ctx &&
+			       s->video_hold_for_resume_audio &&
+			       hold_wait_ms < 2000 ) {
+				if( (hold_wait_ms % 200) == 0 ) {
+					DBG serprintf("video_hold_for_delay: waiting frame_time=%d (%d ms, pt=%d recode=%d wait_resume_audio=%d delay_valid=%d)\n",
+						frame->time, hold_wait_ms, passthrough_active, ac3_recoding,
+						wait_for_resume_audio, audio_interface_is_delay_valid( s->audio_ctx ));
+				}
+				msec_sleep( 10 );
+				hold_wait_ms += 10;
+			}
+		}
+		s->video_hold_for_delay = 0;
+		s->video_hold_for_resume_audio = 0;
+		if( hold_wait_ms >= 2000 ) {
+			serprintf("video_hold_for_delay: timeout after %d ms\n", hold_wait_ms);
+		} else {
+			DBG serprintf("video_hold_for_delay: released after %d ms, frame_time=%d pt=%d recode=%d wait_resume_audio=%d\n",
+				hold_wait_ms, frame->time, passthrough_active, ac3_recoding, wait_for_resume_audio);
+		}
+	}
+
 	int sync_wait_ms = 0;
 	const int sync_wait_timeout_ms = 5000; // Avoid indefinite freeze if audio never starts
 
@@ -3017,8 +3112,9 @@ DBGY serprintf("[ %8d] ", frame->time );
 				s->drop_count = 0;
 			}
 
-			_put_frame_in_sink( s, frame, frame->time );
-			
+			if( !_put_frame_in_sink( s, frame, frame->time ) ) {
+				goto Discard;
+			}
 			if( qframe ) {
 				// we gave this frame to the sink!
 				*qframe = NULL;
@@ -4027,6 +4123,7 @@ static int _handle_video_codec_error( STREAM *s )
 serprintf("no lower prio possible!\n" ); 
 		return 1;
 	}	
+	serprintf("_handle_video_codec_error: downgrade decoder priority %d -> %d\n", cpu + 1, cpu);
 	stream_set_cpu_priority( s, cpu );
 
 	if( stream_open_video_dec( s, NULL ) ) {
@@ -4753,6 +4850,15 @@ serprintf("PNF: not open!\r\n");
 //serprintf("-");	
 		stream_yield();
 	}
+	if( s->play_n_video_frames ) {
+		// Seek decode did not converge in time. Clear one-shot seek state so
+		// playback can continue instead of staying stuck in seek-drop mode.
+		DBG serprintf("SEEK_PNF_TIMEOUT: target_ts=%d old_ts=%d video_time=%d audio_time=%d left=%d\n",
+			time, old_time, s->video_time, s->audio_time, s->play_n_video_frames);
+		s->play_n_video_frames = 0;
+		s->play_n_video_time = -1;
+		s->play_n_old_time = 0;
+	}
 
 	_stream_wait_for_idle( s, 1000 );
 }
@@ -4832,7 +4938,7 @@ serprintf("SSP: not open!\r\n");
 //	stream_set_audio_stream
 //
 // *****************************************************************************
-int stream_set_audio_stream( STREAM *s, int audio_stream )
+static int stream_set_audio_stream_internal( STREAM *s, int audio_stream, int force_refresh )
 {
 serprintf("stream_set_audio_stream( %d )\r\n", audio_stream );
 DBGS {
@@ -4856,7 +4962,7 @@ serprintf("SAS: not audio!\r\n");
 serprintf("SAS: audio_stream > av.as_max\n");	
 		return 1;
 	}
-	if( audio_stream == s->av.as ) {
+	if( !force_refresh && audio_stream == s->av.as ) {
 serprintf("SAS: audio_stream already set\n");	
 		return 0;
 	}
@@ -4952,6 +5058,16 @@ ErrorExit:
 	stream_un_pause( s, was_paused );
 	
 	return 0;
+}
+
+int stream_set_audio_stream( STREAM *s, int audio_stream )
+{
+	return stream_set_audio_stream_internal( s, audio_stream, 0 );
+}
+
+int stream_refresh_audio_stream( STREAM *s )
+{
+	return stream_set_audio_stream_internal( s, s->av.as, 1 );
 }
 
 

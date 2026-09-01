@@ -15,6 +15,8 @@
  */
 
 #include <stdlib.h>
+#include <inttypes.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "global.h"
@@ -46,6 +48,10 @@ void device_config_set_pluginlib(int pluginlib);
 void device_config_set_subtitlepath(const char *path);
 void device_config_set_decoder(int decoder);
 void device_config_set_audio_interface(int audio_interface);
+void device_config_set_audio_decoder(int audio_decoder);
+void device_config_set_mediacodec_audio_capabilities(int64_t capabilities);
+void device_config_set_spatializer_capabilities(int capabilities);
+void device_config_set_spatializer_enabled(int enabled);
 void device_config_set_output_sample_rate(int sample_rate);
 #ifdef CONFIG_ANDROID
 void set_android_sync(int enable);
@@ -120,6 +126,81 @@ void libavos_avsh(const char *cmd)
 #endif
 }
 
+static int ac3_recoding_enabled = 0;
+static int pcm_output_max_channels = 0;
+
+static void log_audio_capabilities64(const char *label, int64_t flags)
+{
+	int first = 1;
+	serprintf("%s: flags=0x%" PRIx64 " codecs=", label, flags);
+	if( flags & ((int64_t)1 << 5) ) {
+		serprintf("%sAC3", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 6) ) {
+		serprintf("%sE_AC3", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 7) ) {
+		serprintf("%sDTS", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 8) ) {
+		serprintf("%sDTS_HD", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 9) ) {
+		serprintf("%sMP3", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 10) ) {
+		serprintf("%sAAC_LC", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 14) ) {
+		serprintf("%sTRUEHD", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 18) ) {
+		serprintf("%sE_AC3_JOC", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 20) ) {
+		serprintf("%sOPUS", first ? "" : ",");
+		first = 0;
+	}
+	if( flags & ((int64_t)1 << 29) ) {
+		serprintf("%sDTS_HD_MA", first ? "" : ",");
+		first = 0;
+	}
+	if( first ) {
+		serprintf("<none>");
+	}
+	serprintf("\n");
+}
+
+static void log_spatializer_capabilities(const char *label, int capabilities)
+{
+	int first = 1;
+	serprintf("%s: flags=0x%x state=", label, capabilities);
+	if( capabilities & 1 ) {
+		serprintf("%ssupported", first ? "" : ",");
+		first = 0;
+	}
+	if( capabilities & (1 << 1) ) {
+		serprintf("%savailable", first ? "" : ",");
+		first = 0;
+	}
+	if( capabilities & (1 << 2) ) {
+		serprintf("%senabled", first ? "" : ",");
+		first = 0;
+	}
+	if( first ) {
+		serprintf("<none>");
+	}
+	serprintf("\n");
+}
+
 void libavos_set_subtitlepath(const char *path)
 {
 	device_config_set_subtitlepath(path);
@@ -135,6 +216,29 @@ void libavos_set_audio_interface(int audio_interface)
 	device_config_set_audio_interface(audio_interface);
 }
 
+void libavos_set_audio_decoder(int audio_decoder)
+{
+	device_config_set_audio_decoder(audio_decoder);
+}
+
+void libavos_set_mediacodec_audio_capabilities(int64_t capabilities)
+{
+	log_audio_capabilities64("libavos_set_mediacodec_audio_capabilities", capabilities);
+	device_config_set_mediacodec_audio_capabilities(capabilities);
+}
+
+void libavos_set_spatializer_capabilities(int capabilities)
+{
+	log_spatializer_capabilities("libavos_set_spatializer_capabilities", capabilities);
+	device_config_set_spatializer_capabilities(capabilities);
+}
+
+void libavos_set_spatializer_enabled(int enabled)
+{
+	serprintf("libavos_set_spatializer_enabled: %d\n", enabled);
+	device_config_set_spatializer_enabled(enabled);
+}
+
 void libavos_set_codepage(int codepage)
 {
 	I18N_set_codepage(codepage);
@@ -145,75 +249,9 @@ void libavos_set_output_sample_rate(int sample_rate)
 	device_config_set_output_sample_rate(sample_rate);
 }
 
-static int ac3_recoding_enabled = 0;
-static int pcm_output_max_channels = 0;
-
-/* Dolby Vision playback mode:
- * 0 = passthrough: route DV bitstream to the device Dolby Vision decoder (MediaCodec)
- * 1 = tone-map:    software HEVC decode + libplacebo GPU reshaping to HDR10 (mpv-style)
- */
-static int dolby_vision_mode = 0;
-
-int libavos_get_dolby_vision_mode(void)
-{
-	return dolby_vision_mode;
-}
-
-void libavos_set_dolby_vision_mode(int mode)
-{
-	serprintf("libavos_set_dolby_vision_mode: mode=%d (%s)\n", mode,
-	          mode ? "tone-map to HDR10" : "passthrough");
-	dolby_vision_mode = (mode != 0) ? 1 : 0;
-}
-
-/*
- * Dolby Vision tone-map target luminance (nits).
- * 0 = automatic: the renderer falls back to the source HDR max_luma/default.
- * The Java layer resolves "auto from display" to the display's reported max
- * luminance (HdrCapabilities) before calling the setter.
- */
-static float dolby_vision_target_nits = 0.f;
-
-float libavos_get_dolby_vision_target_nits(void)
-{
-	return dolby_vision_target_nits;
-}
-
-void libavos_set_dolby_vision_target_nits(float nits)
-{
-	serprintf("libavos_set_dolby_vision_target_nits: %.1f nits%s\n", nits,
-	          nits > 0.f ? "" : " (auto)");
-	dolby_vision_target_nits = (nits > 0.f) ? nits : 0.f;
-}
-
 int libavos_get_ac3_recoding_enabled(void)
 {
 	return ac3_recoding_enabled;
-}
-
-/*
- * Dolby Vision / libplacebo plane scaler (EL residual + chroma upscaling,
- * the libplacebo SAMPLER_PLANE stage - mpv --cscale). 0 = default
- * (inherit from the main scaler = lanczos, mpv's default), 1 = bilinear
- * (cheapest), 2 = bicubic, 3 = ewa_lanczossharp (highest quality, most
- * GPU expensive). Read by dovi_gl at every render.
- */
-static int dolby_vision_plane_scaler = 0;
-
-int libavos_get_dolby_vision_plane_scaler(void)
-{
-	return dolby_vision_plane_scaler;
-}
-
-void libavos_set_dolby_vision_plane_scaler(int scaler)
-{
-	serprintf("libavos_set_dolby_vision_plane_scaler: %d (%s)\n", scaler,
-	          scaler == 0 ? "default (lanczos)" :
-	          scaler == 1 ? "bilinear" :
-	          scaler == 2 ? "bicubic" :
-	          scaler == 3 ? "ewa_lanczossharp" : "?");
-	if (scaler >= 0 && scaler <= 3)
-		dolby_vision_plane_scaler = scaler;
 }
 
 void libavos_set_passthrough(int force_passthrough)
@@ -240,6 +278,7 @@ void libavos_set_passthrough(int force_passthrough)
 void libavos_set_hdmi_supported_audio_codecs(long flag)
 {
 #ifdef CONFIG_ANDROID
+	log_audio_capabilities64("libavos_set_hdmi_supported_audio_codecs", flag);
 	set_hdmi_supported_audio_codecs(flag);
 #endif
 }
@@ -339,4 +378,67 @@ void libavos_set_default_stream_max_iframe_size(int size)
 int (*libavos_transform_audio)(float* buf, int nsamples);
 void libavos_set_audio_transform(int (*transformer)(float* buf, int nsamples)) {
 	libavos_transform_audio = transformer;
+}
+
+/* Dolby Vision playback mode:
+ * 0 = passthrough: route DV bitstream to the device Dolby Vision decoder (MediaCodec)
+ * 1 = tone-map:    software HEVC decode + libplacebo GPU reshaping to HDR10 (mpv-style)
+ */
+static int dolby_vision_mode = 0;
+
+int libavos_get_dolby_vision_mode(void)
+{
+	return dolby_vision_mode;
+}
+
+void libavos_set_dolby_vision_mode(int mode)
+{
+	serprintf("libavos_set_dolby_vision_mode: mode=%d (%s)\n", mode,
+	          mode ? "tone-map to HDR10" : "passthrough");
+	dolby_vision_mode = (mode != 0) ? 1 : 0;
+}
+
+/*
+ * Dolby Vision tone-map target luminance (nits).
+ * 0 = automatic: the renderer falls back to the source HDR max_luma/default.
+ * The Java layer resolves "auto from display" to the display's reported max
+ * luminance (HdrCapabilities) before calling the setter.
+ */
+static float dolby_vision_target_nits = 0.f;
+
+float libavos_get_dolby_vision_target_nits(void)
+{
+	return dolby_vision_target_nits;
+}
+
+void libavos_set_dolby_vision_target_nits(float nits)
+{
+	serprintf("libavos_set_dolby_vision_target_nits: %.1f nits%s\n", nits,
+	          nits > 0.f ? "" : " (auto)");
+	dolby_vision_target_nits = (nits > 0.f) ? nits : 0.f;
+}
+
+/*
+ * Dolby Vision / libplacebo plane scaler (EL residual + chroma upscaling,
+ * the libplacebo SAMPLER_PLANE stage - mpv --cscale). 0 = default
+ * (inherit from the main scaler = lanczos, mpv's default), 1 = bilinear
+ * (cheapest), 2 = bicubic, 3 = ewa_lanczossharp (highest quality, most
+ * GPU expensive). Read by dovi_gl at every render.
+ */
+static int dolby_vision_plane_scaler = 0;
+
+int libavos_get_dolby_vision_plane_scaler(void)
+{
+	return dolby_vision_plane_scaler;
+}
+
+void libavos_set_dolby_vision_plane_scaler(int scaler)
+{
+	serprintf("libavos_set_dolby_vision_plane_scaler: %d (%s)\n", scaler,
+	          scaler == 0 ? "default (lanczos)" :
+	          scaler == 1 ? "bilinear" :
+	          scaler == 2 ? "bicubic" :
+	          scaler == 3 ? "ewa_lanczossharp" : "?");
+	if (scaler >= 0 && scaler <= 3)
+		dolby_vision_plane_scaler = scaler;
 }

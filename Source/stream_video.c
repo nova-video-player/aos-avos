@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -908,6 +908,17 @@ next:
 			s->put_time_mode = 0;
 			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
+		if (s->video_dec) {
+			if (s->video_dec->is_open) {
+				// call cleanup if needed
+				if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
+serprintf("error, could not cleanup video dec!\n");
+				}
+				s->video_dec->close( s->video_dec );
+			}
+			s->video_dec->destroy( s->video_dec );
+			s->video_dec = NULL;
+		}
 	} 
 ErrorExit:
 serprintf("no video_dec found!\r\n");
@@ -1548,6 +1559,8 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 	s->audio_ref_time = -1;
 	s->audio_samples  = 0;
 	s->audio_time_remainder_us = 0;
+
+	s->smoothed_av_delay = -1;
 	s->av_delay_history_count = 0;
 
 	// stop audio sink
@@ -3320,7 +3333,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 			s->audio_sink->get_passthrough( s ) : 0;
 		int ac3_recoding = libavos_get_ac3_recoding_enabled();
 		int wait_for_resume_audio = ((passthrough_active > 0) || ac3_recoding) && s->video_hold_for_resume_audio;
-		// Only hold for passthrough/AC3 resume — PCM skips the wait entirely.
+		// Only hold for passthrough/AC3 resume ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â PCM skips the wait entirely.
 		if( wait_for_resume_audio ) {
 			while( !_engine_abort( s ) &&
 			       s->audio_ctx &&

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -249,47 +249,6 @@ void libavos_set_output_sample_rate(int sample_rate)
 	device_config_set_output_sample_rate(sample_rate);
 }
 
-static int ac3_recoding_enabled = 0;
-static int pcm_output_max_channels = 0;
-
-/* Dolby Vision playback mode:
- * 0 = passthrough: route DV bitstream to the device Dolby Vision decoder (MediaCodec)
- * 1 = tone-map:    software HEVC decode + libplacebo GPU reshaping to HDR10 (mpv-style)
- */
-static int dolby_vision_mode = 0;
-
-int libavos_get_dolby_vision_mode(void)
-{
-	return dolby_vision_mode;
-}
-
-void libavos_set_dolby_vision_mode(int mode)
-{
-	serprintf("libavos_set_dolby_vision_mode: mode=%d (%s)\n", mode,
-	          mode ? "tone-map to HDR10" : "passthrough");
-	dolby_vision_mode = (mode != 0) ? 1 : 0;
-}
-
-/*
- * Dolby Vision tone-map target luminance (nits).
- * 0 = automatic: the renderer falls back to the source HDR max_luma/default.
- * The Java layer resolves "auto from display" to the display's reported max
- * luminance (HdrCapabilities) before calling the setter.
- */
-static float dolby_vision_target_nits = 0.f;
-
-float libavos_get_dolby_vision_target_nits(void)
-{
-	return dolby_vision_target_nits;
-}
-
-void libavos_set_dolby_vision_target_nits(float nits)
-{
-	serprintf("libavos_set_dolby_vision_target_nits: %.1f nits%s\n", nits,
-	          nits > 0.f ? "" : " (auto)");
-	dolby_vision_target_nits = (nits > 0.f) ? nits : 0.f;
-}
-
 int libavos_get_ac3_recoding_enabled(void)
 {
 	return ac3_recoding_enabled;
@@ -452,4 +411,67 @@ void libavos_set_default_stream_max_iframe_size(int size)
 int (*libavos_transform_audio)(float* buf, int nsamples);
 void libavos_set_audio_transform(int (*transformer)(float* buf, int nsamples)) {
 	libavos_transform_audio = transformer;
+}
+
+/* Dolby Vision playback mode:
+ * 0 = passthrough: route DV bitstream to the device Dolby Vision decoder (MediaCodec)
+ * 1 = tone-map:    software HEVC decode + libplacebo GPU reshaping to HDR10 (mpv-style)
+ */
+static int dolby_vision_mode = 0;
+
+int libavos_get_dolby_vision_mode(void)
+{
+	return dolby_vision_mode;
+}
+
+void libavos_set_dolby_vision_mode(int mode)
+{
+	serprintf("libavos_set_dolby_vision_mode: mode=%d (%s)\n", mode,
+	          mode ? "tone-map to HDR10" : "passthrough");
+	dolby_vision_mode = (mode != 0) ? 1 : 0;
+}
+
+/*
+ * Dolby Vision tone-map target luminance (nits).
+ * 0 = automatic: the renderer falls back to the source HDR max_luma/default.
+ * The Java layer resolves "auto from display" to the display's reported max
+ * luminance (HdrCapabilities) before calling the setter.
+ */
+static float dolby_vision_target_nits = 0.f;
+
+float libavos_get_dolby_vision_target_nits(void)
+{
+	return dolby_vision_target_nits;
+}
+
+void libavos_set_dolby_vision_target_nits(float nits)
+{
+	serprintf("libavos_set_dolby_vision_target_nits: %.1f nits%s\n", nits,
+	          nits > 0.f ? "" : " (auto)");
+	dolby_vision_target_nits = (nits > 0.f) ? nits : 0.f;
+}
+
+/*
+ * Dolby Vision / libplacebo plane scaler (EL residual + chroma upscaling,
+ * the libplacebo SAMPLER_PLANE stage - mpv --cscale). 0 = default
+ * (inherit from the main scaler = lanczos, mpv's default), 1 = bilinear
+ * (cheapest), 2 = bicubic, 3 = ewa_lanczossharp (highest quality, most
+ * GPU expensive). Read by dovi_gl at every render.
+ */
+static int dolby_vision_plane_scaler = 0;
+
+int libavos_get_dolby_vision_plane_scaler(void)
+{
+	return dolby_vision_plane_scaler;
+}
+
+void libavos_set_dolby_vision_plane_scaler(int scaler)
+{
+	serprintf("libavos_set_dolby_vision_plane_scaler: %d (%s)\n", scaler,
+	          scaler == 0 ? "default (lanczos)" :
+	          scaler == 1 ? "bilinear" :
+	          scaler == 2 ? "bicubic" :
+	          scaler == 3 ? "ewa_lanczossharp" : "?");
+	if (scaler >= 0 && scaler <= 3)
+		dolby_vision_plane_scaler = scaler;
 }

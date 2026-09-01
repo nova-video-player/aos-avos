@@ -2443,8 +2443,8 @@ static STREAM_PARSER stream_parser_FFMPEG = {
 	_calc_rate,
 	_get_audio_cdata,
 	_get_video_cdata,
-	_get_dovi_el_packet,
 	_get_subtitle_cdata,
+	_get_dovi_el_packet,
 	_peek_n_audio_chunk,
 	_seek_time,	//_seek_time
 	_seek_pos,	//_seek_pos

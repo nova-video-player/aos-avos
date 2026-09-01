@@ -46,9 +46,12 @@ const uint8_t *dovi_next_nal(const uint8_t *data, int size, int lsize,
 		*pos += len;
 		return data;
 	}
-	/* Annex-B: find next start code */
-	{
+	/* Annex-B: find next start code (iterative - zero-width NALs are
+	 * skipped by looping, never recursion: a crafted AU of repeated
+	 * start codes recursed ~350K deep per tail call and blew the stack) */
+	for (;;) {
 		int i = *pos, start = -1, sc_len = 0;
+		int end, j;
 		for (; i + 2 < size; i++) {
 			if (!data[i] && !data[i + 1] && data[i + 2] == 1) {
 				if (i > 0 && !data[i - 1]) { start = i - 1; sc_len = 4; }
@@ -59,20 +62,18 @@ const uint8_t *dovi_next_nal(const uint8_t *data, int size, int lsize,
 		if (start < 0)
 			return NULL;
 		/* NAL payload runs until the next start code (or end) */
-		{
-			int end = size, j;
-			for (j = start + sc_len; j + 2 < size; j++) {
-				if (!data[j] && !data[j + 1] && data[j + 2] == 1) {
-					end = (j > 0 && !data[j - 1]) ? j - 1 : j;
-					break;
-				}
+		end = size;
+		for (j = start + sc_len; j + 2 < size; j++) {
+			if (!data[j] && !data[j + 1] && data[j + 2] == 1) {
+				end = (j > 0 && !data[j - 1]) ? j - 1 : j;
+				break;
 			}
-			*nal_size = end - (start + sc_len);
-			*pos = end;
-			if (*nal_size <= 0)
-				return dovi_next_nal(data, size, lsize, pos, nal_size);
-			return data + start + sc_len;
 		}
+		*nal_size = end - (start + sc_len);
+		*pos = end;
+		if (*nal_size > 0)
+			return data + start + sc_len;
+		/* zero-width NAL: keep scanning from the new pos */
 	}
 }
 

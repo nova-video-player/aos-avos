@@ -10,6 +10,34 @@
 
 #define DBG if(Debug[DBG_SUB])
 
+// RIBBI = Regular/Bold/Italic/Bold Italic. For these, bare `family` is
+// already the font's own name -- appending the style would often produce
+// a string the font doesn't actually have in its name table.
+static int is_ribbi_style(const char *style) {
+    if (!style || !style[0]) return 1;
+    return strcasecmp(style, "Regular") == 0 ||
+           strcasecmp(style, "Bold") == 0 ||
+           strcasecmp(style, "Italic") == 0 ||
+           strcasecmp(style, "Bold Italic") == 0;
+}
+
+// For a named (non-RIBBI) instance like "Medium" or "SemiBold", `family`
+// alone (e.g. "Roboto") can collide with an unrelated system font of the
+// same name, since ASS_Style has no way to request a specific weight.
+// "family style" (e.g. "Roboto Medium") reconstructs the font's own
+// legacy full name instead, which is unique to this file.
+static void build_requested_family(const char *family, const char *style, char *out, size_t out_cap) {
+    if (is_ribbi_style(style)) {
+        size_t len = strlen(family);
+        if (len >= out_cap) len = out_cap - 1;
+        memcpy(out, family, len);
+        out[len] = '\0';
+        return;
+    }
+    int n = snprintf(out, out_cap, "%s %s", family, style);
+    if (n < 0) out[0] = '\0';
+}
+
 // Was previously duplicated near-verbatim as a static resolve_real_family_name()
 // in both sub_format_ssa.c and sub_format_srt.c -- consolidated here since it's
 // pure font_name_parser-facing utility logic (path/selector parsing + a
@@ -60,12 +88,9 @@ int font_name_resolve_family(const char *fonts_dir, const char *stored_value, ch
         if (result.entries[i].face_index == wanted_face &&
             result.entries[i].named_instance == wanted_instance &&
             result.entries[i].family[0] != '\0') {
-            size_t len = strlen(result.entries[i].family);
-            if (len >= out_cap) len = out_cap - 1;
-            memcpy(out, result.entries[i].family, len);
-            out[len] = '\0';
-            DBG serprintf("SUB_FONTS: resolved '%s' (face=%d instance=%d) -> real family '%s'\n",
-                 filename, wanted_face, wanted_instance, out);
+            build_requested_family(result.entries[i].family, result.entries[i].style, out, out_cap);
+            DBG serprintf("SUB_FONTS: resolved '%s' (face=%d instance=%d) -> real family '%s' (family='%s' style='%s')\n",
+                 filename, wanted_face, wanted_instance, out, result.entries[i].family, result.entries[i].style);
             return 1;
         }
     }
@@ -79,10 +104,7 @@ int font_name_resolve_family(const char *fonts_dir, const char *stored_value, ch
          "falling back to first available entry\n", wanted_face, wanted_instance, filename, result.count);
     for (int i = 0; i < result.count; i++) {
         if (result.entries[i].family[0] != '\0') {
-            size_t len = strlen(result.entries[i].family);
-            if (len >= out_cap) len = out_cap - 1;
-            memcpy(out, result.entries[i].family, len);
-            out[len] = '\0';
+            build_requested_family(result.entries[i].family, result.entries[i].style, out, out_cap);
             return 1;
         }
     }

@@ -167,7 +167,11 @@ typedef struct {
 	int	el_params_sent;	/* 1: in-band VPS/SPS/PPS prepended once */
 	/* BL buffer-mode decode (FEL only) */
 	int	stride, slice_height, color_format;
-	AVFrame		*bl_q[4];
+	/* BL parking depth. mpv f_enhancement_pair holds QUEUE_MAX=8 pending
+	 * BLs through the EL warm-up (el_seen==0, no pressure drops); 4 would
+	 * overflow the array the moment the warm-up hold (dvhw_fel_emit /
+	 * park-side drop both gate on el_seen) actually engages. */
+	AVFrame		*bl_q[8];
 	int	bl_q_count;
 } PRIV;
 
@@ -976,7 +980,7 @@ static AVFrame *dvhw_fel_emit(PRIV *p, AVFrame **el_out)
 	}
 	if (p->el_q_count && p->el_q[0]->pts > bl->pts)
 		goto emit;	/* proven absent: EL jumped past this BL */
-	if (p->bl_q_count >= 4 && p->el_seen)
+	if (p->bl_q_count >= 8 && p->el_seen)
 		goto emit;	/* queue pressure, EL warm */
 	/* EL fully drained AND the parser has no more EL packets (probed
 	 * in dvhw_el_feed, cleared on flush): the parked BLs' ELs will never
@@ -1148,20 +1152,18 @@ static int dvhw_decode2(STREAM_DEC_VIDEO *dec, UCHAR *data, int size,
 				}
 				/* park the BL frame: its EL partner may still be in the EL
 				 * codec pipeline (async reorder lag); dvhw_fel_emit pairs */
-				if (p->bl_q_count >= 4) {
-					/* mpv holds pending BLs through the EL warm-up (QUEUE_MAX=8
-				 * + set_extra_hw_frames) and only drops with affirmative
-				 * stale-EL evidence; dropping unconditionally here would
-				 * eat the first frames after every seek on a cold EL codec.
-					 * Once the EL has produced at least one frame (el_seen),
-					 * pressure-dropping the oldest BL matches the emit-side
-					 * policy. */
-					if (p->el_seen) {
-						av_frame_free(&p->bl_q[0]);
-						memmove(&p->bl_q[0], &p->bl_q[1],
-						        3 * sizeof(p->bl_q[0]));
-						p->bl_q_count--;
-					}
+				if (p->bl_q_count >= 8) {
+					/* Park-side pressure release, always active: the array is
+					 * fixed at 8 (mpv f_enhancement_pair QUEUE_MAX parity) and
+					 * must never overflow, warm-up or not. Dropping the OLDEST
+					 * parked BL here is invisible (no frame was rendered) - the
+					 * warm-up protection that matters (never EMIT BL-only
+					 * before the EL produces, mpv 3b4caf0) lives on the emit
+					 * side in dvhw_fel_emit, gated on el_seen. */
+					av_frame_free(&p->bl_q[0]);
+					memmove(&p->bl_q[0], &p->bl_q[1],
+					        7 * sizeof(p->bl_q[0]));
+					p->bl_q_count--;
 				}
 				p->bl_q[p->bl_q_count++] = bl;
 			}

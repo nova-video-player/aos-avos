@@ -198,6 +198,7 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 	int codec_id;
 	int codec_tag     = 0;
 	int supported     = 1;
+	AVCodecContext *vctx = NULL;
 	
 	if (!device_config_is_video_format_supported(dec->video->format)) {
 		supported = 0;
@@ -323,7 +324,10 @@ serprintf("cannot find codec\r\n");
 	}
 
 	p->vctx = avcodec_alloc_context3(p->vcodec);
-	AVCodecContext *vctx = p->vctx;
+	if( !p->vctx ) {
+		goto ErrorExit;
+	}
+	vctx = p->vctx;
 #ifdef LOG
 	vctx->debug |= FF_DEBUG_PICT_INFO;
 	av_log_set_callback( av_log_cb );

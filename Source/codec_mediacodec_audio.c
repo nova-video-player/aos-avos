@@ -147,11 +147,12 @@ static int mediacodec_audio_parser_reset( PRIV *p )
 		av_parser_close( p->aparser );
 		p->aparser = NULL;
 	}
+	if( p->avctx ) {
+		avcodec_free_context( &p->avctx );
+	}
+	p->avctx = avcodec_alloc_context3( NULL );
 	if( !p->avctx ) {
-		p->avctx = avcodec_alloc_context3( NULL );
-		if( !p->avctx ) {
-			return 1;
-		}
+		return 1;
 	}
 	p->avctx->codec_type = AVMEDIA_TYPE_AUDIO;
 	p->avctx->codec_id = p->parser_codec_id;

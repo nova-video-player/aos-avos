@@ -286,6 +286,9 @@ serprintf("cannot find codec\r\n");
 	}
 	
 	AVCodecContext *actx = avcodec_alloc_context3(acodec);
+	if( !actx ) {
+		return 1;
+	}
 
 	actx->sample_rate = audio->samplesPerSec;
 	actx->block_align = audio->blockAlign;

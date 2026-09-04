@@ -113,6 +113,7 @@ DBGS serprintf( "FFMA: open");
 	int need_reorder  = 0;
 	int no_extra      = 0;
 	int codec_id;
+	AVCodecContext *vctx = NULL;
 	
 	switch( dec->video->format ) {
 	case VIDEO_FORMAT_MPG4:
@@ -148,13 +149,15 @@ serprintf("cannot find codec\r\n");
 		goto ErrorExit2;
 	}
 
+	p->vctx = avcodec_alloc_context3(p->vcodec);
+	if( !p->vctx ) {
+		goto ErrorExit;
+	}
+	vctx = p->vctx;
 #ifdef LOG
 	vctx->debug |= FF_DEBUG_PICT_INFO;
 	av_log_set_callback( av_log_cb );
 #endif
-
-	p->vctx = avcodec_alloc_context3(p->vcodec);
-	AVCodecContext *vctx = p->vctx;
 
 	// provide all the data that the decoder might need
 	vctx->coded_width    = dec->video->width;

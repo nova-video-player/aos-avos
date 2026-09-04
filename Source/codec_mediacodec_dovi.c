@@ -420,6 +420,7 @@ dvhw_copyq_t	copyq;	/* BL copy worker ring (see dvhw_copyjob_t) */
 	} th;
 	pthread_t	th_thread;
 	int		th_started;
+	int		th_mtx_inited;	/* th.mtx/th.cond init'd (created before the thread, may outlive it briefly) */
 	int		copyq_started;	/* BL copy worker thread alive */
 	dvhw_au_t	in_q[DVHW_IN_Q_MAX];
 	int		in_q_read, in_q_write, in_q_count;
@@ -742,6 +743,7 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 		p->run = 0;
 		goto fail;
 	}
+	p->th_mtx_inited = 1;
 	for (i = 0; i < DVHW_COPY_WORKERS; i++) {
 		struct worker_ctx {
 			void *dec;

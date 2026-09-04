@@ -377,11 +377,6 @@ float libavos_get_audio_speed(void)
 	return audio_interface_get_audio_speed();
 }
 
-float libavos_get_audio_speed(void)
-{
-	return audio_interface_get_audio_speed();
-}
-
 void libavos_enable_audio_speed(int enable)
 {
 	audio_interface_enable_audio_speed(enable);
@@ -456,27 +451,3 @@ void libavos_set_dolby_vision_target_nits(float nits)
 	dolby_vision_target_nits = (nits > 0.f) ? nits : 0.f;
 }
 
-/*
- * Dolby Vision / libplacebo plane scaler (EL residual + chroma upscaling,
- * the libplacebo SAMPLER_PLANE stage - mpv --cscale). 0 = default
- * (inherit from the main scaler = lanczos, mpv's default), 1 = bilinear
- * (cheapest), 2 = bicubic, 3 = ewa_lanczossharp (highest quality, most
- * GPU expensive). Read by dovi_gl at every render.
- */
-static int dolby_vision_plane_scaler = 0;
-
-int libavos_get_dolby_vision_plane_scaler(void)
-{
-	return dolby_vision_plane_scaler;
-}
-
-void libavos_set_dolby_vision_plane_scaler(int scaler)
-{
-	serprintf("libavos_set_dolby_vision_plane_scaler: %d (%s)\n", scaler,
-	          scaler == 0 ? "default (lanczos)" :
-	          scaler == 1 ? "bilinear" :
-	          scaler == 2 ? "bicubic" :
-	          scaler == 3 ? "ewa_lanczossharp" : "?");
-	if (scaler >= 0 && scaler <= 3)
-		dolby_vision_plane_scaler = scaler;
-}

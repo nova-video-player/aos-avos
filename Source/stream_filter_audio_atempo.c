@@ -61,13 +61,16 @@
 
 // Read-only af_atempo state accessor added to the vendored filter: reports
 // media counters and WSOLA ring occupancy used by the atempo output ledger.
+// Both accessors are weak: prebuilt FFmpeg without the vendored extension
+// links fine (callers must handle the -1/no-state fallback), matching how
+// upstream consumes these against possibly-older prebuilt dists.
 extern void avfilter_atempo_get_state(AVFilterContext *ctx,
                                   int *ring_size,
                                   int64_t *pos_in,
                                   int64_t *pos_out,
                                   int64_t *ns_in,
                                   int64_t *ns_out,
-                                  double *tempo);
+                                  double *tempo) __attribute__((weak));
 extern void avfilter_atempo_get_state_v2(AVFilterContext *ctx,
                                      int *ring_size,
                                      int64_t *pos_in,

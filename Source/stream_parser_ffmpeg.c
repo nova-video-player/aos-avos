@@ -1750,10 +1750,8 @@ DBGP serprintf("FFMPEG: wake\r\n");
 DBGP2 serprintf("FFMPEG full %d %d %d %d\r\n", ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, ff_p->buffer_size);
 		if( s->time_parsed > stream_drive_wake_sleep && !(ff_p->flags & STREAM_PARSER_FILE_NONLOCAL) ) {
 			// time to sleep
-DBGP serprintf("FFMPEG: sleep\r\n");
-				ff_p->sleeping = 1;
-			}
-			return 0;
+DBGP		serprintf("FFMPEG: sleep\r\n");
+			ff_p->sleeping = 1;
 		}
 		return 0;
 	}

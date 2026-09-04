@@ -1559,8 +1559,6 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 	s->audio_ref_time = -1;
 	s->audio_samples  = 0;
 	s->audio_time_remainder_us = 0;
-
-	s->smoothed_av_delay = -1;
 	s->av_delay_history_count = 0;
 
 	// stop audio sink

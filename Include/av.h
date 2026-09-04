@@ -599,7 +599,9 @@ enum {
 	int	header_sent;		/* we have sent the "setup" header*/\
 	int	extra_sent;		/* we have sent the extradata inline*/\
 	int	no_extra;		/* do not send extradata inline */\
-	
+	int 	disposition;\
+
+
 typedef struct _audio_props {
 	AV_COMMON_PROPS
 	
@@ -634,6 +636,7 @@ typedef struct _video_props {
 	int	colorspace;
 	int	aspect_n;
 	int	aspect_d;
+	int	aspect_from_container;	// container display metadata takes precedence over codec headers
 	int 	rotation;
 	int 	msPerFrame;
 	int 	framesPerSec;
@@ -644,6 +647,7 @@ typedef struct _video_props {
 	
 	// for PTS/DTS issues:
 	int	reorder_pts;
+	int	reorder_depth;
 	
 	// for H264
 	H264_SPS sps;	
@@ -663,6 +667,7 @@ typedef struct _video_props {
     int dv_el_dual_track;	// container carries a separate EL track (dual-track layout)
     int dv_bl_present;		// bl_present_flag from the dvcC/dvvC record
     int dv_compat_id;		// dv_bl_signal_compatibility_id from the dvcC/dvvC record
+    int dv_bl_signal_compatibility_id; // upstream name for dv_compat_id (aliased semantics)
     // Dolby Vision tone-map mode: enhancement-layer config for the EL decoder.
     // Dual-track: EL track CodecPrivate; interleaved: dovi_split BSF output extradata.
     // Same ownership model as extraData (points into parser/BSF-owned memory).

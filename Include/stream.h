@@ -393,6 +393,11 @@ typedef int (*PARSER_SET_AUDIO_STREAM)( struct STREAM *s, int audio_stream );
 typedef int (*PARSER_GET_AUDIO_CDATA)( struct STREAM *s, CLEVER_BUFFER *buffer, STREAM_CDATA *cdata );
 typedef int (*PARSER_GET_VIDEO_CDATA)( struct STREAM *s, struct CBE *cbe,       STREAM_CDATA *cdata );
 typedef int (*PARSER_GET_SUBTITLE_CDATA)( struct STREAM *s, CLEVER_BUFFER *buffer, STREAM_CDATA *cdata );
+/* Dolby Vision FEL: pull one queued EL packet (dovi_split BSF output or
+ * dual-track EL stream). Returns 0 and fills *pkt (AVPacket, caller unrefs)
+ * or 1 when empty. mpv pair_dovi_tracks parity - the EL track is decoded
+ * alongside the BL and paired by pts. */
+typedef int (*PARSER_GET_DOVI_EL_PACKET)( struct STREAM *s, void *pkt );
 typedef struct STREAM_CHUNK * 
          (*PARSER_PEEK_N_AUDIO_CHUNK)( struct STREAM *s, int n, UINT8 **data );
 typedef int (*PARSER_SEEK_TIME)      ( struct STREAM *s, int time, int dir, int flags, int force_reload, STREAM_CHUNK *sc );
@@ -419,6 +424,7 @@ typedef struct stream_parser_str {
 	PARSER_GET_AUDIO_CDATA 	get_audio_cdata;
 	PARSER_GET_VIDEO_CDATA 	get_video_cdata;
 	PARSER_GET_SUBTITLE_CDATA get_subtitle_cdata;
+	PARSER_GET_DOVI_EL_PACKET	get_dovi_el_packet;
 	PARSER_PEEK_N_AUDIO_CHUNK peek_n_audio_chunk;
 	PARSER_SEEK_TIME	seek_time;
 	PARSER_SEEK_POS		seek_pos;

@@ -39,6 +39,18 @@ struct AVFrame;
 int dovi_gl_open(void **ctx, void *native_window);
 
 /*
+ * Declare the content frame rate on the ANativeWindow (API 30+
+ * ANativeWindow_setFrameRate). Without it, SurfaceFlinger has no frame-rate
+ * hint for this surface: back-buffer acquisition serializes on the
+ * compositor cadence and eglSwapBuffers measured ~20ms steady-state blocks
+ * even at 120Hz displays - a hard ~43 presents/s ceiling on 48fps content
+ * with a growing forced-late backlog (measured on S24). With the hint,
+ * SF schedules the surface at content rate and the swap fence releases on
+ * cadence. Returns 0 if applied (or unsupported and ignored).
+ */
+int dovi_gl_set_framerate(void *ctx, float fps);
+
+/*
  * Render one frame. `bl` is the decoded base-layer AVFrame (must carry
  * AV_FRAME_DATA_DOVI_METADATA / AV_FRAME_DATA_DOVI_RPU_BUFFER side data
  * for DV reshaping to apply). `el` is an optional enhancement-layer
@@ -56,6 +68,32 @@ int dovi_gl_render(void *ctx, struct AVFrame *bl, struct AVFrame *el);
  * swap_buffers fences pace up to three frames in flight.
  */
 void dovi_gl_present(void *ctx);
+
+/*
+ * Present with a desired latch time (EGL_ANDROID_presentation_time).
+ * `target_monotonic_ns' is the CLOCK_MONOTONIC nanosecond timestamp at
+ * which SurfaceFlinger should composite this buffer; SF latches the
+ * frame on the vsync nearest that time instead of "as soon as queued",
+ * which paces content-rate frames on any panel mode (48fps@60Hz gets
+ * SF's own 5:4 vsync allocation; 48fps@120Hz gets one vsync each).
+ * Returns 0 when the hint was applied, -1 when unsupported (the caller
+ * presents unscheduled - same as dovi_gl_present).
+ */
+int dovi_gl_present_at(void *ctx, int64_t target_monotonic_ns);
+
+/*
+ * Actual-presentation feedback (EGL_ANDROID_get_frame_timestamps).
+ * Queries the display latch time of the frame most recently queued by
+ * dovi_gl_present/dovi_gl_present_at: `*actual_monotonic_ns' receives
+ * EGL_DISPLAY_PRESENT_TIME_ANDROID (CLOCK_MONOTONIC ns) once the frame
+ * has latched on screen.
+ * Returns 0 when a valid timestamp is available (timestamp fresh since
+ * the last call), -1 when unsupported/absent (caller must skip the
+ * feedback path), 1 when still pending (caller should re-poll), 2 when
+ * no one-behind frame is queued YET (first present - NOT a capability
+ * failure: the caller's probe must stay open until a frame exists).
+ */
+int dovi_gl_present_feedback(void *ctx, int64_t *actual_monotonic_ns);
 
 /*
  * Destroy the renderer and release all GPU/EGL resources.

@@ -1784,7 +1784,16 @@ static void _queue_sink_frames( STREAM *s )
 	// try to get all the frame from the sink and queue them
 	VIDEO_FRAME *frame;
 	while ( !s->video_sink->get( s->video_sink, &frame ) ) {
-		s->video_sink_count--;
+		/* sink-owned pools (dovi: 64 frames) pre-queue ALL free frames at
+		 * open/flush; this pull is a POOL REFILL, not a sink→stream recycle
+		 * of a previously-put frame. Letting it go negative biases the
+		 * engine's video_sink_count < stream_sink_video_max(5) throttle
+		 * permanently open (measured -46/-63: decode ran untethered, vtime
+		 * raced 4.7s ahead of the audio clock, venc deadlines 2-3s in the
+		 * future = the 3s/frame collapse). Clamp at 0: the throttle then
+		 * counts real in-sink frames only, like android2's small pool. */
+		if ( s->video_sink_count > 0 )
+			s->video_sink_count--;
 		
 		// got a frame, queue it
 		if( s->vtime_post_sink && frame->time != -1 ) {
@@ -2371,6 +2380,21 @@ serprintf("no duration!\r\n" );
 			goto ErrorExit;
 		} 
 serprintf("VID_DEC: [%s]\r\n", s->video_dec ? s->video_dec->name : "(none)" ); 
+
+		/* Fire the props event at open so the mp layer sends the initial
+		 * MEDIA_SET_VIDEO_FPS to Java: the decode-side send sites only
+		 * fire on GEOMETRY changes (width/height/interlaced), so a file
+		 * whose fps is known from the container but whose geometry never
+		 * changes (every normal file) never delivered its fps - measured:
+		 * enable_tv_refreshrate_switch_mode=3 (closest refresh) never ran
+		 * for a 48/1 FEL file and the panel stayed at 120Hz while presents
+		 * pinned ~40/s. The handler re-reads rate/msPerFrame and only
+		 * sends when they differ from the last sent values, so a second
+		 * event later (geometry change) stays a no-op. */
+		if( s->message_cb ) {
+			s->message_cb( s, STREAM_VIDEO_PROPS_CHANGED );
+		}
+
 
 		// do we dump the stream?
 		if( stream_dump_video ) {
@@ -3157,9 +3181,14 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 //
 // ************************************************************
 
+/* 1Hz output-path diagnostics */
+static int _dbg_invalid, _dbg_putfail, _dbg_drop;
+static int _dbg_emit, _dbg_outfn, _dbg_outframes, _dbg_put;
+static int _dbg_cdata_sleep, _dbg_spin;
 static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
+	_dbg_put++;
 	int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
 	int total_audio_delay = stream_sync_av_delay( s );
 	int sink_ref_time = stream_sync_anchor_get_sink( s );
@@ -3272,9 +3301,13 @@ static int _frame_stale_after_seek( STREAM *s, VIDEO_FRAME *frame )
 //	_output_frame_no_resize - kilroy was here
 //
 // ************************************************************
+/* 1Hz output-path diagnostics: where frames vanish between disp_q
+ * and the sink (invalid / put-fail / sync-drop) */
 static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME **qframe )
 {
+	_dbg_outfn++;
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
+		_dbg_invalid++;
 		goto Discard;
 	}
 
@@ -3414,6 +3447,7 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 				int sink_ref_time = stream_sync_anchor_adjust_sink( s,
 					-RST_TO_TS_DELTA(s->video->msPerFrame, int) );
 				frames_dropped ++;
+				_dbg_drop++;
 				DBG serprintf("FRAME_DROP: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
 					RST_TO_TS_DELTA(s->video->msPerFrame, int), audio_interface_get_audio_speed(), sink_ref_time);
 DBGY serprintf("[-%8d] ", frame->time );
@@ -3439,6 +3473,7 @@ DBGY serprintf("[ %8d] ", frame->time );
 			}
 
 			if( !_put_frame_in_sink( s, frame, frame->time ) ) {
+				_dbg_putfail++;
 				goto Discard;
 			}
 			if( qframe ) {
@@ -4066,6 +4101,7 @@ static int output_frames( STREAM *s )
 {
 	int ret = 0;
 	VIDEO_FRAME *output_frame = frame_q_get( &s->disp_q );
+	_dbg_outframes++;
 	
 	while( output_frame ) {
 		if( stream_fake_ts_post && stream_fake_ts_num && stream_fake_ts_den ) {
@@ -4097,6 +4133,33 @@ DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), fram
 // *****************************************************************************
 static void _stream_player_sync( STREAM *s )
 {
+	/* 1Hz engine pacing diagnostics: queue depths + times - pinpoints
+	 * where frames pile up between decode and the sink */
+	{
+		static int64_t last_us;
+		static int loop_count;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		loop_count++;
+		if (s && s->video && s->video->valid && !last_us)
+			last_us = now_us;
+		if (s && s->video && s->video->valid && last_us && now_us - last_us >= 1000000) {
+			serprintf("engine: loop=%d emit=%d outfr=%d outfn=%d put=%d dec_q=%d disp_q=%d sink_cnt=%d msPF=%d vtime=%d atime=%d heard=%d dr_inv=%d dr_putfail=%d dr_drop=%d csleep=%d spin=%d\n",
+			          loop_count, _dbg_emit, _dbg_outframes, _dbg_outfn, _dbg_put,
+			          frame_q_count(&s->decode_q), frame_q_count(&s->disp_q),
+			          s->video_sink_count, s->video->msPerFrame,
+			          s->video_time, s->audio_time,
+			          s->audio_time != -1 ? stream_get_heard_audio_ts(s, s->audio_time) : -1,
+			          _dbg_invalid, _dbg_putfail, _dbg_drop,
+			          _dbg_cdata_sleep, _dbg_spin);
+			_dbg_cdata_sleep = _dbg_spin = 0;
+			_dbg_invalid = _dbg_putfail = _dbg_drop = 0;
+			_dbg_emit = _dbg_outframes = _dbg_outfn = _dbg_put = 0;
+			loop_count = 0;
+			last_us = now_us;
+		}
+	}
 DECODE_AGAIN:
 	if( s->video->valid && s->use_sink_frames ) {
 		pthread_mutex_lock( &s->video_sink_mutex );
@@ -4130,7 +4193,8 @@ DECODE_AGAIN:
 	}
 
 	if( !s->cdata_now.valid ) {
-DBGV serprintf("!" );				
+DBGV serprintf("!" );
+		_dbg_cdata_sleep++;
 		msec_sleep( 10 );
 		return;
 	}
@@ -4303,6 +4367,7 @@ DBGV1 serprintf(" w ");
 		}
 		if( !s->paused )
 			_do_stuff( s );
+		_dbg_spin++;
 		stream_yield_RT();
 	}
 #endif
@@ -4358,6 +4423,7 @@ DBGCV1 serprintf("[%6d  d %6d/%7d %d|%8d|%c]", cdata_time, s->vcodec.decoded, s-
 	// queue the decode frame for output
 	if( s->decode_frame ) {
 		output = 1;
+		_dbg_emit++;
 DBGQ serprintf("QUE[%2d<", s->decode_frame->index );
 		frame_q_put( &s->disp_q, s->decode_frame );
 DBGQ serprintf(">%2d] ", frame_q_count( &s->disp_q ) );
@@ -4486,6 +4552,29 @@ static void _stream_player_async( STREAM *s )
 		 * short terminal state until the end/error notification is consumed.
 		 */
 		return;
+	}
+	
+	/* 1Hz engine diagnostics (async): loop rate + queue depths - the
+	 * last un-instrumented stage of the pipeline (engine get_out -> sink
+	 * put); pinpoints where emitted frames pile up between decoder and
+	 * sink (measured: emit 44/s but put 31/s). */
+	{
+		static int64_t last_us;
+		static int loops;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		loops++;
+		if (!last_us)
+			last_us = now_us;
+		else if (now_us - last_us >= 1000000) {
+			serprintf("async eng: loop=%d dec_q=%d disp_q=%d sink_cnt=%d vtime=%d atime=%d\n",
+			          loops,
+			          frame_q_count(&s->decode_q), frame_q_count(&s->disp_q),
+			          s->video_sink_count, s->video_time, s->audio_time);
+			loops = 0;
+			last_us = now_us;
+		}
 	}
 	
 	if( s->video_flush ) {

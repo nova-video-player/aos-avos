@@ -608,9 +608,28 @@ DBGP serprintf("\tPAR        %d/%d (stream %d/%d, codec %d/%d)\r\n",
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
 				video->stream = i;
+                /* Frame rate for display-mode matching: r_frame_rate is the
+                 * coded cadence (exact for fixed-rate content like this 48/1
+                 * FEL file), but MKV headers often report avg != r on long
+                 * files (per-frame timestamp rounding accumulates, avg drifts
+                 * a hair below the true rate) - the equality gate then left
+                 * frame_rate_num/den 0 and NO fps ever reached Java
+                 * (MEDIA_SET_VIDEO_FPS) or the dovi sink's SF hint
+                 * (framerate_set), measured: the 48fps FEL file played on a
+                 * 120Hz panel with presents pinned ~40/s. Use r when it
+                 * matches, else fall back to r alone when sane, else avg:
+                 * mode matching wants the content cadence, not the
+                 * long-average; avg is still written to rate/scale below
+                 * for msPerFrame math. */
                 if (st->avg_frame_rate.den && st->r_frame_rate.den && av_q2d(st->avg_frame_rate) == av_q2d(st->r_frame_rate)) {
                     video->frame_rate_den = st->r_frame_rate.den;
                     video->frame_rate_num = st->r_frame_rate.num;
+                } else if (st->r_frame_rate.den && st->r_frame_rate.num && av_q2d(st->r_frame_rate) > 1.0 && av_q2d(st->r_frame_rate) < 500.0) {
+                    video->frame_rate_den = st->r_frame_rate.den;
+                    video->frame_rate_num = st->r_frame_rate.num;
+                } else if (st->avg_frame_rate.den && st->avg_frame_rate.num) {
+                    video->frame_rate_den = st->avg_frame_rate.den;
+                    video->frame_rate_num = st->avg_frame_rate.num;
                 }
 
 				if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
@@ -1681,7 +1700,30 @@ static int _dv_el_take_match( FF_PRIV *priv, AVPacket *bl, AVPacket *el_out )
 static int _parse_once( STREAM *s, int *timestamp)
 {
 	AVFormatContext *fmt = ff_p->fmt;
-	
+
+	/* 1Hz demux-queue diagnostics: packet counts + memory of every queue
+	 * plus this thread's parse rate - pinpoints parser starvation */
+	{
+		static int64_t last_us;
+		static int parse_count;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		parse_count++;
+		if (!last_us)
+			last_us = now_us;
+		else if (now_us - last_us >= 1000000) {
+			serprintf("FFMPEG: parse=%d/s vq=%d(%dKB) aq=%d(%dKB) elq=%d(%dKB) sleeping=%d\n",
+			          parse_count,
+			          ff_p->vq.packets, ff_p->vq.mem_used / 1024,
+			          ff_p->aq.packets, ff_p->aq.mem_used / 1024,
+			          ff_p->elq.packets, ff_p->elq.mem_used / 1024,
+			          ff_p->sleeping);
+			parse_count = 0;
+			last_us = now_us;
+		}
+	}
+
 	if( ff_p->sleeping ) {
 		// we are sleeping, decide whether to wake up
 		if( s->time_parsed < stream_drive_wake_sleep ) {

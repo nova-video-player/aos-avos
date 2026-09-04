@@ -1158,9 +1158,30 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// Ensure minimum of 32KB for compatibility, but respect larger system requirements
 		at->buf_size = (min_buffer_size > 32768) ? min_buffer_size : 32768;
 	} else {
-		// Use scaled minimum (buffer_scale=2 for audio speed support)
-		// Let Android's getMinBufferSize() determine the requirements
-		at->buf_size = buffer_scale * min_buffer_size;
+		// PCM deep-buffer tracks: getMinBufferSize() is only a latency floor on
+		// modern HALs (measured ~40-160ms on Samsung deep_buffer usecases - the
+		// HAL fragment is 4x3840 frames = 320ms, but getMinBufferSize stays
+		// near the AudioFlinger mixer minimum). A single ~500ms parser hiccup
+		// (SMB stall, GC pause) then drains the queue, AudioFlinger fires
+		// 'BUFFER TIMEOUT ... underrun', DISABLES the track, and the
+		// disable->restart cycle with Samsung SoundAlive/DLB re-init takes
+		// multiple seconds (measured 29 such windows in got-vc32-run1: audio
+		// thread froze 1-6s per event, audio_time advanced at 92.8% of realtime,
+		// and the sink's 6 hard clock rewinds produced the 10-20s A/V desync).
+		// A ~1s application-level buffer absorbs sub-second stalls entirely:
+		// AudioTrack.write() blocks until space frees, the audible stream never
+		// gaps, and the write-side clock (audio_time) keeps advancing per written
+		// byte. getTimestamp()-based delay stays exact: delay = written - presented,
+		// both sides unchanged by queue depth.
+		int64_t rate = (int64_t)sampleRateInHz > 0 ? (int64_t)sampleRateInHz : 48000;
+		int frame_sz = (frame_size > 0) ? (int)frame_size : 4;
+		int64_t one_sec = rate * frame_sz;
+		int64_t want = buffer_scale * (int64_t)min_buffer_size;
+		if (want < one_sec)
+			want = one_sec;
+		if (want > INT_MAX)
+			want = INT_MAX;
+		at->buf_size = (int)want;
 	}
 
 	DBG LOG ( "audio_interface_audiotrack_java:audiotrack_set_output_params getMinBufferSize=%d, final buf_size=%d\n",

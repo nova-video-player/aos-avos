@@ -60,7 +60,7 @@ int acodecs_is_supported( int format, int is_video, int is_sw_allowed );
 typedef struct PRIV {
 	struct dec_audio *dec_audio;
 	AVCodecParserContext *aparser;
-	struct AVCodecContext avctx;
+	AVCodecContext *avctx;
 	int parser_codec_id;
 	int parser_drained;
 	int64_t parser_last_input_time;
@@ -147,9 +147,14 @@ static int mediacodec_audio_parser_reset( PRIV *p )
 		av_parser_close( p->aparser );
 		p->aparser = NULL;
 	}
-	memset( &p->avctx, 0, sizeof( p->avctx ) );
-	p->avctx.codec_type = AVMEDIA_TYPE_AUDIO;
-	p->avctx.codec_id = p->parser_codec_id;
+	if( !p->avctx ) {
+		p->avctx = avcodec_alloc_context3( NULL );
+		if( !p->avctx ) {
+			return 1;
+		}
+	}
+	p->avctx->codec_type = AVMEDIA_TYPE_AUDIO;
+	p->avctx->codec_id = p->parser_codec_id;
 	p->parser_drained = 0;
 	p->parser_last_input_time = STREAM_NO_PTS_VALUE;
 	p->access_unit_size = 0;
@@ -184,7 +189,7 @@ static int mediacodec_audio_parse_input( PRIV *p, UCHAR *data, int size,
 	if( input_time != STREAM_NO_PTS_VALUE ) {
 		p->parser_last_input_time = input_time;
 	}
-	int parsed = av_parser_parse2( p->aparser, &p->avctx,
+	int parsed = av_parser_parse2( p->aparser, p->avctx,
 		&output, &output_size, data, size,
 		parser_time, parser_time, 0 );
 	if( parsed < 0 || parsed > size ) {
@@ -319,6 +324,9 @@ static int mediacodec_audio_codec_delete( AUDIO_PROPERTIES *audio )
 	if( p->aparser ) {
 		av_parser_close( p->aparser );
 		p->aparser = NULL;
+	}
+	if( p->avctx ) {
+		avcodec_free_context( &p->avctx );
 	}
 	afree( p->access_unit_buffer );
 	p->access_unit_buffer = NULL;

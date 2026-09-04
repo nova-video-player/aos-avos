@@ -89,6 +89,7 @@ static AVFormatContext *fctxt;
 static buf_t b;
 static AVCodecParserContext *aparser;
 static AVCodecContext *avctx;
+static AVPacket *spdif_pkt;
 
 static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
@@ -250,22 +251,22 @@ static int spdif_put( UCHAR *data, int size, int *decoded )
 		return 0;
 
 	// Prevent segfault if format context is not initialized
-	if ( !fctxt ) {
+	if ( !fctxt || !spdif_pkt ) {
 		serprintf("spdif_put: format context not initialized\n");
 		return 0;
 	}
 
-	AVPacket pkt;
-	av_init_packet( &pkt );
 	static int pts = 1;
 
-	pkt.pts  = pts++;
-	pkt.data = data;
-	pkt.size = size;
+	av_packet_unref( spdif_pkt );
+	spdif_pkt->pts  = pts++;
+	spdif_pkt->data = data;
+	spdif_pkt->size = size;
 
 	*decoded = size;
 
-	av_write_frame( fctxt, &pkt );
+	av_write_frame( fctxt, spdif_pkt );
+	av_packet_unref( spdif_pkt );
 	return 0;
 }
 
@@ -434,6 +435,9 @@ static int spdif_free( void )
 	if (avctx) {
 		avcodec_free_context(&avctx);
 		avctx = NULL;
+	}
+	if (spdif_pkt) {
+		av_packet_free(&spdif_pkt);
 	}
 	// Clear buffer position to prevent stale data
 	b.pos = 0;
@@ -615,6 +619,12 @@ serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
 	} else {
 		aparser = NULL;
 		DBGS serprintf("spdif_init: skipping parser for AC3 recoding (encoder produces complete frames)\n");
+	}
+
+	spdif_pkt = av_packet_alloc();
+	if( !spdif_pkt ) {
+		spdif_free();
+		return 0;
 	}
 
 	return 1;

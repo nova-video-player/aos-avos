@@ -115,6 +115,7 @@ typedef struct PRIV {
 	enum AVSampleFormat swr_in_fmt;
 	int             swr_in_rate;
 	AVFrame         *aframe;
+	AVPacket        *avpkt;
 	SHORT		*asamples;
 	SHORT		*bsamples;
 	int 		open;
@@ -303,12 +304,16 @@ serprintf("cannot open codec\r\n");
 	}
 	
 	AVFrame *aframe = av_frame_alloc();
+	AVPacket *avpkt = av_packet_alloc();
+	if ( !aframe || !avpkt ) {
+		goto ErrorExit2;
+	}
 
-	AVPacket avpkt = { .data = data, .size = size };
-	av_init_packet(&avpkt);
+	avpkt->data = data;
+	avpkt->size = size;
 
 	av_frame_unref(aframe);
-	int ret = avcodec_send_packet(actx, &avpkt);
+	int ret = avcodec_send_packet(actx, avpkt);
     if (ret < 0) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret));
         goto ErrorExit2;
@@ -334,12 +339,16 @@ serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, a
 		}
 	}
 	
+	av_packet_free( &avpkt );
 	av_frame_free( &aframe );
 	avcodec_free_context( &actx );
 
 	return 0;
 
 ErrorExit2:
+	if ( avpkt ) {
+		av_packet_free( &avpkt );
+	}
 	if ( aframe ) {
 		av_frame_free( &aframe );
 	}
@@ -486,6 +495,10 @@ serprintf("downmix to stereo S16\r\n");
 		serprintf("channels    changed! %d\r\n", audio->channels);
 
 	p->aframe = av_frame_alloc();
+	p->avpkt  = av_packet_alloc();
+	if( !p->aframe || !p->avpkt ) {
+		goto ErrorExit;
+	}
 	
 	p->asamples = (SHORT*)amalloc(    MAX_AUDIO_FRAME_SIZE);
 	p->bsamples = (SHORT*)amalloc(2 * MAX_AUDIO_FRAME_SIZE);
@@ -499,6 +512,12 @@ serprintf("downmix to stereo S16\r\n");
 
 ErrorExit:
 	// Close the codec
+	if ( p->aframe ) {
+		av_frame_free( &p->aframe );
+	}
+	if ( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 	if ( p->actx ) {
                 avcodec_free_context( &p->actx );
 		p->actx = NULL;
@@ -540,6 +559,10 @@ serprintf("ffad not open!\r\n");
 	av_channel_layout_uninit( &p->swr_out_layout );
 
 	av_frame_free(&p->aframe);
+
+	if( p->avpkt ) {
+		av_packet_free(&p->avpkt);
+	}
 
 	if( p->asamples ) {
 		afree( p->asamples );
@@ -869,12 +892,13 @@ Dump( data, 64 );
 serprintf("\r\n");
 Dump( data, size );
 }
-		AVPacket avpkt = { .data = data, .size = size };
-		av_init_packet(&avpkt);
+		av_packet_unref( p->avpkt );
+		p->avpkt->data = data;
+		p->avpkt->size = size;
 
 		int t1 = time_update_time();
 		av_frame_unref(p->aframe);
-		int ret_send = avcodec_send_packet(p->actx, &avpkt);
+		int ret_send = avcodec_send_packet(p->actx, p->avpkt);
 		if (ret_send < 0) {
 			if (ret_send != AVERROR(EAGAIN)) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
@@ -1057,11 +1081,12 @@ DBGCA2 serprintf("drop %5d\n", parsed );
 		break;
 	}
 
-	AVPacket avpkt = { .data = out, .size = out_size };
-	av_init_packet(&avpkt);
+	av_packet_unref( p->avpkt );
+	p->avpkt->data = out;
+	p->avpkt->size = out_size;
 
 	int t1 = time_update_time();
-	int ret_send = avcodec_send_packet(p->actx, &avpkt);
+	int ret_send = avcodec_send_packet(p->actx, p->avpkt);
     if (ret_send < 0) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
     }
@@ -1071,7 +1096,7 @@ serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2
 	}
 	int t2 = time_update_time();
 	
-    int bytes = avpkt.size;
+    int bytes = p->avpkt->size;
 	if ( ret_rx < 0 ) {
 serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUNCTION__, av_err2str(ret_rx));
         bytes = 0;

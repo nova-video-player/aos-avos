@@ -83,6 +83,7 @@ typedef struct PRIV {
 	AVCodecContext 	*vctx;
 	const AVCodec 	*vcodec;
 	AVFrame		*vframe;
+	AVPacket	*avpkt;
 	
 	VIDEO_FRAME	*in_frame;
 	VIDEO_FRAME	*out_frame;
@@ -172,6 +173,10 @@ serprintf("cannot open codec\r\n");
 
 DBGS serprintf("name %s  type %d  id %d \r\n", vcodec->name, vcodec->type, vcodec->id);
 	p->vframe = av_frame_alloc();
+	p->avpkt  = av_packet_alloc();
+	if( !p->vframe || !p->avpkt ) {
+		goto ErrorExit;
+	}
 	
 	dec->is_open = 1;
 
@@ -194,6 +199,12 @@ DBGS serprintf("LAVC_A: drop extra\r\n");
 	
 ErrorExit:
 	// Close the codec
+	if( p->vframe ) {
+		av_frame_free( &p->vframe );
+	}
+	if( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 	if( vctx ) {
 		avcodec_free_context( &vctx );
 	}
@@ -216,6 +227,10 @@ serprintf("ffvd not open!\r\n");
 
 	// Free the YUV frame
 	av_frame_free( &p->vframe );
+
+	if( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 
 	// Close the codec
 	if( p->vctx ) {
@@ -283,19 +298,20 @@ Dump( data, 64 );
 	// decode the frame
 	int got_picture = 0;
 
-	AVPacket avpkt = { .data = data, .size = size };
-	av_init_packet(&avpkt);
+	av_packet_unref( p->avpkt );
+	p->avpkt->data = data;
+	p->avpkt->size = size;
 	if( dec->video->reorder_pts ) {
 		vframe->opaque = (void*)(intptr_t)avos_frame->time;
-		avpkt.pts = avos_frame->time;
+		p->avpkt->pts = avos_frame->time;
 	} else {
 		vframe->opaque = (void*)(intptr_t)avos_frame->user_ID;
-		avpkt.pts = avos_frame->user_ID;
+		p->avpkt->pts = avos_frame->user_ID;
 	}
 DBGCV2 serprintf("<"); 
 	int start = time_update_time();
 	int ret = 0;
-        ret = avcodec_send_packet(vctx, &avpkt);
+        ret = avcodec_send_packet(vctx, p->avpkt);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
              //try again later -- ignore error silently
              ret = 0;

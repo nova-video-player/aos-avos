@@ -386,7 +386,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			sws_scale(sws_ctx, src_data, src_linesize, 0, rect->h, dst_data, dst_linesize);
 
 			// Free the SwsContext
-			sws_freeContext(sws_ctx);
+			sws_free_context(&sws_ctx);
 		}
 	}
 

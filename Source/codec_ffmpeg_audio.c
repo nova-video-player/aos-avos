@@ -539,7 +539,7 @@ serprintf("ffad not open!\r\n");
 	av_channel_layout_uninit( &p->swr_in_layout );
 	av_channel_layout_uninit( &p->swr_out_layout );
 
-	av_free(p->aframe);
+	av_frame_free(&p->aframe);
 
 	if( p->asamples ) {
 		afree( p->asamples );

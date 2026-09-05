@@ -120,6 +120,16 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 		pthread_mutex_unlock( &s->anchor_mutex );
 		return 0;
 	}
+	/*
+	 * Do not wait for video_sink_mutex while owning anchor_mutex. Video output
+	 * can hold the sink lock while entering synchronization code that needs the
+	 * anchor lock, so a blocking nested acquisition can deadlock both producers.
+	 * Anchor publication is retried on the next audio write or video frame.
+	 */
+	if( pthread_mutex_trylock( &s->video_sink_mutex ) != 0 ) {
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
 	if( refresh_sink )
 		sfdec2_refresh_sched_anchor( s );
 	/*
@@ -128,7 +138,6 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 	 * under the close/delete lock so sink_close() cannot destroy the renderer's
 	 * private mutex between this check and put_time().
 	 */
-	pthread_mutex_lock( &s->video_sink_mutex );
 	if( s->video_sink && s->video_sink->is_open && s->video_sink->put_time )
 		s->video_sink->put_time( s->video_sink, sink_ref_time );
 	pthread_mutex_unlock( &s->video_sink_mutex );
@@ -144,7 +153,10 @@ int stream_sync_anchor_seed_from_sink( STREAM *s, int vid_ref_time )
 		return 0;
 
 	pthread_mutex_lock( &s->anchor_mutex );
-	pthread_mutex_lock( &s->video_sink_mutex );
+	if( pthread_mutex_trylock( &s->video_sink_mutex ) != 0 ) {
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
 	if( __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) != -1 ) {
 		pthread_mutex_unlock( &s->video_sink_mutex );
 		pthread_mutex_unlock( &s->anchor_mutex );

@@ -813,6 +813,32 @@ serprintf("FF: parse H264 SPS\n");
                             video->dv_bl_present = dovi_record->bl_present_flag;
                             video->dv_compat_id  = dovi_record->dv_bl_signal_compatibility_id;
 
+								#ifdef CONFIG_ANDROID
+                            // Tone-map mode (libavos_get_dolby_vision_mode()==1): the EL is
+                            // decoded in software and composited on the GPU - no device DV
+                            // decoder is needed or consulted. Force the DV format for every
+                            // profile the tone-map pipeline handles (P4/5/7/8/9 HEVC, P10 AV1)
+                            // so the dovi sink/decoder chain engages regardless of
+                            // bl_signal_compatibility_id (P7 FEL bl=6 would otherwise take the
+                            // HDR10 fallback - measured regression after the android_sync_back
+                            // rebase: file played through sfdec2 and never reached the dovi
+                            // tone-map path). LAST gate: nothing after this may reset it.
+                            int dovi_tonemap = (libavos_get_dolby_vision_mode() != 0 &&
+                                                video->dv_profile != 0);
+                            if (dovi_tonemap) {
+                                force_dovi = 1;
+                                prefer_hevc_fallback = 0;
+                            }
+                            if (video->dv_profile) {
+                                dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+                                if (!dovi_tonemap)
+                                    force_dovi = (dovi_decoder != NULL);
+                            }
+
+                            if (dovi_mode == 2 && dovi_codec_supported) {
+                                force_dovi = 1;
+                            }
+#else
                             if (video->dv_profile) {
                                 dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
                                 force_dovi = (dovi_decoder != NULL);
@@ -821,8 +847,16 @@ serprintf("FF: parse H264 SPS\n");
                             if (dovi_mode == 2 && dovi_codec_supported) {
                                 force_dovi = 1;
                             }
+#endif
 
-                            if (video->format == VIDEO_FORMAT_HEVC &&
+#ifdef CONFIG_ANDROID
+                            // HEVC fallback for profile-7 BLs applies ONLY to the device
+                            // passthrough path (dovi_mode 0/1): a hardware DV decoder that
+                            // must render the BL alone benefits from the HDR10-compatible
+                            // base layer. It must never override tone-map mode.
+                            if (libavos_get_dolby_vision_mode() == 0 &&
+#endif
+                                video->format == VIDEO_FORMAT_HEVC &&
                                 dovi_record->dv_profile == 7 &&
                                 dovi_mode != 2 &&
                                 dovi_record->dv_bl_signal_compatibility_id != 0 &&
@@ -1859,6 +1893,59 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 			// Keyframes are still queued so playback can resync cleanly once
 			// audio is found.
 			_rt_video_search_pkts++;
+		} else if( ff_p->dv_split_active ) {
+			// Dolby Vision tone-map mode, single-track interleaved P7: split
+			// the combined access unit into BL(+RPU) -> vq and EL -> elq
+			// (mpv runs the same dovi_split at demux level). mkvmerge
+			// dual-layer files instead carry the EL as an hvcE block
+			// addition (AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL, id 'hvcE').
+			uint8_t *hvce_el = NULL;
+			int hvce_el_size = 0;
+			for( int i = 0; i < packet.side_data_elems; i++ ) {
+				if( packet.side_data[i].type == AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL &&
+				    packet.side_data[i].size > 8 &&
+				    AV_RB64( packet.side_data[i].data ) == 0x68766345ULL ) {
+					hvce_el = packet.side_data[i].data + 8;
+					hvce_el_size = packet.side_data[i].size - 8;
+					break;
+				}
+			}
+			AVPacket *bl_out = av_packet_alloc();
+			AVPacket *el_out = av_packet_alloc();
+			int split_ok = 0;
+			if( bl_out && el_out &&
+			    _dv_split_packet( ff_p, &packet, bl_out, el_out ) == 0 )
+				split_ok = 1;
+			if( split_ok ) {
+				if( bl_out->data ) {
+					// drop the hvcE block addition copy from the BL packet
+					av_packet_side_data_remove( bl_out->side_data,
+					                            &bl_out->side_data_elems,
+					                            AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL );
+					_add_packet( &ff_p->vq, bl_out );
+				}
+				if( !el_out->data && hvce_el_size > 0 ) {
+					// EL arrives as a block addition, not in-band NALs
+					if( av_new_packet( el_out, hvce_el_size ) == 0 ) {
+						memcpy( el_out->data, hvce_el, hvce_el_size );
+						el_out->pts = packet.pts;
+						el_out->dts = packet.dts;
+					}
+				}
+				if( el_out->data ) {
+					// EL inherits the combined packet's pts (BL track timebase);
+				// convert to the BL time domain so pts pairing works
+					_dv_el_convert_time( ff_p, el_out, ff_p->time_base_num, ff_p->time_base_den );
+					_add_packet( &ff_p->elq, el_out );
+				}
+			} else {
+				serprintf("FFM: dovi_split failed on AU, decoding BL only\n");
+				_add_packet( &ff_p->vq, &packet );
+			}
+			if( bl_out ) av_packet_free( &bl_out );
+			if( el_out ) av_packet_free( &el_out );
+			if( timestamp )
+				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
 		} else {
 			// add video packet
 			_add_packet( &ff_p->vq, &packet );

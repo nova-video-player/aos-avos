@@ -27,6 +27,9 @@
 #include <libplacebo/opengl.h>
 #include <libplacebo/renderer.h>
 #include <libplacebo/swapchain.h>
+
+/* pacing-mode global from libavos.c (GUI refresh-rate sync mode 4) */
+extern int libavos_get_present_free_run(void);
 #include <libplacebo/utils/dolbyvision.h>
 #include <libplacebo/utils/libav.h>
 
@@ -450,7 +453,12 @@ int dovi_gl_open(void **ctx, void *native_window)
 		 * in the ring stalls the render a full extra period. Depth 6 gives
 		 * ~2 periods of headroom (mpv's Android sizing for high-fps 4K;
 		 * JRiver's fork: BufferCount = depth + slack + 1, up to 16). */
-		.max_swapchain_depth = 6,
+		/* free-run (no-sync GUI mode): the uniform swap grid + as-available
+		 * latches need a TIGHT queue - depth 6 lets SF bank a spare frame and
+		 * skip a latch (measured 0.6% doubled 83ms holds = the last visible
+		 * judder). Depth 3 keeps the 1-behind pipelined render + fence
+		 * overlap (mpv android default) without spare buffers to skip to. */
+		.max_swapchain_depth = libavos_get_present_free_run() ? 3 : 6,
 		.priv          = p,
 	));
 	if (!p->swap)

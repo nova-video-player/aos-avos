@@ -41,6 +41,7 @@ void libavos_set_decoder(int decoder);
 void libavos_set_dolby_vision_mode(int mode);
 void libavos_set_dolby_vision_target_nits(float nits);
 void libavos_set_dolby_vision_plane_scaler(int scaler);
+void libavos_set_present_free_run(int enable);
 void libavos_set_audio_interface(int audio_interface);
 void libavos_set_audio_decoder(int audio_decoder);
 void libavos_set_mediacodec_audio_capabilities(int64_t capabilities);
@@ -335,6 +336,14 @@ Java_com_archos_medialib_LibAvos_nativeSetDolbyVisionPlaneScaler(JNIEnv *env, jo
 {
     pthread_mutex_lock(&libavos.mtx);
     libavos_set_dolby_vision_plane_scaler(scaler);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetPresentFreeRun(JNIEnv *env, jobject thiz, jint enable)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_present_free_run(enable);
     pthread_mutex_unlock(&libavos.mtx);
 }
 

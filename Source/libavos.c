@@ -431,6 +431,26 @@ void libavos_set_dolby_vision_mode(int mode)
 	dolby_vision_mode = (mode != 0) ? 1 : 0;
 }
 
+/* Presentation "no sync" free-run mode (GUI refresh-rate sync == 4):
+ * 1 = the dovi sink swaps at a uniform content-fps grid and ignores
+ * vsync entirely - no present_at, no display-mode switch, no latch-
+ * feedback pacing correction. For panels (e.g. Samsung HRR) that
+ * override every refresh-rate hint and misbehave under scheduled
+ * presents. 0 = default paced path. */
+static int present_free_run = 0;
+
+int libavos_get_present_free_run(void)
+{
+	return present_free_run;
+}
+
+void libavos_set_present_free_run(int enable)
+{
+	serprintf("libavos_set_present_free_run: %d (%s)\n", enable,
+	          enable ? "no-sync free-run presents" : "default pacing");
+	present_free_run = (enable != 0) ? 1 : 0;
+}
+
 /*
  * Dolby Vision tone-map target luminance (nits).
  * 0 = automatic: the renderer falls back to the source HDR max_luma/default.

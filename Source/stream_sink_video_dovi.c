@@ -180,7 +180,32 @@ typedef struct {
 				 * (mpv display-sync: the next vsync slot is one period
 				 * after the previous present, not one period after the
 				 * banked content lead). 0 before the first present. */
+	int64_t pres_chain_ns;	/* FREE-RUN chain (sched_pace==2): CLOCK_MONOTONIC ns of
+				 * the next planned swap - the last actual swap + exactly
+				 * one content period. Never derived from the frame's
+				 * blit deadline and never corrected by latch feedback:
+				 * the chain is a uniform grid (swap at content fps,
+				 * "no sync" free-run, mpv free-running-video model) and
+				 * the compositor latches wherever it latches. */
+	int64_t pres_period_ns;	/* FREE-RUN: exact per-frame period in ns, measured from
+				 * consecutive blit_time deltas (double math; the int
+				 * frame->duration cannot express 23.976fps = 41.708ms
+				 * and an integer-ms grid drifts +1.7%/s into periodic
+				 * catch-up hiccups). 0 until the first delta is seen. */
+	int fr_mode_latched;	/* free-run engaged at first frame (pref may arrive after open) */
+	int fr_last_blit;	/* FREE-RUN measurement state: blit_time of the last
+				 * dequeued frame (the delta source above). */
 	int stat_fb_samples;	/* 1Hz: latch samples for the average */
+	int64_t fb_prev_latch_ns;	/* CLOCK_MONOTONIC ns of the latch before
+				 * fb_last_latch_ns - free-run display-cadence
+				 * diagnosis: consecutive latch deltas expose what
+				 * the panel actually shows (a clean 41.7ms period on
+				 * a 120Hz grid buckets at 5 vsync slots). */
+	int fb_slot_hist[12];	/* 1Hz: latch-delta histogram in 120Hz vsync
+				 * slots (index 0 = 1 slot, i.e. 8.33ms). */
+	int stat_fr_over_us;	/* 1Hz free-run: us the swap entry overshoots
+				 * the chain slot (sum, with the count below = mean) */
+	int stat_fr_over_n;
 	int stat_fb_used;	/* 1Hz: re-anchors performed */
 	int64_t stat_pres_swap_ns;	/* 1Hz: eglSwapBuffers wall (fence+BufferQueue) */
 	int64_t stat_pres_fbpoll_ns;	/* 1Hz: feedback poll wall incl. its bounded sleep */
@@ -298,6 +323,18 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 		}
 		p->fb_last_latch_ns = actual_ns;
 		p->fb_phys_blit = ideal;	/* coherent pair for dovi_phys_time */
+		/* free-run display-cadence diagnosis: bucket the actual
+		 * latch-to-latch delta in 120Hz vsync slots (8.33ms) - the
+		 * 1Hz print exposes what the PANEL really showed (uniform
+		 * 5-slot holds vs occasional 4/6/10). A same-window repeat
+		 * is a duplicate sample (ignored). */
+		if( p->fb_prev_latch_ns > 0 && actual_ns > p->fb_prev_latch_ns ) {
+			int64_t d_ns = actual_ns - p->fb_prev_latch_ns;
+			int slots = (int)((d_ns + 4166666LL) / 8333333LL);
+			if( slots >= 1 && slots <= 12 )
+				p->fb_slot_hist[slots - 1]++;
+		}
+		p->fb_prev_latch_ns = actual_ns;
 		p->stat_fb_used++;
 		p->stat_fb_samples++;
 	}
@@ -396,6 +433,29 @@ static void *dovi_venc_thread( void *ctx )
 		 * already re-listed every pool frame. */
 		int my_gen = p->venc_flush_gen;
 
+		/* FREE-RUN period measurement: refine the exact content
+		 * period from consecutive frame blit deltas (double ms->ns;
+		 * 23.976fps = 41.708ms cannot ride the int duration field).
+		 * Deltas of ~0 (duplicate timestamps) and >500ms (seek/
+		 * chapter jumps) are ignored; the first sane delta wins -
+		 * frames of one content share the cadence. */
+		{
+			extern int libavos_get_present_free_run(void);
+			if( !p->fr_mode_latched && libavos_get_present_free_run() ) {
+				p->fr_mode_latched = 1;
+				p->sched_pace = 2;
+				serprintf("dovi sink: free-run presents engaged\n");
+			}
+		}
+		if( p->sched_pace == 2 && p->pres_period_ns == 0 &&
+		    frame->blit_time > 0 && p->fr_last_blit > 0 ) {
+			double d_ms = (double)(frame->blit_time - p->fr_last_blit);
+			if( d_ms > 0.5 && d_ms < 500.0 )
+				p->pres_period_ns = (int64_t)(d_ms * 1000000.0 + 0.5);
+		}
+		if( frame->blit_time > 0 )
+			p->fr_last_blit = frame->blit_time;
+
 
 		/* lazy content-fps hint: MKV files often leave
 		 * video->frame_rate_num/den 0 (avg != r_frame_rate); the frame's
@@ -403,7 +463,7 @@ static void *dovi_venc_thread( void *ctx )
 		 * rate it latches every frame on its own vsync (48Hz mode) - the
 		 * deterministic swap cadence the present loop needs to sustain
 		 * content rate. */
-		if (!p->framerate_set && frame->duration > 0 && p->gl) {
+		if (!p->framerate_set && p->sched_pace != 2 && frame->duration > 0 && p->gl) {
 			float fps = 1000.0f / (float) frame->duration;
 			if (fps >= 10.0f && fps <= 240.0f &&
 			    dovi_gl_set_framerate(p->gl, fps) == 0)
@@ -549,7 +609,96 @@ static void *dovi_venc_thread( void *ctx )
 			 * outq frozen on vc27 - the first landed latch locked an
 			 * already-held mutex). */
 			pthread_mutex_unlock( &p->venc_mutex );
-			if( !sched_ok ) {
+			if( p->sched_pace == 2 ) {
+				/* --- FREE-RUN "no sync" pacer (GUI mode 4) ---
+				 * Swap at a perfectly uniform CONTENT-fps grid: next
+				 * swap = last actual swap + exactly one period, the
+				 * period measured from consecutive blit_time deltas.
+				 * NO vsync chasing: no present_at, no blit-deadline
+				 * wait, no latch-feedback pacing correction - the
+				 * compositor latches wherever it latches; the constant
+				 * pipeline delay is invisible, exactly like a TV driven
+				 * by a free-running HDMI source. A late swap (fence
+				 * stall) advances the chain from the ACTUAL swap time,
+				 * so the grid neither accumulates drift nor jumps to
+				 * "catch up". Content lead only decides WHICH frame
+				 * (the drop gate above); this block decides WHEN the
+				 * swap fires. */
+				int64_t period_ns = p->pres_period_ns;
+				if( period_ns <= 0 && p->pending_frame->duration > 0 )
+					period_ns = (int64_t)p->pending_frame->duration * 1000000LL;
+				if( period_ns > 0 ) {
+					struct timespec fr_now;
+					clock_gettime(CLOCK_MONOTONIC, &fr_now);
+					int64_t wall_ns = (int64_t)fr_now.tv_sec * 1000000000LL + fr_now.tv_nsec;
+					if( p->pres_chain_ns <= 0 ||
+					    p->pres_chain_ns < wall_ns - period_ns ) {
+						/* first present, or a gap (stall/flush) wider than
+						 * one period: re-seed the chain one period out -
+						 * never let a backlog of "owed" slots fire a burst */
+						p->pres_chain_ns = wall_ns + period_ns;
+					} else if( p->pres_chain_ns > wall_ns + 4 * period_ns ) {
+						/* chain drifted too far ahead: pull back to one
+						 * period out */
+						p->pres_chain_ns = wall_ns + period_ns;
+					}
+					int64_t _t_wait0;
+					struct timespec _ts_wait0;
+					clock_gettime(CLOCK_MONOTONIC, &_ts_wait0);
+					_t_wait0 = (int64_t)_ts_wait0.tv_sec * 1000000 + _ts_wait0.tv_nsec / 1000;
+					for( ;; ) {
+						clock_gettime(CLOCK_MONOTONIC, &fr_now);
+						wall_ns = (int64_t)fr_now.tv_sec * 1000000000LL + fr_now.tv_nsec;
+						int64_t remain_ns = p->pres_chain_ns - wall_ns;
+						if( remain_ns <= 0 ) {
+							p->stat_fr_over_us += (int)((-remain_ns) / 1000);
+							p->stat_fr_over_n++;
+							break;
+						}
+						/* keep the latch-feedback anchor alive while we
+						 * idle (the audio clock reads phys through
+						 * fb_last_latch_ns) */
+						if( p->fb_active != 0 && p->gl &&
+						    p->pending_frame->blit_time > 0 ) {
+							int64_t actual_ns = 0;
+							int fbrc = dovi_gl_present_feedback(p->gl, &actual_ns);
+							if( p->fb_active < 0 && fbrc == -1 )
+								p->fb_active = 0;
+							if( fbrc == 0 )
+								dovi_fb_apply( p, actual_ns, my_gen );
+						}
+						/* never hold a frame more than one period past its
+						 * chain slot (fence stall safety: swap anyway) */
+						if( remain_ns > 2 * period_ns )
+							break;
+						/* hybrid final approach: a 2ms nap can overshoot
+						 * the chain slot by up to 2ms and push the swap
+						 * past the vsync boundary (measured 2% doubled
+						 * display durations = the visible 2-frame judder).
+						 * Under 2.5ms remaining, spin at 100us granularity
+						 * instead. */
+						if( remain_ns < 2500000LL ) {
+							struct timespec spinnap = { 0, 100 * 1000L };
+							nanosleep( &spinnap, NULL );
+						} else {
+							struct timespec nap = { 0, 2 * 1000000L };
+							nanosleep( &nap, NULL );
+						}
+						p->stat_poll_iters++;
+						pthread_mutex_lock( &p->venc_mutex );
+						int flushing = p->venc_flushing;
+						pthread_mutex_unlock( &p->venc_mutex );
+						if( flushing )
+							break;
+					}
+					if( p->stat_poll_iters ) {
+						struct timespec _ts_wait1;
+						clock_gettime(CLOCK_MONOTONIC, &_ts_wait1);
+						p->stat_wait_ns += (int64_t)(_ts_wait1.tv_sec - _ts_wait0.tv_sec) * 1000000 +
+						                   (_ts_wait1.tv_nsec - _ts_wait0.tv_nsec) / 1000;
+					}
+				}
+			} else if( !sched_ok ) {
 			int _poll_iters = 0;
 			int64_t _t_wait0;
 			struct timespec _ts_wait0;
@@ -756,7 +905,12 @@ static void *dovi_venc_thread( void *ctx )
 						 * measured on vc28-31). sched_pace=0 keeps SF latching
 						 * as-available (instant acquire) and the userspace
 						 * cadence-locked wait loop paces presents instead. */
-						if( p->sched_pace )
+						/* sched_pace==2 (free-run): no present_at at all -
+						 * the uniform swap chain paces, SF latches
+						 * as-available. */
+						if( p->sched_pace == 2 )
+							scheduled = -2;
+						else if( p->sched_pace )
 							scheduled = dovi_gl_present_at(p->gl, target_ns);
 						p->fb_sched_mode = (scheduled == 0);
 					}
@@ -767,6 +921,18 @@ static void *dovi_venc_thread( void *ctx )
 				clock_gettime(CLOCK_MONOTONIC, &tB);
 				p->stat_pres_swap_ns += (int64_t)(tB.tv_sec - tA.tv_sec) * 1000000000L + (tB.tv_nsec - tA.tv_nsec);
 				p->pres_wall_ns = (int64_t)tB.tv_sec * 1000000000LL + tB.tv_nsec;
+				if( p->sched_pace == 2 ) {
+					/* FREE-RUN chain advance: the next slot is ACTUAL
+					 * swap completion + exactly one period (a late swap
+					 * shifts the grid, never a burst to "catch up"). */
+					int64_t period_ns = p->pres_period_ns;
+					if( period_ns <= 0 && p->pending_frame &&
+					    p->pending_frame->duration > 0 )
+						period_ns = (int64_t)p->pending_frame->duration * 1000000LL;
+					if( period_ns > 0 )
+						p->pres_chain_ns = p->pres_wall_ns + period_ns;
+					p->fb_sched_mode = 0;
+				}
 				p->stat_present++;
 				/* --- actual-latch feedback: NON-BLOCKING final check. The
 				 * one-behind sample is now polled inside the deadline wait
@@ -808,7 +974,7 @@ static void *dovi_venc_thread( void *ctx )
 					int64_t now_us = (int64_t) s0.tv_sec * 1000000 + s0.tv_nsec / 1000;
 						if (last_us && now_us - last_us >= 1000000) {
 						// pi-lens-ignore: typos
-						serprintf("dovi sink: put=%d rend=%d (avg %dus) pres=%d (avg %dus) [sw=%dus fb=%dus sch=%dus] poll_it=%d wait=%dms vencq=%d late=%d forced_late=%d skip=%d idle=%dms clock=%d phys=%d span=%dms fb=%d fblate=%dus\n",
+						serprintf("dovi sink: put=%d rend=%d (avg %dus) pres=%d (avg %dus) [sw=%dus fb=%dus sch=%dus] poll_it=%d wait=%dms vencq=%d late=%d forced_late=%d skip=%d idle=%dms clock=%d phys=%d span=%dms fb=%d fblate=%dus frov=%d/%dus latchslots=",
 						          p->stat_put,
 						          p->stat_render, p->stat_render ? (int)(p->stat_render_ns / p->stat_render / 1000) : 0,
 						          p->stat_present, p->stat_present ? (int)(p->stat_present_ns / p->stat_present / 1000) : 0,
@@ -823,7 +989,12 @@ static void *dovi_venc_thread( void *ctx )
 						          dovi_phys_time(p),
 						          p->stat_time0 >= 0 ? (p->stat_time_last - p->stat_time0) : -1,
 						          p->stat_fb_used,
-						          p->stat_fb_samples ? (p->stat_fb_late_us / p->stat_fb_samples) : 0);
+						          p->stat_fb_samples ? (p->stat_fb_late_us / p->stat_fb_samples) : 0,
+						          p->stat_fr_over_n,
+						          p->stat_fr_over_n ? (p->stat_fr_over_us / p->stat_fr_over_n) : 0);
+						for( int _si = 0; _si < 12; _si++ )
+							serprintf("%s%d:%d", _si ? "," : "", _si + 1, p->fb_slot_hist[_si]);
+						serprintf("\n");
 						p->stat_put = p->stat_render = p->stat_present = 0;
 						p->stat_forced_late = 0;
 						p->stat_poll_iters = 0;
@@ -837,6 +1008,9 @@ static void *dovi_venc_thread( void *ctx )
 						p->stat_pres_swap_ns = 0;
 						p->stat_pres_fbpoll_ns = 0;
 						p->stat_pres_sched_ns = 0;
+						p->stat_fr_over_us = p->stat_fr_over_n = 0;
+						for( int _si = 0; _si < 12; _si++ )
+							p->fb_slot_hist[_si] = 0;
 						p->stat_time0 = p->stat_time_last = -1;
 						last_us = now_us;
 					} else if (!last_us)
@@ -924,9 +1098,21 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	p->fb_phys_blit = 0;
 	p->fb_prev_blit_time = 0;
 	p->fb_sched_mode = 0;	/* userspace wait until the first accepted target */
-	p->sched_pace = 0;		/* A/B: SF-held pacing off - userspace cadence pacing */
+	/* "No sync" free-run mode (GUI refresh-rate sync == 4): the Java
+	 * Player sets the libavos global in onPrepared, which can land
+	 * AFTER the sink opened - so read it again at the first frame and
+	 * lock the pacing mode in for the rest of the stream (per-iteration
+	 * reads would let a mid-playback pref flip break the chain math). */
+	p->sched_pace = 0;
+	p->fr_mode_latched = 0;
 	p->pres_wall_ns = 0;	/* present cadence restarts on open */
+	p->pres_chain_ns = 0;	/* free-run chain restarts on open */
+	p->pres_period_ns = 0;	/* re-measure the content period per stream */
+	p->fr_last_blit = 0;
+	p->fb_prev_latch_ns = 0;
 	p->stat_fb_late_us = p->stat_fb_samples = p->stat_fb_used = 0;
+	for( int _si = 0; _si < 12; _si++ )
+		p->fb_slot_hist[_si] = 0;
 
 	/* pre-queue all frames as free (mirrors android2's sink_open): the
 	 * stream's _queue_sink_frames pulls them via sink->get into decode_q,

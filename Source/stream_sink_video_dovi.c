@@ -118,8 +118,21 @@ typedef struct {
 					 * anchor pairs so put_time's position writes
 					 * are never fought (single-writer). Clamped
 					 * to ±5000 ppm (0.5%). */
-	int sched_pace;			/* A/B master for eglPresentationTimeANDROID
-					 * pacing: see the present_at call site. */
+	int sched_pace;			/* eglPresentationTimeANDROID pacing master.
+					 * FINAL default 0 = present_at disabled: SF latches
+					 * as-available and the userspace cadence-locked
+					 * wait loop (see the !sched_ok block) paces
+					 * presents. Measured A/B (Phase 13): scheduled
+					 * presents on this Samsung panel lose the 24Hz mode
+					 * fight (yanked back to 120Hz 83ms in), held-
+					 * buffer latches run 50-80ms and acquire blocks
+					 * (rend 43-74ms, pres 17.6-18.7/s on 24fps
+					 * content); userspace pacing holds pres=24.0/s
+					 * on 24fps AND pres=46/s (44-51) on 48fps Charles
+					 * with late=0 skip=0 in both - the present-late
+					 * regime covers the 48fps decode-deficit windows.
+					 * Kept as a runtime-selectable knob (A/B and any
+					 * panel where SF scheduling behaves). */
 	int fb_sched_mode;		/* 1 while eglPresentationTimeANDROID targets are
 					 * accepted: SurfaceFlinger owns the latch pacing
 					 * (the userspace deadline wait is skipped - it

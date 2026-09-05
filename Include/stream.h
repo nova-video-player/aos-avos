@@ -1061,6 +1061,7 @@ void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
+int	stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts );
 int	stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state );
 int	stream_get_anchor_delay_ms( STREAM *s, int allow_static );
 int	stream_get_pcm_startup_seed_delay_ms( STREAM *s );

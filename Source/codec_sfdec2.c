@@ -248,7 +248,8 @@ static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int allow_put_time,
 		}
 	}
 	if (!use_put) {
-		heard_ts = s ? (int64_t)stream_get_heard_audio_ts(s, s->audio_time) : 0;
+		heard_ts = s ? (int64_t)stream_get_heard_audio_ts_renderer_locked(
+			s, s->audio_time) : 0;
 	}
 	if (used_put_time) {
 		*used_put_time = use_put;

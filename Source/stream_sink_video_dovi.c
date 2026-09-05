@@ -1191,38 +1191,6 @@ static int sink_get_time(STREAM_SINK_VIDEO *sink)
 static int sink_put_time(STREAM_SINK_VIDEO *sink, int time)
 {
 	priv_t *p = sink->priv;
-	/* 1Hz put_time diagnostic (temporary, offset-defect instrumentation):
-	 * counts calls (audio-driven anchor liveness), hard resets, and the
-	 * last applied anchor step + drift so the slew behavior is visible
-	 * in logcat. */
-	{
-		static int64_t last_us;
-		static int calls, hards;
-		static int last_drift, last_step;
-		struct timespec ts;
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-		last_drift = sink->is_open ? (time - dovi_sink_get_time(p)) : 0;
-		int hard_now = (p->venc_flushing || !p->venc_ref_time || p->venc_put_time == 0);
-		if (!hard_now && (last_drift > 500 || last_drift < -500))
-			hard_now = 1;
-		calls++;
-		if (hard_now)
-			hards++;
-		last_step = hard_now ? last_drift : ((time - dovi_sink_get_time(p)) / 8);
-		if (last_step > 12) last_step = 12;
-		if (last_step < -12) last_step = -12;
-		if (!last_us) {
-			last_us = now_us;
-		} else if (now_us - last_us >= 1000000) {
-			serprintf("dovi sink: pt_calls=%d pt_hard=%d pt_drift=%d pt_step=%d clock=%d new_ts=%d\n",
-				calls, hards, last_drift, last_step,
-				dovi_sink_get_time(p), time);
-			calls = 0;
-			hards = 0;
-			last_us = now_us;
-		}
-	}
 	/* under the mutex: venc_put_time + venc_ref_time form one anchor
 	 * pair; the venc thread reads both unlocked, so a torn update would
 	 * pace one present off the new time against the old wall base.

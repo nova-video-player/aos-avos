@@ -23,8 +23,6 @@
 #include "debug.h"
 
 #include "avos_common_priv.h"
-#include <libavutil/imgutils.h>
-#include <libavutil/mem.h>
 
 #define DBG 	if(0)
 
@@ -56,62 +54,6 @@ avos_msg_t *avos_msg_new_str(uint32_t id, const char *text)
 	if (!msg)
 		return NULL;
 	memcpy(msg->data, text, strlen(text) + 1);
-	return msg;
-}
-
-avos_msg_t *avos_msg_new_text_subtitle(uint32_t id, uint32_t position, uint32_t duration, const char *text)
-{
-	avos_msg_t *msg;
-	avos_text_subtitle_t *sub;
-
-	msg = avos_msg_new(id, AVOS_MSG_TYPE_TEXT_SUBTITLE, sizeof(avos_text_subtitle_t) + strlen(text) + 1);
-	if (!msg)
-		return NULL;
-	sub = (avos_text_subtitle_t *) msg->data;
-	sub->position = position;
-	sub->duration = duration;
-	memcpy(sub->text, text, strlen(text) + 1);
-	return msg;
-}
-
-static void bgra32_to_argb888(uint8_t *src, uint32_t src_width, uint32_t src_height, uint32_t src_linestep, int *dst)
-{
-	// Define the source and destination image planes
-	const uint8_t *src_planes[1] = { src };
-	const int src_stride[1] = { src_linestep };
-	uint8_t *dst_planes[1] = { (uint8_t *)dst };
-	const int dst_stride[1] = { src_width * 4 };
-
-	// Use av_image_copy to copy the data
-	av_image_copy(dst_planes, dst_stride, src_planes, src_stride, AV_PIX_FMT_BGRA, src_width, src_height);
-}
-
-avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_t duration, IMAGE *img)
-{
-	avos_msg_t *msg;
-	avos_bitmap_subtitle_t *sub;
-	int rgba_size = img->window.width * img->window.height * 4;
-
-	msg = avos_msg_new(0, AVOS_MSG_TYPE_BITMAP_SUBTITLE, sizeof(avos_bitmap_subtitle_t) + rgba_size);
-	if (!msg)
-		return NULL;
-	sub = (avos_bitmap_subtitle_t *) msg->data;
-	sub->position = position;
-	sub->duration = duration;
-	sub->left_corner = img->window.x;
-	sub->top_corner = img->window.y;
-	sub->orig_width = img->width; // 1920 pgs or 720 vobsub
-	sub->orig_height = img->height; // 1080 pgs or 480 vobsub
-	sub->bitmap.width = img->window.width;
-	sub->bitmap.height = img->window.height;
-	sub->bitmap.linestep = img->window.width;
-	sub->bitmap.data_size = rgba_size;
-	DBG serprintf("avos_msg_new_bitmap_subtitle: img->width=%d, img->window.width=%d, img->height=%d img->window.height=%d, img->linestep[0]=%d\n", img->width, img->window.width, img->height, img->window.height, img->linestep[0]);
-	bgra32_to_argb888((uint8_t *)img->data[0], img->window.width, img->window.height, img->linestep[0], (int *)sub->data);
-	// sub->bitmap.data = sub->data;
-	sub->bitmap.data = sub->data;
-	av_freep(&img->data[0]);
-	//sub->bitmap.data = img->bgra_data[0]; // directly use the original bitmap data
 	return msg;
 }
 

@@ -19,10 +19,28 @@
 
 #include "stream.h"
 
-int  stream_sub_ext_has_new( STREAM *s );
 int  stream_sub_ext_check( STREAM *s );
+// Preferred periodic re-check: one incremental scan, picks the cheapest outcome itself. Returns 0=no change, >0=tracks appended live, -1=full rebuild ran.
+int  stream_sub_ext_update( STREAM *s );
+// Stamps the engine track-generation token sub_engine_open_track() just
+// returned (its `out_generation` out-param -- see sub_engine.h) onto the
+// currently-selected external track, synchronously, on the calling
+// (selecting) thread -- called right after that open_track() and BEFORE
+// stream_sub_ext_feed_engine() can enqueue that track's streaming feed job
+// onto the background parse-worker pool. Closes a race where the worker
+// would otherwise discover the generation itself later, possibly after a
+// subsequent track switch already moved the engine on. No-op if there's no
+// live SUB_PRIV or the current track index isn't a valid, converted one.
+void stream_sub_ext_set_track_generation( STREAM *s, uint64_t token );
+// Syncs with stream_subtitle.c's discovery worker before stream_sub_ext_close() tears down subtitle_priv.
+void stream_sub_ext_wait_for_discovery( STREAM *s );
 void stream_sub_ext_close( STREAM *s );
 int  stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **frame, int time );
+int  stream_sub_ext_feed_engine(STREAM *s);
+// Use instead of stream_sub_ext_feed_engine() when re-feeding on subtitle_ext_needs_refeed (seek flush or an interrupted streaming feed); safe for all formats.
+int  stream_sub_ext_force_streaming_refeed(STREAM *s);
+int  stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time );
+int  stream_sub_ext_get_engine_fmt( STREAM *s );
 
 //int stream_get_num_subtitle( STREAM *s );
 //SUB_PROPERTIES *stream_get_subtitle_props( STREAM *s, int num );

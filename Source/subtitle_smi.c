@@ -33,10 +33,27 @@
 #define SMI_ARRAY_SIZE 10
 static sub_coding_style *chop_line( char * );
 
+// Seeks to the beginning of the file, skipping a leading UTF-8 BOM
+// (EF BB BF) if present. Every "start of file" seek in this parser must go
+// through here rather than a raw fseek(file,0,SEEK_SET): detect_SMI,
+// info_SMI, and parse_SMI each independently rewind and re-read from the
+// top, and a raw seek-to-0 would re-introduce the BOM bytes into the
+// header/body scan every time, breaking the "<SAMI>" match in detect_SMI
+// and offsetting every subsequent line read.
+static void smi_seek_start( FILE *file )
+{
+	fseek( file, 0, SEEK_SET );
+	int c0 = fgetc( file ), c1 = fgetc( file ), c2 = fgetc( file );
+	if( (unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF ) {
+		return; // leave positioned right after the BOM
+	}
+	fseek( file, 0, SEEK_SET );
+}
+
 static int detect_SMI( FILE * file )
 {
-	//make sure that read starts at the beginning of file
-	fseek( file, 0, SEEK_SET );
+	//make sure that read starts at the beginning of file (skipping BOM)
+	smi_seek_start( file );
 	
 	char _tmp[ LINE_LEN + 1 ];
 	char* tmp = _tmp;
@@ -44,7 +61,7 @@ static int detect_SMI( FILE * file )
 		goto ErrorExit;
 	}
 	if ( strstrNC( tmp, "<SAMI>" ) ) {
-		fseek( file, 0, SEEK_SET );
+		smi_seek_start( file );
 DBG serprintf( "SMI: found!\n" );
 		return 0;
 	}
@@ -139,8 +156,8 @@ static sub_coding_style **info_SMI( FILE * file, int *cnt, uint32_t *palette, in
 	int styles = 0;
 	sub_coding_style **style_arr = NULL;
 	sub_coding_style *ifstyle = NULL;
-	//make sure that reading start from the begining of file
-	fseek( file, 0, SEEK_SET );
+	//make sure that reading start from the begining of file (skipping BOM)
+	smi_seek_start( file );
 	
 	//store header to read it easier.
 	header = fgets( header, LINE_LEN, file );
@@ -339,10 +356,9 @@ static char *set_SMI_code( subt_orig * subs, FILE * file )
 //determines where to copy the new line
 static inline void store_text_line( sub_line *new_line, char *line, int clean_tags, int utf8 )
 {
-#ifdef CONFIG_I18N
+	#ifdef CONFIG_I18N
 	char utf[ LINE_LEN * 2 + 1 ] = { 0 };
 	if( !utf8 ) {
-//serprintf("cp: %s\r\n", line );
 		wchar unicode[ LINE_LEN + 1 ] = { 0 };
 		wchar *uc = unicode;
 		char *c   = line;
@@ -351,41 +367,27 @@ static inline void store_text_line( sub_line *new_line, char *line, int clean_ta
 			uc++;
 		}
 		*uc = 0;
-	
 		utf16_to_utf8( utf, unicode, LINE_LEN);
 		line = utf;
-//serprintf("uc: %s\r\n", line );
 	}
-#endif
+	#endif
 	char *tmp_line = subtitle_clean_formatter(line, clean_tags);
 	char *end = strstr(line, "&nbsp");
 	if(end == line || end == line + 1){
-		new_line->top = astrdup(" ");
+		if (!new_line->top) new_line->top = astrdup(" ");
 		goto SMI_TXT_CLEAN;
 	}
+
 	if ( !new_line->top ) {
 		new_line->top = astrdup( tmp_line );
-		goto SMI_TXT_CLEAN;
+	} else {
+		// --- NATIVE LIBASS UPGRADE ---
+		// Do not split to bottom line. Use \N
+		new_line->top = arealloc( new_line->top, ( strlen( new_line->top ) + strlen( tmp_line ) + 3 ) );
+		strcat( new_line->top, "\\N" );
+		strcat( new_line->top, tmp_line );
 	}
-	if ( !new_line->bottom ) {
-		new_line->bottom = astrdup( tmp_line );
-		goto SMI_TXT_CLEAN; 
-	}
-	//both lines are alread filled. do some rearring
-	if ( strlen( tmp_line ) < ( strlen( new_line->bottom ) + strlen( new_line->top ) ) ) {
-		new_line->bottom = arealloc( new_line->bottom, ( strlen( new_line->bottom ) + strlen( tmp_line ) + 3 ) );
-		strcat( new_line->bottom, " " );
-		strcat( new_line->bottom, tmp_line );
-		goto SMI_TXT_CLEAN; 		
-	} else {		// move the bottom line to end of upperline and tmpline to bottomline
-		new_line->top = arealloc( new_line->top, ( strlen( new_line->top ) + strlen( new_line->bottom ) + 3 ) );
-		strcat( new_line->top, " " );
-		strcat( new_line->top, new_line->bottom );
-		afree( new_line->bottom );
-		new_line->bottom = astrdup( tmp_line );
-		goto SMI_TXT_CLEAN; 		
-	}
-SMI_TXT_CLEAN:
+	SMI_TXT_CLEAN:
 	afree(tmp_line);
 }
 
@@ -397,17 +399,19 @@ static inline void handle_linebreak( char *data, sub_line *title, int clean_tags
 	char* dataline = subtitle_clean_formatter(data, clean_tags);
 	if ( !strncmp( dataline, "<br", 3 ) ) {
 		data_low = strchr(dataline, '>');
-		data_low++;
+		if (data_low) data_low++;
 		*dataline = '\0';
 	} else {
 		//split the string to two C strings
 		data_low = strstr( dataline, "<br" );
-		*data_low = '\0';
-		data_low += 4;
-		if(*data_low == '>')
-			data_low++;
+		if (data_low) {
+			*data_low = '\0';
+			data_low += 4;
+			if(*data_low == '>') data_low++;
+		}
 	}
-	if ( dataline ) {
+
+	if ( dataline && *dataline ) {
 		if ( !title->top ) {
 			title->top = astrdup( dataline );
 		} else {
@@ -416,11 +420,16 @@ static inline void handle_linebreak( char *data, sub_line *title, int clean_tags
 		}
 	}
 
-	if ( !title->bottom ) {
-		title->bottom = astrdup( data_low );
-	} else {
-		title->bottom = arealloc( title->bottom, strlen( title->bottom ) + strlen( data_low ) + 1 );
-		strcat( title->bottom, data_low );
+	if ( data_low && *data_low ) {
+		if ( !title->top ) {
+			title->top = astrdup( data_low );
+		} else {
+			// --- NATIVE LIBASS UPGRADE ---
+			// Translate the SMI <br> tag into an ASS \N line break!
+			title->top = arealloc( title->top, strlen( title->top ) + strlen( data_low ) + 3 );
+			strcat( title->top, "\\N" );
+			strcat( title->top, data_low );
+		}
 	}
 	afree(dataline);
 }
@@ -509,14 +518,22 @@ static sub_line *extract_smi_line( char **data, char *coding, int clean_tags, in
         //ignore empty spaces
         char *tmp_line = clear_empty(tmp);
         //loop through every line and acquire lines that have <P Class=coding>
-        if(!tmp_line)     {
+        //
+        // NOTE: this used to be two single-shot "if empty/short, advance
+        // once" checks, which only ever skipped at most one blank/short
+        // line before falling through. A SAMI file with two blank/short
+        // lines in a row (e.g. an empty line followed by a lone short
+        // "<P Class=EN>" tag on its own line before the real text) would
+        // silently orphan the actual cue text sitting past them -- it was
+        // never reached, and the cue was dropped. Loop until we land on
+        // real content, run out of buffer, or hit the next <Sync Start=.
+        while ( tmp_line && line < SMI_ARRAY_SIZE - 1 &&
+                ( *tmp_line == '\0' || strlen( tmp_line ) < 5 ) &&
+                strncmpNC( tmp_line, "<Sync Start=", 12 ) ) {
 		tmp_line = data[++line];
 	}
         if(!tmp_line)     {
 		goto ERROR_CLEAN;
-	}
-	if ( strlen( tmp_line ) < 5 ) {
-		tmp_line = data[++line];
 	}
 	
 	int get_line = 0;
@@ -662,6 +679,7 @@ char *getNextLine(char* start, int len, FILE* fd)
  * **********/
 static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 {
+	clean_tags = 0;
 	FILE *file;
 	char _line_read[LINE_LEN + 1];
 	char* line_read = _line_read;
@@ -690,7 +708,7 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 	
 	sub_record = acalloc(1, sizeof( uni_sub ) );
 	
-	fseek( file, 0, SEEK_SET );
+	smi_seek_start( file );
 	line_read = getNextLine( line_read_start, LINE_LEN, file );
 	//skip the header
 	while ( !feof( file ) ) {

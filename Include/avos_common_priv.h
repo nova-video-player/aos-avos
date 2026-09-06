@@ -21,8 +21,6 @@
 #include "image.h"
 
 avos_msg_t *avos_msg_new_str(uint32_t id, const char *text);
-avos_msg_t *avos_msg_new_text_subtitle(uint32_t id, uint32_t position, uint32_t duration, const char *text);
-avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_t duration, IMAGE *img);
 
 int avos_metadata_write_begin(metadata_buffer_t *buffer);
 int avos_metadata_write_end(metadata_buffer_t *buffer); /* return 1 if metadata changed */

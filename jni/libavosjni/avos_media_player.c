@@ -183,24 +183,6 @@ static void *event_thread(void *ctx)
         if (msg->extdata) {
             if (msg->extdata->type == AVOS_MSG_TYPE_STR) {
                 jextdata = (jobject) (*env)->NewStringUTF(env, (const char *)msg->extdata->data);
-            } else if (msg->extdata->type == AVOS_MSG_TYPE_TEXT_SUBTITLE) {
-                avos_text_subtitle_t *sub = (avos_text_subtitle_t *)msg->extdata->data;
-                jstring jstr = (jstring) (*env)->NewStringUTF(env, sub->text);
-                if (jstr) {
-                    jextdata = (*env)->CallStaticObjectMethod(env, fields.SubtitleClazz,
-                            fields.Subtitle_createTimedTextSubtitleMethod,
-                            sub->position, sub->duration, jstr);
-                    (*env)->DeleteLocalRef(env, jstr);
-                }
-            } else if (msg->extdata->type == AVOS_MSG_TYPE_BITMAP_SUBTITLE) {
-                avos_bitmap_subtitle_t *sub = (avos_bitmap_subtitle_t *)msg->extdata->data;
-                jobject bitmap = create_bitmap(env, &sub->bitmap, 0, 0);
-                if (bitmap) {
-                    jextdata = (*env)->CallStaticObjectMethod(env, fields.SubtitleClazz,
-                            fields.Subtitle_createTimedBitmapSubtitleMethod,
-                            sub->position, sub->duration, sub->left_corner, sub->top_corner, sub->orig_width, sub->orig_height, bitmap);
-                    (*env)->DeleteLocalRef(env, bitmap);
-                }
             }
         }
         (*env)->CallStaticVoidMethod(env, fields.AvosMediaPlayerClazz,

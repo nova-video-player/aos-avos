@@ -330,6 +330,47 @@ static int get_ff_format( int id, UINT32 *fourcc )
 
 // ************************************************************
 //
+//	is_font_attachment
+//
+// ************************************************************
+// Recognizes container-attachment mimetypes that are actual embeddable font
+// files, as opposed to the OTHER things AVMEDIA_TYPE_ATTACHMENT covers in a
+// container (cover art, generic binary blobs, etc.) -- we only want to hand
+// FreeType/libass things it can actually parse as fonts. Matroska muxers
+// consistently tag font attachments with one of these MIME types; falls back
+// to the filename extension for muxers/remuxes that leave mimetype blank or
+// generic (e.g. "application/octet-stream").
+static int is_font_attachment( const char *mimetype, const char *filename )
+{
+	if( mimetype ) {
+		if( !strcmp( mimetype, "application/x-truetype-font" ) ||
+		    !strcmp( mimetype, "application/x-font-ttf" )      ||
+		    !strcmp( mimetype, "application/x-font-otf" )      ||
+		    !strcmp( mimetype, "application/vnd.ms-opentype" ) ||
+		    !strcmp( mimetype, "application/font-sfnt" )       ||
+		    !strcmp( mimetype, "font/ttf" )                    ||
+		    !strcmp( mimetype, "font/otf" )                    ||
+		    !strcmp( mimetype, "font/sfnt" )                   ||
+		    !strcmp( mimetype, "font/collection" ) ) {
+			return 1;
+		}
+	}
+	if( filename ) {
+		static const char *exts[] = { ".ttf", ".otf", ".ttc", ".TTF", ".OTF", ".TTC" };
+		size_t len = strlen( filename );
+		size_t e;
+		for( e = 0; e < sizeof( exts ) / sizeof( exts[0] ); e++ ) {
+			size_t elen = strlen( exts[e] );
+			if( len > elen && !strcmp( filename + len - elen, exts[e] ) ) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
+// ************************************************************
+//
 //	_parse_format
 //
 // ************************************************************
@@ -783,6 +824,46 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				serprintf("stream_parser_ffmpeg: ignoring subtitle stream %d: "
 					"maximum of %d subtitle tracks reached\n",
 					i, SUB_TRACK_MAX);
+			}
+		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT ){
+			//
+			// font attachment (e.g. MKV-embedded .ttf/.otf/.ttc) -- see
+			// font_name_parser.c/.h and sub_format_ssa.c's
+			// load_embedded_fonts() for what happens to these downstream.
+			//
+			// Deliberately does NOT set discard = 0: attachment streams
+			// carry no time-stamped packets to read in the first place (the
+			// whole payload is already sitting in codecpar->extradata by
+			// the time avformat_find_stream_info() returns, same as it is
+			// for the AVMEDIA_TYPE_SUBTITLE codec_private case above) -- so
+			// there's nothing to gain from keeping this stream un-discarded,
+			// exactly as before this feature existed.
+			AVDictionaryEntry *filename_tag = av_dict_get(st->metadata, "filename", NULL, 0);
+			AVDictionaryEntry *mimetype_tag = av_dict_get(st->metadata, "mimetype", NULL, 0);
+			const char *att_name = filename_tag ? filename_tag->value : NULL;
+			const char *att_mime = mimetype_tag ? mimetype_tag->value : NULL;
+
+			if( codecpar->extradata && codecpar->extradata_size > 0 &&
+			    is_font_attachment( att_mime, att_name ) ) {
+				if( priv->av.fonts_max < ATTACHED_FONT_MAX ) {
+					ATTACHED_FONT *font = priv->av.font + priv->av.fonts_max;
+
+					font->valid = 1;
+					strnZcpy( font->filename, att_name ? att_name : "", AV_NAME_LEN );
+					strnZcpy( font->mimetype, att_mime ? att_mime : "", AV_NAME_LEN );
+					// Alias, not a copy -- see ATTACHED_FONT's doc comment
+					// in av.h for the lifetime contract (mirrors extraData2
+					// just above for AVMEDIA_TYPE_SUBTITLE).
+					font->data = codecpar->extradata;
+					font->size = codecpar->extradata_size;
+
+					priv->av.fonts_max ++;
+DBGP serprintf("\tfont attachment: '%s' (%s, %d bytes)\r\n", font->filename, font->mimetype, font->size);
+				} else {
+					serprintf("stream_parser_ffmpeg: ignoring font attachment stream %d: "
+						"maximum of %d font attachments reached\n",
+						i, ATTACHED_FONT_MAX);
+				}
 			}
 		}
 DISCARD_STREAM:
@@ -1684,71 +1765,10 @@ ErrorExit:
 	return 0;
 }
 
-static int msk_fixup_ssa( char *dst, int max, const char *src, int src_size, int time, int duration )
-{
-	const char *layer = NULL;
-	const char *ptr = src; 
-	const char *end = src + src_size;
-	
-	// skip the count
-	for ( ; *ptr != ',' && ptr < end - 1; ptr++ );
-	
-	// we are at the layer tag
-	if ( *ptr == ',' )
-		layer = ++ptr;
-	
-	// find next comma
-	for ( ; *ptr != ',' && ptr < end - 1; ptr++ );
-	
-	// we are at the rest to copy verbatim
-	if ( layer && *ptr == ',' ) {
-		int sc =  time / 10;
-		int ec = (time + duration) / 10;
-		
-		int sh  = sc / 360000;
-		    sc -= 360000 * sh;
-		int sm  = sc / 6000;
-		    sc -= 6000 * sm;
-		int ss  = sc / 100;
-		    sc -= 100 * ss;
-		
-		int eh  = ec / 360000;
-		    ec -= 360000 * eh;
-		int em  = ec / 6000;
-		    ec -= 6000 * em;
-		int es  = ec / 100;
-		    ec -= 100 * es;
-		char *layere = (char*)ptr;
-		
-		*layere = '\0';
-		snprintf( dst, max, "Dialogue: %s,%d:%02d:%02d.%02d,%d:%02d:%02d.%02d,", layer, sh, sm, ss, sc, eh, em, es, ec );
-		*layere = ',';
-		
-		max -= strlen(dst) + 3;
-		char *d = dst + strlen(dst);
-		ptr ++;
-		while( max-- > 0 && *ptr && ptr != end )
-			*d++ = *ptr++;
-		*d++ = '\r';
-		*d++ = '\n';
-		*d++ = '\0';
-	} else {
-		strcpy( dst, "" );
-	}
-	return strlen( dst );
-}
-
-static int msk_fixup_srt( char *dst, int max, const char *src, int src_size, int time, int duration )
-{
-	char *d = dst;
-	max --;
-	snprintf( d, max, "%d:%d,", time, time + duration );
-	max -= strlen(dst);
-	d   += strlen(dst);
-	int copy = MIN( max, src_size );
-	snprintf( d, copy + 1, "%s", src );
-	return strlen( dst );
-}
+// msk_fixup_srt() removed: it produced a "<start_ms>:<end_ms>,<text>" wire format for the
+// old pre-libass SRT decoder. The current pipeline (sub_format_srt.c::srt_feed()) expects
+// plain subtitle text with timing passed separately, so this function had no remaining
+// valid caller — see _get_subtitle_cdata()'s SUB_FORMAT_TEXT handling above.
 
 // ************************************************************
 //
@@ -1789,10 +1809,25 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 	
 	int duration_rst = GET_SUB_TS( packet->duration );
 	int duration_ts = RST_TO_TS_DELTA(duration_rst, int);
-	if( s->subtitle->format == SUB_FORMAT_SSA ) {
-		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
-	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
-		cdata->size = msk_fixup_srt( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
+	// Prepend the 4-byte duration natively!
+	// NOTE: SUB_FORMAT_TEXT (container-embedded SRT) is intentionally handled by the SAME
+	// raw-passthrough branch as SUB_FORMAT_SSA, not by msk_fixup_srt() below. msk_fixup_srt()
+	// produces a "<start_ms>:<end_ms>,<text>" wire format that was consumed by the old
+	// pre-libass SRT decoder; the current pipeline's sub_format_srt.c::srt_feed() expects
+	// plain subtitle text and receives start time/duration separately via
+	// sub_engine_feed(..., pts_ms, duration_ms) (see stream_subtitle.c's fast lane). Routing
+	// SUB_FORMAT_TEXT through msk_fixup_srt() here would prepend a bogus timestamp string
+	// that libass would render as literal garbage text at the start of every line.
+	if( s->subtitle->format == SUB_FORMAT_SSA || s->subtitle->format == SUB_FORMAT_TEXT ||
+	    s->subtitle->format == SUB_FORMAT_MOV_TEXT || s->subtitle->format == SUB_FORMAT_WEBVTT ) {
+		// mov_text/webvtt (ffdec-text, CASE 2) need this too: their ffmpeg subtitle
+		// decoders (tx3g / webvtt) do not populate AVSubtitle.start_display_time/
+		// end_display_time (both come back 0 -- see codec_ffsub.c's DBGS log), so
+		// codec_ffsub.c's _decode() has no other source for the real cue duration.
+		// Without this prefix every decoded cue is stuck at frame->duration = -1.
+		memcpy(sub_buffer->data, &duration_ts, sizeof(int));
+		memcpy(sub_buffer->data + sizeof(int), packet->data, packet->size);
+		cdata->size = packet->size + sizeof(int);
 	} else {
 		memcpy( sub_buffer->data, packet->data, packet->size );
 	}

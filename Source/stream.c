@@ -248,6 +248,16 @@ DBGS serprintf("stream_delete: %08X\r\n", s ? (long)*s : -1 );
 	if( !s || !*s )
 		return 1;
 	stream_url_clear( &(*s)->src );
+	// See the comment in stream_close(): deferred this far so any last
+	// stream_sub_ext_close() call for this stream is guaranteed to already
+	// be done, same as mode2_heard_mutex's own deferred destroy.
+	pthread_mutex_destroy( &(*s)->subtitle_owner_lock );
+	pthread_cond_destroy(  &(*s)->subtitle_owner_cond );
+	// subtitle_table_lock (stream.h): same deferred-destroy reasoning as
+	// subtitle_owner_lock above -- stream_stop()'s stream_sub_ext_close()
+	// waits for the discovery worker before returning, and that happens
+	// after stream_close() but before here, so it's safe to destroy now.
+	pthread_mutex_destroy( &(*s)->subtitle_table_lock );
 	afree( *s );
 	*s = NULL;
 	return 0;
@@ -280,6 +290,9 @@ DBGS serprintf("stream_init\r\n" );
 	pthread_mutex_init( &s->video_sink_mutex,  NULL );
 	pthread_mutex_init( &s->anchor_mutex,      NULL );
 	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
+	pthread_mutex_init( &s->subtitle_owner_lock, NULL );
+	pthread_cond_init(  &s->subtitle_owner_cond, NULL );
+	pthread_mutex_init( &s->subtitle_table_lock, NULL );
 	
 	ref_count ++;
 	return 0;
@@ -343,6 +356,13 @@ DBGS serprintf("codec_thread joined\r\n");
 	// mode2_heard_mutex is also read by the asynchronous video renderer. Its
 	// lifetime therefore extends until stream_stop() has joined decoder/sink
 	// threads, not just the core stream threads joined above; destroy it there.
+	// subtitle_owner_lock/subtitle_owner_cond guard subtitle_priv's validity
+	// for stream_sub_ext.c's parse-worker pool (see their doc comment in
+	// stream.h) and must, by the same reasoning, stay alive until
+	// stream_sub_ext_close() has made its very last call for this stream --
+	// which this function has no visibility into the timing of. Destroyed
+	// in stream_delete() instead, once the STREAM itself is being freed and
+	// nothing can still be resolving against it.
 	
 	s->open = 0;
 	
@@ -1729,6 +1749,8 @@ void stream_show_short_props( STREAM *s )
 			);
 		}
 	}
+	// Locked -- debug output only, but see subtitle_table_lock (stream.h).
+	pthread_mutex_lock( &s->subtitle_table_lock );
 	if( s->subtitle->valid ) {
 		int i;
 		for( i = 0; i < s->av.subs_max; i++ ) {
@@ -1744,6 +1766,7 @@ void stream_show_short_props( STREAM *s )
 			);
 		}
 	}
+	pthread_mutex_unlock( &s->subtitle_table_lock );
 }
 
 // *****************************************************************************

@@ -117,7 +117,13 @@ ifeq ($(VIDEO),ON)
 	DEFINES += -DCONFIG_3GP
 	
 	DEFINES += -DCONFIG_SUBTITLES
-        DEFINES += -DCONFIG_VOBSUB
+    DEFINES += -DCONFIG_VOBSUB
+
+    ifeq ($(LIBASS),ON)
+		DEFINES += -DCONFIG_LIBASS      # for rendering subtitles
+		INCLUDES += -I$(LOCAL_PATH)/../../native/prebuilt/libass/include
+		SHARED_LIBS      += -lm
+	endif
 
 	ifeq ($(VIDEO_FFMPEG),ON)
 		# FFmpeg

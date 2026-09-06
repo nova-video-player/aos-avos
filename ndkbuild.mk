@@ -62,8 +62,8 @@ LOCAL_LDLIBS := -L$(TARGET_OUT) -lz \
 	-llog
 
 LOCAL_STATIC_LIBRARIES := $(sort $(addsuffix $(AVOS_LIBS_SUFFIX), $(AVOS_STATIC_LIBS))) \
-	cpufeatures libyuv
-
+	cpufeatures libyuv \
+	ass_prebuilt fontconfig_prebuilt xml2_prebuilt unibreak_prebuilt harfbuzz_prebuilt fribidi_prebuilt freetype_prebuilt png_prebuilt z_prebuilt
 LOCAL_MODULE := libavos$(AVOS_LIBS_SUFFIX)
 
 LOCAL_MODULE_TAGS := optional

@@ -23,8 +23,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <limits.h>
-#include <errno.h>
 
 #define DBG if(Debug[DBG_SUB])
 #define DBG2 if(Debug[DBG_SUB] > 1)
@@ -82,6 +80,14 @@ static int detect_SRT( FILE * file )
 	char _line [LINE_LEN + 1 ];
 	char* line = _line;
 
+	// Skip BOM if present (UTF-8: EF BB BF)
+	int c0 = fgetc(file), c1 = fgetc(file), c2 = fgetc(file);
+	if( !((unsigned char)c0 == 0xEF && (unsigned char)c1 == 0xBB && (unsigned char)c2 == 0xBF) ) {
+		// Not a BOM — rewind
+		fseek( file, 0, SEEK_SET );
+	}
+
+	// Read line 1 (cue index number) then line 2 (timestamp)
 	Xfgets(line, LINE_LEN, file)
 	if(feof(file)){
 		goto ErrorExit;
@@ -134,222 +140,149 @@ char *subtitle_get_next_line( char *start, int len, FILE *fd )
 	return ret;
 }
 
-/**************
- * 
- * Parses SRT formatted subtitle text
- * input:
- * spex->filename must exist and point to VALID srt file
- * 
- * returns subtitles, packed into uni_sub*
- * 
- * ***********************/
-static uni_sub *parse_SRT( subt_orig *spex, int clean_tags )
+// In-memory equivalent of subtitle_get_next_line(), for callers (feed_SRT, feed_VTT) that read the whole file into a buffer upfront; same fgets()-like contract, but an oversized line is truncated into `out` while `*cursor` still advances past the full physical line so the next call resyncs. Returns NULL at EOF.
+char *subtitle_get_next_line_from_buffer( const char **cursor, const char *end, char *out, int len )
 {
-	uni_sub *sub_record = acalloc(1, sizeof( uni_sub ) );
-	char _line[ LINE_LEN + 1];
-	memset(_line,0,LINE_LEN);
-	char *line = _line;
-	FILE *fd = 0;
-	sub_line *new_line = 0;
-	int srt_state = SRT_NR;
-	char* store = 0;
-	int next_index = 0;
-	//in SRT there is no data for all fields
-	if ( !spex ) {
-DBG serprintf( "SRT: Invalid parameter\n" );
-		goto CLEAR_ERROR;
-	}
-	if ( !spex->filename ) {
-DBG serprintf( "SRT: Invalid filename parameter\n" );
-		goto CLEAR_ERROR;
-	}
-	fd = fopen( spex->filename, "r" );
-	if( !fd )
-		goto CLEAR_ERROR;
-	line = subtitle_get_next_line( line, LINE_LEN, fd );
-	while ( line ) {
+	if( *cursor >= end ) return NULL;
 
-		switch ( srt_state ) {
-		case SRT_NR:{
-			//here should be data, but ignore possible blank lines
-			srt_chop(line);
-			if(*line == '\0'){
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
-			}
-			if ( next_index == atoi( line ) ) {
-				next_index++;
-				srt_state = SRT_TIME;
-			} else {
-DBG2 serprintf( "SRT: missing index %i(%i),line='%s'\n", next_index, atoi( line ), line );
-				next_index = atoi( line ) + 1;
-				srt_state = SRT_TIME;
-			}
-			memset(line,0,LINE_LEN);
-			line = subtitle_get_next_line( line, LINE_LEN, fd );
-			continue;
-		}
-		case SRT_TIME:{
-			int start;
-			int end;
-			if ( subtitle_get_srt_time( line, &start, &end ) ) {
-DBG serprintf( "subtitle: SRT time error near index %i  line %s\n", next_index - 1, line );
-				srt_state = SRT_NR;
-				memset(line,0,LINE_LEN);
-				line = subtitle_get_next_line( line, LINE_LEN, fd );
-				continue;
-			}
-			//new title coming, init new struct for it
-			new_line = acalloc(1, sizeof( sub_line ) );
-			new_line->start = start;
-			new_line->end   = end;
+	const char *p  = *cursor;
+	const char *nl = memchr( p, '\n', end - p );
+	const char *line_end = nl ? nl + 1 : end; // include the '\n', like fgets()
 
-			srt_state = SRT_TEXT;
-			memset(line,0,LINE_LEN);
-			line = subtitle_get_next_line( line, LINE_LEN, fd );
-			continue;
-		}
-		case SRT_TEXT:{
-			//here can be either blank (ends this title) or text.
-			//ok. the title ends to this line
-			if ( line[0] == NEW_LINE_CH || line[0] == MS_CURSOR_BEGIN ) {
-				if ( new_line->top == 0 && new_line->bottom == 0 ) {
-DBG serprintf( "no text found for index %i\n", next_index - 1 );
-					afree( new_line );
-					memset(line,0,LINE_LEN);
-					new_line = 0;
-					line = subtitle_get_next_line( line, LINE_LEN, fd );
-					if( !line ) {
-						continue;
-					}
-				} else {
-					//end of this title. Store it
-					if ( sub_record->first == 0 ) {
-						sub_record->first = new_line;
-						sub_record->last = new_line;
-					} else {
-						if( sub_record->last->end < new_line->end ) {
-							sub_record->last->next = new_line;
-							new_line->prev   = sub_record->last;
-							sub_record->last = new_line;
-						}
-					}
-					new_line = 0;
-				}
-				srt_state = SRT_NR;
-			}
-			//IF \n or \r must be erased, do it here!!
-			srt_chop(line);
-			if ( strlen( line ) ) {
-#ifdef CONFIG_I18N
-				if( !spex->utf8 ) {
-					//serprintf("LINE: %s\r\n", line );
-					wchar unicode[ LINE_LEN + 1 ];
-					memset(unicode,0, LINE_LEN);
-					wchar *uc = unicode;
-					char *c = line;
-					while( *c ) {
-						// take care about wide codepage chars!
-						c += I18N_codepage_to_unicode( c, uc );
-						uc++; 
-					}
-					// convert to utf8
-					utf16_to_utf8( line, unicode, LINE_LEN );
-					//serprintf("LINE: %s\r\n", line );
-				}
-#endif
-				store = subtitle_clean_formatter(line, clean_tags);
-				//There may be multiple lines. If true put to top line
-				if(new_line){
-					if ( new_line->top == 0 ) {
-						new_line->top = amalloc( strlen( store ) + 1 );
-						strcpy( new_line->top, store );
-					} else {	//hopefully the bottom line is empty
-						if ( new_line->bottom == 0 ) {
-							new_line->bottom = amalloc( strlen( store ) + 1 );
-							strcpy( new_line->bottom, store );
-						} else {
-							//Only allow catting until line is LINE_LEN after that we know that
-							//the line is crap
-							if((strlen(new_line->bottom) + strlen(store)) < LINE_LEN){
+	int phys_len = (int)(line_end - p);
+	int out_len  = phys_len < len ? phys_len : len - 1;
 
-								new_line->bottom = arealloc( new_line->bottom,
-										strlen( store ) + strlen( new_line->bottom ) + 2 );
-								strcat( new_line->bottom, store );
-							}
-						}
-					}
-				}
-				else{
-					srt_state = SRT_NR;
-				}
-				afree(store);
-				store = 0;
-			}
-			memset(line,0,LINE_LEN);
-			line = subtitle_get_next_line( line, LINE_LEN, fd );
-			continue;
-		}
-		}
-	}
-	if( new_line ) { //last one was not stored;
-		if( sub_record->first == 0 ) {
-			sub_record->first = new_line;
-			sub_record->last = new_line;
-		} else {
-			if( sub_record->last->end < new_line->end ) {
-				sub_record->last->next = new_line;
-				new_line->prev = sub_record->last;
-				sub_record->last = new_line;
-			}
-		}
-	}
-	
-	if(fd){
-		fclose(fd);
-	}
-	if(store){
-		afree(store);
-	}
-	return sub_record;
-CLEAR_ERROR:
-	if(fd){
-		fclose(fd);
-	}
-	if(store){
-		afree(store);
-	}
-	subtitle_clean_error(sub_record);
-		
-	afree(sub_record);
-	if(new_line){
-		free(new_line);
-	}
-	return 0;
+	memcpy( out, p, out_len );
+	out[out_len] = '\0';
+
+	*cursor = line_end;
+	return out;
 }
 
-__attribute__((unused))
-static int subtitle_get_next_time_val(const char **start, int sep, long int *val)
-{
-	char *endptr;
+// Streaming single-pass SRT parser: fires cb() per cue as parsed, no linked list or second pass; this is the only path (SRT.parse is NULL below). `poll` is checked every SRT_POLL_INTERVAL lines -- on interruption the loop just stops (caller retries later) and `interrupted` suppresses flushing a genuinely-incomplete trailing cue.
+#define SRT_POLL_INTERVAL 200
 
-	errno = 0;
-	*val = strtol(*start, &endptr, 10);
-	if ((errno == ERANGE && (*val == LONG_MAX || *val == LONG_MIN))
-	    || (errno != 0 && *val == 0) || (sep != 0 && endptr != NULL && endptr - *start != sep)) {
-		return 1;
-	} else {
-		*start = endptr +1;
-		return 0;
+static void feed_SRT( subt_orig *spex, sub_cue_cb cb, void *ctx, sub_feed_poll_cb poll, void *poll_ctx )
+{
+	if( !spex || !spex->filename || !cb ) return;
+
+	// Full-file buffered read: one read() instead of many fgets() round-trips (costly on network shares); parse from RAM instead.
+	FILE *fd = fopen( spex->filename, "rb" );
+	if( !fd ) return;
+
+	fseek( fd, 0, SEEK_END );
+	long file_size = ftell( fd );
+	fseek( fd, 0, SEEK_SET );
+	if( file_size <= 0 ) { fclose( fd ); return; }
+
+	char *buf = amalloc( file_size + 1 );
+	if( !buf ) { fclose( fd ); return; }
+
+	long bytes_read = (long)fread( buf, 1, file_size, fd );
+	fclose( fd );
+	if( bytes_read <= 0 ) { afree( buf ); return; }
+	buf[bytes_read] = '\0';
+
+	const char *cursor = buf;
+	const char *end     = buf + bytes_read;
+
+	// Skip BOM
+	if( bytes_read >= 3 && (unsigned char)cursor[0] == 0xEF && (unsigned char)cursor[1] == 0xBB && (unsigned char)cursor[2] == 0xBF ) {
+		cursor += 3;
 	}
+
+	char  _line[ LINE_LEN + 1 ];
+	char *line;
+	char  cue_text[ LINE_LEN * 2 + 4 ];
+	cue_text[0] = '\0';
+
+	int srt_state = SRT_NR;
+	int next_index = 0;
+	int cue_start = 0, cue_end = 0;
+	char *store = 0;
+	int line_count = 0;
+	int interrupted = 0;
+
+	line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
+	while( line ) {
+		if( poll && (++line_count % SRT_POLL_INTERVAL) == 0 && poll( poll_ctx ) ) {
+			interrupted = 1;
+			break;
+		}
+		switch( srt_state ) {
+			case SRT_NR: {
+				srt_chop( line );
+				if( *line == '\0' ) break;
+				next_index = atoi( line ) + 1;
+				srt_state  = SRT_TIME;
+				break;
+			}
+			case SRT_TIME: {
+				if( subtitle_get_srt_time( line, &cue_start, &cue_end ) ) {
+					DBG serprintf( "SRT feed: time error line %s\n", line );
+					srt_state = SRT_NR;
+					break;
+				}
+				cue_text[0] = '\0';
+				srt_state   = SRT_TEXT;
+				break;
+			}
+			case SRT_TEXT: {
+				srt_chop( line );
+				if( line[0] == NEW_LINE_CH || line[0] == MS_CURSOR_BEGIN || line[0] == '\0' ) {
+					// Blank line — cue is complete, fire callback
+					if( cue_text[0] ) {
+						cb( ctx, cue_text, cue_start, cue_end );
+					}
+					cue_text[0] = '\0';
+					srt_state   = SRT_NR;
+					break;
+				}
+				#ifdef CONFIG_I18N
+				if( !spex->utf8 ) {
+					wchar unicode[ LINE_LEN + 1 ];
+					memset( unicode, 0, LINE_LEN );
+					wchar *uc = unicode;
+					char  *c  = line;
+					while( *c ) { c += I18N_codepage_to_unicode( c, uc ); uc++; }
+					utf16_to_utf8( line, unicode, LINE_LEN );
+				}
+				#endif
+				store = subtitle_clean_formatter( line, 0 ); // clean_tags always 0
+				if( store ) {
+					if( cue_text[0] ) {
+						// Multi-line: append \N separator
+						if( strlen(cue_text) + strlen(store) + 3 < sizeof(cue_text) ) {
+							strcat( cue_text, "\\N" );
+							strcat( cue_text, store );
+						}
+					} else {
+						strncpy( cue_text, store, sizeof(cue_text) - 1 );
+						cue_text[sizeof(cue_text)-1] = '\0';
+					}
+					afree( store );
+					store = 0;
+				}
+				break;
+			}
+		}
+		line = subtitle_get_next_line_from_buffer( &cursor, end, _line, LINE_LEN + 1 );
+	}
+
+	// Flush the trailing cue only at true EOF -- on interruption it may still be incomplete, and a full re-parse will happen next pass anyway.
+	if( !interrupted && cue_text[0] ) cb( ctx, cue_text, cue_start, cue_end );
+	if( store ) afree( store );
+	afree( buf );
 }
 
 static struct SUBTITLE_FORMAT SRT = {
 	"SubRip",
 	detect_SRT,
 	NULL,		// no info
-	parse_SRT,
+	NULL,		// no parse -- feed_SRT (streaming) is the only path; NULL .parse is treated as an immediate SUBT_PARSE_FAILED (see subtitle_do_parse())
+	NULL,		// no get_gfx
+	NULL,		// no close
+	feed_SRT,	// streaming single-pass feed — primary path
 };
 
 SUBTITLE_REGISTER_FORMAT( SRT );

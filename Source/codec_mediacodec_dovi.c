@@ -238,6 +238,10 @@ typedef struct {
 				 * worker attaches the DV side data */
 	int rpu_size;
 	int user_id;			/* AU user_ID for the park (subtitle sync) */
+	int64_t pts_us;			/* EMISSION-ORDER GATE: this job's pts - the
+				 * emit loop holds bl_q[0] while any in-flight
+				 * copy carries an older pts (see
+				 * dvhw_copyq_oldest_inflight_ms) */
 } dvhw_copyjob_t;
 #define DVHW_COPY_Q_MAX 8
 /* TWO copy workers: one job = getOutputBuffer + 25MB P010 memcpy + release
@@ -254,6 +258,11 @@ typedef struct {
 	int ready_head, ready_count;
 	int run;		/* workers alive */
 	int busy[DVHW_COPY_WORKERS];	/* per-worker in-flight state (flush waits) */
+	int64_t busy_pts_us[DVHW_COPY_WORKERS];
+				/* per-worker CURRENT job pts (INT64_MAX = idle);
+				 * the emission-order gate needs the pts of a
+				 * frame still inside a worker, not just the ones
+				 * posted to the ring */
 	int release_only;	/* flush protocol: drain queued jobs, release-only */
 	pthread_mutex_t mtx;
 	pthread_cond_t cond;
@@ -261,6 +270,37 @@ typedef struct {
 } dvhw_copyq_t;
 
 static void *dvhw_copy_worker_n(void *ctx);
+
+/* EMISSION-ORDER GATE support: the oldest pts (us domain, but the same
+ * media-ms * 1000) still inside the copy pipeline - posted jobs, jobs
+ * held by a busy worker, frames sitting on the ready ring - or INT64_MAX
+ * when nothing is in flight. The emit loop compares this against
+ * bl_q[0]->pts*1000: a smaller value means an OLDER frame is still
+ * copying, so emitting the head now would put its newer content on
+ * screen first and the old frame after - the backward jump. Takes the
+ * copyq directly (PRIV is not yet typedef'd at this point in the file);
+ * callers hold NO other locks while taking q->mtx. */
+static int64_t dvhw_copyq_oldest_inflight_us(dvhw_copyq_t *q)
+{
+	int64_t oldest = INT64_MAX;
+	pthread_mutex_lock(&q->mtx);
+	for (int i = 0; i < q->count; i++) {
+		int64_t us = q->job[(q->head + i) % DVHW_COPY_Q_MAX].pts_us;
+		if (us < oldest)
+			oldest = us;
+	}
+	for (int i = 0; i < DVHW_COPY_WORKERS; i++) {
+		if (q->busy_pts_us[i] < oldest)
+			oldest = q->busy_pts_us[i];
+	}
+	for (int i = 0; i < q->ready_count; i++) {
+		AVFrame *f = q->ready[(q->ready_head + i) % DVHW_COPY_Q_MAX];
+		if (f && f->pts * 1000 < oldest)
+			oldest = f->pts * 1000;
+	}
+	pthread_mutex_unlock(&q->mtx);
+	return oldest;
+}
 static void dvhw_bufpool_init(dvhw_bufpool_t *bp)
 {
 	bp->count = 0;
@@ -355,7 +395,10 @@ typedef struct {
 	int	el_fed_count;		/* EL AUs fed, throttled against BL AUs consumed */
 	int	el_drain_count;		/* EL frames emitted by the decoder (reorder lag tracking) */
 	int	bl_fed_count;		/* BL AUs queued to the BL codec (EL feed pacing master) */
-	int	el_seen;		/* EL emitted >=1 frame since last flush (warm-up gate, mpv 3b4caf0) */
+	int	el_seen;		/* EL emitted >=1 frame since last OPEN (warm-up gate,
+				 * mpv 3b4caf0; carries across seek/flush - a flushed
+				 * codec keeps its pipeline primed, only its reorder
+				 * window must refill) */
 	int	el_exhausted;		/* parser has no more EL packets (EOF tail evidence,
 				 * probed in dvhw_el_feed; cleared on flush) */
 	AVFrame		*el_q[DVHW_PENDING_MAX];
@@ -390,6 +433,8 @@ typedef struct {
 	int	stat_park_drop;	/* parked BLs dropped on bl_q overflow */
 	int	stat_bl_qfull;	/* AUs dropped because the BL codec input queue was full */
 	int	stat_pts_last, stat_pts_dmin, stat_pts_dmax;	/* emitted pts spacing */
+	int64_t	dq_ring[8];	/* DEQUEUE-ORDER diagnostic ring: last 8 */
+	int	dq_ring_w;	/*   dequeued pts, dumped on negative emit */
 	int64_t	stat_fed_last_us;	/* last AU pts FED - detects double-feed/duplicate-pts */
 	int64_t	stat_fed_dmin_us, stat_fed_dmax_us;	/* fed pts step range */
 	int64_t	stat_phase_ns[4];	/* per-1s wall: 0 feed / 1 el / 2 output-poll+copy / 3 emit */
@@ -720,8 +765,10 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 	/* BL copy workers: mutex+cond first, ring state zeroed, then start */
 	p->copyq.head = p->copyq.count = 0;
 	p->copyq.ready_head = p->copyq.ready_count = 0;
-	for (i = 0; i < DVHW_COPY_WORKERS; i++)
+	for (i = 0; i < DVHW_COPY_WORKERS; i++) {
 		p->copyq.busy[i] = 0;
+		p->copyq.busy_pts_us[i] = INT64_MAX;	/* 0 is a VALID pts - */
+	}							/* an idle worker must not gate */
 	p->copyq.release_only = 0;
 	p->copyq.run = 1;
 	/* errorcheck mutexes: they diagnose lock-order/double-unlock bugs with
@@ -831,13 +878,21 @@ static void dvhw_el_q_clear(PRIV *p)
 		p->el_hold_valid = 0;
 	}
 	/* seek/flush: EL decoder state restarts, drop the pace accounting
-	 * and the warm-up flag (mpv pair_reset) */
+	 * and the warm-up flag (mpv pair_reset) - EXCEPT el_seen: a FLUSH
+	 * does not un-prime the codec's decode pipeline (it keeps its
+	 * hardware state; only its reorder window must refill, ~CATCHUP
+	 * frames), so the codec is still 'warm' for pressure-emit purposes.
+	 * Clearing el_seen on every seek let a post-seek EL hiccup park BLs
+	 * up to the 12-slot array bound with the pressure-emit disarmed
+	 * (park_drop 4 measured on the 12:07 seek-stall) and re-fed 96 AUs
+	 * of the warm-up floor (~2s at 44 AU/s) that a warm codec never
+	 * needed. Close/re-open still resets it - a NEW codec instance
+	 * must re-prove warmth. */
 	p->el_fed_count = 0;
 	p->el_drain_count = 0;
 	p->bl_fed_count = 0;
 	p->bl_out_count = 0;	/* or in-flight (fed-out) goes negative and
-				 * the credit gate opens unbounded after seek */
-	p->el_seen = 0;
+					 * the credit gate opens unbounded after seek */
 }
 
 static void dvhw_bl_q_clear(PRIV *p)
@@ -1297,7 +1352,15 @@ static void dvhw_el_feed(STREAM_DEC_VIDEO *dec)
 	 * deep floor cannot wedge the sink: frames only EMIT when paired,
 	 * and the park gate bounds decode; it only risks ~2s of EL-only
 	 * pre-decode at startup/seek, discarded by pairing if unneeded.
-	 * Seek/flush resets both counters, so seek recovery re-primes too. */
+	 * Seek/flush resets both counters, so seek recovery re-primes too.
+	 * FLUSH SHORT-FLOOR: after a SEEK the codec is already warm (its
+	 * pipeline spin-up is done - only its reorder window, ~DVHW_EL_CATCHUP
+	 * frames, must refill), so the 96-AU floor only re-primes the
+	 * DECODE-AHEAD, not codec spin-up: the measured post-seek recovery
+	 * window is ~4-5s, of which the floor's 96 AUs at ~44 AU/s feed
+	 * rate is ~2s of EL-only pre-decode the pair logic then discards.
+	 * el_seen carries across flush (the codec proved warm once), so the
+	 * floor only applies to a genuinely cold codec. */
 	int el_budget = p->bl_fed_count + DVHW_EL_CATCHUP;
 	if (!p->el_seen) {
 		int warm_floor = 96;
@@ -1622,6 +1685,29 @@ emit:
 		int d = (int)(bl->pts - p->stat_pts_last);
 		if (d < p->stat_pts_dmin) p->stat_pts_dmin = d;
 		if (d > p->stat_pts_dmax) p->stat_pts_dmax = d;
+			if (d < 0) {
+			/* EMIT-ORDER VIOLATION dump: emitted pts stepped backward.
+			 * With the emission-order gate this is an invariant breach -
+			 * it fired on every build before the gate (pts stepping
+			 * -41..-209ms, i.e. frames shown 1-5 slots out of order, the
+			 * visible judder) and is silent with the gate healthy. Dump
+			 * the dequeue ring (codec output order), the parked queue,
+			 * and the copy pipeline state to localize the breach. */
+			serprintf(TAG ": EMIT-ORDER VIOLATION d=%d bl_pts=%d last=%d  dq_ring:",
+				  d, (int)bl->pts, p->stat_pts_last);
+			for (int i = 0; i < 8; i++) {
+				int idx = (p->dq_ring_w + i) & 7;
+				serprintf(" %lld", (long long)(p->dq_ring[idx] / 1000));
+			}
+			serprintf("  bl_q:");
+			for (int i = 0; i < p->bl_q_count; i++)
+				serprintf(" %d", (int)p->bl_q[i]->pts);
+			serprintf("  inflight_us=%lld busy=[%lld %lld] cnt=%d\n",
+				  (long long)dvhw_copyq_oldest_inflight_us(&p->copyq),
+				  (long long)p->copyq.busy_pts_us[0],
+				  (long long)p->copyq.busy_pts_us[1],
+				p->copyq.count);
+		}
 	}
 	p->stat_pts_last = (int) bl->pts;
 	p->emit_user_id = p->bl_user_id[0];
@@ -2002,6 +2088,7 @@ static void *dvhw_copy_worker_n(void *ctx)
 
 		q->busy[slot] = 1;
 		dvhw_copyjob_t job = q->job[q->head];
+		q->busy_pts_us[slot] = job.pts_us;
 		q->head = (q->head + 1) % DVHW_COPY_Q_MAX;
 		q->count--;
 		int release_only = q->release_only;
@@ -2015,9 +2102,18 @@ static void *dvhw_copy_worker_n(void *ctx)
 			av_free(job.rpu);
 			pthread_mutex_lock(&q->mtx);
 			q->busy[slot] = 0;
+			q->busy_pts_us[slot] = INT64_MAX;
 			pthread_cond_broadcast(&q->cond);
 			continue;
 		}
+		/* NOTE: busy_pts_us[slot] STAYS = job.pts_us for the whole
+		 * copy + RPU parse: the emission-order gate must see the pts
+		 * of the frame this worker is holding while it works. Clearing
+		 * it here made the worker report idle exactly while carrying
+		 * the older frame - the gate went blind and the reorder
+		 * inversions continued (measured diag8: gate_hist entries
+		 * 'X->MAX' at every violation). It is cleared only when the
+		 * frame reaches the ready ring (or is dropped) below. */
 
 		AVFrame *bl = dvhw_copy_yuv420(p, p->codec, job.oidx, &job.info,
 		                               job.width, job.height,
@@ -2056,6 +2152,7 @@ static void *dvhw_copy_worker_n(void *ctx)
 
 		pthread_mutex_lock(&q->mtx);
 		q->busy[slot] = 0;
+		q->busy_pts_us[slot] = INT64_MAX;
 		if (!q->run) {
 			/* close raced us: drop the frame (close frees everything) */
 			av_frame_free(&bl);
@@ -2067,10 +2164,16 @@ static void *dvhw_copy_worker_n(void *ctx)
 			q->ready[rslot] = bl;
 			q->ready_user_id[rslot] = job.user_id;
 			q->ready_count++;
+			/* frame reached the ready ring: NOW the worker is idle for
+			 * gate purposes (the ready ring itself is covered by the
+			 * oldest-inflight scan) */
+			q->busy_pts_us[slot] = INT64_MAX;
 		} else {
 			av_frame_free(&bl);	/* ready ring full: drop (defense;
 						 * the collector keeps it shallow) */
 			p->stat_bl_readydrop++;
+			/* dropped: worker idle again for gate purposes */
+			q->busy_pts_us[slot] = INT64_MAX;
 		}
 		pthread_cond_broadcast(&q->cond);
 	}
@@ -2442,10 +2545,17 @@ static void *dvhw_async_thread(void *ctx)
 				job->rpu = NULL;
 				job->rpu_size = 0;
 				job->user_id = 0;
+				job->pts_us = info.presentationTimeUs;
 				dvhw_pending_take(p, info.presentationTimeUs,
 					  &job->rpu, &job->rpu_size,
 					  &job->user_id);
 				p->bl_out_count++;
+				/* DEQUEUE-ORDER RING (diagnostic): the last 8 dequeued pts -
+				 * dumped when the emitter sees a negative pts step, this
+				 * proves/disproves decode-order (vs display-order) output
+				 * from the codec directly. Zero cost otherwise. */
+				p->dq_ring[p->dq_ring_w] = info.presentationTimeUs;
+				p->dq_ring_w = (p->dq_ring_w + 1) & 7;
 				p->copyq.count++;
 				pthread_cond_signal(&p->copyq.cond);
 				pthread_mutex_unlock(&p->copyq.mtx);
@@ -2476,6 +2586,33 @@ static void *dvhw_async_thread(void *ctx)
 		for (;;) {
 			if (frame_q_count(&p->slot_q) == 0)
 				break;	/* pool backpressure: decode stops here */
+			/* EMISSION-ORDER GATE: NEVER emit a parked BL while an older
+			 * frame is still inside the copy pipeline (posted / in a
+			 * worker / on the ready ring). The 2-worker copy ring
+			 * completes out of order (measured on every build incl. the
+			 * 2154 baseline: pts_dmin -41..-209 ms, i.e. emitted frames
+			 * stepping 1-5 frames BACKWARD, ~33% of seconds, from the
+			 * first frames of playback - the visible judder: one frame
+			 * jumps back ~3, then snaps forward). The pts-sorted park in
+			 * dvhw_bl_finish orders what is PARKED, but the head can
+			 * pair + emit while its predecessor is still copying.
+			 * Holding emission here (the missing frame parks on the
+		 * NEXT collect, ~20-35ms - a single copy wall, bounded by the
+		 * ring depth, no queue growth: the park gate back-pressures
+		 * the feed) restores strict pts-ascending emission. It also
+		 * fixes the EL pairing that the reorder race broke: with the
+		 * head temporarily "newest", an older EL arriving hit the
+		 * stale-EL drop in dvhw_fel_emit and was destroyed - its BL
+		 * then emitted BL-only. Holding the head keeps the stale-drop
+		 * from running against the wrong head. */
+			if (p->bl_q_count > 0 && p->copyq_started &&
+			    !p->flushing) {
+				int64_t oldest_us =
+					dvhw_copyq_oldest_inflight_us(&p->copyq);
+				if (oldest_us != INT64_MAX &&
+				    oldest_us < p->bl_q[0]->pts * 1000)
+					break;
+			}
 			AVFrame *el_emit = NULL;
 			AVFrame *bl_emit = dvhw_fel_emit(p, &el_emit);
 			if (!bl_emit)
@@ -2696,6 +2833,14 @@ static int dvhw_flush(STREAM_DEC_VIDEO *dec)
 	p->flushing = 0;
 	pthread_cond_broadcast(&p->th.cond);
 	pthread_mutex_unlock(&p->th.mtx);
+	/* epoch boundary: the emitted-pts delta tracker is epoch-local - the
+	 * first post-seek emit is legally d=new_pos-old_pos (a backward seek
+	 * is a huge NEGATIVE delta), which the EMIT-ORDER detector would
+	 * falsely flag (measured: d=-6663 dump at a rewind, queue properly
+	 * ordered). Reset like the 1Hz stat block does. */
+	p->stat_pts_last = -1;
+	p->stat_pts_dmin = 1 << 30;
+	p->stat_pts_dmax = 0;
 	/* resume the feed worker (gates re-check on wake) */
 	pthread_mutex_lock(&p->feed_mtx);
 	pthread_cond_broadcast(&p->feed_cond);

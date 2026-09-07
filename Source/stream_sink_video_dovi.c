@@ -195,6 +195,33 @@ typedef struct {
 	int fr_mode_latched;	/* free-run engaged at first frame (pref may arrive after open) */
 	int fr_last_blit;	/* FREE-RUN measurement state: blit_time of the last
 				 * dequeued frame (the delta source above). */
+	int64_t fr_period_sum_ns;	/* FREE-RUN windowed period estimator: cumulative
+				 * ns over sampled blit deltas (numerator). */
+	int64_t fr_period_last_blit_ms;	/* FREE-RUN estimator: blit_time (ms) of the
+				 * estimator's previous sample frame. */
+	int fr_period_pairs;	/* FREE-RUN estimator: frame PAIRS spanned by the
+				 * cumulative sum (denominator) - a 24-frame window
+				 * averages the 41/42 integer-TS mix into 41.708ms
+				 * (23.976fps), which ONE delta (41.0ms measured on
+				 * GoT: frjag period_us=41000) can never express. */
+	int period_refined;	/* FREE-RUN: the windowed estimator has committed a
+				 * period (the pre-refine single-delta fallback stays
+				 * active until the first window closes). */
+	int64_t fr_grid_sum_ns;	/* FREE-RUN grid estimator: cumulative ns of
+				 * consecutive ACTUAL latch deltas (the panel's true
+				 * scan cadence, e.g. Samsung's 24.000Hz video-refresh
+				 * grid while the display server still reports 120Hz). */
+	int64_t fr_grid_last_ns;	/* FREE-RUN grid estimator: previous latch ns. */
+	int fr_grid_pairs;	/* FREE-RUN grid estimator: deltas accumulated. */
+	int64_t pres_grid_ns;	/* FREE-RUN: the LOCKED panel latch cadence (ns).
+				 * Zero until the grid estimator closes its window. */
+	int fr_resample_published;/* FREE-RUN: the display-resample hint has been
+				 * published to the engine exactly once for this
+				 * playback (recompute would fight the settled loop). */
+	int fr_chain_on_grid;	/* FREE-RUN: the swap chain now paces on the panel
+				 * grid (pres_grid_ns) instead of the TS-derived
+				 * period - flipped when the grid locks and the
+				 * resample hint is published. */
 	int stat_fb_samples;	/* 1Hz: latch samples for the average */
 	int64_t fb_prev_latch_ns;	/* CLOCK_MONOTONIC ns of the latch before
 				 * fb_last_latch_ns - free-run display-cadence
@@ -206,6 +233,12 @@ typedef struct {
 	int stat_fr_over_us;	/* 1Hz free-run: us the swap entry overshoots
 				 * the chain slot (sum, with the count below = mean) */
 	int stat_fr_over_n;
+	int stat_gate_timeout;	/* 1Hz free-run: depth-2 inflight gate hit its
+				 * one-period bound without seeing frame N latch
+				 * (swap proceeded with 2 frames in flight). */
+	int64_t fr_last_gate_wait_ns;	/* free-run: ns the LAST inflight-gate spin
+				 * waited before releasing the swap (0 when the
+				 * previous latch had already landed). */
 	int stat_fb_used;	/* 1Hz: re-anchors performed */
 	int64_t stat_pres_swap_ns;	/* 1Hz: eglSwapBuffers wall (fence+BufferQueue) */
 	int64_t stat_pres_fbpoll_ns;	/* 1Hz: feedback poll wall incl. its bounded sleep */
@@ -316,12 +349,27 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 				p->fb_rate_ppm = 5000;
 			if( p->fb_rate_ppm < -5000 )
 				p->fb_rate_ppm = -5000;
-		} else {
-			/* inside the 3ms window: hold position via put_time,
-			 * stop rate drift accumulation */
-			p->fb_rate_ppm = 0;
-		}
-		p->fb_last_latch_ns = actual_ns;
+			} else {
+				/* inside the 3ms window: hold position via put_time,
+				 * stop rate drift accumulation */
+				p->fb_rate_ppm = 0;
+			}
+			/* CAPABILITY PROMOTION: the first landed timestamp sample
+			 * proves eglGetFrameTimestamps works on this surface - the
+			 * probe (-1) becomes ACTIVE (1). Without this the probe state
+			 * only ever transitions to 0 (unsupported) and EVERY consumer
+			 * gated on fb_active==1 stays dead: the latch-anchored phys
+			 * clock (dovi_phys_from falls back to the audio-anchored sink
+			 * clock), the scheduled-mode tightening chain, and the
+			 * free-run depth-2 inflight gate (the swapchain banks frames,
+			 * SF skips latches to the spare, and the display shows doubled
+			 * holds - the 1-per-5-30s judder that survived every earlier
+			 * fix because the gate shipped disabled). Measured on GoT
+			 * diag6: fb=0 stretches 58/34/45/40s, 16/25/33ms banked-latch
+			 * cascades, gate_to=0 forever. */
+			if( p->fb_active < 0 )
+				p->fb_active = 1;
+			p->fb_last_latch_ns = actual_ns;
 		p->fb_phys_blit = ideal;	/* coherent pair for dovi_phys_time */
 		/* free-run display-cadence diagnosis: bucket the actual
 		 * latch-to-latch delta in 120Hz vsync slots (8.33ms) - the
@@ -333,6 +381,95 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 			int slots = (int)((d_ns + 4166666LL) / 8333333LL);
 			if( slots >= 1 && slots <= 12 )
 				p->fb_slot_hist[slots - 1]++;
+			/* GRID ESTIMATOR (display-resample basis, both modes): the
+			 * steady latch deltas ARE the panel's true scan cadence.
+			 * On this Samsung panel video playback drops the scan
+			 * into a 24.000Hz-class grid while SF still advertises
+			 * 120Hz - the ONLY reliable way to learn the real grid
+			 * is to measure it. Same consistency gate as the content
+			 * period estimator: deltas within 4ms of the running mean
+			 * extend the window (the 41.667ms steady holds), outliers
+			 * (the beat doubles / startup noise) flush it. Lock after
+			 * 24 consistent pairs; then, ONCE, publish the display-
+			 * resample hint: speed = content TS period / grid period
+			 * (23.976fps on a 24.000 grid -> 1.001001x) so the engine
+			 * can retune audio (atempo) and phase-lock content to the
+			 * grid - the mpv display-resample endgame. Mode-0 pacing
+			 * keeps its own model (cadence-locked userspace wait); the
+			 * audio retune alone removes the 23.976-vs-grid beat.
+			 * Measured mode 0 without it: 4+6-slot beat pairs (52/20)
+			 * recurring every few seconds. */
+			if( 1 ) {
+				if( p->fr_grid_last_ns > 0 ) {
+					int64_t gd_ns = actual_ns - p->fr_grid_last_ns;
+					if( gd_ns > 20000000LL && gd_ns < 100000000LL ) {
+						int consistent = 1;
+						if( p->fr_grid_pairs > 0 ) {
+							int64_t mean_ns = p->fr_grid_sum_ns / p->fr_grid_pairs;
+							int64_t dev_ns = gd_ns > mean_ns ?
+								gd_ns - mean_ns : mean_ns - gd_ns;
+								if( dev_ns > 4000000LL )
+									consistent = 0;
+							}
+						if( consistent ) {
+								p->fr_grid_sum_ns += gd_ns;
+								p->fr_grid_pairs++;
+							} else {
+								p->fr_grid_sum_ns = 0;
+								p->fr_grid_pairs = 0;
+							}
+						}
+					if( p->fr_grid_pairs >= 24 && p->pres_grid_ns == 0 ) {
+						int64_t mean_ns =
+							(p->fr_grid_sum_ns + p->fr_grid_pairs / 2) /
+							p->fr_grid_pairs;
+						/* VALIDITY: the panel's true video-refresh grid must be
+						 * near the content cadence (within 10%). A latch stream
+						 * at 2x the period is the low-power idle scan (12Hz-class
+						 * on 24fps content, before the panel enters video mode) or
+						 * a banked/stalled window - locking it as the "grid"
+						 * poisoned build 1419 (12.002Hz grid, quarter-speed
+						 * video, multi-second stalls). A sane grid also never
+						 * exceeds 1.9x content rate. */
+						if( mean_ns > 20000000LL && mean_ns < 100000000LL &&
+						    p->pres_period_ns > 0 &&
+						    mean_ns > p->pres_period_ns - p->pres_period_ns / 10 &&
+						    mean_ns < p->pres_period_ns + p->pres_period_ns / 10 ) {
+							p->pres_grid_ns = mean_ns;
+							serprintf("dovi sink: free-run panel grid locked: %lldus (%.3fHz)\n",
+							          (long long)(mean_ns / 1000),
+							          1000000000.0 / (double)mean_ns);
+						}
+					}
+				}
+				p->fr_grid_last_ns = actual_ns;
+			}
+			/* per-event latch diagnosis (both modes): every latch
+			 * delta that is NOT the clean 5-slot (41.67ms) hold gets a
+			 * full-context line - raw delta, both latch timestamps,
+			 * the pacing target (free-run: chain slot; mode 0: last
+			 * swap wall), the chain period, and the inflight-gate
+			 * state at that moment. Ground truth the 1Hz histogram
+			 * aggregates: discriminates a real panel double-hold
+			 * (latch 83ms after the previous latch, swap on time) from
+			 * a lost feedback sample (frame N+1 latched into the
+			 * sample slot) from a gate timeout (gate_to>0 with
+			 * gate_wait ~= one period). ~1 line per 5-30s. */
+			if( slots != 5 ) {
+				int64_t phase_ns = actual_ns - p->pres_chain_ns;
+				serprintf("dovi frjag: slots=%d d_us=%lld prev_us=%lld latch_us=%lld chain_us=%lld period_us=%lld pres_wall_us=%lld gate_to=%d gate_wait_us=%lld phase_us=%lld blit=%d\n",
+				          slots,
+				          (long long)(d_ns / 1000),
+				          (long long)(p->fb_prev_latch_ns / 1000),
+				          (long long)(actual_ns / 1000),
+				          (long long)(p->pres_chain_ns / 1000),
+				          (long long)(p->pres_period_ns / 1000),
+				          (long long)(p->pres_wall_ns / 1000),
+				          p->stat_gate_timeout,
+				          (long long)(p->fr_last_gate_wait_ns / 1000),
+				          (long long)(phase_ns / 1000),
+				          ideal);
+			}
 		}
 		p->fb_prev_latch_ns = actual_ns;
 		p->stat_fb_used++;
@@ -436,9 +573,21 @@ static void *dovi_venc_thread( void *ctx )
 		/* FREE-RUN period measurement: refine the exact content
 		 * period from consecutive frame blit deltas (double ms->ns;
 		 * 23.976fps = 41.708ms cannot ride the int duration field).
-		 * Deltas of ~0 (duplicate timestamps) and >500ms (seek/
-		 * chapter jumps) are ignored; the first sane delta wins -
-		 * frames of one content share the cadence. */
+		 * WINDOWED ESTIMATOR + CONSISTENCY GATE: the int-ms blit
+		 * deltas alternate 41/42 and ONE delta (the original code)
+		 * quantizes the whole run to 41.0/42.0ms (measured on GoT:
+		 * pres_period_ns=41ms vs real 41.708ms cadence; the chain
+		 * then ran ~0.7ms/frame slow, its phase drifted through the
+		 * vsync latch grid and forced the doubled 83ms holds - frjag
+		 * evidence: d_us=83324, on-time swaps, gate_to=0). A naive
+		 * mean window is poisonable by the startup burst (double-
+		 * duration 83/84ms head frames averaged 43.4ms into the
+		 * first window and the pure-grid chain paced the panel wrong
+		 * EVERY second - measured 0049 build). Only deltas within 4ms
+		 * of the running mean extend the window; outliers flush it
+		 * and the steady 41/42 mix rebuilds it within ~1s. Lock at 24
+		 * consistent pairs; a persistent >2ms shift re-locks (real
+		 * cadence change, e.g. 24->48fps content mid-file). */
 		{
 			extern int libavos_get_present_free_run(void);
 			if( !p->fr_mode_latched && libavos_get_present_free_run() ) {
@@ -447,14 +596,99 @@ static void *dovi_venc_thread( void *ctx )
 				serprintf("dovi sink: free-run presents engaged\n");
 			}
 		}
-		if( p->sched_pace == 2 && p->pres_period_ns == 0 &&
-		    frame->blit_time > 0 && p->fr_last_blit > 0 ) {
-			double d_ms = (double)(frame->blit_time - p->fr_last_blit);
-			if( d_ms > 0.5 && d_ms < 500.0 )
-				p->pres_period_ns = (int64_t)(d_ms * 1000000.0 + 0.5);
+		/* WINDOWED CONTENT-PERIOD ESTIMATOR (both modes): refines the
+		 * exact content period from consecutive frame blit deltas
+		 * (double ms->ns; 23.976fps = 41.708ms cannot ride the int
+		 * duration field). The refined period feeds the display-
+		 * resample ratio in EVERY pacing mode (mode 0 included: its
+		 * cadence wait uses the frame deadline, but the beat vs the
+		 * panel grid is mode-independent). */
+		if( frame->blit_time > 0 &&
+		    p->fr_period_last_blit_ms > 0 ) {
+			double d_ms = (double)(frame->blit_time - (int)p->fr_period_last_blit_ms);
+			if( d_ms > 0.5 && d_ms < 500.0 ) {
+				int64_t d_ns = (int64_t)(d_ms * 1000000.0 + 0.5);
+				/* CONSISTENCY GATE: a delta only extends the window when it
+				 * is within 4ms of the window mean. The startup burst feeds
+				 * double-duration frames (83/84ms) and irregular gaps while
+				 * sync acquisition runs - a naive window averaged 43.4ms and
+				 * the pure-grid chain then paced the panel wrong every
+				 * second (measured 0049 build: pres avg 43.4ms, slot-10/s).
+				 * The 41/42 steady mix stays in; outliers flush the window
+				 * and the steady cadence rebuilds it within ~1s. */
+				int consistent = 1;
+				if( p->fr_period_pairs > 0 ) {
+					int64_t mean_ns = p->fr_period_sum_ns / p->fr_period_pairs;
+					int64_t dev_ns = d_ns > mean_ns ?
+						d_ns - mean_ns : mean_ns - d_ns;
+					if( dev_ns > 4000000LL )
+						consistent = 0;
+				}
+				if( consistent ) {
+					p->fr_period_sum_ns += d_ns;
+					p->fr_period_pairs++;
+				} else {
+					p->fr_period_sum_ns = 0;
+					p->fr_period_pairs = 0;
+				}
+			}
+			if( p->fr_period_pairs >= 24 ) {
+				int64_t mean_ns =
+					(p->fr_period_sum_ns + p->fr_period_pairs / 2) /
+					p->fr_period_pairs;
+				/* lock on first close; re-lock only on a persistent >2ms shift
+				 * (real cadence change, e.g. 24->48fps content mid-file) */
+				if( mean_ns > 0 &&
+				    ( !p->period_refined ||
+				      mean_ns > p->pres_period_ns + 2000000LL ||
+				      mean_ns < p->pres_period_ns - 2000000LL ) ) {
+					serprintf("dovi sink: free-run period %s: %lldus over %d pairs\n",
+					          p->period_refined ? "re-refined" : "refined",
+					          (long long)(mean_ns / 1000), p->fr_period_pairs);
+				p->pres_period_ns = mean_ns;
+				p->period_refined = 1;
+				}
+			}
 		}
-		if( frame->blit_time > 0 )
+		/* DISPLAY-RESAMPLE publish (once per playback, both modes):
+		 * both rates are locked now - content cadence (TS period)
+		 * and the panel's real scan cadence (pres_grid_ns, refined
+		 * from actual latches in dovi_fb_apply). If they differ by a
+		 * small but non-trivial ratio (the classic 23.976-on-24.000
+		 * beat, ~0.1%), publish the audio speed that makes content
+		 * wall-cadence EXACTLY the panel grid. In free-run the swap
+		 * chain also flips onto the grid; in mode 0 the pacing model
+		 * stays as-is - the audio retune alone removes the beat.
+		 * Guards: |speed-1| <= 1.5% (covers 23.976->24 and PAL-class
+		 * ratios) and >= 0.01% (a 1.0 ratio publishes nothing - the
+		 * 48fps-on-48Hz case needs no resample); hints outside the
+		 * band are NOT published (the grid estimator misread a mixed
+		 * cadence - never resample wild).
+		 * The engine applies the hint through stream_set_av_speed
+		 * (atempo, timeline mapping) exactly once per generation. */
+		if( p->period_refined &&
+		    p->pres_grid_ns > 0 && !p->fr_resample_published ) {
+			double ratio = (double)p->pres_period_ns / (double)p->pres_grid_ns;
+			double dev = ratio > 1.0 ? ratio - 1.0 : 1.0 - ratio;
+			p->fr_resample_published = 1;
+			if( dev >= 0.0001 && dev <= 0.015 ) {
+				extern void libavos_set_display_resample_hint(float);
+				serprintf("dovi sink: display-resample engaged: content %lldus on grid %lldus -> audio %.6fx\n",
+				          (long long)(p->pres_period_ns / 1000),
+				          (long long)(p->pres_grid_ns / 1000),
+				          ratio);
+				libavos_set_display_resample_hint((float)ratio);
+				p->fr_chain_on_grid = 1;
+			} else {
+				serprintf("dovi sink: display-resample skipped: ratio %.6f (grid %lldus content %lldus)\n",
+				          ratio, (long long)(p->pres_grid_ns / 1000),
+				          (long long)(p->pres_period_ns / 1000));
+			}
+		}
+		if( frame->blit_time > 0 ) {
 			p->fr_last_blit = frame->blit_time;
+			p->fr_period_last_blit_ms = (int64_t)frame->blit_time;
+		}
 
 
 		/* lazy content-fps hint: MKV files often leave
@@ -462,8 +696,20 @@ static void *dovi_venc_thread( void *ctx )
 		 * own duration is the ground truth. One shot: once SF accepts the
 		 * rate it latches every frame on its own vsync (48Hz mode) - the
 		 * deterministic swap cadence the present loop needs to sustain
-		 * content rate. */
-		if (!p->framerate_set && p->sched_pace != 2 && frame->duration > 0 && p->gl) {
+		 * content rate.
+		 *
+		 * FREE-RUN MODE 4 sets the hint TOO (the sched_pace!=2 gate is
+		 * removed): the hint does NOT change our pacing (the uniform
+		 * swap chain stays the pacer) - it only tells Samsung's HRR the
+		 * content class so the panel leaves its ~12Hz low-power idle
+		 * scan and enters the 24Hz-class video-refresh grid PROMPTLY.
+		 * Without it the panel idles at 12Hz for the first seconds of
+		 * playback (until its own cadence classifier catches up), the
+		 * depth-2 gate starves on 83ms latches, and build 1419 locked
+		 * the whole pipeline to 12fps (quarter-speed video, multi-
+		 * second stalls). With the hint the panel is in video mode
+		 * before the first latches land. */
+		if (!p->framerate_set && frame->duration > 0 && p->gl) {
 			float fps = 1000.0f / (float) frame->duration;
 			if (fps >= 10.0f && fps <= 240.0f &&
 			    dovi_gl_set_framerate(p->gl, fps) == 0)
@@ -491,7 +737,12 @@ static void *dovi_venc_thread( void *ctx )
 			 * one constant presentation delay, invisible to the eye.
 			 * Only a run-away backlog (>= 8 frame durations) is worth
 			 * dropping. */
-			int late_by = now - frame->blit_time;   /* >0 = past deadline */
+			int late_by = now - frame->blit_time;   /* >0 = past deadline. In
+			 * free-run (sched_pace==2) lateness reads as ~1-2 pipeline
+			 * periods EVERY frame against the audio-anchored phys clock -
+			 * that is the constant presentation delay, not backlog: the
+			 * forced_late counter ticks per-frame and late/skip stay 0
+			 * (guards hold). Only a REAL decode deficit grows lateness. */
 			/* 4 durations: mpv drops when the vsync window is GONE and a
 			 * fresher frame exists. The 24-duration threshold was a
 			 * codec-ceiling-era compromise (see the drain comment above:
@@ -625,6 +876,13 @@ static void *dovi_venc_thread( void *ctx )
 				 * (the drop gate above); this block decides WHEN the
 				 * swap fires. */
 				int64_t period_ns = p->pres_period_ns;
+				/* DISPLAY-RESAMPLE: once the panel grid is locked and the
+				 * resample hint is published, pace the chain on the MEASURED
+				 * panel grid - the audio retune makes content arrive at
+				 * exactly this cadence, so swaps and latches stay in one
+				 * fixed vsync slot (the 23.976-on-24.000 beat is gone). */
+				if( p->fr_chain_on_grid && p->pres_grid_ns > 0 )
+					period_ns = p->pres_grid_ns;
 				if( period_ns <= 0 && p->pending_frame->duration > 0 )
 					period_ns = (int64_t)p->pending_frame->duration * 1000000LL;
 				if( period_ns > 0 ) {
@@ -696,6 +954,92 @@ static void *dovi_venc_thread( void *ctx )
 						clock_gettime(CLOCK_MONOTONIC, &_ts_wait1);
 						p->stat_wait_ns += (int64_t)(_ts_wait1.tv_sec - _ts_wait0.tv_sec) * 1000000 +
 						                   (_ts_wait1.tv_nsec - _ts_wait0.tv_nsec) / 1000;
+					}
+					/* EFFECTIVE DEPTH-2 (free-run): the swapchain was created
+					 * with depth 6 (the mode global is set after GL open), so
+					 * up to 6 frames can sit queued; SurfaceFlinger with
+					 * as-available latching can skip a latch to a banked spare
+					 * (the measured 0.6% doubled 83ms display holds). Gate the
+					 * swap on the PREVIOUS frame having actually LATCHED: at
+					 * most one frame is then in flight - the spare is never
+					 * available to skip to. Bounded by one period past the
+					 * chain slot (a lost feedback sample must not stall the
+					 * grid). */
+					if( p->fb_active == 1 ) {
+						int64_t gwait_t0_ns;
+						{
+							struct timespec gw0;
+							clock_gettime(CLOCK_MONOTONIC, &gw0);
+							gwait_t0_ns = (int64_t)gw0.tv_sec * 1000000000LL + gw0.tv_nsec;
+						}
+						/* previous swap wall = chain - period; a latch at or
+						 * after that wall can only be the frame THAT swap
+						 * queued (frame N). Wait until such a latch lands:
+						 * only then is N on display and N+1 the single
+						 * frame in flight. */
+					int64_t prev_swap_ns = p->pres_chain_ns - period_ns;
+					int64_t last_latch_ns;
+					pthread_mutex_lock( &p->venc_mutex );
+					last_latch_ns = p->fb_last_latch_ns;
+					pthread_mutex_unlock( &p->venc_mutex );
+					/* GATE BOUND: ONE 120Hz VSYNC past the chain slot, not one
+					 * full period. The old +period bound let a slow-latch window
+					 * (Samsung's low-power ~12Hz idle scan for the first seconds
+					 * after playback starts, while the panel has not yet entered
+					 * its video-refresh mode) push EVERY iteration to
+					 * wait(period)+gate(period) = 2 periods = 83ms cadence:
+					 * the whole pipeline locked to 12fps, the grid estimator
+					 * then measured 83.3ms as the "panel grid" and the video
+					 * played at quarter speed with multi-second stalls (measured
+					 * build 1419: pres avg 84ms, gate_to=12/s, grid 12.002Hz).
+					 * At one vsync past the slot the frame is late anyway - swap
+					 * immediately; worst iteration = period + 8.3ms, which the
+					 * late-swap re-anchor then folds back into the grid. */
+					int64_t gate_bound_ns = 8333333LL;
+					if( gate_bound_ns > period_ns / 4 )
+						gate_bound_ns = period_ns / 4;
+					int64_t inflight_deadline_ns = p->pres_chain_ns + gate_bound_ns;
+						while( last_latch_ns < prev_swap_ns ) {
+							/* frame N has not latched yet: wait, bounded by
+							 * one period past the chain slot (a lost feedback
+							 * sample must not stall the grid); 100us spin
+							 * keeps the approach phase exact */
+							struct timespec gnow;
+							clock_gettime(CLOCK_MONOTONIC, &gnow);
+							int64_t wall2 = (int64_t)gnow.tv_sec * 1000000000LL + gnow.tv_nsec;
+							if( wall2 >= inflight_deadline_ns )
+								break;
+							int flushing2;
+							pthread_mutex_lock( &p->venc_mutex );
+							flushing2 = p->venc_flushing;
+							pthread_mutex_unlock( &p->venc_mutex );
+							if( flushing2 )
+								break;
+							struct timespec gnap = { 0, 100 * 1000L };
+							nanosleep( &gnap, NULL );
+							int64_t actual_ns2 = 0;
+							if( p->gl && dovi_gl_present_feedback(p->gl, &actual_ns2) == 0 ) {
+								dovi_fb_apply( p, actual_ns2, my_gen );
+								pthread_mutex_lock( &p->venc_mutex );
+								last_latch_ns = p->fb_last_latch_ns;
+								pthread_mutex_unlock( &p->venc_mutex );
+							}
+						}
+						/* free-run gate diagnostics: how long this gate spin
+						 * waited, and whether it released WITHOUT frame
+						 * N's latch (the one-period bound fired - two
+						 * frames then went in flight) */
+						{
+							struct timespec gw;
+							int64_t gwait_ns;
+							clock_gettime(CLOCK_MONOTONIC, &gw );
+							gwait_ns = (int64_t)gw.tv_sec * 1000000000LL + gw.tv_nsec;
+							pthread_mutex_lock( &p->venc_mutex );
+							p->fr_last_gate_wait_ns = gwait_ns - gwait_t0_ns;
+							if( last_latch_ns < prev_swap_ns )
+								p->stat_gate_timeout++;
+							pthread_mutex_unlock( &p->venc_mutex );
+						}
 					}
 				}
 			} else if( !sched_ok ) {
@@ -816,9 +1160,19 @@ static void *dovi_venc_thread( void *ctx )
 				 * rotates at the next present - measured fb=0 on vc28/29:
 				 * every poll hit PENDING, nothing ever landed). Nap-retry up
 				 * to 5x2ms (10ms) - the loop idles 43-51ms in swapchain
-				 * acquire in this mode, so the re-poll is effectively free. */
+				 * acquire in this mode, so the re-poll is effectively free.
+				 * FREE-RUN EXCLUSION: never nap here when the uniform swap
+				 * chain owns pacing (sched_pace==2) - this block sits between
+				 * the chain-slot break and eglSwapBuffers, and up to 10ms of
+				 * re-poll naps would shift the swap past its slot per frame
+				 * (measured: the residual doubled 83ms display holds + a
+				 * weak frov/swap-delay correlation - frov only counted the
+				 * wait-break overshoot, not this delay). The free-run wait
+				 * loop already polls feedback at its 100us-2ms cadence, so
+				 * a single non-blocking sample here keeps the anchor fresh
+				 * with zero delay added to the swap path. */
 				int fb_tries = 0;
-				while( fbrc == 1 && fb_tries < 5 ) {
+				while( fbrc == 1 && fb_tries < 5 && p->sched_pace != 2 ) {
 					struct timespec fbnap = { 0, 2 * 1000000L };
 					nanosleep( &fbnap, NULL );
 					fb_tries++;
@@ -916,21 +1270,100 @@ static void *dovi_venc_thread( void *ctx )
 					}
 				clock_gettime(CLOCK_MONOTONIC, &tB);
 				p->stat_pres_sched_ns += (int64_t)(tB.tv_sec - tA.tv_sec) * 1000000000L + (tB.tv_nsec - tA.tv_nsec);
+				/* DEPTH-2 INFLIGHT GATE (mode 0): the swapchain runs depth 6
+				 * and SF latches as-available in this mode, so a banked spare
+				 * lets the compositor skip a latch to the newest queued buffer
+			 * - the user sees one stale frame then a snap forward (mode-0
+				 * measured: 154 slot-10 doubles / 8min, 1.67%). Gate this swap
+				 * on the PREVIOUS frame having actually LATCHED, same
+				 * discipline as the free-run gate: at most one frame in
+				 * flight, the spare is never available to skip to. Anchors:
+				 * the previous swap wall (pres_wall_ns) and the newest latch
+				 * (fb_last_latch_ns). Bounded by one vsync past THIS frame's
+				 * wait target (target_ns, computed above; when no latch has
+				 * landed yet the gate is a no-op) - a lost feedback sample
+				 * must not stall the cadence. */
+				if( p->sched_pace != 2 && p->fb_active == 1 &&
+				    p->fb_last_latch_ns > 0 && p->pres_wall_ns > 0 &&
+				    p->gl ) {
+					int flushing_g;
+					int64_t prev_swap_ns = p->pres_wall_ns;
+					int64_t last_latch_ns;
+					pthread_mutex_lock( &p->venc_mutex );
+					last_latch_ns = p->fb_last_latch_ns;
+					flushing_g = p->venc_flushing;
+					pthread_mutex_unlock( &p->venc_mutex );
+					while( !flushing_g && last_latch_ns < prev_swap_ns ) {
+						struct timespec gnow;
+						clock_gettime(CLOCK_MONOTONIC, &gnow);
+						int64_t gwall_ns = (int64_t)gnow.tv_sec * 1000000000LL + gnow.tv_nsec;
+						int64_t bound_ns = ( target_ns > 0 ?
+						                    target_ns : prev_swap_ns ) + 8333333LL;
+						if( gwall_ns >= bound_ns )
+							break;
+						struct timespec gnap = { 0, 100 * 1000L };
+						nanosleep( &gnap, NULL );
+						int64_t actual_ns_g = 0;
+						if( dovi_gl_present_feedback(p->gl, &actual_ns_g) == 0 ) {
+							dovi_fb_apply( p, actual_ns_g, my_gen );
+							pthread_mutex_lock( &p->venc_mutex );
+								last_latch_ns = p->fb_last_latch_ns;
+								flushing_g = p->venc_flushing;
+							pthread_mutex_unlock( &p->venc_mutex );
+						}
+					}
+				}
 				clock_gettime(CLOCK_MONOTONIC, &tA);
 				dovi_gl_present(p->gl);
 				clock_gettime(CLOCK_MONOTONIC, &tB);
 				p->stat_pres_swap_ns += (int64_t)(tB.tv_sec - tA.tv_sec) * 1000000000L + (tB.tv_nsec - tA.tv_nsec);
 				p->pres_wall_ns = (int64_t)tB.tv_sec * 1000000000LL + tB.tv_nsec;
 				if( p->sched_pace == 2 ) {
-					/* FREE-RUN chain advance: the next slot is ACTUAL
-					 * swap completion + exactly one period (a late swap
-					 * shifts the grid, never a burst to "catch up"). */
+					/* FREE-RUN chain advance (PURE GRID): the next slot is
+					 * the PREVIOUS slot + exactly one refined period - NOT
+					 * swap completion + period. The old wall+period advance
+					 * leaked the swap duration (~0.65ms) + frov overshoot
+					 * into the grid EVERY frame: with the quantized 41ms
+					 * period the two errors nearly cancelled (net ~41.74ms
+					 * measured), but they made the grid rate depend on
+					 * per-frame overhead jitter - each present's slot-time
+					 * wobbled independently and crossed the vsync latch
+					 * boundary stochastically (the residual slot-10 doubles:
+					 * frjag d_us=83324 with on-time swaps, gate_to=0).
+					 * A pure slot+=period grid is exactly the content
+					 * cadence; the wait loop re-seeds on any stall/gap wider
+					 * than one period (pres_chain_ns < wall - period) and
+					 * pulls back if it drifts >4 periods ahead, so a late
+					 * swap still shifts the grid (never a catch-up burst).
+					 *
+					 * LATE-SWAP RE-ANCHOR (oscillation killer): a pure grid
+					 * that ignores swap reality is METASTABLE - once one
+					 * swap lands late (gate timeout / compositor hiccup),
+					 * the NEXT slot's deadline is still nominal, the wait
+					 * cannot make up the delay, the next gate times out too,
+					 * and the system locks into a 3-frame limit cycle (16.6
+					 * -> 25 -> 83ms latch deltas, gate_to climbing 0->12,
+					 * measured diag6 13:59: 89 frjag in 5s, the visible
+					 * judder). Re-anchor to the ACTUAL swap wall whenever it
+					 * completed more than 2ms past the slot (swap jitter under
+					 * 2ms stays on the exact grid - no beat reintroduced);
+					 * the next slot is then reachable, the next gate sees its
+					 * latch, and the cycle collapses back to clean 5-slots
+					 * within one frame. */
 					int64_t period_ns = p->pres_period_ns;
+					if( p->fr_chain_on_grid && p->pres_grid_ns > 0 )
+						period_ns = p->pres_grid_ns;
 					if( period_ns <= 0 && p->pending_frame &&
 					    p->pending_frame->duration > 0 )
 						period_ns = (int64_t)p->pending_frame->duration * 1000000LL;
-					if( period_ns > 0 )
-						p->pres_chain_ns = p->pres_wall_ns + period_ns;
+					if( period_ns > 0 ) {
+						int64_t next_nominal_ns = ( p->pres_chain_ns > 0 ) ?
+							 p->pres_chain_ns + period_ns :
+							 p->pres_wall_ns + period_ns;
+						if( p->pres_wall_ns > p->pres_chain_ns + 2000000LL )
+						next_nominal_ns = p->pres_wall_ns + period_ns;
+						p->pres_chain_ns = next_nominal_ns;
+					}
 					p->fb_sched_mode = 0;
 				}
 				p->stat_present++;
@@ -974,7 +1407,7 @@ static void *dovi_venc_thread( void *ctx )
 					int64_t now_us = (int64_t) s0.tv_sec * 1000000 + s0.tv_nsec / 1000;
 						if (last_us && now_us - last_us >= 1000000) {
 						// pi-lens-ignore: typos
-						serprintf("dovi sink: put=%d rend=%d (avg %dus) pres=%d (avg %dus) [sw=%dus fb=%dus sch=%dus] poll_it=%d wait=%dms vencq=%d late=%d forced_late=%d skip=%d idle=%dms clock=%d phys=%d span=%dms fb=%d fblate=%dus frov=%d/%dus latchslots=",
+						serprintf("dovi sink: put=%d rend=%d (avg %dus) pres=%d (avg %dus) [sw=%dus fb=%dus sch=%dus] poll_it=%d wait=%dms vencq=%d late=%d forced_late=%d skip=%d idle=%dms clock=%d phys=%d span=%dms fb=%d fblate=%dus frov=%d/%dus gate_to=%d latchslots=",
 						          p->stat_put,
 						          p->stat_render, p->stat_render ? (int)(p->stat_render_ns / p->stat_render / 1000) : 0,
 						          p->stat_present, p->stat_present ? (int)(p->stat_present_ns / p->stat_present / 1000) : 0,
@@ -991,7 +1424,8 @@ static void *dovi_venc_thread( void *ctx )
 						          p->stat_fb_used,
 						          p->stat_fb_samples ? (p->stat_fb_late_us / p->stat_fb_samples) : 0,
 						          p->stat_fr_over_n,
-						          p->stat_fr_over_n ? (p->stat_fr_over_us / p->stat_fr_over_n) : 0);
+						          p->stat_fr_over_n ? (p->stat_fr_over_us / p->stat_fr_over_n) : 0,
+						          p->stat_gate_timeout);
 						for( int _si = 0; _si < 12; _si++ )
 							serprintf("%s%d:%d", _si ? "," : "", _si + 1, p->fb_slot_hist[_si]);
 						serprintf("\n");
@@ -1009,6 +1443,7 @@ static void *dovi_venc_thread( void *ctx )
 						p->stat_pres_fbpoll_ns = 0;
 						p->stat_pres_sched_ns = 0;
 						p->stat_fr_over_us = p->stat_fr_over_n = 0;
+						p->stat_gate_timeout = 0;
 						for( int _si = 0; _si < 12; _si++ )
 							p->fb_slot_hist[_si] = 0;
 						p->stat_time0 = p->stat_time_last = -1;
@@ -1323,6 +1758,25 @@ static int sink_flush(STREAM_SINK_VIDEO *sink)
 	 * below purely an optimization: even if it times out, the thread's
 	 * late puts are now harmless no-op references, never queue writes. */
 	p->venc_flush_gen++;
+	/* SEEK EPOCH RE-ARM: sync acquisition is per-EPOCH, not per-open.
+	 * The engine does NOT re-open the sink on a seek - it only flushes
+	 * - so without this the one-time jump flag stays set from the
+	 * pre-seek stream and the FIRST latch after the seek goes through
+	 * the rate-trim path (clamped ±0.5%/s) instead of re-anchoring: the
+	 * phys clock stays on the OLD timeline while the engine's media
+	 * clock jumps to the seek target, every present deadline computes
+	 * hundreds of seconds into the future, and the sink presents one
+	 * frame per ~2s (measured 12:07 run: pres avg 1.9s, idle=1789ms,
+	 * phys frozen at the pre-seek position while clock=+548s; the
+	 * venc pipeline then parks 12 BLs, el_fed/el_out wedge, and
+	 * playback freezes). fb_locked re-arms here so dovi_fb_apply's
+	 * next landed latch re-anchors in ONE jump, mpv seek-epoch
+	 * semantics - same as the open path (fb_locked=0). The rate trim
+	 * and the latch anchor also reset: both are epoch-local. */
+	p->fb_locked = 0;
+	p->fb_rate_ppm = 0;
+	p->fb_last_latch_ns = 0;
+	p->fb_prev_latch_ns = 0;
 	pthread_cond_broadcast(&p->venc_cond);
 	while (p->venc_busy && p->venc_run) {
 		struct timespec ts;

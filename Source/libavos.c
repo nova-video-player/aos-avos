@@ -452,6 +452,43 @@ void libavos_set_present_free_run(int enable)
 }
 
 /*
+ * DISPLAY-RESAMPLE hint (mpv display-resample semantics, free-run mode):
+ * the dovi sink measures the content cadence (TS) and the panel's ACTUAL
+ * latch cadence and publishes the ratio as the audio speed that phase-
+ * locks content to the panel grid (e.g. 23.976fps content on Samsung's
+ * 24.000Hz video-refresh grid -> 1.001001x). The engine's player thread
+ * polls the hint generation and applies it ONCE per STREAM through the
+ * normal speed machinery (stream_set_av_speed -> atempo). A new playback
+ * overwrites the hint; 0 speed means "no hint". Thread safety: the sink
+ * (venc thread) writes, the player thread reads a coherent pair under a
+ * mutex (same pattern as the sink's own anchor pair).
+ */
+static pthread_mutex_t display_resample_mtx = PTHREAD_MUTEX_INITIALIZER;
+static float display_resample_speed = 0.f;
+static int display_resample_generation = 0;
+
+void libavos_set_display_resample_hint(float speed)
+{
+	pthread_mutex_lock(&display_resample_mtx);
+	display_resample_speed = speed;
+	display_resample_generation++;
+	pthread_mutex_unlock(&display_resample_mtx);
+}
+
+int libavos_get_display_resample_hint(float *speed, int *generation)
+{
+	int gen;
+	pthread_mutex_lock(&display_resample_mtx);
+	if (speed)
+		*speed = display_resample_speed;
+	gen = display_resample_generation;
+	pthread_mutex_unlock(&display_resample_mtx);
+	if (generation)
+		*generation = gen;
+	return gen;
+}
+
+/*
  * Dolby Vision tone-map target luminance (nits).
  * 0 = automatic: the renderer falls back to the source HDR max_luma/default.
  * The Java layer resolves "auto from display" to the display's reported max

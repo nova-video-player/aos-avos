@@ -4060,6 +4060,36 @@ static void _do_stuff( STREAM *s )
 	if ( s->video->valid ) {
 		_get_next_chunk( s );
 	}
+
+	/* DISPLAY-RESAMPLE (free-run mode 4): the dovi video sink measured
+	 * the content cadence and the panel's actual latch grid and
+	 * published an audio speed that phase-locks content to the grid
+	 * (23.976fps content on Samsung's 24.000Hz video-refresh grid ->
+	 * 1.001001x). Apply each published hint exactly once per stream,
+	 * through the normal speed machinery (stream_set_av_speed ->
+	 * atempo + timeline mapping): the swap chain has already flipped
+	 * onto the grid cadence, the audio retune makes content follow it,
+	 * and the 23.976-on-24.000 beat (the last visible judder source)
+	 * is eliminated. Skipped when the user has an active custom speed
+	 * (never fight an explicit user setting) or audio speed control
+	 * is disabled. One-shot per generation: a later stream re-reads
+	 * the freshest hint once. */
+	{
+		extern int libavos_get_display_resample_hint(float *speed, int *generation);
+		float hint_speed = 0.f;
+		int gen = 0;
+		libavos_get_display_resample_hint(&hint_speed, &gen);
+		if ( gen > 0 && gen != s->display_resample_applied_gen ) {
+			float cur = audio_interface_get_audio_speed();
+			if ( hint_speed > 0.5f && hint_speed < 2.0f &&
+			     fabsf(cur - 1.0f) < 1e-6f ) {
+				serprintf("stream: applying display-resample speed %.6fx (sink hint gen %d)\n",
+				          hint_speed, gen);
+				stream_set_av_speed(s, hint_speed);
+			}
+			s->display_resample_applied_gen = gen;
+		}
+	}
 }
 
 // *****************************************************************************

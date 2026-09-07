@@ -28,8 +28,6 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/swapchain.h>
 
-/* pacing-mode global from libavos.c (GUI refresh-rate sync mode 4) */
-extern int libavos_get_present_free_run(void);
 #include <libplacebo/utils/dolbyvision.h>
 #include <libplacebo/utils/libav.h>
 
@@ -115,11 +113,20 @@ typedef struct dovi_gl_priv {
 					 * eglGetNextFrameIdANDROID is a BEFORE-swap
 					 * query); captured by dovi_gl_present */
 	EGLuint64KHR prev2_frame_id;	/* id TWO presents back: with scheduled
-						   presents the swap runs up to one period EARLY, so the
-						   one-behind target is still ~dur in the future at poll
-						   time (always PENDING, measured fb=0) - the two-behind
-						   frame's target passed ~one period ago: its timestamp
-						   has landed and is the freshest guaranteed sample. */
+					   presents the swap runs up to one period EARLY, so the
+					   one-behind target is still ~dur in the future at poll
+					   time (always PENDING, measured fb=0) - the two-behind
+					   frame's target passed ~one period ago: its timestamp
+					   has landed and is the freshest guaranteed sample. */
+	EGLuint64KHR prev3_frame_id;	/* id THREE presents back: on-grid free-run
+					   swaps latch at a fixed vsync phase, so a compositor
+					   hiccup can leave prev AND prev2 PENDING while the
+					   landed sample sits two slots back (measured diag6
+					   13:59: gate_to 10-12 with both queries PENDING, the
+					   samples lost forever -> depth-2 gate starved -> banked
+					   frames -> the 1-per-5-30s judder). Extending the
+					   fallback ring one more slot keeps a landed sample
+					   reachable (~3 frame ids on a depth-6 swapchain). */
 	EGLuint64KHR prev_frame_id;	/* id of the frame queued by the
 					 * PREVIOUS present - queried by
 					 * dovi_gl_present_feedback. One-behind:
@@ -453,12 +460,7 @@ int dovi_gl_open(void **ctx, void *native_window)
 		 * in the ring stalls the render a full extra period. Depth 6 gives
 		 * ~2 periods of headroom (mpv's Android sizing for high-fps 4K;
 		 * JRiver's fork: BufferCount = depth + slack + 1, up to 16). */
-		/* free-run (no-sync GUI mode): the uniform swap grid + as-available
-		 * latches need a TIGHT queue - depth 6 lets SF bank a spare frame and
-		 * skip a latch (measured 0.6% doubled 83ms holds = the last visible
-		 * judder). Depth 3 keeps the 1-behind pipelined render + fence
-		 * overlap (mpv android default) without spare buffers to skip to. */
-		.max_swapchain_depth = libavos_get_present_free_run() ? 3 : 6,
+		.max_swapchain_depth = 6,
 		.priv          = p,
 	));
 	if (!p->swap)
@@ -682,6 +684,7 @@ void dovi_gl_present(void *ctx)
 	if (p->has_frame_ts) {
 		EGLuint64KHR fid = 0;
 		if (p->eglGetNextFrameId(p->display, p->surface, &fid)) {
+			p->prev3_frame_id = p->prev2_frame_id;
 			p->prev2_frame_id = p->prev_frame_id;
 			p->prev_frame_id = p->next_frame_id;
 			p->next_frame_id = fid;
@@ -745,14 +748,24 @@ int dovi_gl_present_feedback(void *ctx, int64_t *actual_monotonic_ns)
 		 * TWO-behind frame (target passed ~one period ago - its sample
 		 * has landed). This is the freshest GUARANTEED sample; skipping
 		 * it (returning PENDING) loses it forever once ids rotate
-		 * (measured: fb=0 for entire runs on GoT 4K24). */
-		if (!p->prev2_frame_id ||
-		    !p->eglGetFrameTimestamps(p->display, p->surface,
-		                          p->prev2_frame_id, 1, names, values))
-			return 1;
-		if (values[0] == EGL_TIMESTAMP_PENDING_ANDROID)
-			return 1;
+		 * (measured: fb=0 for entire runs on GoT 4K24). On-grid free-run
+		 * presents latch at a fixed vsync phase, so a compositor hiccup
+		 * can leave BOTH pending while the landed sample sits one more
+		 * slot back (diag6: gate starvation, banked frames, judder) -
+		 * try THREE-behind before giving up. */
+		if (p->prev2_frame_id &&
+		    p->eglGetFrameTimestamps(p->display, p->surface,
+		                              p->prev2_frame_id, 1, names, values) &&
+		    values[0] != EGL_TIMESTAMP_PENDING_ANDROID)
+			goto have_sample;
+		if (p->prev3_frame_id &&
+		    p->eglGetFrameTimestamps(p->display, p->surface,
+		                              p->prev3_frame_id, 1, names, values) &&
+		    values[0] != EGL_TIMESTAMP_PENDING_ANDROID)
+			goto have_sample;
+		return 1;
 	}
+have_sample:
 	if (values[0] == EGL_TIMESTAMP_INVALID_ANDROID)
 		return -1;
 	if (values[0] <= 0)

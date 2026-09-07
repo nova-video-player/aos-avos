@@ -925,6 +925,10 @@ typedef struct STREAM {
 	int		audio_speed_atempo_stable_count;
 	int		audio_speed_last_atempo_state;
 	int		audio_speed_stabilized_atempo_delay_ms;
+	int		display_resample_applied_gen;	/* display-resample hint generation
+						 * already applied to THIS stream (0 = none): the dovi
+						 * sink publishes grid-lock speeds, the player thread
+						 * applies each hint once via stream_set_av_speed */
 
 	// AudioTrack PlaybackParams speed-epoch checkpoint.
 	// Re-armed on every AT speed change (including return to 1.0).

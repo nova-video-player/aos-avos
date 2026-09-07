@@ -250,7 +250,8 @@ static int64_t _get_render_heard_ts(priv_t *p, STREAM *s, int allow_put_time,
 		}
 	}
 	if (!use_put) {
-		heard_ts = s ? (int64_t)stream_get_heard_audio_ts(s, s->audio_time) : 0;
+		heard_ts = s ? (int64_t)stream_get_heard_audio_ts_renderer_locked(
+			s, s->audio_time) : 0;
 	}
 	if (used_put_time) {
 		*used_put_time = use_put;
@@ -2155,6 +2156,14 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
 	p->hold_audio_applied_ms = 0;
+	// A seek establishes a new render timeline even while playback remains
+	// paused. Resume must only preserve time elapsed since that new timeline,
+	// not add the full pre-seek pause duration to it.
+	if( p->pause_armed ) {
+		p->pause_start_ms = atime();
+		DBGSI serprintf("android_sync: pause baseline rebased after seek at %d\n",
+			p->pause_start_ms);
+	}
 
 	p->last_user_av_delay = s->av_delay;
 	p->effective_av_delay_ms = s->av_delay > 0 ? s->av_delay : 0;

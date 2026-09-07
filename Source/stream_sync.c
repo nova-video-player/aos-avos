@@ -120,6 +120,16 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 		pthread_mutex_unlock( &s->anchor_mutex );
 		return 0;
 	}
+	/*
+	 * Do not wait for video_sink_mutex while owning anchor_mutex. Video output
+	 * can hold the sink lock while entering synchronization code that needs the
+	 * anchor lock, so a blocking nested acquisition can deadlock both producers.
+	 * Anchor publication is retried on the next audio write or video frame.
+	 */
+	if( pthread_mutex_trylock( &s->video_sink_mutex ) != 0 ) {
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
 	if( refresh_sink )
 		sfdec2_refresh_sched_anchor( s );
 	/*
@@ -128,7 +138,6 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 	 * under the close/delete lock so sink_close() cannot destroy the renderer's
 	 * private mutex between this check and put_time().
 	 */
-	pthread_mutex_lock( &s->video_sink_mutex );
 	if( s->video_sink && s->video_sink->is_open && s->video_sink->put_time )
 		s->video_sink->put_time( s->video_sink, sink_ref_time );
 	pthread_mutex_unlock( &s->video_sink_mutex );
@@ -144,7 +153,10 @@ int stream_sync_anchor_seed_from_sink( STREAM *s, int vid_ref_time )
 		return 0;
 
 	pthread_mutex_lock( &s->anchor_mutex );
-	pthread_mutex_lock( &s->video_sink_mutex );
+	if( pthread_mutex_trylock( &s->video_sink_mutex ) != 0 ) {
+		pthread_mutex_unlock( &s->anchor_mutex );
+		return 0;
+	}
 	if( __atomic_load_n( &s->sink_ref_time, __ATOMIC_ACQUIRE ) != -1 ) {
 		pthread_mutex_unlock( &s->video_sink_mutex );
 		pthread_mutex_unlock( &s->anchor_mutex );
@@ -1120,7 +1132,10 @@ int stream_get_pcm_startup_seed_delay_ms( STREAM *s )
 //	stream_get_heard_audio_ts
 //
 // ************************************************************
-static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_static)
+static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink );
+
+static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_static,
+	int renderer_locked)
 {
 	stream_delay_status_t status = { 0 };
 	int passthrough_mode = s && s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
@@ -1156,14 +1171,14 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 			_stream_is_dynamic_evidence_tag( source_tag ) &&
 			status.streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
 			status.has_dynamic_evidence = 1;
-			status.dynamic_evidence_ms = stream_sync_av_delay( s );
+			status.dynamic_evidence_ms = _stream_sync_av_delay( s, !renderer_locked );
 			status.dynamic_evidence_streak = status.streak;
 		}
 
 		if( !passthrough_mode && !ac3_recoding && delay_valid &&
 			status.source == STREAM_DELAY_SOURCE_DYNAMIC &&
 			measured_delay > 0 ) {
-			int dynamic_delay = stream_sync_av_delay( s );
+			int dynamic_delay = _stream_sync_av_delay( s, !renderer_locked );
 			if( status.streak >= STREAM_PCM_DELAY_STABLE_STREAK ) {
 				if( !s->last_good_delay_valid ) {
 					status.effective_delay_ms = dynamic_delay;
@@ -1232,7 +1247,7 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 
 static int _get_anchor_delay_ms(STREAM *s, int *valid, int allow_static)
 {
-	stream_delay_status_t status = _stream_get_delay_status(s, allow_static);
+	stream_delay_status_t status = _stream_get_delay_status(s, allow_static, 0);
 	if (valid) {
 		*valid = status.is_anchorable;
 	}
@@ -1502,7 +1517,8 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
 	return heard_ts;
 }
 
-static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
+static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
+	int renderer_locked )
 {
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
 		return fallback_ts;
@@ -1513,7 +1529,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 	int allow_static = 0;
 #endif
 
-	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
+	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static,
+		renderer_locked);
 	int delay_valid = delay_status.is_delay_valid;
 	int passthrough_mode = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	int ac3_recoding = libavos_get_ac3_recoding_enabled();
@@ -1532,7 +1549,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 #ifdef CONFIG_ANDROID
 		// When atempo is active, include filter delay in heard-time even if timing is invalid.
 		if( audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() ) {
-			int chain_delay = stream_sync_av_delay( s );
+			int chain_delay = _stream_sync_av_delay( s, !renderer_locked );
 			if( chain_delay > heard_delay ) {
 				heard_delay = chain_delay;
 			}
@@ -1913,10 +1930,24 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts )
 
 int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
 {
-	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts );
+	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts, 0 );
 	// Consume only the observer's cached sample. This keeps JNI off the
 	// scheduler thread and lets shadow diagnostics continue while the compressed
 	// writer is idle or paused.
+	stream_sync_compressed_shadow_observe( s );
+	return heard_ts;
+}
+
+int stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts )
+{
+	/*
+	 * sfdec2 calls this while holding its private scheduler mutex. Its sink is
+	 * already known to be live and reports post-sink video time, so inspecting
+	 * video_sink_mutex contributes no delay value. More importantly, doing so
+	 * would invert the video producer's video_sink_mutex -> scheduler-mutex
+	 * order and can deadlock after a seek.
+	 */
+	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts, 1 );
 	stream_sync_compressed_shadow_observe( s );
 	return heard_ts;
 }
@@ -1967,7 +1998,7 @@ DBGS serprintf("sync_init\r\n");
 //	it contains all hardware delays in the audio and video chain
 //
 // *****************************************************************************
-int stream_sync_av_delay( STREAM *s )
+static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink )
 {
 	// Defensive check: validate stream pointer and audio/video validity to prevent crashes
 	if (!s || !s->audio || !s->video) {
@@ -1984,11 +2015,13 @@ int stream_sync_av_delay( STREAM *s )
 	if (s->audio_sink && !s->audio_sink_open) {
 		return 0;
 	}
-	pthread_mutex_lock( &s->video_sink_mutex );
-	int video_sink_not_open = s->video_sink && !s->video_sink->is_open;
-	pthread_mutex_unlock( &s->video_sink_mutex );
-	if (video_sink_not_open) {
-		return 0;
+	if( inspect_video_sink ) {
+		pthread_mutex_lock( &s->video_sink_mutex );
+		int video_sink_not_open = s->video_sink && !s->video_sink->is_open;
+		pthread_mutex_unlock( &s->video_sink_mutex );
+		if( video_sink_not_open ) {
+			return 0;
+		}
 	}
 	
 	// audio data passes through decoder, filters, and sink
@@ -2059,7 +2092,7 @@ int stream_sync_av_delay( STREAM *s )
 	}
 	// wold time video sink delay not dependant on audio speed
 	int video_delay;
-	if( s->vtime_post_sink ) {
+	if( !inspect_video_sink || s->vtime_post_sink ) {
 		// we sample after the sink, so the time stamps are the one we get out of the sink
 		video_delay = 0;
 	} else {
@@ -2093,6 +2126,11 @@ int stream_sync_av_delay( STREAM *s )
 		}
 		return total_delay;
 	}
+}
+
+int stream_sync_av_delay( STREAM *s )
+{
+	return _stream_sync_av_delay( s, 1 );
 }
 
 // ************************************************************
@@ -2442,7 +2480,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 #else
 	int allow_static = 0;
 #endif
-	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static);
+	stream_delay_status_t delay_status = _stream_get_delay_status(s, allow_static, 0);
 	int anchor_valid = delay_status.is_anchorable;
 	int delay_valid = delay_status.is_delay_valid;
 	int current_av_delay = delay_status.effective_delay_ms;
@@ -2795,7 +2833,7 @@ int stream_sync_video( STREAM *s, int video_time )
 
 #ifdef CONFIG_ANDROID
 	{
-		stream_delay_status_t delay_status = _stream_get_delay_status(s, 1);
+		stream_delay_status_t delay_status = _stream_get_delay_status(s, 1, 0);
 		int anchor_valid = delay_status.is_anchorable;
 		int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough(s)) ? 1 : 0;
 		int delay_valid = delay_status.is_delay_valid;
@@ -2849,7 +2887,7 @@ DBGY			serprintf("sync_video: timing unavailable, free-run video (anchor_valid=0
 	}
 #else
 	{
-		stream_delay_status_t delay_status = _stream_get_delay_status(s, 0);
+		stream_delay_status_t delay_status = _stream_get_delay_status(s, 0, 0);
 		int anchor_valid = delay_status.is_anchorable;
 		_sync_diag_log_state(s, "video", &delay_status);
 		if( !anchor_valid ) {

@@ -433,6 +433,11 @@ typedef struct {
 	int	stat_park_drop;	/* parked BLs dropped on bl_q overflow */
 	int	stat_bl_qfull;	/* AUs dropped because the BL codec input queue was full */
 	int	stat_pts_last, stat_pts_dmin, stat_pts_dmax;	/* emitted pts spacing */
+	int64_t stat_log_last_us;	/* 1Hz fps-pipe print timer (PER-INSTANCE: the
+				 * function-static it replaces was shared across
+				 * live codec instances, interleaving their prints) */
+	int	stat_log_loops;	/* loops accumulated since the last 1Hz print */
+	int64_t stat_fdguard_last_us;	/* 1Hz fdguard print timer (same) */
 	int64_t	dq_ring[8];	/* DEQUEUE-ORDER diagnostic ring: last 8 */
 	int	dq_ring_w;	/*   dequeued pts, dumped on negative emit */
 	int64_t	stat_fed_last_us;	/* last AU pts FED - detects double-feed/duplicate-pts */
@@ -1907,13 +1912,14 @@ static int dvhw_dec_in_should_drop(PRIV *p, STREAM_DEC_VIDEO *dec,
 	STREAM *s = (STREAM *) dec->ctx;
 	(void) d;
 	/* 1Hz guard diagnostic - FIRST, before any early return, so the
-	 * drop decision inputs are always visible */
+	 * drop decision inputs are always visible. Timer is PER-INSTANCE
+	 * (review finding 13: the function-static it replaces was shared
+	 * across live codec instances). */
 	{
-		static int64_t last_diag_us;
 		struct timespec tsd;
 		clock_gettime(CLOCK_MONOTONIC, &tsd);
 		int64_t now_us = (int64_t) tsd.tv_sec * 1000000 + tsd.tv_nsec / 1000;
-		if (now_us - last_diag_us >= 1000000) {
+		if (now_us - p->stat_fdguard_last_us >= 1000000) {
 			int nt = -1, nonref = -1;
 			if (d && clean && clean_size > 0) {
 				const uint8_t *pd = clean;
@@ -1942,7 +1948,7 @@ static int dvhw_dec_in_should_drop(PRIV *p, STREAM_DEC_VIDEO *dec,
 			  (clean && clean_size > 1) ? clean[1] : 0,
 			  (clean && clean_size > 2) ? clean[2] : 0,
 			  (clean && clean_size > 3) ? clean[3] : 0);
-			last_diag_us = now_us;
+			p->stat_fdguard_last_us = now_us;
 		}
 	}
 	if (!s || !s->audio || !s->audio->valid || s->audio_time < 0)
@@ -2633,19 +2639,20 @@ static void *dvhw_async_thread(void *ctx)
 
 		/* 1Hz pipeline stats (was decode2's tail block): the thread's
 		 * AU + emit rate vs the codec feed/drain counters - the single
-		 * line that catches any pacing collapse live */
+		 * line that catches any pacing collapse live. Timer + loop
+		 * counter are PER-INSTANCE (review finding 13: the function
+		 * statics they replace were shared across live codec
+		 * instances, interleaving/duplicating their prints). */
 		{
-			static int64_t last_us;
-			static int stat_loops;
 			struct timespec ts;
 			clock_gettime(CLOCK_MONOTONIC, &ts);
 			int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-			stat_loops++;
-			if (!last_us)
-				last_us = now_us;
-			else if (now_us - last_us >= 1000000) {
+			p->stat_log_loops++;
+			if (!p->stat_log_last_us)
+				p->stat_log_last_us = now_us;
+			else if (now_us - p->stat_log_last_us >= 1000000) {
 				serprintf(TAG ": fps pipe: loops=%d inq=%d slots=%d outq=%d bl_fed=%d bl_out=%d bl_z=%d el_z=%d blq_full=%d park=%d park_drop=%d el_fed=%d el_out=%d emit=%d exh=%d fed_dmin=%d fed_dmax=%d pts_dmin=%d pts_dmax=%d ph_us fed/el/out/emit=%d/%d/%d/%d copy/rpu=%d/%d getin/qin=%d/%d deq=%d postdrop=%d rdydrop=%d decdrop=%d\n",
-					  stat_loops,
+					  p->stat_log_loops,
 					  p->in_q_count, frame_q_count(&p->slot_q),
 					  frame_q_count(&p->out_q),
 					  p->bl_fed_count, p->stat_bl_out,
@@ -2670,7 +2677,7 @@ static void *dvhw_async_thread(void *ctx)
 				p->stat_phase_ns[2] = p->stat_phase_ns[3] = 0;
 				p->stat_copy_ns = p->stat_rpu_ns = 0;
 				p->stat_getin_ns = p->stat_qin_ns = 0;
-				stat_loops = 0;
+				p->stat_log_loops = 0;
 				p->stat_bl_out = p->stat_emit = 0;
 				p->stat_bl_qfull = 0;
 				p->stat_bl_zerolen = 0;
@@ -2684,7 +2691,7 @@ static void *dvhw_async_thread(void *ctx)
 				p->stat_fed_last_us = 0;
 				p->stat_fed_dmin_us = (int64_t) 1 << 62;
 				p->stat_fed_dmax_us = -((int64_t) 1 << 62);
-				last_us = now_us;
+				p->stat_log_last_us = now_us;
 			}
 		}
 		/* pace: FFmpeg mediacodec_receive_frame parity - the BLOCKING

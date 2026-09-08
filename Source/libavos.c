@@ -488,6 +488,25 @@ int libavos_get_display_resample_hint(float *speed, int *generation)
 	return gen;
 }
 
+void libavos_clear_display_resample_hint(void)
+{
+	/* HINT LIFETIME IS PER PLAYBACK (review finding 3: cross-playback
+	 * leak). The hint is a PROCESS-GLOBAL with a MONOTONIC generation:
+	 * a fresh STREAM (applied_gen == 0) would otherwise apply the
+	 * PREVIOUS file's ratio at its first _do_stuff poll - and when the
+	 * new sink's grid never publishes (ratio out of band, or the file
+	 * is already on-grid and the sink correctly publishes nothing), the
+	 * stale speed persists for the whole playback with no correction
+	 * path (stream_video.c's apply guard refuses any change once
+	 * fabsf(cur - 1.0f) is non-zero and no new hint arrives). The dovi
+	 * sink clears the hint at OPEN: each playback starts neutral and
+	 * only its OWN measured grid can publish a ratio. */
+	pthread_mutex_lock(&display_resample_mtx);
+	display_resample_speed = 0.f;
+	display_resample_generation++;
+	pthread_mutex_unlock(&display_resample_mtx);
+}
+
 /*
  * Dolby Vision tone-map target luminance (nits).
  * 0 = automatic: the renderer falls back to the source HDR max_luma/default.

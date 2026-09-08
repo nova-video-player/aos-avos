@@ -112,21 +112,6 @@ typedef struct dovi_gl_priv {
 	EGLuint64KHR next_frame_id;	/* id the NEXT swap will queue (spec:
 					 * eglGetNextFrameIdANDROID is a BEFORE-swap
 					 * query); captured by dovi_gl_present */
-	EGLuint64KHR prev2_frame_id;	/* id TWO presents back: with scheduled
-					   presents the swap runs up to one period EARLY, so the
-					   one-behind target is still ~dur in the future at poll
-					   time (always PENDING, measured fb=0) - the two-behind
-					   frame's target passed ~one period ago: its timestamp
-					   has landed and is the freshest guaranteed sample. */
-	EGLuint64KHR prev3_frame_id;	/* id THREE presents back: on-grid free-run
-					   swaps latch at a fixed vsync phase, so a compositor
-					   hiccup can leave prev AND prev2 PENDING while the
-					   landed sample sits two slots back (measured diag6
-					   13:59: gate_to 10-12 with both queries PENDING, the
-					   samples lost forever -> depth-2 gate starved -> banked
-					   frames -> the 1-per-5-30s judder). Extending the
-					   fallback ring one more slot keeps a landed sample
-					   reachable (~3 frame ids on a depth-6 swapchain). */
 	EGLuint64KHR prev_frame_id;	/* id of the frame queued by the
 					 * PREVIOUS present - queried by
 					 * dovi_gl_present_feedback. One-behind:
@@ -684,8 +669,6 @@ void dovi_gl_present(void *ctx)
 	if (p->has_frame_ts) {
 		EGLuint64KHR fid = 0;
 		if (p->eglGetNextFrameId(p->display, p->surface, &fid)) {
-			p->prev3_frame_id = p->prev2_frame_id;
-			p->prev2_frame_id = p->prev_frame_id;
 			p->prev_frame_id = p->next_frame_id;
 			p->next_frame_id = fid;
 		}
@@ -743,29 +726,21 @@ int dovi_gl_present_feedback(void *ctx, int64_t *actual_monotonic_ns)
 		                          p->prev_frame_id, 1, names, values))
 		return -1;
 	if (values[0] == EGL_TIMESTAMP_PENDING_ANDROID) {
-		/* scheduled presents swap up to one period EARLY: the one-behind
-		 * target is still in the future at poll time. Fall back to the
-		 * TWO-behind frame (target passed ~one period ago - its sample
-		 * has landed). This is the freshest GUARANTEED sample; skipping
-		 * it (returning PENDING) loses it forever once ids rotate
-		 * (measured: fb=0 for entire runs on GoT 4K24). On-grid free-run
-		 * presents latch at a fixed vsync phase, so a compositor hiccup
-		 * can leave BOTH pending while the landed sample sits one more
-		 * slot back (diag6: gate starvation, banked frames, judder) -
-		 * try THREE-behind before giving up. */
-		if (p->prev2_frame_id &&
-		    p->eglGetFrameTimestamps(p->display, p->surface,
-		                              p->prev2_frame_id, 1, names, values) &&
-		    values[0] != EGL_TIMESTAMP_PENDING_ANDROID)
-			goto have_sample;
-		if (p->prev3_frame_id &&
-		    p->eglGetFrameTimestamps(p->display, p->surface,
-		                              p->prev3_frame_id, 1, names, values) &&
-		    values[0] != EGL_TIMESTAMP_PENDING_ANDROID)
-			goto have_sample;
+		/* ONE-BEHIND ONLY. The earlier prev2/prev3 fallback returned the
+		 * latch of a frame 2-3 presents back while the caller paired it
+		 * with the ONE-BEHIND frame's blit anchor - an incoherent pair
+		 * off by 1-2 periods that mis-anchored the phys clock by a full
+		 * period (review finding 2: biased sync-acquisition jumps and
+		 * rate-trim steps on every compositor hiccup, exactly the
+		 * pacing machinery this branch fixes). The sample is NOT lost
+		 * by returning PENDING here: every wait/gate loop polls at its
+		 * 100us-2ms cadence, the ids only rotate at the NEXT present,
+		 * and the depth-2 inflight gate bounds how far the one-behind
+		 * sample can lag - the sample lands and is picked up on a
+		 * later poll. A PENDING result is the truthful answer for
+		 * 'the one-behind frame has not latched yet'. */
 		return 1;
 	}
-have_sample:
 	if (values[0] == EGL_TIMESTAMP_INVALID_ANDROID)
 		return -1;
 	if (values[0] <= 0)

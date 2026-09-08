@@ -56,14 +56,29 @@ typedef struct {
 	volatile int venc_run;
 	volatile int venc_flushing;
 	volatile int venc_busy;	/* 1: the thread holds a frame (dequeue..put) */
-	volatile int venc_flush_gen;	/* bumped by sink_flush under the lock; the
-				 * venc thread re-checks it after every unlock window
-				 * (render/present run unclocked) and abandons its
-				 * held frame if a flush rebuilt the pool underneath
-				 * it - the rebuild owns every pool frame from that
-				 * point, so a recycled put would double-list it
-				 * (the measured 'frame_q_put FATAL already in
-				 * [dec]' wedge). */
+	volatile int venc_flush_gen;	/* bumped by sink_flush AND the epoch
+					re-arm under the lock; the venc thread
+					re-checks it after every unlock window
+					(render/present run unclocked) and
+					abandons its held frame if a flush
+					REBUILT the pool underneath it - the
+					rebuild owns every pool frame from that
+					point, so a recycled put would double-list
+					it (the measured 'frame_q_put FATAL
+					already in [dec]' wedge). */
+	volatile int venc_flush_rebuild;	/* 1 while the bumping flush REBUILDS the
+					 * pool (sink_flush: every pool frame is
+					 * re-listed by the rebuild - a racing
+					 * gen-check must DROP its frame reference,
+					 * never recycle). 0 for the epoch re-arm
+					 * (dvhw_sink_epoch_rearm: drain-only, the
+					 * pool is NOT rebuilt) - the gen-check then
+					 * RECYCLES the racing frame to get_q
+					 * instead of leaking it (measured diag12
+					 * 21:57: the rearm gen-bump leaked the
+					 * parked thread's held frame + the stale
+					 * pending: sink_cnt never dropped, the
+					 * engine throttle closed forever). */
 	/* 1Hz pacing diagnostics */
 	int stat_render, stat_present;
 	int stat_put;
@@ -74,6 +89,10 @@ typedef struct {
 	int64_t stat_wait_ns;
 	int stat_time0, stat_time_last;	/* frame->time span at put (spacing check) */
 	int stat_late_skips;	/* dropped by the vsync-skip catch-up drain */
+	int stat_recycles;	/* frames recycled by the epoch re-arm / tail
+				 * present paths (pool conservation audit: this +
+				 * get_q + venc_q + pending + engine-held must equal
+				 * the pool size at all times) */
 	int64_t stat_idle_ns;	/* cond_wait time: queue-starved vs paced */
 	/* content fps hint state: the MKV parser leaves frame_rate_num/den 0
 	 * when avg != r_frame_rate, so the open-time hint is a fallback; the
@@ -109,7 +128,42 @@ typedef struct {
 					 * ±1ms re-anchor - heard anchor held ~200ms
 					 * ahead of the clock for an entire file while
 					 * the two rate caps canceled each other).
-					 * One jump = mpv's seek-epoch re-anchor semantics. */
+					 * One jump = mpv's seek-epoch re-anchor semantics.
+					 * Re-arms on EVERY epoch change (the sink_put epoch
+					 * discipline below) and on sink_flush - async
+					 * decoders never re-arm it any other way. */
+	UINT64 cur_epoch;		/* newest VIDEO_FRAME->epoch the sink has seen.
+					 * The ENGINE bumps s->seek_epoch on every seek
+					 * and ASYNC DECODERS never go through
+					 * _free_all_frames -> sink->flush on that path
+					 * (stream_video.c _video_init: the async branch
+					 * only flushes the stream's own disp_q) - so
+					 * without sink-side epoch tracking, a seekbar
+					 * seek leaves the sink holding the PRE-SEEK
+					 * pending frame, a stale phys anchor and
+					 * fb_locked still set: the first post-seek
+					 * latch goes through rate-trim (±0.5%/s clamp)
+					 * while the engine clock jumps minutes; every
+					 * present target computes minutes into the
+					 * future and the pipeline wedges (measured
+					 * 18:15 run, build 1728: forward tap -> pres
+					 * avg 3.7s, phys = pre-seek frame + elapsed wall,
+					 * zero 'sync acquired' lines for seeks 2/3,
+					 * close-time frjag blit = pre-seek frame 15s
+					 * after the seek). sink_put detects a newer
+					 * epoch and runs the re-arm half of sink_flush
+					 * (fb_locked=0, anchor reset, venc park,
+					 * stale-queue drain) - the sink's half of the
+					 * discipline _video_init skips for async. */
+	int64_t fb_last_latch_wall_ns;	/* CLOCK_MONOTONIC when fb_last_latch_ns
+					 * last ADVANCED - wall basis, epoch-stable
+					 * (unlike latch_ns which is SurfaceFlinger's).
+					 * Mode-0 inflight-gate escape hatch: if no
+					 * latch advanced for > 2 present periods of
+					 * wall (paused panel: no presents -> no
+					 * latches -> the gate would spin forever
+					 * against a bound derived from a far-future
+					 * stale-lead target), release the swap. */
 	int fb_rate_ppm;		/* clock RATE trim from latch feedback, in
 					 * ns-per-ms (ppm): positive = the wall clock
 					 * runs fast vs content (TrueHD accumulator
@@ -370,6 +424,13 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 			if( p->fb_active < 0 )
 				p->fb_active = 1;
 			p->fb_last_latch_ns = actual_ns;
+		{	/* wall-basis companion anchor for the gate's stall escape:
+			 * CLOCK_MONOTONIC at the moment this sample ADVANCED the
+			 * latch anchor (epoch-stable, unlike SF's latch_ns itself) */
+			struct timespec wl;
+			clock_gettime(CLOCK_MONOTONIC, &wl);
+			p->fb_last_latch_wall_ns = (int64_t)wl.tv_sec * 1000000000LL + wl.tv_nsec;
+		}
 		p->fb_phys_blit = ideal;	/* coherent pair for dovi_phys_time */
 		/* free-run display-cadence diagnosis: bucket the actual
 		 * latch-to-latch delta in 120Hz vsync slots (8.33ms) - the
@@ -488,14 +549,220 @@ static void *dovi_venc_thread( void *ctx )
 	while( p->venc_run ) {
 		struct timespec iw0, iw1;
 		clock_gettime(CLOCK_MONOTONIC, &iw0);
-		while( p->venc_run && !(frame = frame_q_get( &p->venc_q )) )
-			pthread_cond_wait( &p->venc_cond, &p->venc_mutex );
-		clock_gettime(CLOCK_MONOTONIC, &iw1);
+		/* TAIL LIVENESS deadline: computed ONCE per wait entry (an absolute
+		 * CLOCK_REALTIME instant), NOT per wake - sink_put_time broadcasts
+		 * on every audio anchor (~21ms at TrueHD rate), and a wake that
+		 * recomputed the deadline would push the timeout out forever, so
+		 * the tail present below would starve exactly when it is needed. */
+		struct timespec tail_dl;
+		{
+			int64_t period_ns = ( p->pres_period_ns > 0 ) ?
+				p->pres_period_ns :
+				(( p->pending_frame && p->pending_frame->duration > 0 ) ?
+					(int64_t)p->pending_frame->duration * 1000000LL : 41666666LL);
+			clock_gettime(CLOCK_REALTIME, &tail_dl);
+			tail_dl.tv_nsec += (long)(period_ns + 2000000LL);	/* period + 2ms */
+			if( tail_dl.tv_nsec >= 1000000000L ) { tail_dl.tv_sec++; tail_dl.tv_nsec -= 1000000000L; }
+		}
+		int tail_deadline = 0;	/* set when the timed wait expires with a pending frame */
+		while( p->venc_run && !(frame = frame_q_get( &p->venc_q )) ) {
+			/* TAIL LIVENESS (the one-behind pipeline's last frame): the
+			 * mpv flip_page design presents pending_frame (the previous
+			 * render) when the NEXT frame's iteration reaches the present
+			 * section. If the feed stalls with the queue EMPTY after the
+			 * last frame became pending, no successor iteration ever comes:
+			 * the frame strands as pending - never presented, never
+			 * recycled to get_q - and the engine's sink-count throttle
+			 * (sink_cnt >= max) closes forever while its disp_q fills.
+			 * Measured (diag12 21:57, build 2138): a no-pause FF/REW
+			 * tap-seek raced the epoch re-arm drain exactly this way -
+			 * ONE current-epoch frame entered, got rendered + assigned
+			 * pending, and the thread parked in this cond_wait for 10s+
+			 * while the engine waited for the sink to hand frames back
+			 * (park=12, bl_out=0, vtime frozen; the FOLLOWING seek could
+			 * not even push its preview frame - total freeze).
+			 * Fix: BOUNDED wait against the absolute tail deadline above.
+			 * If nothing arrives by then AND a pending frame exists,
+			 * break out and run the tail-present path below: present
+			 * pending at its (already-passed or imminent) deadline, recycle
+			 * it, and re-enter the wait. The pipeline can never strand its
+			 * last frame; the cost is one extra present when the feed
+			 * pauses mid-epoch (exact mpv drain behavior - flip presents
+			 * the last rendered frame when the wait times out). */
+			if( pthread_cond_timedwait( &p->venc_cond, &p->venc_mutex, &tail_dl ) == ETIMEDOUT ) {
+				if( p->pending_frame ) {
+					tail_deadline = 1;
+					break;	/* run the tail-present path */
+				}
+			}
+		}
+		clock_gettime(CLOCK_MONOTONIC, &iw1 );
 		p->stat_idle_ns += (int64_t)(iw1.tv_sec - iw0.tv_sec) * 1000000000L +
-			           (iw1.tv_nsec - iw0.tv_nsec);
+		           (iw1.tv_nsec - iw0.tv_nsec);
 
-		if( !frame )
+		if( !frame ) {
+			/* woken by tail_deadline or venc_run clearing - if the
+			 * pending frame exists and we OWN the tail, present it now
+			 * (bounded liveness; see the wait block above). If the
+			 * pending present already ran (flushed/epoch path nulled
+			 * it), just loop. */
+			if( !p->venc_run )
+				break;
+			if( tail_deadline && p->pending_frame && p->gl ) {
+				/* TAIL PRESENT WITH CADENCE DISCIPLINE. The first cut of
+			 * this path swapped immediately - no blit-deadline wait,
+			 * no depth-2 inflight gate - and the post-seek burst-feed
+			 * regime fed it constantly (decode re-primes in bursts,
+			 * the queue runs dry between bursts, every dry-spell fired
+			 * an instant tail swap): early swaps + SF as-available
+			 * latching = the doubled 83ms holds, 36 of 48 slot-10s
+			 * inside 20s after a seek (measured diag13 23:41-23:45,
+			 * gate_to=0 - not gate timeouts, unpaced tail presents).
+			 * The tail path now runs the SAME discipline as the normal
+			 * present section: wait to the pending frame's blit_time
+			 * (mpv: never more than one period past the tail deadline),
+			 * then the depth-2 inflight gate (prev swap latched) before
+			 * the swap. Liveness is unchanged - every bound is wall-
+			 * bounded, so a stalled panel still releases within 150ms. */
+				VIDEO_FRAME *pf = p->pending_frame;
+				int my_gen2 = p->venc_flush_gen;
+				int tail_abandon = 0;	/* epoch/flush raced mid-tail */
+				p->pending_frame = NULL;	/* we own it; recycle below */
+				p->venc_busy = 1;
+				pthread_mutex_unlock( &p->venc_mutex );
+
+				/* (a) blit-deadline wait (mpv flip_page: a future-dated
+				 * frame presents at the next vsync - never hold it longer
+				 * than one period past the tail deadline, which already
+				 * elapsed one period of wait in the queue-wait above). */
+				int64_t due_wall_ns = 0;
+				{
+					struct timespec dw0;
+					clock_gettime(CLOCK_MONOTONIC, &dw0);
+					due_wall_ns = (int64_t)dw0.tv_sec * 1000000000LL + dw0.tv_nsec;
+					int64_t period2_ns = ( p->pres_period_ns > 0 ) ?
+						p->pres_period_ns :
+						(( pf->duration > 0 ) ?
+							(int64_t)pf->duration * 1000000LL : 41666666LL);
+					int64_t wait_cap_ns = due_wall_ns + period2_ns + 2000000LL;
+					while( pf->blit_time > 0 ) {
+						int64_t latch_ns; int phys_blit; int flushing_t; int gen_t;
+						pthread_mutex_lock( &p->venc_mutex );
+						latch_ns = p->fb_last_latch_ns;
+						phys_blit = p->fb_phys_blit;
+						flushing_t = p->venc_flushing;
+						gen_t = p->venc_flush_gen;
+						pthread_mutex_unlock( &p->venc_mutex );
+						if( flushing_t || gen_t != my_gen2 ) {
+							tail_abandon = 1;
+							break;
+						}
+						int now_ms = dovi_phys_from( p, latch_ns, phys_blit );
+						if( pf->blit_time - now_ms <= 2 )
+							break;					/* due: present now */
+						struct timespec dw1;
+						clock_gettime(CLOCK_MONOTONIC, &dw1);
+						int64_t wall2_ns = (int64_t)dw1.tv_sec * 1000000000LL + dw1.tv_nsec;
+						if( wall2_ns >= wait_cap_ns )
+							break;				/* one period cap (mpv) */
+						/* overlapped latch poll keeps the anchor fresh */
+						if( p->fb_active != 0 ) {
+							int64_t actual_ns = 0;
+							if( dovi_gl_present_feedback(p->gl, &actual_ns) == 0 )
+								dovi_fb_apply( p, actual_ns, my_gen2 );
+						}
+						struct timespec tnap = { 0, 2 * 1000000L };
+						nanosleep( &tnap, NULL );
+					}
+					/* the present target: when (a) broke, the frame is due */
+					struct timespec dw2;
+					clock_gettime(CLOCK_MONOTONIC, &dw2);
+					due_wall_ns = (int64_t)dw2.tv_sec * 1000000000LL + dw2.tv_nsec;
+				}
+
+				/* (b) depth-2 inflight gate (same bounds as the main path:
+				 * one vsync past the due time, 150ms wall escape). */
+				if( !tail_abandon && p->fb_active == 1 &&
+				    p->pres_wall_ns > 0 && p->gl ) {
+					int64_t gate_t0_ns;
+					{
+						struct timespec gt0;
+						clock_gettime(CLOCK_MONOTONIC, &gt0);
+						gate_t0_ns = (int64_t)gt0.tv_sec * 1000000000LL + gt0.tv_nsec;
+					}
+					int64_t prev_swap_ns = p->pres_wall_ns;
+					int64_t last_latch_ns;
+					int flushing_g;
+					pthread_mutex_lock( &p->venc_mutex );
+					last_latch_ns = p->fb_last_latch_ns;
+					flushing_g = p->venc_flushing;
+					pthread_mutex_unlock( &p->venc_mutex );
+					while( !flushing_g && !tail_abandon &&
+					       last_latch_ns < prev_swap_ns ) {
+						struct timespec gnow;
+						clock_gettime(CLOCK_MONOTONIC, &gnow);
+						int64_t gwall_ns = (int64_t)gnow.tv_sec * 1000000000LL + gnow.tv_nsec;
+						if( gwall_ns >= due_wall_ns + 8333333LL ||
+						    gwall_ns >= gate_t0_ns + 150000000LL ) {
+							p->stat_gate_timeout++;
+							serprintf("dovi sink: tail gate escape (%lldms in gate)\n",
+							          (long long)((gwall_ns - gate_t0_ns) / 1000000LL));
+							break;
+						}
+						struct timespec gnap = { 0, 100 * 1000L };
+						nanosleep( &gnap, NULL );
+						int64_t actual_ns_g = 0;
+						if( dovi_gl_present_feedback(p->gl, &actual_ns_g) == 0 ) {
+							dovi_fb_apply( p, actual_ns_g, my_gen2 );
+							pthread_mutex_lock( &p->venc_mutex );
+							last_latch_ns = p->fb_last_latch_ns;
+							flushing_g = p->venc_flushing;
+							pthread_mutex_unlock( &p->venc_mutex );
+						}
+					}
+				}
+
+				/* (c) present (unless an epoch/flush raced mid-tail -
+				 * then skip the swap: the rearm already drained the
+				 * epoch and a stale present would resurrect it) and
+				 * recycle the frame either way. */
+				if( !tail_abandon )
+					dovi_gl_present(p->gl);
+				pthread_mutex_lock( &p->venc_mutex );
+				{
+					struct timespec tw2;
+					clock_gettime(CLOCK_MONOTONIC, &tw2 );
+					p->pres_wall_ns = (int64_t)tw2.tv_sec * 1000000000LL + tw2.tv_nsec;
+					p->stat_present++;
+				}
+				p->fb_prev_blit_time = pf->blit_time;
+				frame_q_put( &p->get_q, pf );
+				p->stat_recycles++;
+				p->venc_busy = 0;
+				pthread_cond_broadcast( &p->venc_cond );
+				(void)my_gen2;
+			}
 			continue;
+		}
+
+	/* EPOCH GUARD AT DEQUEUE: a frame older than the sink's current epoch
+	 * is PRE-SEEK content that slipped into venc_q before sink_put's re-arm
+	 * (or arrived between the re-arm and this dequeue). Presenting it would
+	 * resurrect the measured 18:15 wedge half: the stale blit deadlines
+	 * compute present targets far away from the new timeline while the
+	 * engine clock already jumped. Free the payloads, recycle the frame,
+	 * and move on - the pending-frame pipelining machinery below re-seeds
+	 * from the first CURRENT-epoch frame. Frames at the CURRENT epoch (late
+	 * output of the same seek) pass through untouched. */
+	if( frame->epoch != p->cur_epoch ) {
+		serprintf("dovi sink: epoch drop at dequeue (frame epoch %llu != %llu, blit=%d)\n",
+		          (unsigned long long)frame->epoch,
+		          (unsigned long long)p->cur_epoch, frame->blit_time);
+		dovi_frame_free_payloads( frame );
+		frame->blit_time = -1;
+		frame_q_put( &p->get_q, frame );
+		continue;
+	}
 
 	/* mpv vsync-skip catch-up: mpv only drops a frame when its
 	 * vsync window is GONE (past deadline) AND a fresher frame is
@@ -1087,6 +1354,34 @@ static void *dovi_venc_thread( void *ctx )
 					if( since_pres_ns < slot_ns )
 						blit_duration = (int)((slot_ns - since_pres_ns) / 1000000LL);
 				}
+				/* PRESENT-AHEAD WINDOW (pipelining cushion): break out of the
+				 * wait when the frame is within ONE 120Hz vsync slot (8.33ms)
+				 * of its blit deadline - not at the deadline exactly. The swap
+				 * then enters the swapchain slightly early and SurfaceFlinger
+				 * holds the buffer to its vsync target (as-available latching
+				 * still latches at the target vsync), while the NEXT frame's
+				 * render already overlaps this wait's tail. Two measured wins:
+				 * 1) the shallow-queue regime (post seek-fix, vencq 0-6 vs the
+				 *    historical banked 6-12) exposed every decode hiccup
+				 *    straight to the vsync boundary - a swap that fires at
+				 *    deadline+ε lands one vsync late and the panel doubles
+				 *    (measured diag14 steady state: 1.6% slot-10 doubles at
+				 *    vencq<=2 vs 0.07% at vencq>=6, diag9 banked baseline).
+				 *    The early window gives the swap ~8ms of scheduling
+				 *    slack to still hit the same vsync - the cushion the
+				 *    banked queue used to provide, rebuilt structurally.
+				 * 2) the render of frame N+1 overlaps the tail of N's wait
+				 *    (mpv draw_frame/flip_page pipelining, already the design
+				 *    of this loop's next-iteration structure).
+				 * Bounded: the depth-2 inflight gate below the swap still
+				 * enforces at most 1 queued + 1 rendering, and the drop
+				 * policy above still drops STALE frames - only the wait
+				 * bound changed (2ms -> one vsync slot early). */
+				{
+					int vsync_early_ms = 8;
+					if( blit_duration <= vsync_early_ms && blit_duration > 2 )
+						break;		/* inside the present-ahead window */
+				}
 				if( blit_duration <= 2 )
 					break;
 				/* OVERLAPPED LATCH FEEDBACK (the serialized post-swap poll
@@ -1289,6 +1584,12 @@ static void *dovi_venc_thread( void *ctx )
 					int flushing_g;
 					int64_t prev_swap_ns = p->pres_wall_ns;
 					int64_t last_latch_ns;
+					int64_t gate_start_ns = 0;
+					{
+						struct timespec gs0;
+						clock_gettime(CLOCK_MONOTONIC, &gs0);
+						gate_start_ns = (int64_t)gs0.tv_sec * 1000000000LL + gs0.tv_nsec;
+					}
 					pthread_mutex_lock( &p->venc_mutex );
 					last_latch_ns = p->fb_last_latch_ns;
 					flushing_g = p->venc_flushing;
@@ -1299,6 +1600,49 @@ static void *dovi_venc_thread( void *ctx )
 						int64_t gwall_ns = (int64_t)gnow.tv_sec * 1000000000LL + gnow.tv_nsec;
 						int64_t bound_ns = ( target_ns > 0 ?
 						                    target_ns : prev_swap_ns ) + 8333333LL;
+						/* STALE-BLIND GATE ESCAPE (paused-panel / poisoned-target):
+						 * the bound above is derived from this frame's present
+						 * target, which is derived from the phys anchor +
+						 * content lead. A STALE anchor (async seek that skipped
+						 * sink_flush) dates new-seek frames minutes AHEAD, the
+						 * bound lands minutes out, and the gate spins while the
+						 * panel is paused (no presents -> no latches -> the
+						 * loop's only exit never fires; measured 18:15 wedge:
+						 * pres avg 3.7s with sw=383us - the gate, not the swap,
+						 * owned the wall time, fb samples 470/s from re-polling
+						 * the same never-advancing one-behind latch). Two
+						 * independent escapes, whichever first:
+						 *  - WALL: 150ms since gate entry, period-agnostic -
+						 *    latches for the previous swap CANNOT be more than
+							 *    ~2 vsyncs behind its swap on any live panel; the
+							 *    frame releases with 2 in flight, the next present
+							 *    proceeds, and the post-seek re-arm re-anchors on the
+							 *    first latch that DOES land.
+						 *  - ANCHOR STALL: fb_last_latch_wall_ns (wall basis,
+						 *    updated by every advancing dovi_fb_apply) older
+							 *    than 2 present periods -> the anchor is frozen
+							 *    (panel paused or feedback wedged): spinning can
+							 *    never see prev_swap_ns latch. */
+						int64_t esc_wall_ns = gate_start_ns + 150000000LL;
+						/* WALL-BOUND ONLY. The earlier ANCHOR-STALL branch (no latch
+						 * advanced for 2 periods -> release) fired spuriously during
+						 * post-seek decode-refill windows, where latch samples
+						 * legitimately pause for ~500ms while the codec re-primes: the
+						 * gate then released instantly with 2 frames in flight, SF
+						 * skipped latches to the spare, and the panel showed doubled
+						 * 83ms holds - the returning post-seek judder (measured
+						 * diag13 23:41:47: 'gate escape (wall-anchor-stall, 0ms in
+						 * gate)' followed by 8 slot-10 doubles). The wall bound
+						 * alone is strictly better: it releases a genuinely stuck
+						 * gate within 150ms (covers the 18:15 paused-panel deadlock)
+						 * while never firing faster than the normal target bound
+						 * in ordinary operation. */
+						if( gwall_ns >= esc_wall_ns ) {
+							p->stat_gate_timeout++;
+							serprintf("dovi sink: gate escape (wall, %lldms in gate)\n",
+							          (long long)((gwall_ns - gate_start_ns) / 1000000LL));
+							break;
+						}
 						if( gwall_ns >= bound_ns )
 							break;
 						struct timespec gnap = { 0, 100 * 1000L };
@@ -1307,8 +1651,8 @@ static void *dovi_venc_thread( void *ctx )
 						if( dovi_gl_present_feedback(p->gl, &actual_ns_g) == 0 ) {
 							dovi_fb_apply( p, actual_ns_g, my_gen );
 							pthread_mutex_lock( &p->venc_mutex );
-								last_latch_ns = p->fb_last_latch_ns;
-								flushing_g = p->venc_flushing;
+							last_latch_ns = p->fb_last_latch_ns;
+							flushing_g = p->venc_flushing;
 							pthread_mutex_unlock( &p->venc_mutex );
 						}
 					}
@@ -1407,7 +1751,7 @@ static void *dovi_venc_thread( void *ctx )
 					int64_t now_us = (int64_t) s0.tv_sec * 1000000 + s0.tv_nsec / 1000;
 						if (last_us && now_us - last_us >= 1000000) {
 						// pi-lens-ignore: typos
-						serprintf("dovi sink: put=%d rend=%d (avg %dus) pres=%d (avg %dus) [sw=%dus fb=%dus sch=%dus] poll_it=%d wait=%dms vencq=%d late=%d forced_late=%d skip=%d idle=%dms clock=%d phys=%d span=%dms fb=%d fblate=%dus frov=%d/%dus gate_to=%d latchslots=",
+						serprintf("dovi sink: put=%d rend=%d (avg %dus) pres=%d (avg %dus) [sw=%dus fb=%dus sch=%dus] poll_it=%d wait=%dms vencq=%d late=%d forced_late=%d skip=%d recyc=%d idle=%dms clock=%d phys=%d span=%dms fb=%d fblate=%dus frov=%d/%dus gate_to=%d latchslots=",
 						          p->stat_put,
 						          p->stat_render, p->stat_render ? (int)(p->stat_render_ns / p->stat_render / 1000) : 0,
 						          p->stat_present, p->stat_present ? (int)(p->stat_present_ns / p->stat_present / 1000) : 0,
@@ -1417,6 +1761,7 @@ static void *dovi_venc_thread( void *ctx )
 						          p->stat_poll_iters, (int)(p->stat_wait_ns / 1000000),
 						          frame_q_count(&p->venc_q), p->dropped, p->stat_forced_late,
 						          p->stat_late_skips,
+						          p->stat_recycles,
 						          (int)(p->stat_idle_ns / 1000000),
 						          dovi_sink_get_time(p),
 						          dovi_phys_time(p),
@@ -1435,6 +1780,7 @@ static void *dovi_venc_thread( void *ctx )
 						p->stat_wait_ns = 0;
 						p->stat_idle_ns = 0;
 						p->stat_late_skips = 0;
+						p->stat_recycles = 0;
 						p->stat_render_ns = p->stat_present_ns = 0;
 						p->stat_fb_used = 0;
 						p->stat_fb_late_us = 0;
@@ -1452,10 +1798,21 @@ static void *dovi_venc_thread( void *ctx )
 						last_us = now_us;
 				}
 				/* (mutex already re-taken above) */
-				/* flush raced this iteration (present ran unclocked): the
-				 * rebuild owns the pending frame - drop the reference,
-				 * do not put it back */
+				/* flush raced this iteration (present ran unclocked):
+				 * REBUILD (sink_flush): the rebuild owns the pending
+				 * frame - drop the reference, do not put it back.
+				 * RE-ARM (epoch change, no rebuild): the pool was NOT
+				 * re-listed - recycle the pending frame back to get_q
+				 * (its payloads were consumed by the render; only the
+				 * reference needs returning) or the engine's sink-count
+				 * throttle never reopens (measured diag12 21:57:
+				 * sink_cnt=5 frozen, disp_q=50, total stall). */
 				if( p->venc_flush_gen != my_gen ) {
+					if( p->venc_flush_rebuild || !p->pending_frame ) {
+						p->pending_frame = NULL;
+						goto flushed_away;
+					}
+					frame_q_put( &p->get_q, p->pending_frame );
 					p->pending_frame = NULL;
 					goto flushed_away;
 				}
@@ -1473,11 +1830,24 @@ static void *dovi_venc_thread( void *ctx )
 			goto endloop_skip;	/* frame stays pending; recycled after present */
 		}
 endloop:
-		/* flush raced this iteration (render ran unclocked): the rebuild
-		 * owns this frame - its payloads were consumed by the render, so
-		 * dropping the reference (not putting it back) is the correct recycle */
-		if( p->venc_flush_gen != my_gen )
+		/* flush raced this iteration (render ran unclocked):
+		 * REBUILD (sink_flush): the rebuild owns this frame - its
+		 * payloads were consumed by the render, so dropping the
+		 * reference (not putting it back) is the correct recycle.
+		 * RE-ARM (epoch change, no rebuild): the pool was NOT
+		 * re-listed - recycle to get_q instead of leaking (the
+		 * measured diag12 21:57 leak closed the engine throttle
+		 * forever). */
+		if( p->venc_flush_gen != my_gen ) {
+			if( p->venc_flush_rebuild )
+				goto flushed_away;
+			if( frame ) {
+				dovi_frame_free_payloads( frame );
+				frame->blit_time = -1;
+				frame_q_put( &p->get_q, frame );
+			}
 			goto flushed_away;
+		}
 		frame_q_put( &p->get_q, frame );
 endloop_skip:
 flushed_away:
@@ -1493,9 +1863,8 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	priv_t *p = sink->priv;
 	int i;
 
-	if (sink->is_open)
+	if( sink->is_open )
 		return 0;   /* resize re-open: renderer and frames stay alive */
-
 	if (!p->surface_handle) {
 		serprintf("dovi sink: no surface handle\n");
 		return 1;
@@ -1532,6 +1901,11 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	p->fb_last_latch_ns = 0;
 	p->fb_phys_blit = 0;
 	p->fb_prev_blit_time = 0;
+	p->fb_last_latch_wall_ns = 0;	/* gate stall-escape basis resets with the anchor */
+	p->cur_epoch = 0;		/* epoch tracking: a fresh open has seen no epochs;
+					 * the engine's seek_epoch also starts at 0 so the
+					 * first frames (epoch 0) pass the epoch guard */
+	p->fb_prev_latch_ns = 0;
 	p->fb_sched_mode = 0;	/* userspace wait until the first accepted target */
 	/* "No sync" free-run mode (GUI refresh-rate sync == 4): the Java
 	 * Player sets the libavos global in onPrepared, which can land
@@ -1668,6 +2042,115 @@ static VIDEO_FRAME *sink_get_frame(STREAM_SINK_VIDEO *sink, int index)
 	return p->frames[index];
 }
 
+/* SEEK-EPOCH RE-ARM (async-seek path): the engine bumps s->seek_epoch on
+ * every seek, but for an ASYNC decoder _video_init does NOT run
+ * _free_all_frames - so sink->flush (and the fb_locked re-arm in it) never
+ * runs on a seekbar seek. This is the sink's half of that discipline,
+ * invoked from sink_put when the frame carries a NEWER epoch:
+ *   - park the venc thread out of any pace-wait/gate spin (venc_flushing +
+ *     generation bump - late recycles from a mid-flight iteration become
+ *     harmless no-op references, same contract as sink_flush), then drain
+ *     every STALE-epoch frame from venc_q (free payloads, recycle),
+ *   - drop the stale pending frame reference (its payloads were consumed
+ *     by the render - only the reference needs clearing),
+ *   - re-arm the sync-acquisition machinery (fb_locked=0, rate 0, latch
+ *     anchors 0) so the first post-seek latch re-anchors in ONE jump
+ *     (mpv seek-epoch semantics) instead of rate-trimming from a stale
+ *     anchor while the engine clock jumped minutes.
+ * The pool rebuild stays in sink_flush (the stream's _free_all_frames
+ * contract must drive it); here we only drain + re-arm. Must be called
+ * with venc_mutex NOT held (it takes the timed park wait itself). */
+static void dvhw_sink_epoch_rearm( priv_t *p, UINT64 new_epoch )
+{
+	int i;
+	pthread_mutex_lock( &p->venc_mutex );
+	p->cur_epoch = new_epoch;
+	/* park + generation bump FIRST (same ordering contract as sink_flush:
+	 * a mid-iteration thread abandons its frame on the gen check instead
+	 * of double-listing it into the recycled pool). REBUILD=0: the rearm
+	 * does NOT re-list the pool, so the thread's gen-check RECYCLES its
+	 * frame instead of dropping it (see the endloop comment). */
+	p->venc_flushing = 1;
+	p->venc_flush_rebuild = 0;
+	p->venc_flush_gen++;
+	p->fb_locked = 0;
+	p->fb_rate_ppm = 0;
+	p->fb_last_latch_ns = 0;
+	p->fb_prev_latch_ns = 0;
+	p->fb_last_latch_wall_ns = 0;
+	p->fr_grid_pairs = 0;
+	p->fr_grid_sum_ns = 0;
+	p->fr_grid_last_ns = 0;
+	p->fb_prev_blit_time = 0;
+	serprintf("dovi sink: epoch %llu: re-arm (fb_locked, anchors, venc drain)\n",
+	          (unsigned long long)new_epoch);
+	pthread_cond_broadcast( &p->venc_cond );
+	while( p->venc_busy && p->venc_run ) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += 50 * 1000000L;
+		if( ts.tv_nsec >= 1000000000L ) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+		if( pthread_cond_timedwait( &p->venc_cond, &p->venc_mutex, &ts ) == ETIMEDOUT )
+			break;	/* thread stuck: the generation check keeps its
+			 * late recycles out of the drained pool */
+	}
+	p->venc_flushing = 0;
+	/* the stale pipelined pending reference: WHO recycles it decides on
+	 * where the venc thread parked.
+	 * - venc_busy==0 (thread parked in the queue-wait, pending retained
+	 *   from its last iteration - the measured 21:57 case): the thread
+	 *   holds NO frame reference it will later put, so WE recycle pending
+	 *   here (payloads were consumed by the render; only the reference
+	 *   needs returning to get_q) or the engine's sink-count throttle
+	 *   never reopens.
+	 * - venc_busy==1 (mid-flight, park-wait timed out on a >50ms 4K
+	 *   present): the thread still owns pending and its ENDLOOP-AREA GEN
+	 *   CHECK (venc_flush_rebuild==0 branch) recycles it - touching it
+	 *   here would double-list the frame against that recycle. */
+	if( p->venc_busy == 0 && p->pending_frame ) {
+		VIDEO_FRAME *pf = p->pending_frame;
+		p->pending_frame = NULL;
+		p->fb_prev_blit_time = pf->blit_time;
+		frame_q_put( &p->get_q, pf );
+		p->stat_recycles++;
+	} else if( p->pending_frame ) {
+		serprintf("dovi sink: epoch rearm: pending left to in-flight thread (busy=%d)\n",
+		          p->venc_busy );
+	}
+	/* drain every STALE-epoch frame from the render queue, preserving
+	 * the order of current-epoch frames (venc_q order IS presentation
+	 * order - a get/put-back loop would cycle them through the tail and
+	 * could reorder or even reverse the queue within the bounded pass).
+	 * Stage everything into a local array, then re-put current-epoch
+	 * frames in order and recycle stale ones. */
+	{
+		VIDEO_FRAME *stage[DOVI_SINK_MAX_FRAMES];
+		int n_staged = 0, n_kept = 0, k;
+		for( i = 0; i < DOVI_SINK_MAX_FRAMES; i++ ) {
+			VIDEO_FRAME *fr = frame_q_get( &p->venc_q );
+			if( !fr )
+				break;
+			stage[n_staged++] = fr;
+		}
+		for( k = 0; k < n_staged; k++ ) {
+			VIDEO_FRAME *fr = stage[k];
+			if( fr->epoch == p->cur_epoch ) {
+				frame_q_put( &p->venc_q, fr );
+				n_kept++;
+				continue;
+			}
+			dovi_frame_free_payloads( fr );
+			fr->blit_time = -1;
+			frame_q_put( &p->get_q, fr );
+		}
+		if( n_kept < n_staged )
+			serprintf("dovi sink: epoch drain: kept %d, recycled %d stale\n",
+			          n_kept, n_staged - n_kept );
+	}
+	pthread_cond_broadcast( &p->venc_cond );
+	pthread_mutex_unlock( &p->venc_mutex );
+}
+
 static int sink_put(STREAM_SINK_VIDEO *sink, VIDEO_FRAME *frame)
 {
 	priv_t *p = sink->priv;
@@ -1675,6 +2158,17 @@ static int sink_put(STREAM_SINK_VIDEO *sink, VIDEO_FRAME *frame)
 	if (!sink->is_open || !frame)
 		return 0;
 	p->stat_put++;
+
+	/* SEEK-EPOCH DETECTION: a frame with a NEWER epoch than the sink has
+	 * seen means the engine seeked WITHOUT flushing us (the async path).
+	 * Run the epoch re-arm BEFORE queueing: the parked venc thread then
+	 * dequeues into a clean epoch-local pipeline. Stale-epoch frames are
+	 * drained; the sync-acquisition machinery re-arms so the first
+	 * post-seek latch jumps instead of rate-trimming against a stale
+	 * anchor (the measured 18:15 forward-tap wedge). */
+	if( frame->epoch > p->cur_epoch ) {
+		dvhw_sink_epoch_rearm( p, frame->epoch );
+	}
 
 	/* android2 venc_thread parity: hand the frame to the render thread,
 	 * which paces it against the anchored presentation clock.
@@ -1748,6 +2242,10 @@ static int sink_flush(STREAM_SINK_VIDEO *sink)
 	 * already in [dec]' wedging the whole pool). */
 	pthread_mutex_lock(&p->venc_mutex);
 	p->venc_flushing = 1;
+	/* REBUILD=1 for the whole park + rebuild window: a racing thread's
+	 * gen-check must DROP its frame references (the rebuild re-lists
+	 * every pool frame below - a recycle would double-list). */
+	p->venc_flush_rebuild = 1;
 	/* bump the generation FIRST: if the thread is mid-iteration (its
 	 * render/present run with the mutex released, and a 4K FEL present
 	 * can legitimately block >50ms on the swapchain fence), it will see
@@ -1816,6 +2314,8 @@ static int sink_flush(STREAM_SINK_VIDEO *sink)
 		p->frames[i]->locked = 0;
 		frame_q_put(&p->get_q, p->frames[i]);
 	}
+	p->venc_flush_rebuild = 0;	/* rebuild complete: future bumps default
+					 * to drain-only (the epoch rearm) */
 	pthread_mutex_unlock(&p->venc_mutex);
 	return 0;
 }

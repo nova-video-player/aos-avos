@@ -396,10 +396,13 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 	if( p->venc_flush_gen == my_gen &&
 	    ( p->pending_frame || p->fb_prev_blit_time > 0 ) ) {
 	/* ANCHOR FREEZE (off-grid/boost): while the probe reports an
-		 * early-latch stream, the sync re-anchor, rate trim and the
-		 * anchor pair below would follow the boost down and drag every
-		 * future deadline early (the runaway) - they are gated below
-		 * on fb_latch_on_grid. The probe itself and the diagnostics
+		 * early-latch stream, the sync re-anchor and rate trim are
+		 * gated on fb_latch_on_grid (they would follow the boost
+		 * down); the anchor PAIR (fb_last_latch_ns + fb_phys_blit)
+		 * stays live off-grid by design - the inflight gates and
+		 * the phys clock need fresh latch anchors, and the off-grid
+		 * present floor (not the anchor freeze) bounds the swap
+		 * spacing during a boost. The probe itself and the diagnostics
 		 * (histogram/frjag/grid-estimator) run UNCONDITIONALLY: the
 		 * probe must keep classifying deltas while the anchor is
 		 * frozen or the off-grid state could never re-arm (measured
@@ -414,7 +417,7 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 		int ideal = p->fb_prev_blit_time > 0 ?
 			p->fb_prev_blit_time : p->pending_frame->blit_time;
 		int step = ideal - clock_at_latch;
-		if( p->fb_latch_on_grid ) {  /* frozen: skip re-anchor/rate/anchors */
+		if( p->fb_latch_on_grid ) {  /* frozen: skip re-anchor/rate trim */
 		if( !p->fb_locked ) {
 			/* SYNC ACQUISITION: the FIRST valid latch closes the banked
 			 * startup lead in ONE jump (mpv seek-epoch semantics); after
@@ -453,9 +456,10 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 			 * cascades, gate_to=0 forever. */
 			if( p->fb_active < 0 )
 				p->fb_active = 1;
-		}		/* end on-grid anchor gate (frozen off-grid: the anchor
-			 * pair keeps its last on-grid value; dovi_phys_from coasts
-			 * on it at the content period) */
+		}		/* end on-grid anchor gate (frozen off-grid: sync
+			 * re-anchor + rate trim; the anchor pair below stays
+			 * live - the inflight gates and phys clock need fresh
+			 * anchors, the present floor bounds swap spacing) */
 		p->fb_last_latch_ns = actual_ns;
 		p->fb_phys_blit = ideal;	/* coherent pair for dovi_phys_time */
 		/* free-run display-cadence diagnosis: bucket the actual
@@ -1495,11 +1499,13 @@ static void *dovi_venc_thread( void *ctx )
 				 * panel shows the burst at 2-3x content rate (2/3-slot latches,
 				 * the visible onset judder). FLOOR the wait at the swap-wall
 				 * remainder: never swap sooner than one content period after
-				 * the previous swap, even when the deadline says due. The
-				 * floor cannot push the swap LATER than the deadline: it only
-				 * extends a too-short wait (max, not min). Present cadence
-				 * stays exactly on-period through the whole boost; the banked
-				 * queue drains at content rate instead of bursting. */
+				 * the previous swap, even when the deadline says due. When
+				 * the floor exceeds the remaining deadline wait, the swap
+				 * fires LATER than the raw deadline - deliberately: a
+				 * banked queue entering a boost drains at content rate
+				 * instead of bursting; the wait cap (one period) still
+				 * bounds it. Present cadence
+				 * stays exactly on-period through the whole boost. */
 				{
 					int grid_hold_f;
 					pthread_mutex_lock( &p->venc_mutex );

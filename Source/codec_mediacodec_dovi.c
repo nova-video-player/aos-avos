@@ -644,7 +644,7 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 	PRIV *p = (PRIV *) dec->priv;
 	AMediaFormat *fmt = NULL;
 	media_status_t st;
-	int i;
+	int i, j;
 
 	if (libavos_get_dolby_vision_mode() == 0)
 		return 1;		// passthrough mode: sfdec2 owns DV
@@ -842,14 +842,34 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 	pthread_mutexattr_t mattr;
 	pthread_mutexattr_init(&mattr);
 	pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_ERRORCHECK);
-	if (pthread_mutex_init(&p->copyq.mtx, &mattr) ||
-	    pthread_cond_init(&p->copyq.cond, NULL)) {
+	/* sequential inits: on any failure destroy exactly what succeeded
+	 * (the compound form leaked the initialized ones - close skips them:
+	 * copyq_started/th_mtx_inited stay 0 - so nothing would ever free
+	 * them; same class as the feed-path split below) */
+	if (pthread_mutex_init(&p->copyq.mtx, &mattr)) {
 		p->copyq.run = 0;
+		pthread_mutexattr_destroy(&mattr);
 		goto fail;
 	}
-	if (pthread_mutex_init(&p->th.mtx, &mattr) ||
-	    pthread_cond_init(&p->th.cond, NULL)) {
+	if (pthread_cond_init(&p->copyq.cond, NULL)) {
+		p->copyq.run = 0;
+		pthread_mutex_destroy(&p->copyq.mtx);
+		pthread_mutexattr_destroy(&mattr);
+		goto fail;
+	}
+	if (pthread_mutex_init(&p->th.mtx, &mattr)) {
 		p->run = 0;
+		pthread_cond_destroy(&p->copyq.cond);
+		pthread_mutex_destroy(&p->copyq.mtx);
+		pthread_mutexattr_destroy(&mattr);
+		goto fail;
+	}
+	if (pthread_cond_init(&p->th.cond, NULL)) {
+		p->run = 0;
+		pthread_mutex_destroy(&p->th.mtx);
+		pthread_cond_destroy(&p->copyq.cond);
+		pthread_mutex_destroy(&p->copyq.mtx);
+		pthread_mutexattr_destroy(&mattr);
 		goto fail;
 	}
 	p->th_mtx_inited = 1;
@@ -867,6 +887,18 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 			           dvhw_copy_worker_n, wc)) {
 			afree(wc);
 			p->copyq.run = 0;
+			/* workers 0..i-1 are alive on this mutex/cond: wake and
+			 * join them BEFORE destroying (close runs after this
+			 * failure with is_open=1; copyq_started=0 keeps its
+			 * copyq block out - destroying here would leave close
+			 * locking a dead mutex, the same FORTIFY class this
+			 * commit fixes elsewhere) */
+			pthread_mutex_lock(&p->copyq.mtx);
+			pthread_cond_broadcast(&p->copyq.cond);
+			pthread_mutex_unlock(&p->copyq.mtx);
+			for (j = 0; j < i; j++)
+				pthread_join(p->copyq.thread[j], NULL);
+			p->copyq_started = 0;
 			pthread_mutex_destroy(&p->copyq.mtx);
 			pthread_cond_destroy(&p->copyq.cond);
 			goto fail;
@@ -879,10 +911,21 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 	p->feed_run = 1;
 	p->feed_busy = 0;
 	p->feed_park = 0;
-	if (pthread_mutex_init(&p->feed_mtx, &mattr) ||
-	    pthread_cond_init(&p->feed_cond, NULL) ||
-	    pthread_mutex_init(&p->pending_mtx, &mattr)) {
+	if (pthread_mutex_init(&p->feed_mtx, &mattr)) {
 		p->feed_run = 0;
+		pthread_mutexattr_destroy(&mattr);
+		goto fail;
+	}
+	if (pthread_cond_init(&p->feed_cond, NULL)) {
+		p->feed_run = 0;
+		pthread_mutex_destroy(&p->feed_mtx);
+		pthread_mutexattr_destroy(&mattr);
+		goto fail;
+	}
+	if (pthread_mutex_init(&p->pending_mtx, &mattr)) {
+		p->feed_run = 0;
+		pthread_cond_destroy(&p->feed_cond);
+		pthread_mutex_destroy(&p->feed_mtx);
 		pthread_mutexattr_destroy(&mattr);
 		goto fail;
 	}

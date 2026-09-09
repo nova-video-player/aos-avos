@@ -384,9 +384,10 @@ static int _set_buffersize(struct stream_properties *props, int size)
 	return 0;
 }
 
-int audio_interface_set_output_params(void *ctx, int freq, int channels, int bits, int format )
+int audio_interface_set_output_params(void *ctx, int freq, int channels, int content_channels, int bits, int format )
 {
 	struct stream_properties *props = ctx;
+	(void)content_channels;
 DBG serprintf("ALSA_set_output_params\r\n");
 
 	_set_rate(props, &freq);

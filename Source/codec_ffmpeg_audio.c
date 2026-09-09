@@ -82,6 +82,25 @@ static void update_audio_channel_mask( AUDIO_PROPERTIES *audio, const AVChannelL
 // Channel map built in convert_to_stereo()
 static int channel_map[8] = { CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED };
 
+/*
+ * AVCodecContext owns extradata and frees it from avcodec_free_context().
+ * Stream properties do not transfer ownership, so copy their payload instead
+ * of lending it to FFmpeg. This also provides FFmpeg's required zero padding.
+ */
+static int ffmpeg_audio_copy_extradata( AVCodecContext *ctx, const void *data, int size )
+{
+	if( !data || size <= 0 )
+		return 0;
+
+	ctx->extradata = av_mallocz( (size_t)size + AV_INPUT_BUFFER_PADDING_SIZE );
+	if( !ctx->extradata )
+		return 1;
+
+	memcpy( ctx->extradata, data, size );
+	ctx->extradata_size = size;
+	return 0;
+}
+
 //
 //	AUDIO
 //
@@ -96,6 +115,7 @@ typedef struct PRIV {
 	enum AVSampleFormat swr_in_fmt;
 	int             swr_in_rate;
 	AVFrame         *aframe;
+	AVPacket        *avpkt;
 	SHORT		*asamples;
 	SHORT		*bsamples;
 	int 		open;
@@ -266,6 +286,9 @@ serprintf("cannot find codec\r\n");
 	}
 	
 	AVCodecContext *actx = avcodec_alloc_context3(acodec);
+	if( !actx ) {
+		return 1;
+	}
 
 	actx->sample_rate = audio->samplesPerSec;
 	actx->block_align = audio->blockAlign;
@@ -273,13 +296,10 @@ serprintf("cannot find codec\r\n");
 	av_channel_layout_default(&actx->ch_layout, audio->channels);
 	actx->ch_layout.nb_channels    = audio->channels;
 
-	if( audio->extraDataSize2 ) {
-		actx->extradata      = audio->extraData2;
-		actx->extradata_size = audio->extraDataSize2;
-	} else {
-		actx->extradata      = audio->extraData;
-		actx->extradata_size = audio->extraDataSize;
-	}
+	if( ffmpeg_audio_copy_extradata( actx,
+			audio->extraDataSize2 ? audio->extraData2 : audio->extraData,
+			audio->extraDataSize2 ? audio->extraDataSize2 : audio->extraDataSize ) )
+		goto ErrorExit;
 
 	if (avcodec_open2(actx, acodec, NULL) < 0) {
 serprintf("cannot open codec\r\n");
@@ -287,12 +307,16 @@ serprintf("cannot open codec\r\n");
 	}
 	
 	AVFrame *aframe = av_frame_alloc();
+	AVPacket *avpkt = av_packet_alloc();
+	if ( !aframe || !avpkt ) {
+		goto ErrorExit2;
+	}
 
-	AVPacket avpkt = { .data = data, .size = size };
-	av_init_packet(&avpkt);
+	avpkt->data = data;
+	avpkt->size = size;
 
 	av_frame_unref(aframe);
-	int ret = avcodec_send_packet(actx, &avpkt);
+	int ret = avcodec_send_packet(actx, avpkt);
     if (ret < 0) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret));
         goto ErrorExit2;
@@ -318,13 +342,18 @@ serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, a
 		}
 	}
 	
-	av_free(aframe);
+	av_packet_free( &avpkt );
+	av_frame_free( &aframe );
+	avcodec_free_context( &actx );
 
 	return 0;
 
 ErrorExit2:
+	if ( avpkt ) {
+		av_packet_free( &avpkt );
+	}
 	if ( aframe ) {
-		av_free(aframe);
+		av_frame_free( &aframe );
 	}
 
 ErrorExit:
@@ -405,12 +434,11 @@ DBGS serprintf("codec_ffmpeg_audio: audio->request_channels=%d on entry\r\n", au
 	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
 DBGCA2  serprintf("requested channel layout: %s for %d channel(s)\r\n", layout_desc, p->actx->ch_layout.nb_channels);
 
-	if( audio->extraDataSize2 ) {
-		p->actx->extradata      = audio->extraData2;
-		p->actx->extradata_size = audio->extraDataSize2;
-	} else {
-		p->actx->extradata      = audio->extraData;
-		p->actx->extradata_size = audio->extraDataSize;
+	if( ffmpeg_audio_copy_extradata( p->actx,
+			audio->extraDataSize2 ? audio->extraData2 : audio->extraData,
+			audio->extraDataSize2 ? audio->extraDataSize2 : audio->extraDataSize ) ) {
+		serprintf( "cannot allocate codec extradata\r\n" );
+		goto ErrorExit;
 	}
 
 	// Open codec
@@ -418,10 +446,6 @@ DBGCA2  serprintf("requested channel layout: %s for %d channel(s)\r\n", layout_d
 serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
-
-	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
-	p->actx->extradata      = NULL;
-	p->actx->extradata_size = 0;
 
 	if( need_parser ) {
 		p->aparser = av_parser_init(p->actx->codec_id);
@@ -474,6 +498,10 @@ serprintf("downmix to stereo S16\r\n");
 		serprintf("channels    changed! %d\r\n", audio->channels);
 
 	p->aframe = av_frame_alloc();
+	p->avpkt  = av_packet_alloc();
+	if( !p->aframe || !p->avpkt ) {
+		goto ErrorExit;
+	}
 	
 	p->asamples = (SHORT*)amalloc(    MAX_AUDIO_FRAME_SIZE);
 	p->bsamples = (SHORT*)amalloc(2 * MAX_AUDIO_FRAME_SIZE);
@@ -487,6 +515,12 @@ serprintf("downmix to stereo S16\r\n");
 
 ErrorExit:
 	// Close the codec
+	if ( p->aframe ) {
+		av_frame_free( &p->aframe );
+	}
+	if ( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 	if ( p->actx ) {
                 avcodec_free_context( &p->actx );
 		p->actx = NULL;
@@ -527,7 +561,11 @@ serprintf("ffad not open!\r\n");
 	av_channel_layout_uninit( &p->swr_in_layout );
 	av_channel_layout_uninit( &p->swr_out_layout );
 
-	av_free(p->aframe);
+	av_frame_free(&p->aframe);
+
+	if( p->avpkt ) {
+		av_packet_free(&p->avpkt);
+	}
 
 	if( p->asamples ) {
 		afree( p->asamples );
@@ -857,12 +895,13 @@ Dump( data, 64 );
 serprintf("\r\n");
 Dump( data, size );
 }
-		AVPacket avpkt = { .data = data, .size = size };
-		av_init_packet(&avpkt);
+		av_packet_unref( p->avpkt );
+		p->avpkt->data = data;
+		p->avpkt->size = size;
 
 		int t1 = time_update_time();
 		av_frame_unref(p->aframe);
-		int ret_send = avcodec_send_packet(p->actx, &avpkt);
+		int ret_send = avcodec_send_packet(p->actx, p->avpkt);
 		if (ret_send < 0) {
 			if (ret_send != AVERROR(EAGAIN)) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
@@ -1045,11 +1084,12 @@ DBGCA2 serprintf("drop %5d\n", parsed );
 		break;
 	}
 
-	AVPacket avpkt = { .data = out, .size = out_size };
-	av_init_packet(&avpkt);
+	av_packet_unref( p->avpkt );
+	p->avpkt->data = out;
+	p->avpkt->size = out_size;
 
 	int t1 = time_update_time();
-	int ret_send = avcodec_send_packet(p->actx, &avpkt);
+	int ret_send = avcodec_send_packet(p->actx, p->avpkt);
     if (ret_send < 0) {
 serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
     }
@@ -1059,7 +1099,7 @@ serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2
 	}
 	int t2 = time_update_time();
 	
-    int bytes = avpkt.size;
+    int bytes = p->avpkt->size;
 	if ( ret_rx < 0 ) {
 serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUNCTION__, av_err2str(ret_rx));
         bytes = 0;

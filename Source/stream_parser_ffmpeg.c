@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +31,7 @@
 #include "iso639.h"
 #include "android_codec.h"
 #include "util.h"
+#include "dts.h"
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
@@ -46,6 +47,7 @@
 #include "dovi_nal.h"
 
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 
 #define DBGS 	if(Debug[DBG_STREAM])
@@ -81,6 +83,64 @@ DECLARE_DEBUG_TOGGLE("ffpts", use_pts );
 DECLARE_DEBUG_TOGGLE("ffreo", force_reorder );
 DECLARE_DEBUG_PARAM("ffvp",  force_vpid );
 DECLARE_DEBUG_PARAM("ffap",  force_apid );
+
+static int http_header_is_safe( const char *key, const char *value )
+{
+	const unsigned char *p;
+	if( !key || !key[0] || !value )
+		return 0;
+	for( p = (const unsigned char *)key; *p; p++ ) {
+		if( *p <= 32 || *p >= 127 || *p == ':' )
+			return 0;
+	}
+	return !strchr( value, '\r' ) && !strchr( value, '\n' );
+}
+
+static void ffmpeg_set_http_options( AVDictionary **options, const STREAM_URL *src )
+{
+	const char *user_agent = "Mozilla/5.0 (Linux; Android) Nova/1.0";
+	const char *referer = NULL;
+	char *headers = NULL;
+	size_t headers_size = 1;
+	int i;
+
+	if( src && src->extra_list ) {
+		for( i = 0; src->extra_list[i] && src->extra_list[i + 1]; i += 2 ) {
+			const char *key = src->extra_list[i];
+			const char *value = src->extra_list[i + 1];
+			if( !http_header_is_safe( key, value ) || !strcasecmp( key, "extra_name" ) )
+				continue;
+			if( !strcasecmp( key, "User-Agent" ) )
+				user_agent = value;
+			else if( !strcasecmp( key, "Referer" ) )
+				referer = value;
+			else
+				headers_size += strlen( key ) + 2 + strlen( value ) + 2;
+		}
+		if( headers_size > 1 ) {
+			size_t offset = 0;
+			headers = (char *)amalloc( headers_size );
+			if( headers ) {
+				for( i = 0; src->extra_list[i] && src->extra_list[i + 1]; i += 2 ) {
+					const char *key = src->extra_list[i];
+					const char *value = src->extra_list[i + 1];
+					if( !http_header_is_safe( key, value ) || !strcasecmp( key, "extra_name" ) ||
+							!strcasecmp( key, "User-Agent" ) || !strcasecmp( key, "Referer" ) )
+						continue;
+					offset += snprintf( headers + offset, headers_size - offset,
+							"%s: %s\r\n", key, value );
+				}
+			}
+		}
+	}
+	av_dict_set( options, "user_agent", user_agent, 0 );
+	if( referer )
+		av_dict_set( options, "referer", referer, 0 );
+	if( headers ) {
+		av_dict_set( options, "headers", headers, 0 );
+		afree( headers );
+	}
+}
 
 typedef struct PacketNode {
 	LinkedListNode s;
@@ -130,7 +190,7 @@ typedef struct FF_PRIV
 	
 	int 		need_key;
 	int 		last_audio_time;
-	
+
 	int		apid;
 	int		vpid;
 
@@ -539,14 +599,37 @@ DBGP serprintf("\tdisposition %d / %s\r\n", st->disposition, disposition_name(st
 			if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 			}
-DBGP serprintf("\tPAR        %d/%d\r\n", codecpar->sample_aspect_ratio.num, codecpar->sample_aspect_ratio.den ); 
+			AVRational sample_aspect_ratio = av_guess_sample_aspect_ratio(fmt, st, NULL);
+DBGP serprintf("\tPAR        %d/%d (stream %d/%d, codec %d/%d)\r\n",
+			sample_aspect_ratio.num, sample_aspect_ratio.den,
+			st->sample_aspect_ratio.num, st->sample_aspect_ratio.den,
+			codecpar->sample_aspect_ratio.num, codecpar->sample_aspect_ratio.den );
 			if ( priv->av.vs_max < VIDEO_TRACK_MAX ) {
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
 				video->stream = i;
+                /* Frame rate for display-mode matching: r_frame_rate is the
+                 * coded cadence (exact for fixed-rate content like this 48/1
+                 * FEL file), but MKV headers often report avg != r on long
+                 * files (per-frame timestamp rounding accumulates, avg drifts
+                 * a hair below the true rate) - the equality gate then left
+                 * frame_rate_num/den 0 and NO fps ever reached Java
+                 * (MEDIA_SET_VIDEO_FPS) or the dovi sink's SF hint
+                 * (framerate_set), measured: the 48fps FEL file played on a
+                 * 120Hz panel with presents pinned ~40/s. Use r when it
+                 * matches, else fall back to r alone when sane, else avg:
+                 * mode matching wants the content cadence, not the
+                 * long-average; avg is still written to rate/scale below
+                 * for msPerFrame math. */
                 if (st->avg_frame_rate.den && st->r_frame_rate.den && av_q2d(st->avg_frame_rate) == av_q2d(st->r_frame_rate)) {
                     video->frame_rate_den = st->r_frame_rate.den;
                     video->frame_rate_num = st->r_frame_rate.num;
+                } else if (st->r_frame_rate.den && st->r_frame_rate.num && av_q2d(st->r_frame_rate) > 1.0 && av_q2d(st->r_frame_rate) < 500.0) {
+                    video->frame_rate_den = st->r_frame_rate.den;
+                    video->frame_rate_num = st->r_frame_rate.num;
+                } else if (st->avg_frame_rate.den && st->avg_frame_rate.num) {
+                    video->frame_rate_den = st->avg_frame_rate.den;
+                    video->frame_rate_num = st->avg_frame_rate.num;
                 }
 
 				if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
@@ -609,9 +692,12 @@ serprintf("FF: parse H264 SPS\n");
 				
 				video->width       = codecpar->width;
 				video->height      = codecpar->height;
-				video->aspect_n    = codecpar->sample_aspect_ratio.num;
-				video->aspect_d	   = codecpar->sample_aspect_ratio.den;
+				video->aspect_n    = sample_aspect_ratio.num;
+				video->aspect_d	   = sample_aspect_ratio.den;
+				video->aspect_from_container = st->sample_aspect_ratio.num > 0 &&
+						st->sample_aspect_ratio.den > 0;
 				video->bytesPerSec = codecpar->bit_rate / 8;
+				video->reorder_depth = codecpar->video_delay;
 
 				video->color_primaries = codecpar->color_primaries;
 				video->color_trc       = codecpar->color_trc;
@@ -650,6 +736,7 @@ serprintf("FF: parse H264 SPS\n");
                                 break;
                             }
                         }
+
                         if (side_data && side_data_size > 0) {
                             dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                         } else if (video->format == VIDEO_FORMAT_HEVC &&
@@ -666,10 +753,27 @@ serprintf("FF: parse H264 SPS\n");
                         // Tone-map mode renders DV through libplacebo and does not
                         // need a device DV decoder, so detect DV from the container
                         // metadata regardless of "video/dolby-vision" HW support.
-                        if(dovi_record && (libavos_get_dolby_vision_mode() != 0 || acodecs_is_type_supported("video/dolby-vision", 0))) {
+                        int dovi_codec_supported = acodecs_is_type_supported("video/dolby-vision", 0);
+                        int dovi_mode = acodecs_get_dovi_mode();
+                        if(dovi_record && (libavos_get_dolby_vision_mode() != 0 || dovi_codec_supported)) {
 #else
+                        int dovi_codec_supported = 1;
+                        int dovi_mode = 0;
                         if(dovi_record) {
 #endif
+                            int force_dovi = 0;
+                            int prefer_hevc_fallback = 0;
+                            char *dovi_decoder = NULL;
+                            video->dv_bl_signal_compatibility_id = dovi_record->dv_bl_signal_compatibility_id;
+                            serprintf("Dolby Vision config: codec=%d dv_profile=%d dv_level=%d bl_compat_id=%d rpu=%d el=%d bl=%d codec_supported=%d\r\n",
+                                      video->format,
+                                      dovi_record->dv_profile,
+                                      dovi_record->dv_level,
+                                      dovi_record->dv_bl_signal_compatibility_id,
+                                      dovi_record->rpu_present_flag,
+                                      dovi_record->el_present_flag,
+                                      dovi_record->bl_present_flag,
+                                      dovi_codec_supported);
                             if (video->format == VIDEO_FORMAT_HEVC) {
                                 switch(dovi_record->dv_profile) {
                                     // Mapping source: Kodi's DVDVideoCodecAndroidMediaCodec.cpp
@@ -702,18 +806,96 @@ serprintf("FF: parse H264 SPS\n");
                                 serprintf("Dolby Vision in an unknown codec %d", video->format);
                             }
 
+								// capture raw DV metadata for the tone-map pipeline (mpv-style EL handling)
                             video->dv_profile_source = dovi_record->dv_profile;
                             video->dv_level      = dovi_record->dv_level;
                             video->dv_el_present = dovi_record->el_present_flag;
                             video->dv_bl_present = dovi_record->bl_present_flag;
                             video->dv_compat_id  = dovi_record->dv_bl_signal_compatibility_id;
 
-                            video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
-                            video->format = VIDEO_FORMAT_DOLBY_VISION;
+								#ifdef CONFIG_ANDROID
+                            // Tone-map mode (libavos_get_dolby_vision_mode()==1): the EL is
+                            // decoded in software and composited on the GPU - no device DV
+                            // decoder is needed or consulted. Force the DV format for every
+                            // profile the tone-map pipeline handles (P4/5/7/8/9 HEVC, P10 AV1)
+                            // so the dovi sink/decoder chain engages regardless of
+                            // bl_signal_compatibility_id (P7 FEL bl=6 would otherwise take the
+                            // HDR10 fallback - measured regression after the android_sync_back
+                            // rebase: file played through sfdec2 and never reached the dovi
+                            // tone-map path). LAST gate: nothing after this may reset it.
+                            int dovi_tonemap = (libavos_get_dolby_vision_mode() != 0 &&
+                                                video->dv_profile != 0);
+                            if (dovi_tonemap) {
+                                force_dovi = 1;
+                                prefer_hevc_fallback = 0;
+                            }
+                            if (video->dv_profile) {
+                                dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+                                if (!dovi_tonemap)
+                                    force_dovi = (dovi_decoder != NULL);
+                            }
 
-                            serprintf("HELLO, This is a dolby vision content! profile %d level %d el %d bl %d compat %d\r\n",
-                                      video->dv_profile_source, video->dv_level, video->dv_el_present,
-                                      video->dv_bl_present, video->dv_compat_id);
+                            if (dovi_mode == 2 && dovi_codec_supported) {
+                                force_dovi = 1;
+                            }
+#else
+                            if (video->dv_profile) {
+                                dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+                                force_dovi = (dovi_decoder != NULL);
+                            }
+
+                            if (dovi_mode == 2 && dovi_codec_supported) {
+                                force_dovi = 1;
+                            }
+#endif
+
+#ifdef CONFIG_ANDROID
+                            // HEVC fallback for profile-7 BLs applies ONLY to the device
+                            // passthrough path (dovi_mode 0/1): a hardware DV decoder that
+                            // must render the BL alone benefits from the HDR10-compatible
+                            // base layer. It must never override tone-map mode.
+                            if (libavos_get_dolby_vision_mode() == 0 &&
+#endif
+                                video->format == VIDEO_FORMAT_HEVC &&
+                                dovi_record->dv_profile == 7 &&
+                                dovi_mode != 2 &&
+                                dovi_record->dv_bl_signal_compatibility_id != 0 &&
+                                dovi_record->dv_bl_signal_compatibility_id != 2 &&
+                                dovi_record->dv_bl_signal_compatibility_id != 3) {
+                                prefer_hevc_fallback = 1;
+                                force_dovi = 0;
+                            }
+
+                            if (force_dovi) {
+                                video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
+                                video->format = VIDEO_FORMAT_DOLBY_VISION;
+                            }
+
+                            serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s prefer_hevc_fallback=%d bl_compat_id=%d dovi_mode=%d\r\n",
+                                      video->format,
+                                      video->dv_profile,
+                                      video->fourcc,
+                                      dovi_decoder ? dovi_decoder : "(none)",
+                                      prefer_hevc_fallback,
+                                      video->dv_bl_signal_compatibility_id,
+                                      dovi_mode);
+                            if (!force_dovi) {
+                                serprintf("Dolby Vision fallback: keeping base codec=%d because %s (profile=%d bl_compat_id=%d)\r\n",
+                                          video->format,
+                                          prefer_hevc_fallback ? "HDR-compatible base layer is preferred" : "no usable Dolby Vision decoder matched",
+                                          video->dv_profile,
+                                          video->dv_bl_signal_compatibility_id);
+                            }
+
+                            if (dovi_decoder)
+                                afree(dovi_decoder);
+                        } else if (side_data && side_data_size > 0) {
+                            AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
+                            serprintf("Dolby Vision config ignored: codec=%d dv_profile=%d bl_compat_id=%d codec_supported=%d\r\n",
+                                      video->format,
+                                      dovi_record->dv_profile,
+                                      dovi_record->dv_bl_signal_compatibility_id,
+                                      dovi_codec_supported);
                         }
 			}
 		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO ){
@@ -728,12 +910,22 @@ DBGP serprintf("\tchannels   %d\r\n", codecpar->ch_layout.nb_channels);
 DBGP serprintf("\tfps        %5.2f fps(r)\r\n", av_q2d(st->avg_frame_rate));
 			}
 
-			if ( priv->av.as_max < AUDIO_TRACK_MAX ) {	
+			if ( priv->av.as_max < AUDIO_TRACK_MAX ) {
 				AUDIO_PROPERTIES *audio = priv->av.audio + priv->av.as_max;
 
 				audio->codec_id	     = codecpar->codec_id;
 				strnZcpy( audio->codec_name, desc ? desc->name : "", AV_NAME_LEN );
 				audio->format        = get_ff_format( codecpar->codec_id, NULL );
+#ifdef CONFIG_DTS
+				if( audio->format == WAVE_FORMAT_DTS && codecpar->profile > 0 ) {
+					int dts_format = DTS_get_format_from_profile( codecpar->profile );
+					if( dts_format != WAVE_FORMAT_DTS ) {
+						audio->format = dts_format;
+						DBG serprintf("stream_parser_ffmpeg: detected DTS profile=%d -> format=%04X\n",
+							codecpar->profile, audio->format);
+					}
+				}
+#endif
 				if( audio->format == WAVE_FORMAT_EAC3 &&
 				    codecpar->profile == AV_PROFILE_EAC3_DDP_ATMOS ) {
 					audio->format = WAVE_FORMAT_E_AC3_JOC;
@@ -798,7 +990,11 @@ DBGP serprintf( "arate=%d; ascale=%d\n", audio->rate, audio->scale );
 				
 				priv->av.as_max ++;
 				discard = 0;
-			} 
+			} else {
+				serprintf("stream_parser_ffmpeg: ignoring audio stream %d: "
+					"maximum of %d audio tracks reached\n",
+					i, AUDIO_TRACK_MAX);
+			}
 		} else if( st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codecpar->codec_type == AVMEDIA_TYPE_DATA ){
 			//
 			// subtitle
@@ -840,6 +1036,10 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 
 				priv->av.subs_max ++;
 				discard = 0;
+			} else if( fmt ) {
+				serprintf("stream_parser_ffmpeg: ignoring subtitle stream %d: "
+					"maximum of %d subtitle tracks reached\n",
+					i, SUB_TRACK_MAX);
 			}
 		}
 DISCARD_STREAM:
@@ -881,7 +1081,7 @@ DBGP serprintf("\r\n");
 static int ffmpeg_interrupt_cb(void *ctx)
 {
 	STREAM *s = (STREAM*)ctx;
-	return s && stream_abort( s ) ? 1 : 0;
+	return s && (s->parser_interrupt || stream_abort( s )) ? 1 : 0;
 }
 
 static void parse_PID_from_query( STREAM *s )
@@ -983,8 +1183,7 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 		av_dict_set(&ff_p->fmt_opts, "probesize", "10000000", 0);
 	}
 
-	// Set user agent for HTTP streams to improve compatibility with CDN/debrid services
-	av_dict_set(&ff_p->fmt_opts, "user_agent", "Mozilla/5.0 (Linux; Android) Nova/1.0", 0);
+	ffmpeg_set_http_options(&ff_p->fmt_opts, &s->src);
 DBGP serprintf("FFMPEG: opening url [%s]\r\n", s->src.url);
 
 	if( avformat_open_input(&ff_p->fmt, s->src.url, NULL, &ff_p->fmt_opts ) != 0) {
@@ -1535,7 +1734,30 @@ static int _dv_el_take_match( FF_PRIV *priv, AVPacket *bl, AVPacket *el_out )
 static int _parse_once( STREAM *s, int *timestamp)
 {
 	AVFormatContext *fmt = ff_p->fmt;
-	
+
+	/* 1Hz demux-queue diagnostics: packet counts + memory of every queue
+	 * plus this thread's parse rate - pinpoints parser starvation */
+	{
+		static int64_t last_us;
+		static int parse_count;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		parse_count++;
+		if (!last_us)
+			last_us = now_us;
+		else if (now_us - last_us >= 1000000) {
+			serprintf("FFMPEG: parse=%d/s vq=%d(%dKB) aq=%d(%dKB) elq=%d(%dKB) sleeping=%d\n",
+			          parse_count,
+			          ff_p->vq.packets, ff_p->vq.mem_used / 1024,
+			          ff_p->aq.packets, ff_p->aq.mem_used / 1024,
+			          ff_p->elq.packets, ff_p->elq.mem_used / 1024,
+			          ff_p->sleeping);
+			parse_count = 0;
+			last_us = now_us;
+		}
+	}
+
 	if( ff_p->sleeping ) {
 		// we are sleeping, decide whether to wake up
 		if( s->time_parsed < stream_drive_wake_sleep ) {
@@ -1547,27 +1769,39 @@ DBGP serprintf("FFMPEG: wake\r\n");
 		}
 	}
 
-	if( ff_p->aq.mem_used + ff_p->vq.mem_used + ff_p->sq.mem_used > ff_p->buffer_size ) {
-		// The audio queue must never be starved by video backpressure:
-		// below-realtime software video decode (e.g. Dolby Vision FEL
-		// BL+EL composition) would otherwise let the pool stay full, block
-		// all reads including audio, and stall A/V sync on every frame.
-		// Audio packets are tiny compared to video, so keep reading while
-		// the audio queue is below a small cap.
-		if( ff_p->aq.packets > 32 ) {
-			if( s->time_parsed > stream_drive_wake_sleep && !(ff_p->flags & STREAM_PARSER_FILE_NONLOCAL) ) {
-				// time to sleep
-DBGP serprintf("FFMPEG: sleep\r\n");
-				ff_p->sleeping = 1;
-			}
-			return 0;
+	int mem_used = ff_p->aq.mem_used + ff_p->vq.mem_used + ff_p->sq.mem_used;
+
+	// If the audio queue is empty while the audio stream is still valid and
+	// not yet at EOF, video packets have been monopolizing the shared buffer
+	// and starving audio. Keep demuxing past the normal buffer_size cap in
+	// that case instead of deadlocking with audio starved forever - memory
+	// stays bounded because starved video packets are discarded rather than
+	// queued below (see the video routing branch), not by capping how far
+	// we search.
+	int audio_starved = s->audio->valid && ff_p->aq.packets == 0 && !s->audio_parse_end;
+
+	if( mem_used > ff_p->buffer_size && !audio_starved ) {
+DBGP2 serprintf("FFMPEG full %d %d %d %d\r\n", ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, ff_p->buffer_size);
+		if( s->time_parsed > stream_drive_wake_sleep && !(ff_p->flags & STREAM_PARSER_FILE_NONLOCAL) ) {
+			// time to sleep
+DBGP		serprintf("FFMPEG: sleep\r\n");
+			ff_p->sleeping = 1;
 		}
+		return 0;
 	}
-	
+
 	// Read the next packet, skipping all packets that aren't for this stream
 	AVPacket packet = { 0 };
 	// Read new packet
 	if (av_read_frame( fmt, &packet) < 0) {
+		// A seek first asks the parser thread to become idle. Interrupt a
+		// potentially blocking FFmpeg read so the thread can acknowledge that
+		// state transition. This is not EOF: the async seek will reposition the
+		// same format context before allowing parsing to run again.
+		if (s->parser_interrupt) {
+			DBG serprintf("FFMPEG: read interrupted for parser state change\n");
+			return 0;
+		}
 		if( !s->video_parse_end ) {
 DBGP serprintf("FFMPEG: end\r\n");
 			s->video_parse_end = 1;
@@ -1583,7 +1817,36 @@ DBGP3 serprintf("%8d/%8d/%8d  %4d/%4d/%4d  ",
 DBGP2 serprintf("pkt [%4d] st %d  size %10d  pos %8lld  %08X  ", 
 			ff_p->packet_count++, stream, packet.size, packet.pos, packet.data );
 	
+	// Packet-routing accounting, gated behind DBGP (Debug[DBG_PARSER]).
+	// Reports periodically how packets are being routed to the
+	// audio/video/subtitle queues, so a demuxer that stops producing audio
+	// packets (or misroutes them) after a seek is visible in a capture with
+	// DBG_PARSER enabled.
+	static int _rt_audio_pkts, _rt_video_pkts, _rt_sub_pkts, _rt_discard_pkts, _rt_video_search_pkts;
+	static int _rt_discard_logged;
+	static int _rt_last_log_ms;
+DBGP {
+		int now_ms = atime();
+		if( _rt_last_log_ms == 0 )
+			_rt_last_log_ms = now_ms;
+		if( now_ms - _rt_last_log_ms >= 2000 ) {
+			serprintf("FFMPEG_ROUTE: a=%d v=%d s=%d discard=%d vsearch=%d  aq=%d/%d vq=%d/%d  a_stream=%d v_stream=%d\n",
+				_rt_audio_pkts, _rt_video_pkts, _rt_sub_pkts, _rt_discard_pkts, _rt_video_search_pkts,
+				ff_p->aq.packets, ff_p->aq.mem_used, ff_p->vq.packets, ff_p->vq.mem_used,
+				s->audio->valid ? s->audio->stream : -1, s->video->valid ? s->video->stream : -1 );
+			_rt_audio_pkts = _rt_video_pkts = _rt_sub_pkts = _rt_discard_pkts = _rt_video_search_pkts = 0;
+			_rt_last_log_ms = now_ms;
+		}
+	}
+
 	if( s->audio->valid && stream == s->audio->stream ) {
+		_rt_audio_pkts++;
+		if( ff_p->aq.packets == 0 && mem_used > ff_p->buffer_size ) {
+			// This packet arrived while searching past buffer_size for audio
+			// (see audio_starved above / the video routing branch below).
+DBGP		serprintf("AUDIO_SEARCH_HIT: overflow=%d bytes vq=%d/%d\n",
+				mem_used - ff_p->buffer_size, ff_p->vq.packets, ff_p->vq.mem_used);
+		}
 		DBG serprintf("FFMPEG:AUDIO pkt st=%d pts=%lld dts=%lld pos=%lld size=%d seek=%d\n",
 			stream,
 			(long long)GET_AUDIO_TS( packet.pts ),
@@ -1617,11 +1880,20 @@ DBGP2 serprintf("VIDEO EL(q) dts/pts %8lld/%8lld  size %d\r\n",
 		if( timestamp )
 			*timestamp = -1;
 	} else if( s->video->valid && stream == s->video->stream ) {
+		_rt_video_pkts++;
 DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
 DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
-		if( ff_p->dv_split_active ) {
+		if( audio_starved && ff_p->vq.mem_used > ff_p->buffer_size && !( packet.flags & AV_PKT_FLAG_KEY ) ) {
+			// Audio is starved and video already fills the buffer on its own:
+			// keep demuxing to search for the next audio packet, but stop
+			// queuing further non-key video so memory doesn't grow unbounded
+			// while we search - no matter how far the search has to go.
+			// Keyframes are still queued so playback can resync cleanly once
+			// audio is found.
+			_rt_video_search_pkts++;
+		} else if( ff_p->dv_split_active ) {
 			// Dolby Vision tone-map mode, single-track interleaved P7: split
 			// the combined access unit into BL(+RPU) -> vq and EL -> elq
 			// (mpv runs the same dovi_split at demux level). mkvmerge
@@ -1662,7 +1934,7 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 				}
 				if( el_out->data ) {
 					// EL inherits the combined packet's pts (BL track timebase);
-					// convert to the BL time domain so pts pairing works
+				// convert to the BL time domain so pts pairing works
 					_dv_el_convert_time( ff_p, el_out, ff_p->time_base_num, ff_p->time_base_den );
 					_add_packet( &ff_p->elq, el_out );
 				}
@@ -1672,34 +1944,34 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 			}
 			if( bl_out ) av_packet_free( &bl_out );
 			if( el_out ) av_packet_free( &el_out );
+			if( timestamp )
+				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
 		} else {
-			if( ff_p->dv_el_merge && ff_p->dv_el_pending_count ) {
-				// Dolby Vision profile 7 dual-track: append the matching EL
-				// payload to this BL access unit so the DV decoder+composer
-				// receives both layers (like a single-track interleaved stream)
-				AVPacket el;
-				if( _dv_el_take_match( ff_p, &packet, &el ) ) {
-					int bl_size = packet.size;
-					if( av_grow_packet( &packet, el.size ) >= 0 ) {
-						memcpy( packet.data + bl_size, el.data, el.size );
-DBGP2 serprintf("DV: merged EL into BL pts %lld (+%d bytes)\r\n", (long long)packet.pts, el.size );
-					}
-					av_packet_unref( &el );
-				}
-			}
 			// add video packet
 			_add_packet( &ff_p->vq, &packet );
+			if( timestamp )
+				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
 		}
-		if( timestamp )
-			*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
 	} else if( s->subtitle->valid && stream == s->subtitle->stream ) {
+		_rt_sub_pkts++;
 DBGP2 serprintf("SUBTITLE   dts/pts %8lld/%8lld  ", GET_SUB_TS( packet.dts ), GET_SUB_TS( packet.pts ) );
-DBGP2 DumpLine( packet.data, 16, 16 );		
+DBGP2 DumpLine( packet.data, 16, 16 );
 		// add subtitle packet
 		_add_packet( &ff_p->sq, &packet );
 		if( timestamp )
 			*timestamp = GET_SUB_TS( packet.pts );
 	} else {
+		_rt_discard_pkts++;
+		// A packet that doesn't match any known stream index. Should be rare
+		// (e.g. extra streams we don't decode). Log the first few occurrences
+		// with the actual index, since a stream suddenly becoming misrouted
+		// here would explain audio packets vanishing.
+		if( _rt_discard_logged < 5 ) {
+			_rt_discard_logged++;
+DBGP		serprintf("FFMPEG_ROUTE_DISCARD: stream=%d a_valid=%d a_stream=%d v_valid=%d v_stream=%d s_valid=%d s_stream=%d\n",
+				stream, s->audio->valid, s->audio->stream, s->video->valid, s->video->stream,
+				s->subtitle->valid, s->subtitle->stream );
+		}
 DBGP2 serprintf("\r\n");
 		if( timestamp )
 			*timestamp = -1;
@@ -1721,6 +1993,8 @@ static int _parse( STREAM *s)
 	// load chunk aggressively, try more often ...
 	int i;
 	for( i = 0; i < 5; i ++ ) {
+		if (s->parser_interrupt)
+			return 0;
 		if( _parse_once( s, NULL ) ) {
 			return 1;
 		}
@@ -2324,9 +2598,10 @@ STREAM_REGISTER_IO( proto, _dummy_new, STREAM_IO_NONLOCAL, ETYPE_RTSP );
 //	get_info_FFMPEG
 //
 // *****************************************************************************
-static int _get_info_FFMPEG( const char *full_path, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
+static int _get_info_FFMPEG( const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
 {
 DBGP serprintf("ReadFFMPEGInfo: ");
+	const char *full_path = src->url;
 
 	FF_PRIV *priv = NULL;
 	// allocate private data
@@ -2348,8 +2623,7 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 	AVDictionary *fmt_opts = NULL;
 	av_dict_set(&fmt_opts, "probesize", "500000", 0);      // 500KB instead of 5MB default
 	av_dict_set(&fmt_opts, "analyzeduration", "1000000", 0);  // 1 second max
-	// Set user agent for HTTP streams to improve compatibility with CDN/debrid services
-	av_dict_set(&fmt_opts, "user_agent", "Mozilla/5.0 (Linux; Android) Nova/1.0", 0);
+	ffmpeg_set_http_options(&fmt_opts, src);
 
 	serprintf("FFMPEG: metadata opening url [%s]\r\n", full_path);
 	if( avformat_open_input(&priv->fmt, full_path, NULL, &fmt_opts ) != 0) {
@@ -2411,78 +2685,78 @@ ErrorExit:
 #ifdef CONFIG_MPEG_TS
 #ifdef CONFIG_MPEG_TS_FF
 STREAM_REGISTER_PARSER( ETYPE_MPEG_TS, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPEG_TS, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPEG_TS, _get_info_FFMPEG );
 #endif
 #endif
 
 #ifdef CONFIG_WTV
 STREAM_REGISTER_PARSER( ETYPE_WTV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_WTV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_WTV, _get_info_FFMPEG );
 #endif
 
 #ifdef CONFIG_OGV
 STREAM_REGISTER_PARSER( ETYPE_OGV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_OGV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_OGV, _get_info_FFMPEG );
 #endif
 
 #ifdef CONFIG_FLV
 STREAM_REGISTER_PARSER( ETYPE_FLV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_FLV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_FLV, _get_info_FFMPEG );
 #endif
 
 STREAM_REGISTER_PARSER( ETYPE_AMV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_AMV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_AMV, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_AC3, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_AC3, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_AC3, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_H264_RAW, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_H264_RAW, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_H264_RAW, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MPG4_RAW, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPG4_RAW, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPG4_RAW, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MPEG_PS, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPEG_PS, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPEG_PS, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MPEG_RAW, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MPEG_RAW, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MPEG_RAW, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_DTS, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_DTS, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_DTS, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MP3, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_MP3, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_MP3, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_AAC, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_AAC, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_AAC, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_FLAC, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_FLAC, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_FLAC, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_WAVPACK, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_WAVPACK, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_WAVPACK, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_TTA, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_TTA, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_TTA, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_OGG, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_AUD, ETYPE_OGG, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_AUD, ETYPE_OGG, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_ASF, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_ASF, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_ASF, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_AVI, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_AVI, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_AVI, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MP4, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MP4, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MP4, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_MKV, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_MKV, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_MKV, _get_info_FFMPEG );
 
 STREAM_REGISTER_PARSER( ETYPE_RM, stream_parser_FFMPEG );
-FILE_INFO_REGISTER_PATH( TYPE_VID, ETYPE_RM, _get_info_FFMPEG );
+FILE_INFO_REGISTER_URL( TYPE_VID, ETYPE_RM, _get_info_FFMPEG );
 
 #ifdef DEBUG_MSG
 static STREAM_REG_PARSER reg_avi = {
@@ -2516,21 +2790,17 @@ static STREAM_REG_PARSER reg_mp4 = {
 };
 
 static FILE_INFO_REG fi_mkv = {
-	TYPE_VID,
-	ETYPE_MKV,
-	_get_info_FFMPEG,
-	"_get_info_FFMPEG",
-	NULL,
-	NULL,
+	.type = TYPE_VID,
+	.etype = ETYPE_MKV,
+	.info_url = _get_info_FFMPEG,
+	.info_url_name = "_get_info_FFMPEG",
 };
 
 static FILE_INFO_REG fi_ogg = {
-	TYPE_VID,
-	ETYPE_OGG,
-	_get_info_FFMPEG,
-	"_get_info_FFMPEG",
-	NULL,
-	NULL,
+	.type = TYPE_VID,
+	.etype = ETYPE_OGG,
+	.info_url = _get_info_FFMPEG,
+	.info_url_name = "_get_info_FFMPEG",
 };
 
 static void _reg_ff( void ) 

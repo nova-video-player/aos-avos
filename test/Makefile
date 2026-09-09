@@ -17,7 +17,7 @@
 #
 CC = gcc -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -g -I.
 
-ALL = ff comp
+ALL = ff comp stream_url
 
 # targets
 all:	$(ALL)
@@ -28,6 +28,8 @@ comp:	comp.c ../Source/pcm_autogain.c ../Source/stream_filter_audio_agc.c
 ff:	ff.c  ../Source/vobsub.c
 	$(CC) -I ../Include  -g -o ff -lavformat -lavcodec -lavutil -lavfilter  ff.c
 
+stream_url:	stream_url.c
+	$(CC) -I ../Include -g -o stream_url stream_url.c
+
 clean:	
 	rm -f *.o $(ALL) *.out *~ *.bak core
-

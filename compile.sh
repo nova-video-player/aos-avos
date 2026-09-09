@@ -1,4 +1,4 @@
 #!/bin/sh
 
 cd ../../
-make native_avos_full
+make native_avos_full > /dev/null

@@ -182,7 +182,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (!mime_type)
         return NULL;
 
-    DBG LOG("(NdkMediaCodec): %s with extradata size %d", mime_type, extradata_size);
+    DBG LOG("(NdkMediaCodec): %s with extradata size %zu", mime_type, extradata_size);
 
     sfdec_priv_t *sfdec = new sfdec_priv_t();
     if (sfdec == NULL)
@@ -204,7 +204,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     sfdec->playback_speed_den = 1;
     sfdec->playback_speed_num = 1;
 
-    DBG LOG("sfdec->mCodec %d sfdec->mCodec %d", sfdec->mCodec, sfdec->mFormat);
+    DBG LOG("sfdec->mCodec %p sfdec->mFormat %p", (void *)sfdec->mCodec, (void *)sfdec->mFormat);
 
     if (codec_name) {
         LOG("Grabbing codec by name %s", codec_name);
@@ -365,7 +365,8 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
 
     memcpy(buf, data, size);
 
-    DBG LOG("queueInputBuffer: index %d size %d time %lld flag %d\n", index, size, time_us, flag);
+    DBG LOG("queueInputBuffer: index %zd size %zu time %lld flag %d\n",
+            index, size, (long long)time_us, flag);
     err = AMediaCodec_queueInputBuffer(sfdec->mCodec,
             index,
             0,
@@ -403,6 +404,7 @@ static int sfdec_stop_input(sfdec_priv_t *sfdec)
 
 static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_out)
 {
+    static const int64_t DEQUEUE_TIMEOUT_US = 10000;
     ssize_t index;
 
     if (!read_out)
@@ -412,7 +414,10 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
 
     for (;;) {
         AMediaCodecBufferInfo info;
-        index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, -1);
+        // A bounded dequeue lets seek/close wait until no MediaCodec call is in
+        // flight before flushing. Some vendor implementations corrupt their
+        // output-port state when flush interrupts an indefinite dequeue.
+        index = AMediaCodec_dequeueOutputBuffer(sfdec->mCodec, &info, DEQUEUE_TIMEOUT_US);
 
         if (index >= 0) {
             err_count = 0;
@@ -425,7 +430,7 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
             read_out->flag |= SFDEC_READ_BUF;
             read_out->buf.sfbuf = sfbuf;
             read_out->buf.time_us = info.presentationTimeUs;
-            DBG LOG("buf: %d / time: %lld", index, info.presentationTimeUs);
+            DBG LOG("buf: %zd / time: %lld", index, (long long)info.presentationTimeUs);
             return 0;
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
 
@@ -466,14 +471,35 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
 static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns)
 {
     media_status_t err;
+	if (!sfdec || !sfdec->mCodec || !sfbuf) {
+		LOG("sfdec_buf_render: invalid argument sfdec=%p codec=%p sfbuf=%p",
+			sfdec, sfdec ? sfdec->mCodec : NULL, sfbuf);
+		return -1;
+	}
     if( render ) {
+        int64_t now_ns = get_monotonic_ns();
+        DBG LOG("sfdec_render: index=%zu ts_us=%lld render=%d asap=%d render_ts_ns=%lld start_off_ns=%lld start_mono_ns=%lld last_off_ns=%lld last_mono_ns=%lld now_ns=%lld reset_age_ms=%lld",
+            sfbuf ? sfbuf->index : (size_t)-1,
+            sfbuf ? (long long)sfbuf->timestamp_us : -1LL,
+            render, asap, (long long)render_ts_ns,
+            (long long)sfdec->start_off,
+            (long long)sfdec->start_monotonic,
+            (long long)sfdec->last_off,
+            (long long)sfdec->last_monotonic,
+            (long long)now_ns,
+            (long long)((sfdec->last_reset_monotonic > 0) ? ((now_ns - sfdec->last_reset_monotonic) / 1000000LL) : -1));
+        // The current sfdec2 path renders ASAP and no longer relies on libsfdec's
+        // internal timed-release scheduling. Keep the render_ts_ns / cadence-aware
+        // scheduling logic below intact for safekeeping and possible future reuse.
         if (render_ts_ns > 0) {
             err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, render_ts_ns);
+            DBG LOG("sfdec_render_release: mode=at_time index=%zu when_ns=%lld", sfbuf->index, (long long)render_ts_ns);
         } else if (asap) {
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
+            DBG LOG("sfdec_render_release: mode=asap index=%zu", sfbuf->index);
         } else {
             int64_t timestamp_ns = sfbuf->timestamp_us * 1000LL;
-            DBG LOG("Received og timestamp %lld us", sfbuf->timestamp_us);
+            DBG LOG("Received og timestamp %lld us", (long long)sfbuf->timestamp_us);
             if (sfdec->video_frame_rate_den) {
                 int rendering_frame_rate_num = sfdec->video_frame_rate_num * sfdec->playback_speed_num;
                 int rendering_frame_rate_den = sfdec->video_frame_rate_den * sfdec->playback_speed_den;
@@ -522,14 +548,14 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             if (!asap) {
                 if (delta < -DROP_THRESHOLD_NS) {
                     sfdec->n_late++;
-                    DBG LOG("Dropping frame: %lld ns late", -delta);
+                    DBG LOG("Dropping frame: %lld ns late", (long long)(-delta));
                     err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
                     CHECK_STATUS(err);
                     sfbuf->released = true;
                     return 0;
                 } else if (delta < -LATE_THRESHOLD_NS) {
                     sfdec->n_late++;
-                    DBG LOG("Late frame (%lld ns), rendering ASAP", -delta);
+                    DBG LOG("Late frame (%lld ns), rendering ASAP", (long long)(-delta));
                     asap = 1;
                 } else if (delta < 0) {
                     sfdec->n_late++;
@@ -542,10 +568,11 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             // Compute the realtime timestamp to display the frame based on timestamp from codec, and the info we stored when we started
             ts = timestamp_ns - sfdec->start_off + sfdec->start_monotonic;
 
-            if (asap)
+            if (asap) {
                 DBG LOG("Scheduling frame in a jiffy");
-            else
-                DBG LOG("Scheduling frame in %lld", ts - now_ts);
+            } else {
+                DBG LOG("Scheduling frame in %lld", (long long)(ts - now_ts));
+            }
 
             sfdec->last_monotonic = now_ts;
             sfdec->last_off = timestamp_ns;
@@ -554,9 +581,16 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
                 err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
             else
                 err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, ts);
+            DBG LOG("sfdec_render_release: mode=%s index=%zu target_ns=%lld delta_ns=%lld ts_ns=%lld",
+                asap ? "asap" : "scheduled",
+                sfbuf->index,
+                (long long)ts,
+                (long long)(ts - now_ts),
+                (long long)timestamp_ns);
         }
     } else {
         err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, false);
+        DBG LOG("sfdec_render_release: mode=drop index=%zu", sfbuf ? sfbuf->index : (size_t)-1);
     }
     CHECK_STATUS(err);
     sfbuf->released = true;
@@ -571,6 +605,13 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
     free(sfbuf);
         
     return err == AMEDIA_OK ? 0 : -1;
+}
+
+static int sfdec_buf_discard(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
+{
+    (void)sfdec;
+    free(sfbuf);
+    return 0;
 }
 
 static int sfdec_reset_ts(sfdec_priv_t *sfdec)
@@ -653,4 +694,5 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_pause,
     sfdec_resume,
     sfdec_seek_reset,
+    sfdec_buf_discard,
 };

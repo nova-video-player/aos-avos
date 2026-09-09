@@ -23,6 +23,7 @@
 #include "file.h"
 #include "sysfs_ll.h"
 #include "device_config.h"
+#include "ac3_recode.h"
 
 #include <string.h>
 #include <libavcodec/avcodec.h>
@@ -38,6 +39,8 @@
 
 // Forward declaration for AC3 recoding check
 extern int libavos_get_ac3_recoding_enabled(void);
+
+int spdif_format_passthrough_supported(int format);
 
 // check if bit at position in value is 1
 #define CHECK_BIT(value,position) (((value)>>(position)) & 1)
@@ -85,24 +88,158 @@ static int passthrough_on = -1;
 static AVFormatContext *fctxt;
 static buf_t b;
 static AVCodecParserContext *aparser;
-static AVCodecContext avctx;
+static AVCodecContext *avctx;
+static AVPacket *spdif_pkt;
 
 static long hdmi_audio_codecs_flag = 0; // supported audio codecs by AV receiver via HDMI
 
-static int _spdif_frame_samples(const AUDIO_PROPERTIES *a)
+static int spdif_is_dts_hd_format(int format)
 {
-	// Prefer parser-derived frame sample count when available.
-	// EAC3 can vary (256/512/768/1536 samples), so fixed 1536 causes drift.
-	if (avctx.frame_size > 0) {
-		return avctx.frame_size;
+	return format == WAVE_FORMAT_DTS_HD || format == WAVE_FORMAT_DTS_HD_MA;
+}
+
+static int spdif_route_supports_dts_core(void)
+{
+	return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
+}
+
+static int spdif_route_supports_dts_hd(void)
+{
+	return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
+	       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA);
+}
+
+static int spdif_mode1_dts_core_fallback(int format)
+{
+#ifdef CONFIG_ANDROID
+	return passthrough_on == 1 &&
+	       spdif_is_dts_hd_format(format) &&
+	       !spdif_route_supports_dts_hd() &&
+	       spdif_route_supports_dts_core();
+#else
+	(void)format;
+	return 0;
+#endif
+}
+
+static int _spdif_frame_samples(const AUDIO_PROPERTIES *a, int passthrough_mode)
+{
+	// DTS frame duration is not fixed at 1536 samples. In mode 2 the raw
+	// AudioTrack path consumes parser output directly, so use the parser's
+	// duration for the logical clock when available. Forcing 1536 on 512-sample
+	// DTS frames advances AVOS audio time 3x too fast and causes large A/V drift.
+	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
+		    a->format == WAVE_FORMAT_DTS_HD ||
+		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
+		if (aparser && aparser->duration > 0) {
+			return aparser->duration;
+		}
+		if (avctx && avctx->frame_size > 0) {
+			return avctx->frame_size;
+		}
+		return 512;
 	}
 
-	// Conservative fallback for legacy behavior when parser metadata is missing.
-	if (a && (a->format == WAVE_FORMAT_AC3 ||
-	          a->format == WAVE_FORMAT_EAC3 ||
-	          a->format == WAVE_FORMAT_E_AC3_JOC ||
-	          a->format == WAVE_FORMAT_DTS)) {
-		return 1536;
+	// 1. Primary: codec-specific context metadata (avctx.frame_size).
+	if (avctx && avctx->frame_size > 0) {
+		return avctx->frame_size;
+	}
+
+	// 2. Secondary: parser-derived logical duration.
+	// Most FFmpeg parsers (MLP/TrueHD, EAC3) populate this correctly.
+	if (aparser && aparser->duration > 0) {
+		return aparser->duration;
+	}
+
+	// 3. Last resort: logical base units for known formats.
+	// These represent the standard logical frame duration regardless of compression ratio.
+	if (a) {
+		if (a->format == WAVE_FORMAT_AC3 ||
+		    a->format == WAVE_FORMAT_EAC3 ||
+		    a->format == WAVE_FORMAT_E_AC3_JOC) {
+			return 1536; // 32ms at 48kHz
+		}
+		if (a->format == WAVE_FORMAT_TRUEHD) {
+			return 1280; // 26.6ms logical major sync base (common parser unit)
+		}
+	}
+
+	return 0;
+}
+
+// Detailed version that captures decision path for debug logging
+static int _spdif_frame_samples_debug(const AUDIO_PROPERTIES *a, int passthrough_mode, int *avctx_size, int *parser_duration, int *fallback_samples, const char **source)
+{
+	*avctx_size = 0;
+	*parser_duration = 0;
+	*fallback_samples = 0;
+	if (source) {
+		*source = "none";
+	}
+
+	// Mode 2 DTS uses raw parser output as the AudioTrack write unit, so its
+	// logical duration must follow the parser. DTS commonly uses 512-sample
+	// frames; treating every frame as 1536 samples over-advances audio time.
+	if (passthrough_mode == 2 && a && (a->format == WAVE_FORMAT_DTS ||
+		    a->format == WAVE_FORMAT_DTS_HD ||
+		    a->format == WAVE_FORMAT_DTS_HD_MA)) {
+		if (aparser && aparser->duration > 0) {
+			*parser_duration = aparser->duration;
+			if (source) {
+				*source = "parser";
+			}
+			return aparser->duration;
+		}
+		if (avctx && avctx->frame_size > 0) {
+			*avctx_size = avctx->frame_size;
+			if (source) {
+				*source = "avctx";
+			}
+			return avctx->frame_size;
+		}
+		*fallback_samples = 512;
+		if (source) {
+			*source = "fallback-dts";
+		}
+		return 512;
+	}
+
+	// 1. Primary: codec-specific context metadata (avctx.frame_size).
+	if (avctx && avctx->frame_size > 0) {
+		*avctx_size = avctx->frame_size;
+		if (source) {
+			*source = "avctx";
+		}
+		return avctx->frame_size;
+	}
+
+	// 2. Secondary: parser-derived logical duration.
+	if (aparser && aparser->duration > 0) {
+		*parser_duration = aparser->duration;
+		if (source) {
+			*source = "parser";
+		}
+		return aparser->duration;
+	}
+
+	// 3. Last resort: logical base units for known formats.
+	if (a) {
+		if (a->format == WAVE_FORMAT_AC3 ||
+		    a->format == WAVE_FORMAT_EAC3 ||
+		    a->format == WAVE_FORMAT_E_AC3_JOC) {
+			*fallback_samples = 1536;
+			if (source) {
+				*source = "fallback-ac3";
+			}
+			return 1536;
+		}
+		if (a->format == WAVE_FORMAT_TRUEHD) {
+			*fallback_samples = 1280;
+			if (source) {
+				*source = "fallback-truehd";
+			}
+			return 1280;
+		}
 	}
 
 	return 0;
@@ -114,22 +251,22 @@ static int spdif_put( UCHAR *data, int size, int *decoded )
 		return 0;
 
 	// Prevent segfault if format context is not initialized
-	if ( !fctxt ) {
+	if ( !fctxt || !spdif_pkt ) {
 		serprintf("spdif_put: format context not initialized\n");
 		return 0;
 	}
 
-	AVPacket pkt;
-	av_init_packet( &pkt );
 	static int pts = 1;
 
-	pkt.pts  = pts++;
-	pkt.data = data;
-	pkt.size = size;
+	av_packet_unref( spdif_pkt );
+	spdif_pkt->pts  = pts++;
+	spdif_pkt->data = data;
+	spdif_pkt->size = size;
 
 	*decoded = size;
 
-	av_write_frame( fctxt, &pkt );
+	av_write_frame( fctxt, spdif_pkt );
+	av_packet_unref( spdif_pkt );
 	return 0;
 }
 
@@ -153,10 +290,13 @@ static int spdif_get( AUDIO_FRAME *frame )
 	return 0;
 }
 
-int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded )
-{	
+int spdif_encapsulate_frames( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int frame_count )
+{
 	if (!size)
 		return 0;
+	if (frame_count < 1 || size % frame_count != 0) {
+		frame_count = 1;
+	}
 
 	// AC3 recoding can intentionally run without parser (encoder already emits full syncframes).
 	// In passthrough mode 2, the sink expects raw codec frames (ENCODING_AC3/E_AC3/DTS),
@@ -171,8 +311,11 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		frame->error = 0;
 		frame->format = a->format;
 		{
-			int samples = _spdif_frame_samples(a);
-			frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : size;
+			int samples = _spdif_frame_samples(a, passthrough_on);
+			frame->fakeSize = samples > 0 ? samples * frame_count * a->bytesPerFrame : size;
+			DBGCA2 serprintf("Mode 2 duration: format=%04X source=%s samples=%d fakeSize=%d raw=%d bpf=%d rate=%d recode=1\n",
+				a->format, samples > 0 ? "fallback-ac3" : "physical", samples,
+				frame->fakeSize, size, a->bytesPerFrame, a->samplesPerSec);
 		}
 		*decoded = size;
 		DBGCA2 serprintf("Mode 2 (no parser): raw data, format=%04X size=%d, fakeSize=%d, bpf=%d, rate=%d, recode=1\n",
@@ -180,11 +323,33 @@ int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *
 		return 0;
 	}
 
+	// AC3 recoding deliberately has no parser. A resampled input chunk can now
+	// produce several complete CBR AC3 frames. Feed each frame separately to the
+	// SPDIF muxer so it creates one IEC61937 burst per frame, then return the
+	// concatenated complete bursts for individual writes by stream_audio.
+	if (passthrough_on == 1 && !aparser && libavos_get_ac3_recoding_enabled() &&
+	    a->format == WAVE_FORMAT_AC3 && frame_count > 1) {
+		int packet_size = size / frame_count;
+		b.pos = 0;
+		for (int i = 0; i < frame_count; i++) {
+			int packet_decoded = 0;
+			spdif_put(data + i * packet_size, packet_size, &packet_decoded);
+		}
+		spdif_get(frame);
+		frame->fakeSize = frame_count * AC3_RECODE_FRAME_SAMPLES * a->bytesPerFrame;
+		*decoded = size;
+		return 0;
+	}
+
 DBGCA2 serprintf("spdif_encapsulate %5d", size );
 	if( aparser ) {
 		unsigned char *out = NULL;
 		int out_size;
-		int parsed = av_parser_parse2( 	aparser, &avctx, 
+		if (avctx) {
+			if (avctx->sample_rate == 0) avctx->sample_rate = a->samplesPerSec;
+			if (avctx->ch_layout.nb_channels == 0) av_channel_layout_default(&avctx->ch_layout, a->channels);
+		}
+		int parsed = av_parser_parse2( 	aparser, avctx, 
 						&out, &out_size, 
 						data, size,
 						AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0 );
@@ -208,11 +373,24 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			frame->error = 0;
 			frame->format = a->format;  // Preserve codec ID (AC3/EAC3/DTS) for downstream logic
 
-			// fakeSize carries PCM-equivalent duration for timing.
-			// Use parser frame_size when available (required for variable-size EAC3 frames).
+			// fakeSize carries PCM-equivalent duration for timing. DTS mode 2 follows
+			// parser duration because the raw write unit can be 512 samples; AC3/EAC3
+			// and TrueHD keep their codec base-unit fallbacks when parser metadata is absent.
 			{
-				int samples = _spdif_frame_samples(a);
-				frame->fakeSize = samples > 0 ? samples * a->bytesPerFrame : out_size;
+				int avctx_size, parser_duration, fallback_samples;
+				const char *duration_source = "none";
+				int samples = _spdif_frame_samples_debug(a, passthrough_on, &avctx_size, &parser_duration, &fallback_samples, &duration_source);
+				if (samples > 0) {
+					DBGCA2 serprintf("Mode 2 timing: format=%04X samples=%d fakeSize=%d source=%s avctx_size=%d parser_dur=%d fallback=%d\n",
+						a->format, samples, samples * a->bytesPerFrame, duration_source, avctx_size, parser_duration, fallback_samples);
+					frame->fakeSize = samples * a->bytesPerFrame;
+				} else {
+					// Fallback to physical size if parser is blind
+					frame->fakeSize = out_size;
+					duration_source = "physical";
+				}
+				DBGCA2 serprintf("Mode 2 duration: format=%04X source=%s samples=%d fakeSize=%d raw=%d bpf=%d rate=%d\n",
+					a->format, duration_source, samples, frame->fakeSize, out_size, a->bytesPerFrame, a->samplesPerSec);
 			}
 			DBGCA2 serprintf("Mode 2: raw data, format=%04X size=%d, fakeSize=%d, bytesPerFrame=%d, rate=%d, parser=1\n",
 			                 frame->format, frame->size, frame->fakeSize, a->bytesPerFrame, a->samplesPerSec);
@@ -222,7 +400,7 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 			spdif_put( out, out_size, &dummy );
 			spdif_get( frame );
 			{
-				int samples = _spdif_frame_samples(a);
+				int samples = _spdif_frame_samples(a, passthrough_on);
 				if (samples > 0) {
 					frame->fakeSize = samples * a->bytesPerFrame;
 				}
@@ -239,6 +417,11 @@ DBGCA2 serprintf("\n", size );
 	return 0;
 }
 
+int spdif_encapsulate( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded )
+{
+	return spdif_encapsulate_frames(a, data, size, frame, decoded, 1);
+}
+
 static int spdif_free( void )
 {
 	if( aparser ) {
@@ -248,6 +431,13 @@ static int spdif_free( void )
 	if (fctxt) {
 		avformat_free_context(fctxt);
 		fctxt = NULL;
+	}
+	if (avctx) {
+		avcodec_free_context(&avctx);
+		avctx = NULL;
+	}
+	if (spdif_pkt) {
+		av_packet_free(&spdif_pkt);
 	}
 	// Clear buffer position to prevent stale data
 	b.pos = 0;
@@ -280,7 +470,6 @@ static int wave2libav_codecid( int codecid )
 			return 0;
 		}
 	case WAVE_FORMAT_EAC3:
-	case WAVE_FORMAT_E_AC3_JOC:
 		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
 			serprintf("EAC3 encoding passthrough supported\n");
 			return AV_CODEC_ID_EAC3;
@@ -288,10 +477,21 @@ static int wave2libav_codecid( int codecid )
 			serprintf("EAC3 encoding passthrough NOT supported\n");
 			return 0;
 		}
+	case WAVE_FORMAT_E_AC3_JOC:
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3_JOC) ||
+		   CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3)) {
+			serprintf("EAC3_JOC encoding passthrough supported\n");
+			return AV_CODEC_ID_EAC3;
+		} else {
+			serprintf("EAC3_JOC encoding passthrough NOT supported\n");
+			return 0;
+		}
 	case WAVE_FORMAT_DTS_HD_MA:
 	case WAVE_FORMAT_DTS_HD:
 	case WAVE_FORMAT_DTS:
-		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS)) {
+		if(CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS) ||
+		   CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD) ||
+		   CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA)) {
 			serprintf("DTS encoding passthrough supported\n");
 			return AV_CODEC_ID_DTS;
 		} else {
@@ -315,7 +515,11 @@ static int wave2libav_codecid( int codecid )
 static int spdif_check( int codecid )
 {
 DBGS serprintf( "spdif_check, check codecid %d, force %d\n", codecid, passthrough_on);
-	if ( !wave2libav_codecid( codecid ) ) {
+	if ( spdif_mode1_dts_core_fallback( codecid ) ) {
+		serprintf("DTS-HD mode 1 passthrough using DTS core IEC fallback\n");
+		return passthrough_on;
+	}
+	if ( !spdif_format_passthrough_supported( codecid ) ) {
 		serprintf("codec not supported for passthrough...\n" );
 		return 0;
 	}
@@ -377,12 +581,36 @@ DBGS serprintf( "spdif_init\n");
 	stream->codecpar->codec_id = wave2libav_codecid( codecid );
 	stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
 	stream->codecpar->sample_rate = a->samplesPerSec;
-	if ( avformat_write_header( fctxt, NULL ) < 0 )
+
+	const char *dtshd_rate = NULL;
+	if (a->format == WAVE_FORMAT_DTS_HD_MA || a->format == WAVE_FORMAT_DTS_HD) {
+		if (spdif_mode1_dts_core_fallback(a->format)) {
+			// Keep FFmpeg's SPDIF muxer in regular DTS mode; it strips the
+			// embedded core instead of producing high-bitrate DTS-HD bursts.
+			dtshd_rate = "0";
+			serprintf("spdif_init: DTS-HD mode 1 core fallback, dtshd_rate=0\n");
+		} else if (get_hdmi_supports_iec_8ch192khz()) {
+			dtshd_rate = "768000";
+		} else {
+			dtshd_rate = "0";
+		}
+	}
+	AVDictionary *opts = NULL;
+	if (dtshd_rate) {
+		av_dict_set( &opts, "dtshd_rate", dtshd_rate, 0 );
+	}
+
+	int header_ret = avformat_write_header( fctxt, opts ? &opts : NULL );
+	av_dict_free( &opts );
+	if ( header_ret < 0 )
 		return 0;
 
 	// try to get a parser for this codec
 	// Skip parser for AC3 recoding - the encoder already produces complete syncframes
-	memset( &avctx, 0, sizeof( avctx ));
+	avctx = avcodec_alloc_context3(NULL);
+	if (avctx) {
+		avcodec_parameters_to_context(avctx, stream->codecpar);
+	}
 	if ( !libavos_get_ac3_recoding_enabled() ) {
 		aparser = av_parser_init(stream->codecpar->codec_id);
 		if( !aparser ) {
@@ -393,16 +621,11 @@ serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
 		DBGS serprintf("spdif_init: skipping parser for AC3 recoding (encoder produces complete frames)\n");
 	}
 
-	const char *dtsrate = NULL;
-    if (a->codec_id == WAVE_FORMAT_DTS_HD_MA || a->codec_id == WAVE_FORMAT_DTS_HD) {
-        if (get_hdmi_supports_iec_8ch192khz()) {
-            dtsrate = "dtshd_rate=768000";
-        } else {
-            dtsrate = "dtshd_rate=0";
-        }
-    }
-	if (dtsrate && av_set_options_string( &fctxt->av_class, dtsrate, "=", ":" ) < 0 )
-		serprintf( "Failed2 setting dtshd rate to %s\n", dtsrate );
+	spdif_pkt = av_packet_alloc();
+	if( !spdif_pkt ) {
+		spdif_free();
+		return 0;
+	}
 
 	return 1;
 }
@@ -421,11 +644,28 @@ DBGS serprintf( "spdif_open\n");
 DBGS serprintf("audio format is %d, %d channels, %dkHz, %d bits, %d B/s, %d B/f\n", audio->format, audio->channels, audio->samplesPerSec/1000, audio->bitsPerSample, audio->bytesPerSec, audio->bytesPerFrame);
 
 	int codecid = audio->format;
+	if (audio->sourceSamples == 0) {
+		audio->sourceSamples = audio->samplesPerSec;
+	}
+	if (audio->sourceChannels == 0) {
+		audio->sourceChannels = audio->channels;
+	}
+	if (audio->sourceBitsPerSample == 0) {
+		audio->sourceBitsPerSample = audio->bitsPerSample;
+	}
 
 	if (!aparser && !libavos_get_ac3_recoding_enabled()) {
 		aparser = av_parser_init(wave2libav_codecid(codecid));
 		if (!aparser) {
 DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
+		} else {
+			if (!avctx) {
+				avctx = avcodec_alloc_context3(NULL);
+			}
+			if (avctx) {
+				if (avctx->sample_rate == 0) avctx->sample_rate = audio->samplesPerSec;
+				if (avctx->ch_layout.nb_channels == 0) av_channel_layout_default(&avctx->ch_layout, audio->channels);
+			}
 		}
 	}
 
@@ -433,6 +673,7 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 	// Mode 2 (raw data to Android): Must match AudioTrack configuration for timing sync
 	if (passthrough_on == 1) {
 		int orig_rate = audio->samplesPerSec;
+		int dts_core_iec_fallback = spdif_mode1_dts_core_fallback(codecid);
 		// IEC61937 container is always 16-bit, 2-channel stereo (or 8ch for high-bitrate)
 		audio->bitsPerSample = 16;
 		audio->channels = 2;
@@ -446,6 +687,19 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 			break;
 		case WAVE_FORMAT_DTS_HD:
 		case WAVE_FORMAT_DTS_HD_MA:
+			if (dts_core_iec_fallback) {
+				serprintf("spdif_open: DTS-HD mode 1 core fallback, using DTS IEC container\n");
+				if (orig_rate == 32000 || orig_rate == 44100) {
+					audio->samplesPerSec = orig_rate;
+				} else {
+					audio->samplesPerSec = 48000;
+				}
+				break;
+			}
+			// High-bitrate DTS-HD needs higher IEC rate.
+			audio->channels      = 8;
+			audio->samplesPerSec = 192000;
+			break;
 		case WAVE_FORMAT_TRUEHD:
 			// High-bitrate formats need higher IEC rate
 			audio->channels      = 8;
@@ -467,8 +721,9 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 		audio->bytesPerFrame = audio->channels * audio->bitsPerSample / 8;
 		audio->bytesPerSec = audio->samplesPerSec * audio->bytesPerFrame;
 	} else if (passthrough_on == 2) {
-		// Mode 2: Keep content sample rate for timing, but match channel/bit-depth to AudioTrack
-		// Android handles the actual container format when using codec-specific encodings
+		// Mode 2 uses synthetic stereo PCM geometry for compressed timing and byte
+		// accounting. sourceChannels retains the content layout that AudioTrack may
+		// advertise separately for DTS-HD MA and TrueHD.
 		audio->bitsPerSample = 16;
 		audio->channels = 2;
 		// Keep original samplesPerSec from demuxer (typically 48kHz for AC3/EAC3/DTS content)
@@ -544,6 +799,39 @@ int spdif_is_passthrough_on()
 	return passthrough_on;
 }
 
+int spdif_format_passthrough_supported(int format)
+{
+#ifdef CONFIG_ANDROID
+	// Mode 1 IEC: DTS-HD MA/HD can extract DTS core into IEC 61937 if route supports DTS
+	if (spdif_mode1_dts_core_fallback(format))
+		return 1;
+	switch( format ) {
+	case WAVE_FORMAT_AC3:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_AC3) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
+	case WAVE_FORMAT_EAC3:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
+	case WAVE_FORMAT_E_AC3_JOC:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3_JOC) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_E_AC3);
+	case WAVE_FORMAT_DTS_HD_MA:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD_MA) ||
+		       CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
+	case WAVE_FORMAT_DTS_HD:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS_HD);
+	case WAVE_FORMAT_DTS:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DTS);
+	case WAVE_FORMAT_TRUEHD:
+		return CHECK_BIT(hdmi_audio_codecs_flag, ENCODING_DOLBY_TRUEHD);
+	default:
+		return 0;
+	}
+#else
+	(void)format;
+	return 1;
+#endif
+}
+
 static STREAM_DEC_AUDIO stream_spdif = 
 {
 	.name    = "spdif",
@@ -563,6 +851,7 @@ static STREAM_REG_DEC_AUDIO reg_spdif_eac3              = { WAVE_FORMAT_EAC3,   
 static STREAM_REG_DEC_AUDIO reg_spdif_eac3_joc          = { WAVE_FORMAT_E_AC3_JOC,&stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_dts		= { WAVE_FORMAT_DTS,	&stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_dts_hd		= { WAVE_FORMAT_DTS_HD,    &stream_spdif, 8 };
+static STREAM_REG_DEC_AUDIO reg_spdif_dts_hd_ma		= { WAVE_FORMAT_DTS_HD_MA, &stream_spdif, 8 };
 static STREAM_REG_DEC_AUDIO reg_spdif_truehd	= { WAVE_FORMAT_TRUEHD,	&stream_spdif, 8 };
 static void register_spdif(void) __attribute__((constructor));
 static void register_spdif(void) {
@@ -571,6 +860,7 @@ static void register_spdif(void) {
 	stream_register_dec_audio_head( &reg_spdif_eac3_joc);
 	stream_register_dec_audio_head( &reg_spdif_dts);
 	stream_register_dec_audio_head( &reg_spdif_dts_hd);
+	stream_register_dec_audio_head( &reg_spdif_dts_hd_ma);
 	stream_register_dec_audio_head( &reg_spdif_truehd);
 }
 

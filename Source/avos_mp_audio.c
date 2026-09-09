@@ -52,9 +52,11 @@ extern int audio_main_buffer;
 
 static void audio_track_init(avos_mp_audio_track_t *track, STREAM_URL *url, int etype)
 {
+	stream_url_clear(&track->src);
 	if (url) {
 		track->etype = etype;
-		memcpy(&track->src, url, sizeof(STREAM_URL));
+		if (stream_url_cpy(&track->src, url))
+			track->etype = ETYPE_NONE;
 	} else {
 		track->etype = ETYPE_NONE;
 	}
@@ -62,7 +64,11 @@ static void audio_track_init(avos_mp_audio_track_t *track, STREAM_URL *url, int 
 
 static void audio_track_move(avos_mp_audio_track_t *dest, avos_mp_audio_track_t *src)
 {
-	memcpy(dest, src, sizeof(avos_mp_audio_track_t));
+	stream_url_clear(&dest->src);
+	*dest = *src;
+	src->src.url = NULL;
+	src->src.name[0] = '\0';
+	src->src.extra_list = NULL;
 	src->etype = ETYPE_NONE;
 }
 
@@ -71,25 +77,30 @@ static void send_audio_track_info(avos_mp_t *mp, avos_mp_audio_t *audio)
 	int changed;
 	int duration;
 	ID3_TAG *tag;
-	AV_PROPERTIES av;
+	AV_PROPERTIES *av = acalloc(1, sizeof(*av));
+	if (!av) {
+		MPLOG("failed to allocate audio metadata");
+		return;
+	}
 
 	audio->last_pauseable = 1;
 	audio->last_seekable = audio_seekable(&audio->a);
 	audio_get_current_time(&audio->a, &audio->last_duration);
 
-	memcpy(&av.audio[0], audio->a.audio, sizeof(AUDIO_PROPERTIES));
-	av.as_max = 1;
+	memcpy(&av->audio[0], audio->a.audio, sizeof(AUDIO_PROPERTIES));
+	av->as_max = 1;
 	tag = audio_get_current_tag(&audio->a);	
 	changed = avos_mp_fillmetadata(mp,
 	    TYPE_AUD,
 	    audio->a.size,
 	    tag,
-	    &av,
+	    av,
 	    NULL,
 	    audio->last_duration,
 	    audio->last_seekable,
 	    audio->last_pauseable,
 	    0);
+	afree(av);
 	if (changed) {
 		MPLOG("changed");
 		avos_mp_sendevent(mp, MEDIA_INFO, MEDIA_INFO_METADATA_UPDATE, 0);

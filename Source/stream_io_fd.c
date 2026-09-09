@@ -218,8 +218,10 @@ static int _delete( STREAM_IO *io )
 	if( io && io->priv )
 		afree( io->priv );
 
-	if( io )
+	if( io ) {
+		stream_url_clear( &io->src );
 		afree( io );
+	}
 	return 0;
 }
 
@@ -256,7 +258,7 @@ static STREAM_IO *_new( STREAM_URL *src )
 
 	// allocate private data
 	if( !(io->priv = amalloc( sizeof( FILE_PRIV ) ) ) ) {
-		afree( io );
+		_delete( io );
 		return NULL;
 	}
 	memset( io->priv, 0, sizeof( FILE_PRIV ) );

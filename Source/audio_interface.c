@@ -187,9 +187,9 @@ int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length
 	return impl->write(ctx, data, data_length);
 }
 
-int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format)
+int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format)
 {
-	return impl->set_output_params(ctx, freq, channels, bits, format);
+	return impl->set_output_params(ctx, freq, channels, content_channels, bits, format);
 }
 
 int audio_interface_get_delay(audio_ctx_t *ctx)
@@ -205,12 +205,36 @@ int audio_interface_get_latency(audio_ctx_t *ctx)
 	return impl->get_latency(ctx);
 }
 
+int audio_interface_get_pipeline_latency(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->get_pipeline_latency) {
+		return audio_interface_get_latency(ctx);
+	}
+	return impl->get_pipeline_latency(ctx);
+}
+
+int audio_interface_get_fixed_latency(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->get_fixed_latency) {
+		return 0;
+	}
+	return impl->get_fixed_latency(ctx);
+}
+
 int audio_interface_is_delay_valid(audio_ctx_t *ctx)
 {
 	if (!impl || !impl->delay_valid) {
 		return 1;
 	}
 	return impl->delay_valid(ctx);
+}
+
+const char *audio_interface_get_delay_source(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->delay_source) {
+		return "unsupported";
+	}
+	return impl->delay_source(ctx);
 }
 
 int audio_interface_get_delay_valid_streak(audio_ctx_t *ctx)
@@ -229,7 +253,56 @@ int audio_interface_is_startup_hold_active(audio_ctx_t *ctx)
 	return impl->is_startup_hold_active(ctx);
 }
 
-void audio_interface_flush_output(audio_ctx_t *ctx) 
+int audio_interface_passthrough_playhead_advanced(audio_ctx_t *ctx)
+{
+	if (!impl || !impl->passthrough_playhead_advanced) {
+		return 1;
+	}
+	return impl->passthrough_playhead_advanced(ctx);
+}
+
+void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx)
+{
+	if (impl && impl->invalidate_delay_cache) {
+		impl->invalidate_delay_cache(ctx);
+	}
+}
+
+void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples, int accepted_bytes)
+{
+	if (impl && impl->add_logical_samples) {
+		impl->add_logical_samples(ctx, samples, accepted_bytes);
+	}
+}
+
+int audio_interface_get_and_clear_latency_delta(audio_ctx_t *ctx)
+{
+	if (impl && impl->get_and_clear_latency_delta) {
+		return impl->get_and_clear_latency_delta(ctx);
+	}
+	return 0;
+}
+
+int audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh)
+{
+	if (!impl || !impl->get_presented_frames) return 0;
+	return impl->get_presented_frames(ctx, frames, rate, source, age_ms, prefer_fresh);
+}
+
+int audio_interface_get_written_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate)
+{
+	if (!impl || !impl->get_written_frames) return 0;
+	return impl->get_written_frames(ctx, frames, rate);
+}
+
+int audio_interface_get_presentation_snapshot(audio_ctx_t *ctx,
+	AUDIO_PRESENTATION_SNAPSHOT *snapshot)
+{
+	if (!impl || !impl->get_presentation_snapshot || !snapshot) return 0;
+	return impl->get_presentation_snapshot(ctx, snapshot);
+}
+
+void audio_interface_flush_output(audio_ctx_t *ctx)
 {
 	impl->flush_output(ctx);
 }

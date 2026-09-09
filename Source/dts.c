@@ -37,6 +37,8 @@
 #define AV_PROFILE_DTS_96_24   40
 #define AV_PROFILE_DTS_HD_HRA  50
 #define AV_PROFILE_DTS_HD_MA   60
+#define AV_PROFILE_DTS_HD_MA_X 61
+#define AV_PROFILE_DTS_HD_MA_X_IMAX 62
 #define AV_PROFILE_DTS_EXPRESS 70
 
 int DTS_get_format_from_profile(int profile)
@@ -46,6 +48,8 @@ int DTS_get_format_from_profile(int profile)
 	case AV_PROFILE_DTS_ES:
 		return WAVE_FORMAT_DTS;
 	case AV_PROFILE_DTS_HD_MA:	
+	case AV_PROFILE_DTS_HD_MA_X:
+	case AV_PROFILE_DTS_HD_MA_X_IMAX:
 	case AV_PROFILE_DTS_EXPRESS:
 		return WAVE_FORMAT_DTS_HD_MA;
 	case AV_PROFILE_DTS_96_24:

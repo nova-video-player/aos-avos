@@ -739,6 +739,15 @@ static int sfdec_buf_release(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
     return err == 0 ? 0 : -1;
 }
 
+static int sfdec_buf_discard(sfdec_priv_t *sfdec, sfbuf_t *sfbuf)
+{
+    (void)sfdec;
+    // MediaCodec.flush() has already reclaimed this output slot. Its old index
+    // must never be submitted to releaseOutputBuffer() in the new generation.
+    free(sfbuf);
+    return 0;
+}
+
 static int sfdec_reset_ts(sfdec_priv_t *sfdec)
 {
     sfdec->start_off = 0;
@@ -820,4 +829,5 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_pause,
     sfdec_resume,
     sfdec_seek_reset,
+    sfdec_buf_discard,
 };

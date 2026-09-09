@@ -131,6 +131,73 @@ Java_com_archos_medialib_AvosMediaMetadataRetriever_nativeRelease(JNIEnv *env, j
     set_mr(env, thiz, NULL);
 }
 
+static void keys_values_free(char **entries)
+{
+    char **entry = entries;
+    if (!entry)
+        return;
+    while (*entry) {
+        free(*entry);
+        entry++;
+    }
+    free(entries);
+}
+
+static int keys_values_fill(JNIEnv *env, jobjectArray keys, jobjectArray values,
+        char ***p_keys, char ***p_values)
+{
+    int i;
+    int nb_pairs;
+    char **c_keys = NULL;
+    char **c_values = NULL;
+
+    *p_keys = NULL;
+    *p_values = NULL;
+    if (keys == NULL || values == NULL)
+        return 0;
+    nb_pairs = (*env)->GetArrayLength(env, keys);
+    if (nb_pairs != (*env)->GetArrayLength(env, values))
+        return -1;
+    c_keys = calloc(nb_pairs + 1, sizeof(char *));
+    c_values = calloc(nb_pairs + 1, sizeof(char *));
+    if (!c_keys || !c_values)
+        goto err;
+    for (i = 0; i < nb_pairs; i++) {
+        jstring key = (jstring)(*env)->GetObjectArrayElement(env, keys, i);
+        jstring value = (jstring)(*env)->GetObjectArrayElement(env, values, i);
+        const char *c_key;
+        const char *c_value;
+        if (!key || !value)
+            goto err;
+        c_key = (*env)->GetStringUTFChars(env, key, NULL);
+        c_value = (*env)->GetStringUTFChars(env, value, NULL);
+        if (!c_key || !c_value) {
+            if (c_key)
+                (*env)->ReleaseStringUTFChars(env, key, c_key);
+            if (c_value)
+                (*env)->ReleaseStringUTFChars(env, value, c_value);
+            (*env)->DeleteLocalRef(env, key);
+            (*env)->DeleteLocalRef(env, value);
+            goto err;
+        }
+        c_keys[i] = strdup(c_key);
+        c_values[i] = strdup(c_value);
+        (*env)->ReleaseStringUTFChars(env, key, c_key);
+        (*env)->ReleaseStringUTFChars(env, value, c_value);
+        (*env)->DeleteLocalRef(env, key);
+        (*env)->DeleteLocalRef(env, value);
+        if (!c_keys[i] || !c_values[i])
+            goto err;
+    }
+    *p_keys = c_keys;
+    *p_values = c_values;
+    return 0;
+err:
+    keys_values_free(c_keys);
+    keys_values_free(c_values);
+    return -1;
+}
+
 void
 Java_com_archos_medialib_AvosMediaMetadataRetriever_setDataSource(JNIEnv *env, jobject thiz, jstring path, jobjectArray keys, jobjectArray values)
 {
@@ -147,7 +214,17 @@ Java_com_archos_medialib_AvosMediaMetadataRetriever_setDataSource(JNIEnv *env, j
     if (c_path == NULL) {
         return;
     }
-    CHECK(avos->setdatasource(mr, c_path, NULL, NULL));
+    char **c_keys = NULL;
+    char **c_values = NULL;
+    if (keys_values_fill(env, keys, values, &c_keys, &c_values) != 0) {
+        (*env)->ReleaseStringUTFChars(env, path, c_path);
+        jniThrowException(env, "java/lang/IllegalArgumentException", "invalid headers");
+        return;
+    }
+    CHECK(avos->setdatasource(mr, c_path, (const char **)c_keys, (const char **)c_values));
+    keys_values_free(c_keys);
+    keys_values_free(c_values);
+    (*env)->ReleaseStringUTFChars(env, path, c_path);
 }
 
 void

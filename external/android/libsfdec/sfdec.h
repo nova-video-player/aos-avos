@@ -63,7 +63,8 @@ typedef enum sfdec_flags {
 enum {
 	SFDEC_READ_INVALID = 0,
 	SFDEC_READ_BUF  = 0x01,
-	SFDEC_READ_SIZE = 0x02
+	SFDEC_READ_SIZE = 0x02,
+	SFDEC_READ_EOS  = 0x04
 };
 
 typedef struct sfdec_read_out {
@@ -77,6 +78,8 @@ typedef struct sfdec_read_out {
 	int32_t channels;
 	int32_t samplesPerSec;
 	int32_t bitRate;
+	int32_t channelMask;
+	int32_t pcmEncoding;
 	struct {
 		int32_t width;
 		int32_t height;
@@ -104,6 +107,7 @@ int		sfdec_stop_input(sfdec_t *sfdec);
 int		sfdec_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
 int		sfdec_buf_render(sfdec_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns);
 int		sfdec_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf);
+int		sfdec_buf_discard(sfdec_t *sfdec, sfbuf_t *sfbuf);
 int		sfdec_reset_ts(sfdec_t *sfdec);
 int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num);
 int sfdec_pause(sfdec_t *sfdec);

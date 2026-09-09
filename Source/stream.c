@@ -26,6 +26,7 @@
 #include "stream_sync.h"
 
 #include "athread.h"
+#include "atime.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -34,9 +35,6 @@
 #include <signal.h>
 #include <math.h>
 
-#ifdef CONFIG_ANDROID
-int get_android_sync(void);
-#endif
 extern int libavos_get_ac3_recoding_enabled(void);
 
 #ifdef CONFIG_STREAM
@@ -212,8 +210,9 @@ static void _stream_reset( STREAM *s )
 	// set pointer for "audio"/"video"
 	av_init_props( s );
 	memset( &s->audio_sink_props, 0, sizeof( AUDIO_PROPERTIES ) );
-	// Ensure we don't carry a stale delay across new streams.
-	s->smoothed_av_delay = -1;
+	s->audio_time = -1;
+	s->video_time = -1;
+	s->audio_ref_time = -1;
 }
 
 static int stream_buffer_sec  = 64;
@@ -248,6 +247,7 @@ int stream_delete( STREAM **s )
 DBGS serprintf("stream_delete: %08X\r\n", s ? (long)*s : -1 );
 	if( !s || !*s )
 		return 1;
+	stream_url_clear( &(*s)->src );
 	afree( *s );
 	*s = NULL;
 	return 0;
@@ -275,6 +275,11 @@ DBGS serprintf("stream_init\r\n" );
 
 	pthread_mutex_init( &s->codec_mutex,       NULL );
 	pthread_mutex_init( &s->video_done_mutex,  NULL );
+	pthread_mutex_init( &s->audio_sink_mutex,  NULL );
+	// Serializes video-sink calls from the audio thread with sink teardown.
+	pthread_mutex_init( &s->video_sink_mutex,  NULL );
+	pthread_mutex_init( &s->anchor_mutex,      NULL );
+	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
 	
 	ref_count ++;
 	return 0;
@@ -334,6 +339,10 @@ DBGS serprintf("codec_thread joined\r\n");
 	
 	pthread_mutex_destroy( &s->codec_mutex  );
 	pthread_mutex_destroy( &s->video_done_mutex );
+	pthread_mutex_destroy( &s->audio_sink_mutex );
+	// mode2_heard_mutex is also read by the asynchronous video renderer. Its
+	// lifetime therefore extends until stream_stop() has joined decoder/sink
+	// threads, not just the core stream threads joined above; destroy it there.
 	
 	s->open = 0;
 	
@@ -538,13 +547,29 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 {
 	if( !s )
 		return 1;
+
+	int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough)
+		? s->audio_sink->get_passthrough( s ) : 0;
+	if( av_delay < 0 && passthrough_mode ) {
+		serprintf("stream_set_av_delay: negative av_delay=%d is not supported with passthrough mode %d\n",
+			av_delay, passthrough_mode);
+	}
 		
 	s->av_delay = av_delay;
 	s->manual_audio_delay_target_ms = (av_delay < 0) ? -av_delay : 0;
 	if( av_delay >= 0 ) {
 		s->manual_audio_delay_applied_ms = 0;
+		s->manual_audio_hold_pending_ms = 0;
 	}
-	
+	// Snapshot the current realized A/V phase and open a short diagnostic window
+	// so the applied shift is unmistakable in the log: manual_delay_applied lines
+	// report frame_minus_heard against this baseline as the hold takes effect.
+	s->manual_delay_fmh_baseline = s->manual_delay_fmh_last;
+	s->manual_delay_log_until_ms = atime() + 5000;
+DBG serprintf("stream_set_av_delay: av_delay=%d manual_target=%d applied=%d baseline_fmh=%d\r\n",
+		av_delay, s->manual_audio_delay_target_ms, s->manual_audio_delay_applied_ms,
+		s->manual_delay_fmh_baseline);
+
 	return 0;
 }
 
@@ -557,10 +582,13 @@ extern void _stream_resync( STREAM *s );
 
 static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
 {
-	if( !s || !s->video_sink || !s->video_sink->put_time || audio_time_ts < 0 )
+	if( !s || audio_time_ts < 0 )
 		return;
 
-	s->video_sink->put_time( s->video_sink, audio_time_ts );
+	pthread_mutex_lock( &s->video_sink_mutex );
+	if( s->video_sink && s->video_sink->is_open && s->video_sink->put_time )
+		s->video_sink->put_time( s->video_sink, audio_time_ts );
+	pthread_mutex_unlock( &s->video_sink_mutex );
 	DBG serprintf( "stream:stream_set_av_speed anchored video sink to audio_ts=%d put_time=%d av_delay=%d\n",
 		audio_time_ts, audio_time_ts, stream_sync_av_delay( s ) );
 }
@@ -577,8 +605,7 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 		if( !delay_valid && speed_changed && s->last_good_delay_valid && s->audio_time >= 0 ) {
 			int effective_delay = s->last_good_delay_ms;
 			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
-				int current_atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
-				effective_delay += current_atempo_delay - s->last_good_atempo_delay_ms;
+				effective_delay += s->audio_filter_atempo->delay( s->audio_filter_atempo );
 				if( effective_delay < 0 ) {
 					effective_delay = 0;
 				}
@@ -588,8 +615,8 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 				anchor_ts = 0;
 			}
 			use_last_good = 1;
-		} else if( get_android_sync() && !delay_valid ) {
-			// android_sync=1: if delay is invalid, heard_ts can lag far behind stream time.
+		} else if( !delay_valid && s->video_sink && s->video_sink->name && strcmp(s->video_sink->name, "sfdec2") == 0 ) {
+			// sfdec2 timed pacing: if delay is invalid, heard_ts can lag far behind stream time.
 			// Using it for timeline_map_apply bakes in large skew during speed changes.
 			// Fall back to the current stream time until delay is valid.
 			use_current = 1;
@@ -613,16 +640,35 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed audio speed disabled %f\n", av_speed );
 		return 0;
 	}
-
-	int using_atempo = (s->audio_filter_atempo != NULL);
 	int ac3_recoding = 0;
 	int passthrough = 0;
 #ifdef CONFIG_AUDIO_AC3
 	ac3_recoding = libavos_get_ac3_recoding_enabled();
 #endif
-	if( s && s->audio_sink ) {
+	if( s->audio_sink ) {
 		passthrough = s->audio_sink->get_passthrough( s );
 	}
+
+	// MediaCodec is an asynchronous vendor decoder and is not guaranteed to
+	// deliver PCM faster than real time. A faster consumer can then starve
+	// AudioTrack, regardless of whether atempo or PlaybackParams changes the
+	// speed. Keep this decoder strictly at 1x; callers may choose ffmpeg if
+	// variable-speed playback is required.
+	if( !passthrough && !ac3_recoding &&
+		fabsf( av_speed - 1.0f ) > 1e-6f && s->audio_dec &&
+		s->audio_dec->name && !strcmp( s->audio_dec->name, "MediaCodec" ) ) {
+		float current_speed = audio_interface_get_audio_speed();
+		if( fabsf( current_speed - 1.0f ) > 1e-6f &&
+			!audio_interface_is_using_atempo() && s->audio_ctx ) {
+			audio_interface_change_audio_speed( s->audio_ctx, 1.0f );
+		}
+		audio_interface_set_audio_speed( 1.0f );
+		serprintf("stream:stream_set_av_speed rejected %.3fx: variable speed is disabled with MediaCodec audio\n",
+			av_speed);
+		return 1;
+	}
+
+	int using_atempo = (s->audio_filter_atempo != NULL);
 	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
 		using_atempo = 0;
 	}
@@ -655,25 +701,12 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		stream_current_time_rst = 0;
 	}
 
-	int target_num = (int)( av_speed * 100 + 0.5f );
-	int target_den = 100;
-	target_num = MAX( 1, target_num );
-
 	// Check if video is actively playing.
 	int video_active = (s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid);
 
-	if( video_active ) {
-		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d (v=%d a=%d delay=%d)\n",
-			target_den, target_num, s->video_time, s->audio_time, s->smoothed_av_delay );
-		s->video_dec->set_playback_speed( s->video_dec, target_den, target_num );
-		DBG serprintf( "stream:stream_set_av_speed requested speed=%.3f (video_active=%d)\n",
-			av_speed, video_active );
-	}
-
-	s->video_speed_num = target_num;
-	s->video_speed_den = target_den;
-
 	if( speed_changed ) {
+		s->audio_speed_diag_epoch++;
+		s->audio_speed_diag_writes_left = 20;
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
 		int atempo_delay = 0;
@@ -685,6 +718,12 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed speed_change prev=%.3f target=%.3f using_atempo=%d atempo_delay=%d use_current_ts=%d cur_ts=%d anchor_ts=%d speed_anchor_ts=%d\n",
 			previous_speed, av_speed, using_atempo, atempo_delay, use_current_ts_for_speed,
 			current_time_ts, anchor_ts, speed_anchor_ts );
+		DBG serprintf( "stream:stream_set_av_speed epoch=%d writes_budget=%d\n",
+			s->audio_speed_diag_epoch, s->audio_speed_diag_writes_left );
+		DBG serprintf( "stream:stream_set_av_speed snapshot last_good=%d last_good_valid=%d last_good_atempo=%d hist=%d sink_driven=%d\n",
+			s->last_good_delay_ms, s->last_good_delay_valid,
+			s->last_good_atempo_delay_ms, s->av_delay_history_count,
+			(s->video_sink && s->video_sink->put_time) ? 1 : 0 );
 		if( use_last_good_for_speed ) {
 			int current_atempo_delay = 0;
 			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
@@ -699,24 +738,110 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		anchor_ts, speed_anchor_ts, stream_current_time_rst, audio_latency_ms, video_active );
 
 	float applied_speed = av_speed;
+	int defer_commit = 0;
 	if( using_atempo ) {
 		float clamped_speed = av_speed;
-		if( clamped_speed < 0.25f ) {
-			clamped_speed = 0.25f;
+		if( clamped_speed < 0.5f ) {
+			clamped_speed = 0.5f;
 		} else if( clamped_speed > 2.0f ) {
 			clamped_speed = 2.0f;
 		}
+		// Set the global speed — the atempo filter reads it on its next filter() call.
 		audio_interface_set_audio_speed( clamped_speed );
+		if( speed_changed ) {
+			s->atempo_ledger_dense_until_ms = atime() + 2000;
+		}
 		DBG serprintf( "stream:stream_set_av_speed apply atempo speed=%.3f (audio_time=%d video_time=%d)\n",
 			clamped_speed, s->audio_time, s->video_time );
-		timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, clamped_speed );
-		DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
-				   stream_current_time_rst, speed_anchor_ts, clamped_speed );
+		// The sink still holds queued old-speed output.  Switching the video
+		// timeline now would make video advance at the new media rate while the
+		// speaker still plays old-speed content for the drain duration, leaving a
+		// permanent A/V offset of queue_ms * delta_speed per step.  Defer the
+		// video-side commit until the playhead crosses the boundary where new-speed
+		// content begins (stream_atempo_commit_poll).
+		if( speed_changed && video_active && s->atempo_ledger_active ) {
+			UINT64 flt_out = 0;
+			int flt_fifo = 0, flt_rate = 0;
+			stream_filter_audio_atempo_get_ledger_stats( s->audio_filter_atempo,
+				&flt_out, &flt_fifo, &flt_rate );
+			// Diag "prev" is the speed in effect just before this step: the
+			// last queued checkpoint's target if a ramp is in flight, else the
+			// currently committed mapping speed.
+			float prev_for_diag = previous_speed;
+			if( s->atempo_commit_count > 0 ) {
+				int tail = ( s->atempo_commit_head + s->atempo_commit_count - 1 ) % STREAM_ATEMPO_COMMIT_MAX;
+				prev_for_diag = s->atempo_commit_q[tail].speed;
+			}
+			if( s->atempo_commit_count >= STREAM_ATEMPO_COMMIT_MAX ) {
+				// Full (pathological ramp); drop the oldest to make room.
+				s->atempo_commit_head = ( s->atempo_commit_head + 1 ) % STREAM_ATEMPO_COMMIT_MAX;
+				s->atempo_commit_count--;
+				serprintf( "atempo_commit_overflow: queue full, dropped oldest\n" );
+			}
+			int slot = ( s->atempo_commit_head + s->atempo_commit_count ) % STREAM_ATEMPO_COMMIT_MAX;
+			s->atempo_commit_q[slot].speed      = clamped_speed;
+			s->atempo_commit_q[slot].prev_speed = prev_for_diag;
+			s->atempo_commit_q[slot].boundary   = s->atempo_ledger_output_frames +
+				(UINT64)(flt_fifo > 0 ? flt_fifo : 0);
+			s->atempo_commit_q[slot].wall_ms    = atime();
+			s->atempo_commit_count++;
+			defer_commit = 1;
+			DBG serprintf( "atempo_commit_arm: prev=%.3f target=%.3f boundary=%llu out_cursor=%llu flt_fifo=%d audio=%d anchor_ts=%d qlen=%d\n",
+				prev_for_diag, clamped_speed,
+				(unsigned long long)s->atempo_commit_q[slot].boundary,
+				(unsigned long long)s->atempo_ledger_output_frames,
+				flt_fifo, s->audio_time, speed_anchor_ts, s->atempo_commit_count );
+		} else if( s->atempo_commit_count == 0 || speed_changed ) {
+			// Same-speed re-anchor calls must not touch the mapping while
+			// commits are pending (global speed already holds the pending
+			// target).  A genuine speed change that cannot be deferred (no
+			// ledger/video) supersedes the queue: drop it, apply immediately.
+			s->atempo_commit_count = 0;
+			s->atempo_commit_head  = 0;
+			timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, clamped_speed );
+			DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
+					   stream_current_time_rst, speed_anchor_ts, clamped_speed );
+		}
 		applied_speed = clamped_speed;
 	} else {
+		s->atempo_commit_count = 0;
+		s->atempo_commit_head  = 0;
 		if( speed_changed ) {
+			// Arm the epoch before changing speed so any heard_ts calls during
+			// audio_interface_change_audio_speed() see the new anchor immediately.
+			// Speed field is updated to applied_speed once the call returns.
+			if( !passthrough && !ac3_recoding && s->audio_ctx && s->audio_time >= 0 ) {
+				UINT64 ep_frames = 0;
+				int ep_rate = 0, ep_src = 0, ep_age = 0;
+				int ep_frames_valid = audio_interface_get_presented_frames( s->audio_ctx, &ep_frames, &ep_rate, &ep_src, &ep_age, 1 );
+				if( !ep_frames_valid ) {
+					s->at_speed_epoch_active = 0;
+					DBG serprintf( "at_speed_epoch_arm: skipped no_playhead audio=%d anchor_ts=%d speed=%.3f\n",
+						s->audio_time, anchor_ts, av_speed );
+				} else {
+					int epoch_wall_ms = atime();
+					s->at_speed_epoch_active            = 1;
+					s->at_speed_epoch_audio_time_ts     = s->audio_time;
+					s->at_speed_epoch_heard_ts          = anchor_ts;
+					s->at_speed_epoch_speed             = av_speed;
+					s->at_speed_epoch_presented_frames  = ep_frames;
+					s->at_speed_epoch_rate              = ep_rate;
+					s->at_speed_epoch_wall_ms           = epoch_wall_ms;
+					s->at_speed_epoch_frames_cached     = ep_frames;
+					s->at_speed_epoch_cache_wall_ms     = epoch_wall_ms;
+					DBG {
+						int live_delay_ms = stream_sync_av_delay( s );
+						serprintf( "at_speed_epoch_arm: audio=%d anchor_ts=%d live_delay=%d speed=%.3f frames=%llu rate=%d src=%d age=%d\n",
+							s->audio_time, anchor_ts, live_delay_ms, av_speed,
+							(unsigned long long)ep_frames, ep_rate, ep_src, ep_age );
+					}
+				}
+			}
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
 			applied_speed = audio_interface_get_audio_speed();
+			if( s->at_speed_epoch_active ) {
+				s->at_speed_epoch_speed = applied_speed;
+			}
 			DBG serprintf( "stream:stream_set_av_speed applied seamless speed change, anchor_rst=%d anchor_ts=%d, applied_speed=%f rc=%d\n",
 					   stream_current_time_rst, speed_anchor_ts, applied_speed, rc );
 			if( fabsf( applied_speed - av_speed ) > 1e-6f ) {
@@ -728,6 +853,21 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
 		timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, applied_speed );
+	}
+
+	int applied_num = (int)( applied_speed * 100 + 0.5f );
+	int applied_den = 100;
+	applied_num = MAX( 1, applied_num );
+	if( !defer_commit ) {
+		s->video_speed_num = applied_num;
+		s->video_speed_den = applied_den;
+	}
+
+	if( video_active && !defer_commit ) {
+		DBG serprintf( "stream:stream_set_av_speed set_playback_speed den=%d num=%d requested=%.3f applied=%.3f (v=%d a=%d anchor_delay=%d)\n",
+			applied_den, applied_num, av_speed, applied_speed,
+			s->video_time, s->audio_time, stream_get_anchor_delay_ms( s, 1 ) );
+		s->video_dec->set_playback_speed( s->video_dec, applied_den, applied_num );
 	}
 
 	int seek_time_ts = anchor_ts;
@@ -748,19 +888,16 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			seek_time_rst = TS_TO_RST_TIME( seek_time_ts, int );
 		}
 	}
-	if( s->video->valid ) {
-		if( get_android_sync() ) {
-			// For android_sync=1, always seed the anchor when audio_time exists.
-			// stream_sync_audio will override to audio_time if heard_ts is invalid.
+	if( s->video->valid && !defer_commit ) {
+		int is_sfdec2 = (s->video_sink && s->video_sink->name && strcmp(s->video_sink->name, "sfdec2") == 0);
+		if( is_sfdec2 ) {
+			// For sfdec2 timed rendering, always seed the anchor when audio_time exists.
 			if( s->audio_time != -1 ) {
 				int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 				if( delay_valid ) {
 					_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
 				} else {
-					// android_sync=1: if timing is invalid, defer re-anchoring on speed change.
-					// Anchoring to a stale/invalid heard_ts can push the sink far behind the
-					// current video time, causing a visible "fast catch-up" burst. Wait for a
-					// valid delay before snapping the anchor.
+					// Defer re-anchoring on speed change until delay is valid to avoid catch-up bursts
 					int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
 					DBG serprintf("stream:stream_set_av_speed defer anchor (delay invalid, streak=%d v=%d a=%d heard_ts=%d)\n",
 						delay_streak, s->video_time, s->audio_time, anchor_ts);
@@ -773,7 +910,117 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		}
 	}
 
+	if( speed_changed ) {
+		s->av_delay_history_count = 0;
+		if( s->audio_ctx ) {
+			audio_interface_invalidate_delay_cache( s->audio_ctx );
+		}
+	}
+
 	return 0;
+}
+
+// Apply the deferred atempo video-side speed commit once the audio playhead
+// crosses the output-frame boundary where new-speed content begins.
+// Called from stream_sync_audio (audio sync path) on every audio write.
+void stream_atempo_commit_poll( STREAM *s )
+{
+	if( !s || s->atempo_commit_count <= 0 )
+		return;
+	UINT64 playhead = 0;
+	int rate = 0, src = 0, age = 0;
+	int have_ph = ( s->audio_ctx && audio_interface_get_presented_frames( s->audio_ctx,
+			&playhead, &rate, &src, &age, 1 ) );
+
+	// Anchor for every checkpoint promoted in this poll is the heard clock now:
+	// once a boundary is crossed, that step's old-speed content has been played,
+	// so the video timeline catches up to the current audible position.
+	int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	if( anchor_ts < 0 )
+		anchor_ts = s->audio_time >= 0 ? s->audio_time : 0;
+	int anchor_rst = TS_TO_RST_TIME( anchor_ts, int );
+	if( anchor_rst < 0 )
+		anchor_rst = 0;
+
+	float applied_speed = 0.0f;
+	int applied_any = 0;
+
+	// Promote front checkpoints strictly in order while their boundary is
+	// crossed (or they have timed out).  Several may have crossed since the
+	// last poll; drain them in sequence — the final one sets the live state.
+	while( s->atempo_commit_count > 0 ) {
+		int idx = s->atempo_commit_head;
+		STREAM_ATEMPO_COMMIT *cp = &s->atempo_commit_q[idx];
+		int waited_ms = atime() - cp->wall_ms;
+		int crossed;
+		if( cp->boundary == STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER ) {
+			// Post-reset collapsed commit: the old ledger frame domain is gone, so a
+			// frame boundary is meaningless.  Apply only once the NEW ledger is active
+			// and the audible playhead resolves strictly inside a block (state==0), so
+			// the flip below anchors to the fresh ledger RST and not the stale map.
+			int ledger_state = 0;
+			int ledger_rst = have_ph
+				? stream_atempo_ledger_lookup_rst( s, playhead, rate, &ledger_state )
+				: STREAM_NO_PTS_VALUE;
+			crossed = ( ledger_rst != STREAM_NO_PTS_VALUE && ledger_rst >= 0 && ledger_state == 0 );
+		} else {
+			crossed = have_ph && playhead >= cp->boundary;
+		}
+		// Timeout safety: if the playhead stalls or becomes unavailable (pause,
+		// sink recreation), fall back to immediate apply.  Strict ordering: if
+		// the front is not ready, stop — never skip ahead to a later step.
+		if( !crossed && waited_ms < 3000 )
+			break;
+		s->atempo_commit_head = ( idx + 1 ) % STREAM_ATEMPO_COMMIT_MAX;
+		s->atempo_commit_count--;
+		applied_speed = cp->speed;
+		applied_any = 1;
+		DBG serprintf( "atempo_commit_apply: prev=%.3f speed=%.3f boundary=%llu playhead=%llu crossed=%d waited=%d anchor_ts=%d anchor_rst=%d audio=%d video=%d qlen=%d\n",
+			cp->prev_speed, cp->speed,
+			(unsigned long long)cp->boundary,
+			(unsigned long long)playhead, crossed, waited_ms,
+			anchor_ts, anchor_rst, s->audio_time, s->video_time,
+			s->atempo_commit_count );
+	}
+	if( !applied_any )
+		return;
+
+	// Anchor the timeline to the ledger's filter-paced media/RST clock at the
+	// audible playhead, instead of the TS_TO_RST_TIME() projection of anchor_ts.
+	// The projection re-derives RST through the timeline's committed (pre-step)
+	// speed, so it leads the audible playhead by the sink+wrapper+ring backlog and
+	// the lead accumulates across ramp-up steps.  Only flip when the playhead
+	// resolves strictly INSIDE a ledger block (state==0); stale (-1) or
+	// extrapolated (+1) lookups have a weaker media slope, so fall back to the
+	// projection there.  anchor_ts and the video-sink anchor stay unchanged.
+	int anchor_rst_use = anchor_rst;
+	{
+		int ledger_state = 0;
+		int anchor_rst_ledger = STREAM_NO_PTS_VALUE;
+		if( have_ph ) {
+			anchor_rst_ledger = stream_atempo_ledger_lookup_rst( s, playhead, rate, &ledger_state );
+		}
+		int flipped = ( anchor_rst_ledger != STREAM_NO_PTS_VALUE && anchor_rst_ledger >= 0 && ledger_state == 0 );
+		if( flipped ) {
+			anchor_rst_use = anchor_rst_ledger;
+		}
+		DBG serprintf( "atempo_rst_anchor: speed=%.3f anchor_ts=%d anchor_rst_proj=%d anchor_rst_ledger=%d state=%d flipped=%d playhead=%llu have_ph=%d\n",
+			applied_speed, anchor_ts, anchor_rst, anchor_rst_ledger, ledger_state,
+			flipped, (unsigned long long)playhead, have_ph );
+	}
+
+	timeline_map_apply( (double)anchor_rst_use, (double)anchor_ts, applied_speed );
+
+	int num = (int)( applied_speed * 100 + 0.5f );
+	num = MAX( 1, num );
+	s->video_speed_num = num;
+	s->video_speed_den = 100;
+	if( s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid ) {
+		s->video_dec->set_playback_speed( s->video_dec, 100, num );
+	}
+	if( s->video && s->video->valid ) {
+		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
+	}
 }
 
 
@@ -1196,8 +1443,11 @@ static void _free_subtitle_urls( STREAM *s )
 {
 	if( s ) {
 		int i;
-		for ( i = 0; i < SUB_TRACK_MAX && s->sub_url[i]; i++ ) {
-			afree( s->sub_url[i] );
+		for ( i = 0; i < SUB_TRACK_MAX + 2; i++ ) {
+			if( s->sub_url[i] ) {
+				afree( s->sub_url[i] );
+				s->sub_url[i] = NULL;
+			}
 		}
 	}
 }

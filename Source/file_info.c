@@ -126,10 +126,14 @@ int file_info_unregister( int type, int etype )
 //	_fi_get_fn
 //
 // ************************************************************
-static int _fi_get_fn( int type, int etype, FILE_INFO_PATH *info_path, FILE_INFO_IO *info_io, FILE_INFO_MMAP *info_mmap )
+static int _fi_get_fn( int type, int etype, FILE_INFO_PATH *info_path, FILE_INFO_URL *info_url,
+		FILE_INFO_IO *info_io, FILE_INFO_MMAP *info_mmap )
 {
 	if( info_path ) {
 		*info_path = NULL;
+	}
+	if( info_url ) {
+		*info_url = NULL;
 	}
 	if( info_io ) {
 		*info_io = NULL;
@@ -143,6 +147,9 @@ static int _fi_get_fn( int type, int etype, FILE_INFO_PATH *info_path, FILE_INFO
 		if( reg->type == type && (reg->etype == ETYPE_ANY || reg->etype == etype) ) {
 			if( reg->info_path && info_path ) {
 				*info_path = reg->info_path;
+				return 0;
+			} else if( reg->info_url && info_url ) {
+				*info_url = reg->info_url;
 				return 0;
 			} else if( reg->info_io && info_io ) {
 				*info_io = reg->info_io;
@@ -167,13 +174,15 @@ serprintf("\r\nFileInfo:\r\n" );
 	while( reg ) {
 serprintf("\t%-8s  %-16s  %s: %s\r\n", av_get_type_name(reg->type), av_get_etype_name(reg->etype), 
 					reg->info_path ? "PATH" :(
+					reg->info_url  ? "URL " :(
 					reg->info_io   ? "IO  " :( 
 					reg->info_mmap ? "MMAP" : 
-					                 "")),
+					                 ""))),
 					reg->info_path ? reg->info_path_name :( 
+					reg->info_url  ? reg->info_url_name  :(
 					reg->info_io   ? reg->info_io_name   :( 
 					reg->info_mmap ? reg->info_mmap_name :
-					                 "")));	
+					                 ""))));
 		reg = reg->next;
 	}
 }
@@ -345,10 +354,11 @@ static int get_info_subtitle(const char *full_path, FILE_INFO *info)
 		converted_subs *sub_conv = subtitle_get_converted( sub_info, 0 );
 		if (sub_conv) {
 			int i;
+			int added = 0;
 			struct subt_orig_t *sub_files = sub_info->files;
 
-			for (i = 0; i < sub_conv->cnt; ++i) {
-				SUB_PROPERTIES *sub = &info->av.sub[i+info->av.subs_max];
+			for (i = 0; i < sub_conv->cnt && info->av.subs_max + added < SUB_TRACK_MAX; ++i) {
+				SUB_PROPERTIES *sub = &info->av.sub[info->av.subs_max + added];
 				sub->format = SUB_FORMAT_EXT;
 				sub->gfx = 0;
 				sub->ext = 1;
@@ -360,8 +370,14 @@ static int get_info_subtitle(const char *full_path, FILE_INFO *info)
 					}
 					sub_files = sub_files->next;
 				}
+				added++;
 			}
-			info->av.subs_max += sub_info->count;
+			info->av.subs_max += added;
+			if (i < sub_conv->cnt) {
+				serprintf("get_info_subtitle: ignored %d external subtitle tracks: "
+					"maximum of %d subtitle tracks reached\n",
+					sub_conv->cnt - i, SUB_TRACK_MAX);
+			}
 			subtitle_free_converted(sub_conv);
 		}
 		subtitle_free_files(sub_info);
@@ -393,17 +409,21 @@ DBG serprintf("get_url_info: %s %d/%d\r\n", src->url, type, etype );
 	}
 
 	FILE_INFO_PATH info_path;
+	FILE_INFO_URL  info_url;
 	FILE_INFO_IO   info_io;
 	FILE_INFO_MMAP info_mmap;
 	int err = 0;
 	
-	if( _fi_get_fn( type, etype, &info_path, &info_io, &info_mmap ) ) {
+	if( _fi_get_fn( type, etype, &info_path, &info_url, &info_io, &info_mmap ) ) {
 		// no info_path or info_mmap, use generic:
 DBG serprintf("generic: %s\r\n", src->url);
 		err = _get_info_generic( src->url, info, apic, abort );
 	} else if( info_path ) {
 DBG serprintf("path: %s\r\n", src->url);
 		err = info_path( src->url, info, apic, abort );
+	} else if( info_url ) {
+DBG serprintf("url: %s\r\n", src->url);
+		err = info_url( src, info, apic, abort );
 	} else if( info_io ) {
 DBG serprintf("io: %s\r\n", src->url);
 		err = get_info_io( src, info, apic, abort, info_io );
@@ -438,9 +458,13 @@ if( err ) {
 // ************************************************
 int get_file_info_clean( const char *path, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
 {
-	STREAM_URL src;
-	stream_url_cpy_url( &src, path);
-	return get_url_info( &src, type, etype, info, apic, abort );
+	STREAM_URL src = STREAM_URL_INITIALIZER;
+	int ret;
+	if( stream_url_cpy_url( &src, path) )
+		return 1;
+	ret = get_url_info( &src, type, etype, info, apic, abort );
+	stream_url_clear( &src );
+	return ret;
 }
 
 // ************************************************
@@ -505,23 +529,27 @@ void file_info_dump_for_path( const char *path, int verbose )
 		return;
 	} 
 
-	FILE_INFO info;
+	FILE_INFO *info = acalloc(1, sizeof(*info));
+	if (!info) {
+		return;
+	}
 	APIC apic = { 0 };
 	apic.buffer_size = 512 * 1024;
 		
-	if( get_file_info_clean( path, type, etype, &info, &apic, NULL) ){
+	if( get_file_info_clean( path, type, etype, info, &apic, NULL) ){
 serprintf("cannot get info: %s\r\n", path);
-		return;
+		goto out;
 	}
 	
 	if( verbose ) {
-		file_info_dump( &info, &apic );
+		file_info_dump( info, &apic );
 	} else {
-serprintf("\t%-80s  %s  %s\n", cut_path( path ), info.id3_tag.valid ? "TAG" : "   ", apic.valid ? av_get_etype_name( apic.etype) : "" );	
+serprintf("\t%-80s  %s  %s\n", cut_path( path ), info->id3_tag.valid ? "TAG" : "   ", apic.valid ? av_get_etype_name( apic.etype) : "" );
 	}
 	
+out:
 	if( apic.buffer ) {
 		afree( apic.buffer );		
 	}
+	afree( info );
 }
-

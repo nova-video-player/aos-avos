@@ -48,6 +48,7 @@ extern JavaVM *myVm;
 static jclass jCodecDiscoveryClass;
 static jmethodID jCodecSupportedMethod;
 static jmethodID jGetCodecForProfileMethod;
+static jmethodID jGetDoViModeMethod;
 
 void acodecs_init(void) {
     int willDetach = 0;
@@ -87,6 +88,15 @@ void acodecs_init(void) {
 	exception = (*env)->ExceptionOccurred(env);
 	if (exception) {
 		ERR serprintf("!!!EXCEPTION: acodecs_init:getCodecForProfile\n");
+		(*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        return;
+    }
+
+	jGetDoViModeMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass, "getDoViMode", "()I");
+	exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: acodecs_init:getDoViMode\n");
 		(*env)->ExceptionDescribe(env);
         (*env)->ExceptionClear(env);
         return;
@@ -174,6 +184,37 @@ end:
 		(*myVm)->DetachCurrentThread(myVm);
 
 	return ret;
+}
+
+int acodecs_get_dovi_mode(void)
+{
+	JNIEnv * env = NULL;
+	int willDetach = 0;
+	jint result = 0;
+
+	if ((*myVm)->GetEnv(myVm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
+		DBG serprintf("ERROR: %s GetEnv failed\n", __FUNCTION__);
+		if(((*myVm)->AttachCurrentThread(myVm, &env, NULL)) != 0 ) {
+			ERR serprintf("ERROR: %s Attach to JVM failed\n", __FUNCTION__);
+			return 0;
+		}
+		else
+			willDetach = 1;
+	}
+
+	result = (*env)->CallStaticIntMethod(env, jCodecDiscoveryClass, jGetDoViModeMethod);
+	jthrowable exception = (*env)->ExceptionOccurred(env);
+	if (exception) {
+		ERR serprintf("!!!EXCEPTION: acodecs_get_dovi_mode CallStaticIntMethod\n");
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		result = 0;
+	}
+
+	if (willDetach)
+		(*myVm)->DetachCurrentThread(myVm);
+
+	return result;
 }
 
 int acodecs_is_supported(int format, int is_video, int is_sw_allowed)

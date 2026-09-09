@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,7 +42,6 @@
 #include "h264.h"
 #include "hevc.h"
 
-int get_android_sync(void);
 #include "mpg4.h"
 #include "dts.h"
 #include "fb.h"
@@ -71,6 +70,8 @@ int get_android_sync(void);
 
 #define DBG DBG_IF(Debug[DBG_STREAM])
 #define DBG2 DBG_IF(Debug[DBG_STREAM] > 1)
+
+#define SEEK_PREVIEW_PARTIAL_MARGIN_MS 75
 
 int 		stream_zero_fill   = 1;
 
@@ -183,8 +184,9 @@ static int  	_stream_seek_real( STREAM *s, int time, int pos, int dir, int flags
 static void 	_stream_player_sync( STREAM *s );
 static void 	_stream_player_async( STREAM *s );
 static int  	_stream_wait_for_idle( STREAM *s, int timeout );
-static void 	_stream_play_n_frames( STREAM *s, int n, int time, int old_time );
+static int  	_stream_play_n_frames( STREAM *s, int n, int time, int old_time );
 static void 	_do_stuff( STREAM *s );
+static void 	_stream_close_video_sink( STREAM *s, int delete_sink );
 static void 	*_parser_thread( void *data );
 static void 	*_player_thread( void *data );
 static void 	*_decode_thread( void *data );
@@ -228,9 +230,14 @@ static void _video_init( STREAM *s, int time )
 
 	if( s->video_dec && !s->video_dec->async ) {
 		_free_all_frames( s );
+	} else {
+		frame_q_flush( &s->disp_q );
+		s->current_frame = NULL;
+		s->current_out_frame = NULL;
 	}
 	
 	stream_sync_restart( s );
+	s->video_time = time;
 	
 	s->seek	       = 0;
 	s->time_parsed = 0;
@@ -248,10 +255,10 @@ static void _video_init( STREAM *s, int time )
 		s->video_dec->seek( s->video_dec, time );
 	}
 	if( s->video_sink && s->video_sink->put_time ) {
-		// android_sync=1: let audio-driven anchoring seed the sink clock.
+		// Let audio-driven anchoring seed the sink clock.
 		// Avoid an early put_time(0) before audio is known/anchored.
-		if( get_android_sync() && s->audio && (s->audio->valid || (s->buffer && s->buffer->audio)) ) {
-			DBG serprintf("video_init: defer put_time (android_sync audio, valid=%d buffer_audio=%d)\n",
+		if( s->audio && (s->audio->valid || (s->buffer && s->buffer->audio)) ) {
+			DBG serprintf("video_init: defer put_time (audio-driven, valid=%d buffer_audio=%d)\n",
 				s->audio->valid, s->buffer ? s->buffer->audio : -1);
 		} else {
 			s->video_sink->put_time( s->video_sink, time );
@@ -412,6 +419,14 @@ DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recodin
 	}
 #ifdef CONFIG_SPDIF
 	passthrough_mode = spdif_is_passthrough_on();
+	// If passthrough is globally enabled but this format is not actually
+	// passthrough-capable on this device (e.g. TrueHD on a device without
+	// ENCODING_DOLBY_TRUEHD), fall through to PCM decode using pcm_cap,
+	// same as passthrough=0 mode. Android will route multichannel PCM as
+	// the device supports.
+	if( passthrough_mode && !spdif_format_passthrough_supported( s->audio->format ) ) {
+		passthrough_mode = 0;
+	}
 #endif
 	if( !passthrough_mode && !ac3_recoding ) {
 		int pcm_cap = libavos_get_max_pcm_channels();         // 0 if unknown
@@ -714,7 +729,6 @@ DBGS serprintf("stream_open_video_dec\r\n");
 		goto ErrorExit;
 	}
 
-	pthread_mutex_init( &s->video_sink_mutex, NULL );
 	int prio = stream_force_prio ? stream_force_prio : get_cpu_priority(s);
 	int forced;
 	if (prio == STREAM_CPU_ANY) {
@@ -725,6 +739,7 @@ DBGS serprintf("stream_open_video_dec\r\n");
 	}
 	while( prio ) {
 		int try_prio = prio;
+		int decoder_owned_sink = 0;
 		// reset previous error states
 		s->video_error           = VE_NO_ERROR;
 		s->video_error_qualifier = VEQ_NONE;
@@ -774,16 +789,21 @@ DBGS stream_show_rc( &s->video_rc );
 		
 		// Initialize the video sink
 		// no caller provided sink, use standard
+		pthread_mutex_lock( &s->video_sink_mutex );
 		if( !s->video_sink ) {
 			if (s->video_dec->get_sink) {
 				s->video_sink = s->video_dec->get_sink(s->video_dec);
+				decoder_owned_sink = s->video_sink != NULL;
 			} else {
 				s->video_sink = stream_get_default_video_sink(s);
 			}
 		}
 		if( !s->video_sink ) {
 serprintf("stream: no video sink!\r\n");
+			pthread_mutex_unlock( &s->video_sink_mutex );
+			goto next;
 		}
+		s->video_sink->ctx = s;
 serprintf("VID_SNK: [%s]\n", s->video_sink->name);	
 		s->output_frame_fn = _output_frame_no_resize;
 		if( stream_sink_video_allocates_frames(s->video_sink) ) {
@@ -797,6 +817,7 @@ DBGS serprintf("stream: resize to sink!\r\n");
 
 		if( _allocate_video_buffers( s ) ) {
 serprintf("could not allocate video_buffers!r\n");
+			pthread_mutex_unlock( &s->video_sink_mutex );
 			goto next;
 		}
 
@@ -811,11 +832,13 @@ DBGS serprintf("slideshow!\r\n" );
 			int num_frames = s->video_rc.num_frames;
 			if( s->video_sink->open( s->video_sink, s->video, s, num_frames, &s->video_rc ) ) {
 serprintf("error, could not open video sink!\r\n");
+				pthread_mutex_unlock( &s->video_sink_mutex );
 				goto next;
 			}
 			s->put_time_mode = (s->video_sink->put_time != NULL);
 			serprintf("put_time_mode=%d (sink=%s)\n", s->put_time_mode, s->video_sink->name);
 		}
+		pthread_mutex_unlock( &s->video_sink_mutex );
 		if ( s->video->valid) {
 			if( s->use_sink_frames ) {
 				pthread_mutex_lock( &s->video_sink_mutex );
@@ -838,25 +861,52 @@ DBGS serprintf("stream_open_video_dec: %s/%d/%d done!\r\n", s->video_dec->name, 
 		if( audio_interface_is_audio_speed_enabled() && s->video_dec->set_playback_speed ) {
 			int speed_num = s->video_speed_num ? s->video_speed_num : 100;
 			int speed_den = s->video_speed_den ? s->video_speed_den : 100;
-			DBG serprintf( "stream_open_video_dec: apply cached video speed %d/%d (v=%d a=%d delay=%d)\n",
-				speed_num, speed_den, s->video_time, s->audio_time, s->smoothed_av_delay );
+			DBG serprintf( "stream_open_video_dec: apply cached video speed %d/%d (v=%d a=%d anchor_delay=%d)\n",
+				speed_num, speed_den, s->video_time, s->audio_time,
+				stream_get_anchor_delay_ms( s, 1 ) );
 			s->video_dec->set_playback_speed( s->video_dec, speed_den, speed_num );
 		}
 
 		return 0;
 next:
-		// Close the video sink first to join its threads and ensure no
-		// render/convert callbacks reference decoder-owned data
+		// Clean up the decoder frames first (while frames are still allocated and valid)
+		if (s->video_dec) {
+			if (s->video_dec->is_open) {
+				if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
+					serprintf("error, could not cleanup video dec!\n");
+				}
+			}
+		}
+		// Close the video sink to stop and join its threads
 		if (s->video_sink) {
+			pthread_mutex_lock( &s->video_sink_mutex );
 			if (s->video_sink->is_open) {
 				s->video_sink->close(s->video_sink);
 			}
-			// destroy the sink so a retry re-runs sink selection (a decoder
-			// provided sink that failed to open must not be reused, otherwise
-			// the default-sink fallback can never engage)
-			s->video_sink->delete(s->video_sink);
-			s->video_sink = NULL;
 			s->put_time_mode = 0;
+			pthread_mutex_unlock( &s->video_sink_mutex );
+		}
+		// Close and destroy the decoder (safe now that sink threads are joined)
+		if (s->video_dec) {
+			if (s->video_dec->is_open) {
+				s->video_dec->close( s->video_dec );
+			}
+			s->video_dec->destroy( s->video_dec );
+			s->video_dec = NULL;
+		}
+		// A sink returned by get_sink() may reference decoder-private state
+		// (sfdec/sfdec2 do). Match the normal stop order by deleting it after
+		// decoder close, then clear it before trying another decoder.
+		if (decoder_owned_sink && s->video_sink) {
+			pthread_mutex_lock( &s->video_sink_mutex );
+			if (s->video_sink->delete) {
+				s->video_sink->delete(s->video_sink);
+			}
+			s->video_sink = NULL;
+			s->use_sink_frames = 0;
+			s->vtime_post_sink = 0;
+			s->put_time_mode = 0;
+			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
 		if (s->video_dec) {
 			if (s->video_dec->is_open) {
@@ -913,6 +963,16 @@ DBGS serprintf("stream_close_audio_dec\r\n");
 static void stream_close_audio_filter( STREAM *s )
 {
 DBGS serprintf("stream_close_audio_filter\r\n");
+	// Close and delete JNI filter
+	if( s->audio_filter_jni ) {
+		if( s->audio_filter_jni->close ) {
+			s->audio_filter_jni->close( s->audio_filter_jni );
+		}
+		if( s->audio_filter_jni->delete ) {
+			s->audio_filter_jni->delete( s->audio_filter_jni );
+		}
+		s->audio_filter_jni = NULL;
+	}
 	// Close and delete compression filter
 	if( s->audio_filter_compress ) {
 		if( s->audio_filter_compress->close ) {
@@ -955,25 +1015,106 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 	}
 }
 
+static int stream_restart_audio_as_pcm( STREAM *s, const char *reason )
+{
+	if( !s || !s->audio || !s->audio->valid || !s->audio_sink ) {
+		return 1;
+	}
+#ifdef CONFIG_SPDIF
+	if( !spdif_is_passthrough_on() ) {
+		return 1;
+	}
+	serprintf("stream_restart_audio_as_pcm: disabling passthrough after %s\n",
+		reason ? reason : "sink failure");
+	stream_close_audio_filter( s );
+	stream_close_audio_dec( s );
+	spdif_set_passthrough( 0 );
+	s->audio_sink->set_passthrough( s, 0 );
+	if( s->audio->sourceSamples > 0 ) {
+		s->audio->samplesPerSec = s->audio->sourceSamples;
+	}
+	if( s->audio->sourceChannels > 0 ) {
+		s->audio->channels = s->audio->sourceChannels;
+	}
+	if( s->audio->sourceBitsPerSample > 0 ) {
+		s->audio->bitsPerSample = s->audio->sourceBitsPerSample;
+	}
+	if( s->audio->channels > 0 && s->audio->bitsPerSample > 0 ) {
+		s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
+	}
+	if( s->audio->bytesPerFrame > 0 && s->audio->samplesPerSec > 0 ) {
+		s->audio->bytesPerSec = s->audio->bytesPerFrame * s->audio->samplesPerSec;
+	}
+	stream_audio_copy_sink_from_source( s );
+	s->audio_dec = stream_get_audio_dec( s->audio );
+	if( !s->audio_dec || stream_open_audio_dec( s ) ) {
+		serprintf("stream_restart_audio_as_pcm: cannot open PCM decoder\n");
+		return 1;
+	}
+	if( stream_open_audio_filter( s ) ) {
+		serprintf("stream_restart_audio_as_pcm: cannot open PCM audio filter\n");
+		stream_close_audio_dec( s );
+		return 1;
+	}
+	stream_audio_copy_sink_from_source( s );
+	s->audio_sink->set_passthrough( s, 0 );
+	if( s->audio_sink->start( s ) ) {
+		serprintf("stream_restart_audio_as_pcm: cannot start PCM audio sink\n");
+		stream_close_audio_filter( s );
+		stream_close_audio_dec( s );
+		return 1;
+	}
+	serprintf("stream_restart_audio_as_pcm: PCM fallback started\n");
+	return 0;
+#else
+	(void)reason;
+	return 1;
+#endif
+}
+
 // *****************************************************************************
 //
 //	stream_close_video_dec
 //
 // *****************************************************************************
-static void stream_close_video_dec( STREAM *s )
+static void _stream_close_video_sink( STREAM *s, int delete_sink )
 {
-	// Close the video sink first to join its threads (venc_thread, copy_thread)
-	// and ensure no render/convert callbacks are in progress that reference
-	// decoder-owned data (AVFrame pointers in frame->priv)
+	if( !s )
+		return;
+
+	/*
+	 * stream_sync_audio() calls video_sink->put_time() on the audio thread.
+	 * Keep close/delete and clearing the published pointer in one critical
+	 * section so that thread cannot enter a sink after its private locks have
+	 * been destroyed.
+	 */
+	pthread_mutex_lock( &s->video_sink_mutex );
 	if( s->video_sink && s->video_sink->is_open ) {
 		s->video_sink->close( s->video_sink );
 	}
-	if( s->video_dec) {
-DBGS serprintf("stream_close_video_dec\r\n");
-		// call cleanup if needed
-		if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
-serprintf("error, could not cleanup video dec!\n");
+	if( delete_sink && s->video_sink ) {
+		if( s->video_sink->delete ) {
+			s->video_sink->delete( s->video_sink );
 		}
+		s->video_sink = NULL;
+		s->put_time_mode = 0;
+	}
+	pthread_mutex_unlock( &s->video_sink_mutex );
+}
+
+static void stream_close_video_dec( STREAM *s )
+{
+	// Clean up the decoder frames first (while frames are still allocated and valid)
+	if( s->video_dec ) {
+		DBGS serprintf("stream_close_video_dec\r\n");
+		if( s->video_dec->cleanup && s->video_dec->cleanup( s->video_dec, s->frames, s->num_frames ) ) {
+			serprintf("error, could not cleanup video dec!\n");
+		}
+	}
+	// Close the video sink to stop and join its threads
+	_stream_close_video_sink( s, 0 );
+	// Close and destroy the decoder (safe now that sink threads are joined)
+	if( s->video_dec) {
 		s->video_dec->close( s->video_dec );
 		s->video_dec->destroy( s->video_dec );
 		s->video_dec = NULL;
@@ -1418,7 +1559,6 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 	s->audio_ref_time = -1;
 	s->audio_samples  = 0;
 	s->audio_time_remainder_us = 0;
-	s->smoothed_av_delay = -1;
 	s->av_delay_history_count = 0;
 
 	// stop audio sink
@@ -1642,7 +1782,16 @@ static void _queue_sink_frames( STREAM *s )
 	// try to get all the frame from the sink and queue them
 	VIDEO_FRAME *frame;
 	while ( !s->video_sink->get( s->video_sink, &frame ) ) {
-		s->video_sink_count--;
+		/* sink-owned pools (dovi: 64 frames) pre-queue ALL free frames at
+		 * open/flush; this pull is a POOL REFILL, not a sink→stream recycle
+		 * of a previously-put frame. Letting it go negative biases the
+		 * engine's video_sink_count < stream_sink_video_max(5) throttle
+		 * permanently open (measured -46/-63: decode ran untethered, vtime
+		 * raced 4.7s ahead of the audio clock, venc deadlines 2-3s in the
+		 * future = the 3s/frame collapse). Clamp at 0: the throttle then
+		 * counts real in-sink frames only, like android2's small pool. */
+		if ( s->video_sink_count > 0 )
+			s->video_sink_count--;
 		
 		// got a frame, queue it
 		if( s->vtime_post_sink && frame->time != -1 ) {
@@ -1868,10 +2017,12 @@ serprintf("error in stream_init\r\n");
 		timeline_map_apply( 0.0, 0.0, current_speed );
 	}
 
-	if( src )
-		stream_url_cpy( &s->src, src );
-	else
-		stream_url_cpy_url( &s->src, "" );
+	if( src ) {
+		if( stream_url_cpy( &s->src, src ) )
+			goto ErrorExit;
+	} else if( stream_url_cpy_url( &s->src, "" ) ) {
+		goto ErrorExit;
+	}
 
 	int    idx_size = 0; 
 	UCHAR *idx_data = NULL;
@@ -2228,6 +2379,21 @@ serprintf("no duration!\r\n" );
 		} 
 serprintf("VID_DEC: [%s]\r\n", s->video_dec ? s->video_dec->name : "(none)" ); 
 
+		/* Fire the props event at open so the mp layer sends the initial
+		 * MEDIA_SET_VIDEO_FPS to Java: the decode-side send sites only
+		 * fire on GEOMETRY changes (width/height/interlaced), so a file
+		 * whose fps is known from the container but whose geometry never
+		 * changes (every normal file) never delivered its fps - measured:
+		 * enable_tv_refreshrate_switch_mode=3 (closest refresh) never ran
+		 * for a 48/1 FEL file and the panel stayed at 120Hz while presents
+		 * pinned ~40/s. The handler re-reads rate/msPerFrame and only
+		 * sends when they differ from the last sent values, so a second
+		 * event later (geometry change) stays a no-op. */
+		if( s->message_cb ) {
+			s->message_cb( s, STREAM_VIDEO_PROPS_CHANGED );
+		}
+
+
 		// do we dump the stream?
 		if( stream_dump_video ) {
 			stream_dump_video = 0;
@@ -2327,9 +2493,11 @@ serprintf("cannot open audio!\n");
 				// This ensures audiotrack_set_output_params is called with the correct passthrough mode
 #ifdef CONFIG_SPDIF
 				AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
-				int passthrough_mode = 0;
-				if( spdif_is_passthrough_on() && spdif_init(sink) ) {
-					passthrough_mode = spdif_is_passthrough_on();
+				int passthrough_mode = spdif_is_passthrough_on();
+				if( passthrough_mode && !spdif_format_passthrough_supported( sink->format ) ) {
+					passthrough_mode = 0;
+				}
+				if( passthrough_mode && spdif_init(sink) ) {
 					DBG serprintf("stream_start: passthrough enabled, mode=%d\n", passthrough_mode);
 				}
 				s->audio_sink->set_passthrough( s, passthrough_mode );
@@ -2337,10 +2505,12 @@ serprintf("cannot open audio!\n");
 
 				if( s->audio_sink->start( s ) ) {
 serprintf("cannot start audio!\n");
-					// cannot start, close the codec
-					stream_close_audio_dec( s );
-					// drop audio
-					stream_drop_audio( s );
+					if( stream_restart_audio_as_pcm( s, "passthrough sink start failure" ) ) {
+						// cannot start, close the codec
+						stream_close_audio_dec( s );
+						// drop audio
+						stream_drop_audio( s );
+					}
 				}
 			}
 		}
@@ -2538,8 +2708,10 @@ DBGS serprintf("stream_resize\r\n");
 			msec_sleep( 300 );
 		}
 		if( s->video_sink ) {
+			pthread_mutex_lock( &s->video_sink_mutex );
 			s->video_sink->close( s->video_sink );
 			s->video_sink->open( s->video_sink, s->video, s, 0, &s->video_rc );
+			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
 		if ( s->video->valid ) {
 			// FIXME: hangs without this
@@ -2549,10 +2721,16 @@ DBGS serprintf("stream_resize\r\n");
 			stream_un_pause( s, !s->paused_internal );
 			s->paused_internal = 0;
 		}
-	} else if( s->video_sink->resize ) {
-		if (s->video_sink->resize( s->video_sink, s->video ) == 1 && stream_is_paused( s ))
+	} else {
+		int resized = 0;
+		pthread_mutex_lock( &s->video_sink_mutex );
+		if( s->video_sink && s->video_sink->is_open && s->video_sink->resize ) {
+			resized = s->video_sink->resize( s->video_sink, s->video );
+		}
+		pthread_mutex_unlock( &s->video_sink_mutex );
+		if( resized == 1 && stream_is_paused( s ) )
 			_stream_redraw( s );
-	}	
+	}
 	
 
 	return 0;
@@ -2598,16 +2776,7 @@ serprintf("STP: not open!\r\n");
 	}
 
 	// stop video sink (after decoder cleanup so sink-owned frames remain valid)
-	if( s->video_sink) {
-		if( s->video_sink->is_open ) {
-			s->video_sink->close( s->video_sink );
-		}
-		if( s->video_sink->delete ) {
-			s->video_sink->delete( s->video_sink );
-		}
-		s->video_sink = NULL;
-		s->put_time_mode = 0;
-	}
+	_stream_close_video_sink( s, 1 );
 
 	// stop audio decoder
 	stream_close_audio_dec( s );
@@ -2636,6 +2805,12 @@ serprintf("DROPPED: %d  B_DROPPED %d  DOUBLED %d \r\n", frames_dropped, frames_B
 serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_count * 1000 / took );
 		}
 	}
+
+	// The sfdec2 render thread can query stream timing state. Destroy these
+	// locks only after every decoder/sink component has stopped and joined.
+	pthread_mutex_destroy( &s->video_sink_mutex );
+	pthread_mutex_destroy( &s->anchor_mutex );
+	pthread_mutex_destroy( &s->mode2_heard_mutex );
 	
 	return 0;
 }
@@ -2648,7 +2823,7 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 void _stream_resync( STREAM *s ) 
 {
 	DBG serprintf("WALLCLOCK_RESET: by _stream_resync\n");
-	s->sink_ref_time = -1;
+	stream_sync_anchor_reset( s );
 	stream_sync_restart( s );
 }
 
@@ -2715,17 +2890,34 @@ serprintf("PAU: not_open\r\n");
 
 	if ( !was_paused ) {
 DBGS serprintf("stream_pause\r\n");
+		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+			s->audio_sink->get_passthrough( s ) : 0;
+		int serialize_transaction = s->audio_ctx && s->audio_sink_open &&
+			(passthrough == 1 || (passthrough >= 2 && device_get_android_api() >= 23));
+		if( serialize_transaction ) {
+			// Keep IEC and raw access units intact across pause. API 23+ uses
+			// non-blocking writes, so a Mode 2 barrier waits only for the current
+			// unit's remaining capacity, never a long blocking Java call.
+			int barrier_start_ms = atime();
+			pthread_mutex_lock( &s->audio_sink_mutex );
+			int barrier_wait_ms = atime() - barrier_start_ms;
+			if( barrier_wait_ms > 0 ) {
+				DBG serprintf("stream_pause: audio transaction barrier waited %d ms\n",
+					barrier_wait_ms);
+			}
+		}
 		if ( s->parser && s->parser->pause ) {
 			s->parser->pause( s, 1 );
 		}
-
+		s->paused = 1;
+		sfdec2_android_sync_on_pause( s, 1 );
 		stream_audio_mute( s );
 		if ( s->audio_ctx && s->audio_sink_open ) {
 			audio_interface_pause( s->audio_ctx );
 		}
-
-		s->paused = 1;
-		sfdec2_android_sync_on_pause( s, 1 );
+		if( serialize_transaction ) {
+			pthread_mutex_unlock( &s->audio_sink_mutex );
+		}
 	}
 
 	_stream_wait_for_idle( s, 1000 );
@@ -2746,24 +2938,60 @@ serprintf("UNP: not_open\r\n");
 	}
 	if ( !was_paused ) {
 DBGS serprintf("stream_un_pause\r\n");
-		sfdec2_android_sync_on_pause( s, 0 );
-
 		float audio_speed = audio_interface_get_audio_speed();
-		int using_atempo = audio_interface_is_using_atempo();
+		int using_atempo = audio_interface_is_using_atempo() &&
+			fabsf(audio_speed - 1.0f) > 1e-6f;
 		if ( using_atempo || fabsf(audio_speed - 1.0f) > 1e-6f ) {
-			s->sink_ref_time = -1;
+			int last_good_delay_ms = s->last_good_delay_ms;
+			int last_good_delay_valid = s->last_good_delay_valid;
+			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
+			stream_sync_anchor_reset( s );
 			stream_sync_restart( s );
+			// Pause/resume restarts the scheduler, not the audio device. Keep the
+			// last measured HW delay so a rapid resume can avoid static latency.
+			s->last_good_delay_ms = last_good_delay_ms;
+			s->last_good_delay_valid = last_good_delay_valid;
+			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
 			if ( s->video_sink && s->audio && s->audio->valid && s->audio_time != -1 ) {
 				stream_sync_audio( s, s->audio_time );
 			}
 		} else {
-			_stream_resync( s );
+			// Normal 1x resume resets scheduler state, but the AudioTrack and its
+			// buffered compressed media survive pause. Preserve the Mode 2 heard
+			// phase instead of snapping back to audio_time - static latency.
+			// Snapshot and restore so the one-shot reanchor in Commit B can prefer last_good
+			// over static latency on the first audio write after resume.
+			int last_good_delay_ms = s->last_good_delay_ms;
+			int last_good_delay_valid = s->last_good_delay_valid;
+			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
+			DBG serprintf("WALLCLOCK_RESET: by pause resume\n");
+			stream_sync_anchor_reset( s );
+			stream_sync_restart_after_pause( s );
+			s->last_good_delay_ms = last_good_delay_ms;
+			s->last_good_delay_valid = last_good_delay_valid;
+			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
 		}
 
 		// when we unpause, we re-fill the audio sink with 0 samples
 		// so that we are back to the same a2v sync as before
+		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+			s->audio_sink->get_passthrough( s ) : 0;
+		int requested_passthrough = 0;
+#ifdef CONFIG_SPDIF
+		if( s->audio && s->audio->valid ) {
+			requested_passthrough = spdif_is_passthrough_on();
+			if( requested_passthrough &&
+			    !spdif_format_passthrough_supported( s->audio->format ) ) {
+				requested_passthrough = 0;
+			}
+		}
+#endif
+		int compressed_resume = passthrough > 0 || requested_passthrough > 0;
 		int do_audio_preload = stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL &&
-			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f;
+			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f && !compressed_resume;
+		DBG serprintf("audio_resume_route: active_passthrough=%d requested_passthrough=%d compressed=%d preload=%d ctx=%d sink_open=%d\n",
+			passthrough, requested_passthrough, compressed_resume, do_audio_preload,
+			s->audio_ctx != NULL, s->audio_sink_open);
 		if ( do_audio_preload ) {
 			s->audio_preload = 1;
 		} else {
@@ -2771,14 +2999,32 @@ DBGS serprintf("stream_un_pause\r\n");
 			s->audio_stuff_zero = 0;
 		}
 
+		// Keep paused=1 until play() completes so a compressed remainder cannot
+		// reach a paused Java track. API 23+ Mode 2 shares the transaction mutex;
+		// legacy Mode 2 retains an interrupted remainder in the audio thread.
+		int serialize_transaction = passthrough == 1 ||
+			(passthrough >= 2 && device_get_android_api() >= 23);
+		if( serialize_transaction ) {
+			pthread_mutex_lock( &s->audio_sink_mutex );
+		}
+		if ( s->audio_ctx && compressed_resume ) {
+			audio_interface_unpause( s->audio_ctx );
+		}
 		s->paused = 0;
+		sfdec2_android_sync_on_pause( s, 0 );
 
 		if ( s->speed == STREAM_SPEED_NORMAL ) {
 			stream_audio_unmute( s );
 		}
 
-		if ( !do_audio_preload && s->audio_ctx && s->audio_sink_open ) {
+		// stream_pause() paused every open AudioTrack. Passthrough cannot use the
+		// PCM zero-preload path, and its sink-open flag may lag the live AudioTrack
+		// across format setup. Always issue play() for a live compressed route.
+		if ( s->audio_ctx && !compressed_resume && !do_audio_preload && s->audio_sink_open ) {
 			audio_interface_unpause( s->audio_ctx );
+		}
+		if( serialize_transaction ) {
+			pthread_mutex_unlock( &s->audio_sink_mutex );
 		}
 
 		if ( s->parser && s->parser->pause ) {
@@ -2832,8 +3078,7 @@ static int _real_time( STREAM *s, int frame_time )
 	switch( s->speed ) {
 	case STREAM_SPEED_NORMAL: {
 		// For variable speed, we pass the TS value directly to the sink.
-		// `s->vid_ref_time + (frame_time - s->vid_ref_time)` simplifies to `frame_time`.
-		// return s->vid_ref_time + RST_TO_TS( frame_time - s->vid_ref_time, int );
+		// The legacy anchor expression simplifies to frame_time at normal speed.
 		return frame_time;
 	} break;
 
@@ -2847,7 +3092,8 @@ static int _real_time( STREAM *s, int frame_time )
 	}
 
 	// Legacy path for discrete speeds (not used with modern audio speed)
-	return s->vid_ref_time + (frame_time - s->vid_ref_time) * mul / div;
+	int vid_ref_time = stream_sync_anchor_get_video( s );
+	return vid_ref_time + (frame_time - vid_ref_time) * mul / div;
 }
 
 #if 1
@@ -2880,7 +3126,8 @@ serprintf("_engine_abort!\r\n");
 // ************************************************************
 static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 {
-	if( s->sink_ref_time == -1 ) {			
+	if( stream_sync_anchor_get_sink( s ) == -1 ) {
+		int published = 0;
 		// Seek-based approach: no frame rescaling needed
 
 		if( s->video_sink->put_time ) {
@@ -2888,28 +3135,41 @@ static void _check_sink_ref_time( STREAM *s, VIDEO_FRAME *frame )
 			// After seek, defer anchoring until we have a post-seek audio timestamp
 			// to avoid seeding the sink clock from a stale reference.
 			if( s->sync_a_time == -1 ) {
+				DBG serprintf("SINK_REF_DEFERRED: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d seek_epoch=%d\n",
+					frame->time, s->video_time, s->audio_time, s->sync_a_time, s->seek_epoch);
 				return;
 			}
 			int anchor_ts = stream_get_heard_audio_ts( s, frame->time );
-			s->sink_ref_time = anchor_ts;
-			s->vid_ref_time  = frame->time;
-			s->video_sink->put_time( s->video_sink, anchor_ts );
-
 			DBG serprintf(
-				"SINK_REF_ESTABLISHED: sink_ref_time=%d, vid_ref_time=%d, frame_time=%d, put_time=%d (put_time mode)\n",
-				s->sink_ref_time, s->vid_ref_time, frame->time, s->sink_ref_time );
-			DBGV2 serprintf( "  <NSR %d>", frame->time );
+				"SINK_REF_CANDIDATE: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d anchor_ts=%d seek_epoch=%d put_mode=1\n",
+				frame->time, s->video_time, s->audio_time, s->sync_a_time, anchor_ts, s->seek_epoch );
+			if( anchor_ts < 0 ) {
+				DBG serprintf("SINK_REF_DEFERRED: negative put_time anchor frame_time=%d anchor_ts=%d start=%d resume=%d\n",
+					frame->time, anchor_ts, s->audio_start_pending, s->audio_resume_pending);
+				return;
+			}
+			published = stream_sync_anchor_publish( s, anchor_ts, frame->time, 1, 0 );
+			if( published ) {
+				DBG serprintf(
+					"SINK_REF_ESTABLISHED: sink_ref_time=%d, vid_ref_time=%d, frame_time=%d, put_time=%d (put_time mode)\n",
+					anchor_ts, frame->time, frame->time, anchor_ts );
+				DBGV2 serprintf( "  <NSR %d>", frame->time );
+			}
 		} else {
-			s->vid_ref_time = frame->time;
-			int reftime = s->video_sink->get_time( s->video_sink );
-			s->sink_ref_time = reftime - s->vid_ref_time;
-			DBG serprintf("SINK_REF_ESTABLISHED: vid_ref=%d, sink_time=%d, sink_ref=%d (get_time mode)\n", 
-				s->vid_ref_time, reftime, s->sink_ref_time);
+			published = stream_sync_anchor_seed_from_sink( s, frame->time );
+			if( published ) {
+				int sink_ref_time = stream_sync_anchor_get_sink( s );
+				int reftime = sink_ref_time + frame->time;
+				DBG serprintf("SINK_REF_ESTABLISHED: vid_ref=%d, sink_time=%d, sink_ref=%d (get_time mode)\n",
+					frame->time, reftime, sink_ref_time);
 DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
+			}
 		}
 
-		DBG serprintf("NEW_REF_TIME: sink_ref_time established with frame=%d (video_time=%d)\n", 
-			frame->time, s->video_time);
+		if( published ) {
+			DBG serprintf("NEW_REF_TIME: sink_ref_time established with frame=%d (video_time=%d)\n",
+				frame->time, s->video_time);
+		}
 	}
 }
 
@@ -2919,11 +3179,25 @@ DBGV2 serprintf("  <NSR %d/%d>", frame->time, reftime );
 //
 // ************************************************************
 
+/* 1Hz output-path diagnostics */
+static int _dbg_invalid, _dbg_putfail, _dbg_drop;
+static int _dbg_emit, _dbg_outfn, _dbg_outframes, _dbg_put;
+static int _dbg_cdata_sleep, _dbg_spin;
 static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 {
 	int real_time_calc = _real_time( s, time ); // should be ts
+	_dbg_put++;
+	int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	int total_audio_delay = stream_sync_av_delay( s );
+	int sink_ref_time = stream_sync_anchor_get_sink( s );
 	DBG serprintf("_put_frame_in_sink: frame_time=%d video_time=%d audio_time=%d sync_a_time=%d speed=%d\n",
 		time, s->video_time, s->audio_time, s->sync_a_time, s->speed);
+	if( s->put_time_mode && s->audio_time >= 0 ) {
+		DBG serprintf("video_sync_diag: frame=%d video=%d audio=%d heard=%d diff=%d put_mode=%d sink_ref=%d sink_delay=%d audio_delay=%d speed=%.3f\n",
+			time, s->video_time, s->audio_time, heard_audio_ts,
+			time - heard_audio_ts, s->put_time_mode, sink_ref_time,
+			s->sink_delay, total_audio_delay, audio_interface_get_audio_speed() );
+	}
 	if( s->video_sink->put_time ) {
 		// Android put_time mode: pass TS to the sink and let it pace against WC internally.
 		frame->blit_time = real_time_calc;
@@ -2933,12 +3207,12 @@ static int _put_frame_in_sink( STREAM *s, VIDEO_FRAME *frame, int time )
 		// Legacy mode: WC conversion with preroll compensation
 		// we add "stream_sink_preroll" here because the sink might switch to it's next frame
 		// while we do the call!
-		frame->blit_time = real_time_calc + s->sink_ref_time + stream_sink_preroll;
+		frame->blit_time = real_time_calc + sink_ref_time + stream_sink_preroll;
 		DBG2 serprintf( "_put_frame_in_sink: frame_time=%d(RST), real_time=%d(WC), preroll=%d, blit_time=%d(WC)\n",
 						time, real_time_calc, stream_sink_preroll, frame->blit_time );
 	}
 
-//serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), s->sink_ref_time, frame->blit_time );
+//serprintf("real %8d  ref %8d  blit %8d\n", _real_time( s, time ), sink_ref_time, frame->blit_time );
 	frame->time = time;
 	// a sink might want that info
 	frame->aspect_n = s->video->aspect_n,
@@ -2985,7 +3259,7 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 		if( s->sink_delay_count > 2 || s->sink_delay < (-1 * stream_sink_max_delay) ) {
 			DBG serprintf( "_check_sink_delay: wallclock reset delay=%d, count=%d\n",
 						   s->sink_delay, s->sink_delay_count );
-			s->sink_ref_time = -1;
+			stream_sync_anchor_reset( s );
 			s->sink_delay_count = 0;
 		}
 	} else {
@@ -2993,15 +3267,85 @@ DBGV2 serprintf("  d %3d|%3d(%2d)", s->sink_delay, at - vt, s->video_sink_count 
 	}
 }
 
+static int _frame_stale_after_seek( STREAM *s, VIDEO_FRAME *frame )
+{
+	if( !s || !frame || !s->put_time_mode || s->audio_time < 0 ||
+	    frame->epoch == s->seek_epoch ) {
+		return 0;
+	}
+
+	int heard_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	if( heard_ts <= 0 ) {
+		return 0;
+	}
+
+	int threshold = RST_TO_TS_DELTA( 50, int );
+	if( s->video && s->video->msPerFrame > 0 ) {
+		threshold = RST_TO_TS_DELTA( s->video->msPerFrame, int );
+	}
+
+	if( frame->time <= heard_ts + threshold ) {
+		return 0;
+	}
+
+	DBG serprintf("STALE_SEEK_FRAME_DROP: frame=%d frame_epoch=%d seek_epoch=%d heard=%d threshold=%d video=%d audio=%d\n",
+		frame->time, frame->epoch, s->seek_epoch, heard_ts, threshold,
+		s->video_time, s->audio_time);
+	return 1;
+}
+
 // ************************************************************
 //
 //	_output_frame_no_resize - kilroy was here
 //
 // ************************************************************
+/* 1Hz output-path diagnostics: where frames vanish between disp_q
+ * and the sink (invalid / put-fail / sync-drop) */
 static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME **qframe )
 {
+	_dbg_outfn++;
 	if( !frame || !frame->valid || !s->video_output || frame->time == -1 ) {
+		_dbg_invalid++;
 		goto Discard;
+	}
+
+	if( s->seek_video_drop && s->seek_video_target_ts > 0 ) {
+		if( frame->time < s->seek_video_target_ts ) {
+			DBG serprintf("VIDEO_SEEK_DROP: frame=%d target=%d\n", frame->time, s->seek_video_target_ts);
+			goto Discard;
+		}
+		if( frame->epoch != s->seek_epoch ) {
+			DBG serprintf("VIDEO_SEEK_STALE_DROP: frame=%d target=%d frame_epoch=%d seek_epoch=%d\n",
+				frame->time, s->seek_video_target_ts, frame->epoch, s->seek_epoch);
+			goto Discard;
+		}
+		if( s->seek_video_target_pending ) {
+			s->seek_video_ready_ts = frame->time;
+			s->seek_video_target_pending = 0;
+			DBG serprintf("VIDEO_SEEK_TARGET_READY: frame=%d target=%d epoch=%d\n",
+				frame->time, s->seek_video_target_ts, s->seek_epoch);
+		}
+		// Async decoders can deliver older preroll frames after a frame at or
+		// beyond the target.  Keep the target floor armed for the whole seek
+		// epoch; _seek_init() clears it when the next seek begins.
+	}
+	if( s->put_time_mode && s->audio_time >= 0 ) {
+		int heard_audio_ts = stream_get_heard_audio_ts( s, s->audio_time );
+		int total_audio_delay = stream_sync_av_delay( s );
+		int frame_minus_heard = frame->time - heard_audio_ts;
+		DBG serprintf("video_sched_diag: frame=%d video=%d audio=%d heard=%d frame_minus_heard=%d audio_delay=%d sink_ref=%d speed=%.3f seek_epoch=%d\n",
+			frame->time, s->video_time, s->audio_time, heard_audio_ts,
+			frame_minus_heard, total_audio_delay, stream_sync_anchor_get_sink( s ),
+			audio_interface_get_audio_speed(), s->seek_epoch );
+		// Track the realized A/V phase so stream_set_av_delay() can baseline it,
+		// and report the applied shift while a manual-delay window is open.
+		s->manual_delay_fmh_last = frame_minus_heard;
+		if( s->manual_delay_log_until_ms && atime() <= s->manual_delay_log_until_ms ) {
+			DBG serprintf("manual_delay_applied: av_user=%d baseline_fmh=%d now_fmh=%d delta=%d applied=%d\n",
+				s->av_delay, s->manual_delay_fmh_baseline, frame_minus_heard,
+				frame_minus_heard - s->manual_delay_fmh_baseline,
+				s->manual_audio_delay_applied_ms );
+		}
 	}
 	// For passthrough/AC3 recoding, wait for the first actual audio write
 	// before releasing video.  For PCM, do NOT wait for delay_valid: blocking
@@ -3013,14 +3357,14 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	// Skip the hold during seek preview: play_n_video_frames > 0 means we are in
 	// _stream_play_n_frames() showing scrub thumbnails.  Audio is idle during seek
 	// so delay_valid can never become 1 and the hold just burns the 2-second timeout.
-	if( get_android_sync() && s->video_hold_for_delay && s->audio_ctx &&
+	if( s->video_hold_for_delay && s->audio_ctx &&
 	    !s->seek_paused && s->play_n_video_frames <= 0 ) {
 		int hold_wait_ms = 0;
 		int passthrough_active = (s->audio_sink && s->audio_sink->get_passthrough) ?
 			s->audio_sink->get_passthrough( s ) : 0;
 		int ac3_recoding = libavos_get_ac3_recoding_enabled();
 		int wait_for_resume_audio = ((passthrough_active > 0) || ac3_recoding) && s->video_hold_for_resume_audio;
-		// Only hold for passthrough/AC3 resume — PCM skips the wait entirely.
+		// Only hold for passthrough/AC3 resume ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â PCM skips the wait entirely.
 		if( wait_for_resume_audio ) {
 			while( !_engine_abort( s ) &&
 			       s->audio_ctx &&
@@ -3048,7 +3392,18 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 	int sync_wait_ms = 0;
 	const int sync_wait_timeout_ms = 5000; // Avoid indefinite freeze if audio never starts
 
-	while( qframe && !_engine_abort( s ) && stream_sync_video( s, frame->time ) ) {
+	if( _frame_stale_after_seek( s, frame ) ) {
+		goto Discard;
+	}
+
+	// Seek preview runs while audio is deliberately idle. Waiting for the audio
+	// clock here consumes _stream_play_n_frames()'s entire one-second deadline.
+	while( qframe && !_engine_abort( s ) &&
+	       !s->seek_paused && s->play_n_video_frames <= 0 &&
+	       stream_sync_video( s, frame->time ) ) {
+		if( _frame_stale_after_seek( s, frame ) ) {
+			goto Discard;
+		}
 		if( (sync_wait_ms % 1000) == 0 ) { // every 1s
 DBG			serprintf("video waiting for audio sync (%d ms)\n", sync_wait_ms);
 		}
@@ -3087,10 +3442,12 @@ DBGQ serprintf("OUT[%2d|%2d] ", frame->index, frame_q_count( &s->decode_q ) );
 			if( s->drop > 0 ) {
 				// drop one frame
 				s->drop --;
-				s->sink_ref_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
+				int sink_ref_time = stream_sync_anchor_adjust_sink( s,
+					-RST_TO_TS_DELTA(s->video->msPerFrame, int) );
 				frames_dropped ++;
+				_dbg_drop++;
 				DBG serprintf("FRAME_DROP: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
-					RST_TO_TS_DELTA(s->video->msPerFrame, int), audio_interface_get_audio_speed(), s->sink_ref_time);
+					RST_TO_TS_DELTA(s->video->msPerFrame, int), audio_interface_get_audio_speed(), sink_ref_time);
 DBGY serprintf("[-%8d] ", frame->time );
 				s->drop_count ++;
 				if( s->vtime_post_sink ) {
@@ -3099,10 +3456,11 @@ DBGY serprintf("[-%8d] ", frame->time );
 			} else if( s->drop < 0 ) {
 				// double one frame
 				s->drop ++;
-				s->sink_ref_time += RST_TO_TS_DELTA(s->video->msPerFrame, int);
+				int sink_ref_time = stream_sync_anchor_adjust_sink( s,
+					RST_TO_TS_DELTA(s->video->msPerFrame, int) );
 				frames_doubled ++;
 				DBG serprintf("FRAME_DOUBLE: msPerFrame=%d, speed=%.2fx, sink_ref_time=%d\n", 
-					s->video->msPerFrame, audio_interface_get_audio_speed(), s->sink_ref_time);
+					s->video->msPerFrame, audio_interface_get_audio_speed(), sink_ref_time);
 DBGY serprintf("[+%8d] ", frame->time );
 				if( s->vtime_post_sink ) {
 					s->video_time -= RST_TO_TS_DELTA(s->video->msPerFrame, int);
@@ -3113,6 +3471,7 @@ DBGY serprintf("[ %8d] ", frame->time );
 			}
 
 			if( !_put_frame_in_sink( s, frame, frame->time ) ) {
+				_dbg_putfail++;
 				goto Discard;
 			}
 			if( qframe ) {
@@ -3629,7 +3988,17 @@ DBGS serprintf("stream_continue\r\n");
 			return 1;
 		}
 	}
-	return 0;
+	/*
+	 * A failed codec recovery can leave video marked valid after
+	 * stream_close_video_dec() has destroyed and cleared s->video_dec.  Do not
+	 * let the player continue through the rest of its current iteration in that
+	 * terminal state: the async path would otherwise dereference the cleared
+	 * decoder in put_out()/get_out().
+	 *
+	 * Successful recovery clears video_error and already returns above so the
+	 * new decoder is first used on a fresh player iteration.
+	 */
+	return s->video_error ? 1 : 0;
 }
 
 // *****************************************************************************
@@ -3691,6 +4060,36 @@ static void _do_stuff( STREAM *s )
 	if ( s->video->valid ) {
 		_get_next_chunk( s );
 	}
+
+	/* DISPLAY-RESAMPLE (free-run mode 4): the dovi video sink measured
+	 * the content cadence and the panel's actual latch grid and
+	 * published an audio speed that phase-locks content to the grid
+	 * (23.976fps content on Samsung's 24.000Hz video-refresh grid ->
+	 * 1.001001x). Apply each published hint exactly once per stream,
+	 * through the normal speed machinery (stream_set_av_speed ->
+	 * atempo + timeline mapping): the swap chain has already flipped
+	 * onto the grid cadence, the audio retune makes content follow it,
+	 * and the 23.976-on-24.000 beat (the last visible judder source)
+	 * is eliminated. Skipped when the user has an active custom speed
+	 * (never fight an explicit user setting) or audio speed control
+	 * is disabled. One-shot per generation: a later stream re-reads
+	 * the freshest hint once. */
+	{
+		extern int libavos_get_display_resample_hint(float *speed, int *generation);
+		float hint_speed = 0.f;
+		int gen = 0;
+		libavos_get_display_resample_hint(&hint_speed, &gen);
+		if ( gen > 0 && gen != s->display_resample_applied_gen ) {
+			float cur = audio_interface_get_audio_speed();
+			if ( hint_speed > 0.5f && hint_speed < 2.0f &&
+			     fabsf(cur - 1.0f) < 1e-6f ) {
+				serprintf("stream: applying display-resample speed %.6fx (sink hint gen %d)\n",
+				          hint_speed, gen);
+				stream_set_av_speed(s, hint_speed);
+			}
+			s->display_resample_applied_gen = gen;
+		}
+	}
 }
 
 // *****************************************************************************
@@ -3730,6 +4129,7 @@ static int output_frames( STREAM *s )
 {
 	int ret = 0;
 	VIDEO_FRAME *output_frame = frame_q_get( &s->disp_q );
+	_dbg_outframes++;
 	
 	while( output_frame ) {
 		if( stream_fake_ts_post && stream_fake_ts_num && stream_fake_ts_den ) {
@@ -3738,7 +4138,6 @@ static int output_frames( STREAM *s )
 	
 DBGQ serprintf("UNQ[%2d|%2d] ", output_frame->index, frame_q_count( &s->disp_q ) );
 DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), frame_q_count( &s->disp_q ));
-		output_frame->epoch = s->seek_epoch;
 		s->output_frame_fn( s, output_frame, &output_frame );
 		ret = 1;
 		
@@ -3762,6 +4161,33 @@ DBGQ2 serprintf("\r\nDEC[%2d]  DISP[%2d]  ", frame_q_count( &s->decode_q ), fram
 // *****************************************************************************
 static void _stream_player_sync( STREAM *s )
 {
+	/* 1Hz engine pacing diagnostics: queue depths + times - pinpoints
+	 * where frames pile up between decode and the sink */
+	{
+		static int64_t last_us;
+		static int loop_count;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		loop_count++;
+		if (s && s->video && s->video->valid && !last_us)
+			last_us = now_us;
+		if (s && s->video && s->video->valid && last_us && now_us - last_us >= 1000000) {
+			serprintf("engine: loop=%d emit=%d outfr=%d outfn=%d put=%d dec_q=%d disp_q=%d sink_cnt=%d msPF=%d vtime=%d atime=%d heard=%d dr_inv=%d dr_putfail=%d dr_drop=%d csleep=%d spin=%d\n",
+			          loop_count, _dbg_emit, _dbg_outframes, _dbg_outfn, _dbg_put,
+			          frame_q_count(&s->decode_q), frame_q_count(&s->disp_q),
+			          s->video_sink_count, s->video->msPerFrame,
+			          s->video_time, s->audio_time,
+			          s->audio_time != -1 ? stream_get_heard_audio_ts(s, s->audio_time) : -1,
+			          _dbg_invalid, _dbg_putfail, _dbg_drop,
+			          _dbg_cdata_sleep, _dbg_spin);
+			_dbg_cdata_sleep = _dbg_spin = 0;
+			_dbg_invalid = _dbg_putfail = _dbg_drop = 0;
+			_dbg_emit = _dbg_outframes = _dbg_outfn = _dbg_put = 0;
+			loop_count = 0;
+			last_us = now_us;
+		}
+	}
 DECODE_AGAIN:
 	if( s->video->valid && s->use_sink_frames ) {
 		pthread_mutex_lock( &s->video_sink_mutex );
@@ -3795,7 +4221,8 @@ DECODE_AGAIN:
 	}
 
 	if( !s->cdata_now.valid ) {
-DBGV serprintf("!" );				
+DBGV serprintf("!" );
+		_dbg_cdata_sleep++;
 		msec_sleep( 10 );
 		return;
 	}
@@ -3865,7 +4292,7 @@ serprintf("really cannot get DECODE_FRAME!\r\n");
 			s->drop_P        = 0;
 			s->delay         = 0;
 			s->delay_valid   = 0;
-			s->sink_ref_time = -1;
+			stream_sync_anchor_reset( s );
 			s->video_flush   = 1;
 			if( s->cdata_now.valid ) {
 				cbe_skip( s->cbe, s->cdata_now.size );
@@ -3910,6 +4337,7 @@ cdata_time  = s->cdata_now.time;
 	//  Call the Decoder (non-blocking)    
 	//-----------------------------------   
 	s->decode_frame->time       = s->cdata_now.time;
+	s->decode_frame->epoch      = s->seek_epoch;
 	s->decode_frame->user_ID    = s->cdata_now.user_ID;
 	s->decode_frame->type       = s->cdata_now.frm_type;
 	s->decode_frame->audio_skip = s->cdata_now.audio_skip;
@@ -3967,6 +4395,7 @@ DBGV1 serprintf(" w ");
 		}
 		if( !s->paused )
 			_do_stuff( s );
+		_dbg_spin++;
 		stream_yield_RT();
 	}
 #endif
@@ -4022,6 +4451,7 @@ DBGCV1 serprintf("[%6d  d %6d/%7d %d|%8d|%c]", cdata_time, s->vcodec.decoded, s-
 	// queue the decode frame for output
 	if( s->decode_frame ) {
 		output = 1;
+		_dbg_emit++;
 DBGQ serprintf("QUE[%2d<", s->decode_frame->index );
 		frame_q_put( &s->disp_q, s->decode_frame );
 DBGQ serprintf(">%2d] ", frame_q_count( &s->disp_q ) );
@@ -4100,16 +4530,7 @@ serprintf("error preparing decoder in realloc!\n");
 
 static int _handle_video_codec_error( STREAM *s )
 {
-	if (s->video_sink) {
-		if (s->video_sink->is_open) {
-			s->video_sink->close(s->video_sink);
-			if( s->video_sink->delete ) {
-				s->video_sink->delete( s->video_sink );
-			}
-			s->video_sink = NULL;
-		}
-		s->put_time_mode = 0;
-	}
+	_stream_close_video_sink( s, 1 );
 
 	int cpu = s->video_dec->cpu;	
 
@@ -4152,6 +4573,37 @@ static void _stream_player_async( STREAM *s )
 		// leave here if no video
 		return;
 	}
+	if( !s->video_dec ) {
+		/*
+		 * Decoder fallback destroys the failed decoder before trying its
+		 * replacement.  If every replacement fails, the engine can observe this
+		 * short terminal state until the end/error notification is consumed.
+		 */
+		return;
+	}
+	
+	/* 1Hz engine diagnostics (async): loop rate + queue depths - the
+	 * last un-instrumented stage of the pipeline (engine get_out -> sink
+	 * put); pinpoints where emitted frames pile up between decoder and
+	 * sink (measured: emit 44/s but put 31/s). */
+	{
+		static int64_t last_us;
+		static int loops;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		loops++;
+		if (!last_us)
+			last_us = now_us;
+		else if (now_us - last_us >= 1000000) {
+			serprintf("async eng: loop=%d dec_q=%d disp_q=%d sink_cnt=%d vtime=%d atime=%d\n",
+			          loops,
+			          frame_q_count(&s->decode_q), frame_q_count(&s->disp_q),
+			          s->video_sink_count, s->video_time, s->audio_time);
+			loops = 0;
+			last_us = now_us;
+		}
+	}
 	
 	if( s->video_flush ) {
 		s->video_flush = 0;
@@ -4179,6 +4631,10 @@ static void _stream_player_async( STREAM *s )
 	if( _check_end( s ) ) {
 		return;
 	}
+	/* _check_end() may have attempted and failed decoder recovery. */
+	if( !s->video_dec ) {
+		return;
+	}
 
 	// get a decode frame          
 	if( !s->decode_frame ) {
@@ -4192,6 +4648,7 @@ t_show = m_time - t_showtime;
 t_showtime = m_time;
 		// feed it to the decoder
 		VIDEO_FRAME *in_frame  = s->decode_frame;
+		in_frame->epoch = s->seek_epoch;
 		ret = s->video_dec->put_out( s->video_dec, &s->decode_frame );
 DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 	} else {
@@ -4213,12 +4670,51 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 			}	
 
 			if( s->play_n_video_frames && s->play_n_video_time != -1 ) {
-				if(( s->play_n_old_time && out_frame->time >= s->play_n_old_time   ) || // seek back
-				   (!s->play_n_old_time && out_frame->time <  s->play_n_video_time )) { // seek forward
+				int discard_seek_frame = out_frame->epoch != s->seek_epoch;
+				if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) ) {
+					// The refinement pass consumes keyframe preroll until it reaches
+					// the same timestamp floor used by resumed playback. Near its
+					// deadline, admit the closest newer frame reached so a long GOP does
+					// not leave the original keyframe as the final scrub preview.
+					int below_target = out_frame->time < s->play_n_video_time;
+					int deadline_ms = __atomic_load_n(
+						&s->seek_preview_refine_deadline_ms, __ATOMIC_ACQUIRE );
+					int accept_partial = below_target && deadline_ms > 0 &&
+						out_frame->epoch == s->seek_epoch &&
+						!__atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) &&
+						atime() >= deadline_ms - SEEK_PREVIEW_PARTIAL_MARGIN_MS &&
+						out_frame->time >= s->video_time;
+					if( accept_partial ) {
+						DBG serprintf("SEEK_PREVIEW_REFINE_PARTIAL: frame=%d target=%d remaining=%d epoch=%d\n",
+							out_frame->time, s->play_n_video_time,
+							s->play_n_video_time - out_frame->time, out_frame->epoch);
+					} else {
+						discard_seek_frame |= below_target;
+					}
+				} else if( s->play_n_old_time ) {
+					// A backward seek used to accept any frame below the old position.
+					// Delayed MediaCodec output just below that position could therefore
+					// terminate the one-frame preview while still showing the old scene.
+					// Allow a codec-reorder window around the achieved seek timestamp,
+					// rather than requiring an exact timestamp match.
+					int tolerance_ms = 100;
+					if( s->video && s->video->msPerFrame > 0 ) {
+						int reorder_frames = MAX( 2, s->video->reorder_depth + 1 );
+						tolerance_ms = MAX( tolerance_ms,
+							reorder_frames * s->video->msPerFrame );
+					}
+					int tolerance_ts = RST_TO_TS_DELTA( tolerance_ms, int );
+					discard_seek_frame |= (INT64)out_frame->time >
+						(INT64)s->play_n_video_time + tolerance_ts;
+				} else {
+					discard_seek_frame |= out_frame->time < s->play_n_video_time;
+				}
+				if( discard_seek_frame ) {
 					// discard the frame to decode queue
 					if( s->play_n_video_frames == 10 ) {
-						DBG serprintf("SEEK_DROP: frame_ts=%d target_ts=%d old_ts=%d\n",
-							out_frame->time, s->play_n_video_time, s->play_n_old_time);
+						DBG serprintf("SEEK_DROP: frame_ts=%d target_ts=%d old_ts=%d frame_epoch=%d seek_epoch=%d\n",
+							out_frame->time, s->play_n_video_time, s->play_n_old_time,
+							out_frame->epoch, s->seek_epoch);
 					}
 DBGQ serprintf("DIS %08d|%08d|%08d [%2d<", out_frame->time, s->play_n_video_time, s->play_n_old_time, out_frame->index );
 					frame_q_put( &s->decode_q, out_frame );
@@ -4383,6 +4879,22 @@ static void _seek_init( STREAM *s )
 
 	s->cdata_sub.valid  = 0;
 
+	s->seek_audio_drop = 0;
+	s->seek_video_drop = 0;
+	s->seek_video_target_pending = 0;
+	s->seek_audio_target_ts = 0;
+	s->seek_video_target_ts = 0;
+	s->seek_video_ready_ts = STREAM_NO_PTS_VALUE;
+
+	// video_end is a one-way latch (stream_video.c/_get_next_chunk, _check_end)
+	// that is otherwise never cleared. A single premature/transient parser EOF
+	// (e.g. a momentary I/O hiccup misclassified as end-of-stream mid-file) can
+	// set it once and then, since stream_audio.c unconditionally drops every
+	// audio chunk while it's set, permanently silence audio for the rest of the
+	// session even though later seeks resume parsing normally. audio_end has its
+	// own reset on every seek via stream_audio_flush() - mirror that here.
+	s->video_end = 0;
+
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;
 	}
@@ -4399,8 +4911,13 @@ static int _seek_pause( STREAM *s )
 	s->seek_paused     = 1;
 	s->sync_audio      = 0;
 	s->sync_video      = 0;
-	
+
+	// FFmpeg may be blocked in av_read_frame() while the parser thread is
+	// RUNNING. Make its interrupt callback return so the parser can reach
+	// thread_state_ack() and honor this IDLE request.
+	s->parser_interrupt = 1;
 	thread_state_set( &s->parser_tstate,  THREAD_IDLE );
+	s->parser_interrupt = 0;
 	if( s->audio->valid )
 		thread_state_set( &s->audio_tstate,  THREAD_IDLE );
 
@@ -4497,6 +5014,16 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 	stream_audio_flush( s );
 	if( s->audio_sink ) {
 		s->audio_sink->flush( s );
+		// The sink buffer is now EMPTY: the HAL consumes the first post-flush
+		// write immediately, so its physical presentation begins at write time,
+		// not selected_delay later. Tell the mode2 heard interpolator to seed
+		// its next epoch at the frontier (audio_time), not audio_time -
+		// selected_delay; the raw seed assumes a full buffer and understates
+		// presentation by up to the whole capacity during refill, making the
+		// sync gate hold video against a phantom deficit that the wall-anchored
+		// blit schedule then keeps forever (avos-446/447: ~380-1050ms added per
+		// track change). Must be set after stream_audio_flush, which clears it.
+		stream_sync_mode2_heard_frontier_arm( s );
 	}
 
 	if( s->video_dec) {
@@ -4556,7 +5083,21 @@ static int _stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, 
 	int old_time = s->video_time;
 	int last_good_delay_ms = s->last_good_delay_ms;
 	int last_good_delay_valid = s->last_good_delay_valid;
+	int old_audio_time = s->audio_time;
+	int old_sink_ref_time = stream_sync_anchor_get_sink( s );
+	int inherited_mode2_frontier = stream_sync_mode2_heard_frontier_pending( s );
 	int first_start = (old_time < 0 && s->seek_epoch == 0);
+	// A non-negative video timestamp does not prove playback was established:
+	// initial track selection can decode/preview frame zero and then issue another
+	// seek-to-zero before audio has ever anchored. Capture actual epoch ownership
+	// before pause/seek/reset operations mutate these fields. A pending frontier
+	// carries that ownership across rapid seeks where audio has not restarted yet.
+	int had_audio_epoch = old_audio_time >= 0 && old_sink_ref_time >= 0;
+	int preserve_mode2_frontier = had_audio_epoch || inherited_mode2_frontier;
+
+	__atomic_store_n( &s->seek_preview_superseded, 0, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->seek_preview_refining, 0, __ATOMIC_RELEASE );
+	__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0, __ATOMIC_RELEASE );
 
 	if( !s->open ) {
 serprintf("SEE: not open!\n");
@@ -4586,8 +5127,8 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 		if( ( err = s->parser->seek_time ? s->parser->seek_time( s, time, dir, flags, force_reload, &sc ) : 1 ) ) {
 			serprintf("stream_seek time err!\n");
 		} else {
-			int final_rst = sc.time;  // Parser returns RST position
-			DBG serprintf("SEEK_RESULT: final_rst = %d (%s)\n", final_rst, ms_to_hms_string(final_rst, hms_buf, sizeof(hms_buf)));
+			int final_ts = sc.time;  // Parser returns TS position
+			DBG serprintf("SEEK_RESULT: final_ts = %d (%s)\n", final_ts, ms_to_hms_string(final_ts, hms_buf, sizeof(hms_buf)));
 		}
 	} else {
 		// seek by pos
@@ -4602,6 +5143,18 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 	stream_audio_flush( s );
 	if( s->audio_sink ) {
 		s->audio_sink->flush( s );
+		// Preserve the submitted timeline only for a genuine in-playback
+		// restart. Initial playback must include the selected pipeline delay,
+		// so its Mode 2 heard clock starts at audio_time - selected_delay.
+		if( preserve_mode2_frontier ) {
+			stream_sync_mode2_heard_frontier_arm( s );
+			DBG serprintf("mode2_frontier_arm: cause=%s seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
+				inherited_mode2_frontier ? "seek_chain" : "seek",
+				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);
+		} else {
+			DBG serprintf("mode2_frontier_skip: cause=no_audio_epoch seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
+				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);
+		}
 	}
 	if( err ) {
 		stream_sync_init( s, sc.time );
@@ -4619,8 +5172,26 @@ serprintf("STUFF_ZERO!\n");
 			s->audio_stuff_zero = 1;
 		}
 	}
+	// Start the new generation before the parser and decoder resume. Seek preview
+	// frames then belong to the same epoch as subsequent playback, while delayed
+	// output from the previous seek remains distinguishable and can be discarded.
+	if( s->video->valid ) {
+		s->seek_epoch++;
+	}
 	if( s->video_dec) {
-		s->video_flush = 1;
+		// A newly opened async decoder has no pre-seek frames to discard. Some
+		// MediaCodec implementations lose the first GOP when flushed before their
+		// first input (avos-66), while others tolerate the redundant flush
+		// (avos-68). Keep flushing every established seek and all sync decoders.
+		int fresh_sfdec2 = first_start && s->video_dec->async &&
+			s->video_dec->name && !strcmp( s->video_dec->name, "sfdec2" );
+		if( fresh_sfdec2 ) {
+			s->video_flush = 0;
+			DBG serprintf("VIDEO_INITIAL_FLUSH_SKIP: seek_epoch=%d target=%d achieved=%d\n",
+				s->seek_epoch, time, sc.time);
+		} else {
+			s->video_flush = 1;
+		}
 		if( s->video_dec->async ) {
 			// in async case we let the machine roll from here until we get the frame we want
 			s->seek = 0;
@@ -4632,24 +5203,45 @@ serprintf("STUFF_ZERO!\n");
 
 	thread_state_set( &s->parser_tstate,  THREAD_RUNNING );
 
-	// Clear sync markers before probing frames; audio_time is already invalidated above.
+	// Clear sync markers before probing frames.
+	s->audio_time = -1;
 	s->sync_a_time = -1;
 	s->sync_v_time = -1;
 
+	int target_ts = (time >= 0) ? RST_TO_TS_TIME( time, int ) : sc.time;
+
 	if( s->video->valid ) {
-DBGV serprintf("play one frame\n");
+		DBGV serprintf("play one frame\n");
 		s->play_n_video_one = 1;
 		// Passthrough + put_time: initialize sync before any frame output so we don't
 		// display video ahead of audible audio during the initial probe.
 		if( s->video_sink && s->video_sink->put_time &&
 		    s->audio_sink && s->audio_sink->get_passthrough( s ) ) {
-			stream_sync_init( s, sc.time );
+			// On first start/resume no seek-drops are armed, so frames play from the
+			// achieved keyframe position, not the requested target. Sync to sc.time
+			// there, otherwise video_time runs ahead of real content and the first
+			// audio packet gets falsely rebased (AUDIO_PTS_BEHIND_VIDEO), causing a
+			// long silent catch-up and a permanent A/V offset.
+			int drops_armed = !first_start || s->seek_use_target_sync;
+			stream_sync_init( s, (drops_armed && time >= 0) ? target_ts : sc.time );
 		}
 		if( !s->seek_skip_initial_play ) {
-			_stream_play_n_frames( s, 10, sc.time, old_time );
+			int preview_shown = _stream_play_n_frames( s, 10, sc.time, old_time );
+			if( preview_shown && !first_start && time >= 0 && old_time > target_ts &&
+			    target_ts > sc.time &&
+			    !__atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) ) {
+				// The keyframe preview provides immediate scrub feedback. Refine it
+				// only while this remains the newest request, so key-repeat seeking
+				// never serializes behind decoding a complete GOP for every step.
+				DBG serprintf("SEEK_PREVIEW_REFINE: achieved=%d requested=%d old=%d\n",
+					sc.time, target_ts, old_time);
+				__atomic_store_n( &s->seek_preview_refining, 1, __ATOMIC_RELEASE );
+				s->play_n_video_one = 1;
+				_stream_play_n_frames( s, 10, target_ts, old_time );
+				__atomic_store_n( &s->seek_preview_refining, 0, __ATOMIC_RELEASE );
+			}
 		}
 		s->seek_skip_initial_play = 0;
-		s->seek_epoch++;
 		s->seek_frame = 0;
 	}
 
@@ -4658,6 +5250,12 @@ DBGV serprintf("play one frame\n");
 		int sync_time = sc.time;
 		if( s->seek_use_target_sync && s->seek_target_sync_time >= 0 ) {
 			sync_time = s->seek_target_sync_time;
+		} else if( time >= 0 && !first_start ) {
+			// Only sync to the requested target when seek-drops are armed to actually
+			// reach it. On first start/resume drops are skipped and playback begins at
+			// the achieved keyframe (sc.time); syncing to the requested time instead
+			// desyncs A/V by the keyframe distance and stalls audio start.
+			sync_time = target_ts;
 		}
 		if( s->video_sink && s->video_sink->put_time && first_start ) {
 			// Initial start/resume: rebase once using current delay fallback.
@@ -4678,20 +5276,28 @@ DBGV serprintf("play one frame\n");
 		s->last_good_delay_ms = last_good_delay_ms;
 		s->last_good_delay_valid = last_good_delay_valid;
 	}
-	// After seek, drop audio frames until we reach the target TS to avoid anchoring on late audio.
-	// Skip on initial start/resume when audio hasn't started to avoid silent startup.
+	// After seek, drop audio/video frames until we reach the target TS to avoid anchoring on late frames.
+	// Skip on initial start/resume when streams haven't started to avoid silent startup.
 	// If a target was pre-armed (e.g., speed-change realignment), preserve it.
-	if( s->audio && s->audio->valid ) {
-		int allow_drop = (s->audio_time >= 0) || s->seek_use_target_sync;
-		if( allow_drop ) {
-			if( s->seek_audio_target_ts <= 0 ) {
-				s->seek_audio_target_ts = sc.time;
-			}
+	int allow_drop = !first_start || s->seek_use_target_sync;
+	if( allow_drop ) {
+		if( s->seek_audio_target_ts <= 0 ) {
+			s->seek_audio_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : target_ts;
+		}
+		if( s->seek_video_target_ts <= 0 ) {
+			s->seek_video_target_ts = s->seek_use_target_sync ? s->seek_target_sync_time : target_ts;
+		}
+		if( s->audio && s->audio->valid ) {
 			s->seek_audio_drop = 1;
 			DBG serprintf("SEEK_AUDIO_DROP_ARMED: target_ts=%d\n", s->seek_audio_target_ts);
 		}
+		if( s->video && s->video->valid ) {
+			s->seek_video_drop = 1;
+			s->seek_video_target_pending = s->seek_video_target_ts > 0;
+			DBG serprintf("SEEK_VIDEO_DROP_ARMED: target_ts=%d\n", s->seek_video_target_ts);
+		}
 	}
-	sfdec2_android_sync_on_seek( s );
+	sfdec2_reset_sync_state_on_seek( s );
 	
 DBGS serprintf("\nseeked to frame %d  time %d|%d   pos %lld|%lld <------------ took %3d/%3d\n", sc.frame, s->video_time, s->audio_time, s->video_pos, s->audio_pos, atime() - start1, atime()- start2 );
 	
@@ -4731,10 +5337,15 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 {
 	int real_time;
 	if( s ) {
-		// Preserve pre-armed audio drop target (e.g. frame-accurate seek realignment).
+		// Preserve pre-armed audio/video drop target (e.g. frame-accurate seek realignment).
 		if( !(s->seek_use_target_sync && s->seek_audio_target_ts > 0) ) {
 			s->seek_audio_drop = 0;
 			s->seek_audio_target_ts = 0;
+		}
+		if( !(s->seek_use_target_sync && s->seek_video_target_ts > 0) ) {
+			s->seek_video_drop = 0;
+			s->seek_video_target_pending = 0;
+			s->seek_video_target_ts = 0;
 		}
 	}
 	
@@ -4746,12 +5357,21 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
 }
 
+void stream_seek_preview_supersede( STREAM *s )
+{
+	if( s ) {
+		__atomic_store_n( &s->seek_preview_superseded, 1, __ATOMIC_RELEASE );
+	}
+}
+
 int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir, int flags )
 {
 	if( s ) {
 		s->seek_skip_initial_play = 1;
 		s->seek_use_target_sync = 1;
 		s->seek_target_sync_time = target_ts;
+		s->seek_audio_target_ts = target_ts;
+		s->seek_video_target_ts = target_ts;
 	}
 	int ret = stream_seek_time( s, time, dir, flags );
 	if( ret ) {
@@ -4769,7 +5389,12 @@ int stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir
 	if( s->seek_audio_target_ts <= 0 ) {
 		s->seek_audio_target_ts = target_ts;
 	}
+	if( s->seek_video_target_ts <= 0 ) {
+		s->seek_video_target_ts = target_ts;
+	}
 	s->seek_audio_drop = 1;
+	s->seek_video_drop = 1;
+	s->seek_video_target_pending = s->seek_video_target_ts > 0;
 	s->seek_force_video_drop = 1;
 	_stream_play_n_frames( s, 10, target_ts, 0 );
 	s->seek_force_video_drop = 0;
@@ -4820,7 +5445,7 @@ serprintf("SFR: not open!\r\n");
 //	_stream_play_n_frames
 //
 // *****************************************************************************
-static void _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
+static int _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 {
 	char hms_buf[32];
 	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
@@ -4831,36 +5456,58 @@ serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
 	
 	if( !s || !s->open ) {
 serprintf("PNF: not open!\r\n");
-		return;
+		return 0;
+	}
+	if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) ) {
+		__atomic_store_n( &s->seek_preview_refine_deadline_ms, timeout,
+			__ATOMIC_RELEASE );
+	} else {
+		__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0,
+			__ATOMIC_RELEASE );
 	}
 
 	_stream_resync( s );
 
 	s->play_n_video_frames = n;
 	s->play_n_video_time   = (s->video_dec && s->video_dec->seek && !s->seek_force_video_drop) ? -1 : time;
-	if( old_time > time ) {
-		// seek back
-		s->play_n_old_time = old_time; 
+	if( old_time >= 0 && old_time > time ) {
+		// seek back (old_time == -1 means "no known prior position", not a real target)
+		s->play_n_old_time = old_time;
 	} else {
 		s->play_n_old_time = 0;
 	}
 	
 	// wait for it to play
+	int refine_superseded = 0;
 	while( s->play_n_video_frames && atime() < timeout ) {
-//serprintf("-");	
+		if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) &&
+		    __atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) ) {
+			refine_superseded = 1;
+			break;
+		}
+		//serprintf("-");
 		stream_yield();
 	}
-	if( s->play_n_video_frames ) {
-		// Seek decode did not converge in time. Clear one-shot seek state so
-		// playback can continue instead of staying stuck in seek-drop mode.
-		DBG serprintf("SEEK_PNF_TIMEOUT: target_ts=%d old_ts=%d video_time=%d audio_time=%d left=%d\n",
-			time, old_time, s->video_time, s->audio_time, s->play_n_video_frames);
+	int preview_shown = !s->play_n_video_frames;
+	if( !preview_shown ) {
+		if( refine_superseded ) {
+			DBG serprintf("SEEK_PREVIEW_REFINE_SUPERSEDED: target_ts=%d old_ts=%d video_time=%d\n",
+				time, old_time, s->video_time);
+		} else {
+			// Seek decode did not converge in time. Clear one-shot seek state so
+			// playback can continue instead of staying stuck in seek-drop mode.
+			DBG serprintf("SEEK_PNF_TIMEOUT: target_ts=%d old_ts=%d video_time=%d audio_time=%d left=%d\n",
+				time, old_time, s->video_time, s->audio_time, s->play_n_video_frames);
+		}
 		s->play_n_video_frames = 0;
+		s->play_n_video_one = 0;
 		s->play_n_video_time = -1;
 		s->play_n_old_time = 0;
 	}
 
 	_stream_wait_for_idle( s, 1000 );
+	__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0, __ATOMIC_RELEASE );
+	return preview_shown;
 }
 
 // *****************************************************************************
@@ -4975,6 +5622,8 @@ serprintf("SAS: audio_stream already set\n");
 	thread_state_set( &s->sub_tstate,    THREAD_IDLE );
 	
 	// close old audio decoder
+	stream_close_audio_filter( s );
+	s->pcm_accum_size = 0;
 	stream_close_audio_dec( s );
 
 	// stop audio sink
@@ -5016,6 +5665,12 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 		// no audio, disable it
 		stream_drop_audio( s );
 	} else {
+		if( stream_open_audio_filter( s ) ) {
+			stream_close_audio_dec( s );
+			stream_drop_audio( s );
+			goto ErrorExit;
+		}
+
 		// Re-evaluate sync mode for the new audio track
 		int default_sync_mode = stream_parser_get_sync_mode();
 		if (s->audio->valid && s->audio->format == WAVE_FORMAT_FLAC) {
@@ -5032,19 +5687,24 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 			// This ensures audiotrack_set_output_params is called with the correct passthrough mode
 #ifdef CONFIG_SPDIF
 			AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );
-			int passthrough_mode = 0;
-			if( spdif_is_passthrough_on() && spdif_init(sink) ) {
-				passthrough_mode = spdif_is_passthrough_on();
+			int passthrough_mode = spdif_is_passthrough_on();
+			if( passthrough_mode && !spdif_format_passthrough_supported( sink->format ) ) {
+				passthrough_mode = 0;
+			}
+			if( passthrough_mode && spdif_init(sink) ) {
 				DBG serprintf("stream_start: passthrough enabled, mode=%d\n", passthrough_mode);
 			}
 			s->audio_sink->set_passthrough( s, passthrough_mode );
 #endif
 
 			if( s->audio_sink->start( s ) ) {
-				// no audio, close the codec
-				stream_close_audio_dec( s );
-				// drop audio
-				stream_drop_audio( s );
+				if( stream_restart_audio_as_pcm( s, "passthrough sink restart failure" ) ) {
+					// no audio, close the codec
+					stream_close_audio_filter( s );
+					stream_close_audio_dec( s );
+					// drop audio
+					stream_drop_audio( s );
+				}
 			}
 		}
 	}
@@ -5056,7 +5716,7 @@ ErrorExit:
 	thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
 	
 	stream_un_pause( s, was_paused );
-	
+
 	return 0;
 }
 
@@ -5248,7 +5908,7 @@ static int _stream_redraw( STREAM *s )
 		return 1;
 
 serprintf("stream_redraw\r\n");
-	s->sink_ref_time = -1;
+	stream_sync_anchor_reset( s );
 	s->drop          = 0;
 
 	if( s->use_sink_frames ) {

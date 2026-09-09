@@ -27,12 +27,15 @@
 #include <libplacebo/opengl.h>
 #include <libplacebo/renderer.h>
 #include <libplacebo/swapchain.h>
+
 #include <libplacebo/utils/dolbyvision.h>
 #include <libplacebo/utils/libav.h>
 
 #include <libavutil/frame.h>
 #include <libavutil/hdr_dynamic_metadata.h>
 #include <libavutil/pixdesc.h>
+
+#include <dlfcn.h>
 
 #ifndef EGL_GL_COLORSPACE_BT2020_PQ_EXT
 #define EGL_GL_COLORSPACE_BT2020_PQ_EXT 0x3340
@@ -53,6 +56,17 @@ typedef void *GLeglImageOES;
 /* Source/libavos.c: user preference, nits (0 = auto) */
 extern float libavos_get_dolby_vision_target_nits(void);
 extern int libavos_get_dolby_vision_plane_scaler(void);
+
+/* --- EGL_ANDROID_presentation_time / EGL_ANDROID_get_frame_timestamps ---
+ * PFN types come from eglext.h (r26d): PFNEGLPRESENTATIONTIMEANDROIDPROC,
+ * PFNEGLGETFRAMETIMESTAMPSANDROIDPROC, PFNEGLGETNEXTFRAMEIDANDROIDPROC.
+ * dlsym'd at runtime like dvgl_fps_api (the module targets API 21).
+ * EGL_TIMESTAMP_PENDING_ANDROID (-2) vs EGL_TIMESTAMP_INVALID (-1)
+ * distinguish "not latched yet" from "no data". Declared BEFORE
+ * dovi_gl_priv: the struct carries the resolved pointers. */
+typedef EGLBoolean (*PFN_eglPresentationTimeANDROID)(EGLDisplay, EGLSurface, khronos_stime_nanoseconds_t);
+typedef EGLBoolean (*PFN_eglGetFrameTimestampsANDROID)(EGLDisplay, EGLSurface, EGLuint64KHR, EGLint, const EGLint *, EGLnsecsANDROID *);
+typedef EGLBoolean (*PFN_eglGetNextFrameIdANDROID)(EGLDisplay, EGLSurface, EGLuint64KHR *);
 
 typedef struct dovi_gl_priv {
 	ANativeWindow *window;
@@ -79,6 +93,37 @@ typedef struct dovi_gl_priv {
 	int          tex_slot;
 
 	int swap_w, swap_h;
+
+	/* --- EGL presentation feedback (the VideoClock hooks, JRiver/mpv
+	 * parity on Android): eglPresentationTimeANDROID schedules each
+	 * buffer's latch at the frame's content deadline (SF then paces
+	 * content-rate frames on whatever mode the panel picked - 48@60Hz
+	 * gets SF's own vsync allocation instead of our sleep loop racing
+	 * the compositor), and eglGetFrameTimestampsANDROID returns the
+	 * ACTUAL display-present time, which the dovi sink feeds back into
+	 * its presentation clock so vtime advances at physical presentation
+	 * rate (closing the loop: no open-loop drift, no audio-clock-only
+	 * anchoring). Both are EGL_ANDROID extensions (26/28+), dlsym'd
+	 * exactly like dvgl_fps_api above; has_* flags gate their use per
+	 * open, last_feedback_frame_id tracks the newest queued frame so
+	 * the sink polls exactly one new timestamp per present. */
+	int has_present_at;		/* eglPresentationTimeANDROID */
+	int has_frame_ts;		/* eglGetFrameTimestampsANDROID + getNextFrameId */
+	EGLuint64KHR next_frame_id;	/* id the NEXT swap will queue (spec:
+					 * eglGetNextFrameIdANDROID is a BEFORE-swap
+					 * query); captured by dovi_gl_present */
+	EGLuint64KHR prev_frame_id;	/* id of the frame queued by the
+					 * PREVIOUS present - queried by
+					 * dovi_gl_present_feedback. One-behind:
+					 * on a depth-3 swapchain at 60Hz the
+					 * just-queued frame latches 2-3 vsyncs
+					 * later; polling IT blocks the venc thread
+					 * ~28ms/present (measured 30/s ceiling).
+					 * The PREVIOUS frame latched a frame ago -
+					 * its query returns immediately. */
+	PFN_eglPresentationTimeANDROID eglPresentationTime;
+	PFN_eglGetFrameTimestampsANDROID eglGetFrameTimestamps;
+	PFN_eglGetNextFrameIdANDROID eglGetNextFrameId;
 } dovi_gl_priv;
 
 static pl_voidfunc_t dovi_gl_get_proc_addr(const char *name)
@@ -86,10 +131,44 @@ static pl_voidfunc_t dovi_gl_get_proc_addr(const char *name)
 	return (pl_voidfunc_t) eglGetProcAddress(name);
 }
 
+/* --- runtime loader for the two EGL_ANDROID entry points --- */
+static struct {
+	void	*lib;
+	PFN_eglPresentationTimeANDROID	eglPresentationTime;
+	PFN_eglGetFrameTimestampsANDROID	eglGetFrameTimestamps;
+	PFN_eglGetNextFrameIdANDROID	eglGetNextFrameId;
+	int	 loaded;
+} dvgl_present_api;
+
+static int dvgl_present_api_load(void)
+{
+	if (dvgl_present_api.loaded)
+		return 0;
+	dvgl_present_api.lib = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+	if (!dvgl_present_api.lib)
+		return 1;
+	dvgl_present_api.eglPresentationTime = (PFN_eglPresentationTimeANDROID)
+		dlsym(dvgl_present_api.lib, "eglPresentationTimeANDROID");
+	dvgl_present_api.eglGetFrameTimestamps = (PFN_eglGetFrameTimestampsANDROID)
+		dlsym(dvgl_present_api.lib, "eglGetFrameTimestampsANDROID");
+	dvgl_present_api.eglGetNextFrameId = (PFN_eglGetNextFrameIdANDROID)
+		dlsym(dvgl_present_api.lib, "eglGetNextFrameIdANDROID");
+	/* partial is fine: present_at and feedback gate independently */
+	dvgl_present_api.loaded = 1;
+	return 0;
+}
+
 static void dovi_gl_swap_buffers(void *priv_data)
 {
 	dovi_gl_priv *p = priv_data;
 	eglSwapBuffers(p->display, p->surface);
+	/* NOTE: the frame-id capture lives in dovi_gl_present (before the
+	 * swap), NOT here: eglGetNextFrameIdANDROID is a BEFORE-swap query
+	 * ('identifier for the next frame to be swapped', per the
+	 * EGL_ANDROID_get_frame_timestamps spec) - calling it after the
+	 * swap yields the id of the frame AFTER the one just queued, and
+	 * every feedback poll for that id stays PENDING forever (measured:
+	 * fb=0 steady-state, the probe disabled itself on the first try). */
 }
 
 static int dovi_gl_has_ext(const char *exts, const char *ext)
@@ -108,6 +187,93 @@ static void dovi_gl_log_cb(void *priv, enum pl_log_level level, const char *msg)
 {
 	if (level <= PL_LOG_WARN)
 		serprintf("PLGL: %s\n", msg);
+}
+
+/* ANativeWindow_setFrameRate entry points (API 30+), dlsym'd at runtime.
+ * The module builds at APP_PLATFORM android-21, so the NDK headers do not
+ * declare these and a compile-time #if __ANDROID_API__ >= 30 guard compiles
+ * the whole hint out - measured: the dovi sink believed it had latched 48Hz
+ * (framerate_set=1 swallowed the -1), while dumpsys showed mActiveModeId=1
+ * (120Hz) and presents pinned at ~40/s = 3 vsyncs on 48fps FEL content; the
+ * whole pipeline then shed the ~8/s surplus as park/decdrops. dlsym keeps
+ * libavos.so loading on <API 30 devices exactly like dvhw_api's AImage_*
+ * pattern (codec_mediacodec_dovi.c), and actually reaches the API on 30+. */
+#ifndef ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+/* AOSP ANativeWindow.h values: DEFAULT=0 (any rate ok - SF picks a
+ * convenient mode, measured: 48fps content landed on 60Hz and presents
+ * stayed ~40/s), FIXED_SOURCE=1 (fixed-rate content - video: SF picks a
+ * mode where the content rate latches, the 48Hz one-vsync-per-frame
+ * cadence). Media players use FIXED_SOURCE for video surfaces. */
+#define ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE 1
+#endif
+/* AOSP ANativeWindow.h: ANativeWindow_setFrameRateWithChangeStrategy
+ * (API 31+): strategy 1 = CHANGE_FRAME_RATE_ALWAYS. The default 3-arg call
+ * uses ONLY_IF_SEAMLESS and Samsung's 120->48 transition counts as
+ * non-seamless, so SF kept the display at 60/96Hz (measured: FIXED_SOURCE
+ * hint accepted, window layer vote read back 48Hz ExactOrMultiple, but
+ * mActiveModeId stayed 3 (60Hz) and presents pinned ~40/s). ALWAYS is
+ * what Surface.setFrameRate(..., CHANGE_FRAME_RATE_ALWAYS) - the Java
+ * player's own mode-2 path (Player.java:1064) - uses to force Samsung
+ * panels; fall back to the 3-arg call when the 4-arg symbol is absent
+ * (API 30). */
+#define ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS 1
+typedef int32_t (*PFN_ANativeWindow_setFrameRateWithChangeStrategy)(
+	ANativeWindow *, float, int8_t, int8_t);
+typedef int32_t (*PFN_ANativeWindow_setFrameRate)(ANativeWindow *, float, int8_t);
+
+static struct {
+	void	*lib;
+	PFN_ANativeWindow_setFrameRateWithChangeStrategy setFrameRate2;
+	PFN_ANativeWindow_setFrameRate setFrameRate;
+	int	 loaded;
+} dvgl_fps_api;
+
+static int dvgl_fps_api_load(void)
+{
+	if (dvgl_fps_api.loaded)
+		return 0;
+	dvgl_fps_api.lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+	if (!dvgl_fps_api.lib) {
+		serprintf(TAG ": cannot dlopen libandroid.so for setFrameRate\n");
+		return 1;
+	}
+	dvgl_fps_api.setFrameRate2 = (PFN_ANativeWindow_setFrameRateWithChangeStrategy)
+		dlsym(dvgl_fps_api.lib, "ANativeWindow_setFrameRateWithChangeStrategy");
+	dvgl_fps_api.setFrameRate = (PFN_ANativeWindow_setFrameRate)
+		dlsym(dvgl_fps_api.lib, "ANativeWindow_setFrameRate");
+	if (!dvgl_fps_api.setFrameRate2 && !dvgl_fps_api.setFrameRate) {
+		serprintf(TAG ": ANativeWindow_setFrameRate not present (<API 30)\n");
+		dlclose(dvgl_fps_api.lib);
+		dvgl_fps_api.lib = NULL;
+		return 1;
+	}
+	dvgl_fps_api.loaded = 1;
+	return 0;
+}
+
+/* Declare content fps on the window (see dovi_gl.h). Runtime-resolved so the
+ * android-21 build still reaches the API 30+ entry point; pre-30 devices
+ * return -1 and the sink simply paces on the default mode. */
+int dovi_gl_set_framerate(void *ctx, float fps)
+{
+	dovi_gl_priv *p = (dovi_gl_priv *) ctx;
+	if (!p || !p->window || fps <= 0.0f || fps > 240.0f)
+		return -1;
+	if (dvgl_fps_api_load())
+		return -1;
+	int32_t rc;
+	if (dvgl_fps_api.setFrameRate2)
+		rc = dvgl_fps_api.setFrameRate2(p->window, fps,
+			ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+			ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS);
+	else
+		rc = dvgl_fps_api.setFrameRate(p->window, fps,
+			ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+	if (rc == 0)
+		serprintf(TAG ": surface frame rate set to %.3f Hz (always)\n", fps);
+	else
+		serprintf(TAG ": setFrameRate rc=%d (ignored)\n", (int) rc);
+	return rc == 0 ? 0 : -1;
 }
 
 /* Create the on-screen EGL context + libplacebo stack for the native
@@ -154,6 +320,26 @@ int dovi_gl_open(void **ctx, void *native_window)
 		serprintf(TAG ": EGL_ANDROID_recordable missing\n");
 		goto fail;
 	}
+	/* presentation feedback hooks: resolve the EGL_ANDROID entry points
+	 * (present-at scheduling + actual-latch timestamps) and gate them on
+	 * BOTH the extension string and the symbol resolving. The sink keeps
+	 * its deadline-wait as the fallback on any miss - behavior identical
+	 * to today's build. */
+	if (!dvgl_present_api_load()) {
+		p->eglPresentationTime = dvgl_present_api.eglPresentationTime;
+		p->eglGetFrameTimestamps = dvgl_present_api.eglGetFrameTimestamps;
+		p->eglGetNextFrameId = dvgl_present_api.eglGetNextFrameId;
+		p->has_present_at = (p->eglPresentationTime != NULL) &&
+			exts && dovi_gl_has_ext(exts, "EGL_ANDROID_presentation_time");
+		p->has_frame_ts = (p->eglGetFrameTimestamps != NULL) &&
+			(p->eglGetNextFrameId != NULL) &&
+			exts && dovi_gl_has_ext(exts, "EGL_ANDROID_get_frame_timestamps");
+	} else {
+		p->has_present_at = p->has_frame_ts = 0;
+	}
+	/* extension probe (symbols + extension string) - the per-surface
+	 * eglSurfaceAttrib enable lives at the FINAL-surface point below
+	 * (after the BT.2020-PQ recreation), not here. */
 	if (!eglChooseConfig(p->display, config_attrs, &config, 1, &num_configs)
 	    || num_configs < 1)
 		goto fail;
@@ -169,16 +355,23 @@ int dovi_gl_open(void **ctx, void *native_window)
 		goto fail;
 
 	/* try to switch the surface to the BT.2020-PQ colorspace; harmless
-	 * no-op on EGL < 1.5 without EXT_gl_colorspace_bt2020_pq */
+	 * no-op on EGL < 1.5 without EXT_gl_colorspace_bt2020_pq. NOTE:
+	 * destroy the plain surface FIRST - an ANativeWindow allows only ONE
+	 * EGL surface per api-connect; creating the replacement while the
+	 * original is alive fails with EGL_BAD_ALLOC 'already connected to
+	 * another API' (measured: HDR10 mode NEVER engaged, every run
+	 * logged 'SDR fallback', and tone-mapping then runs the SDR path -
+	 * visible color/quality loss on every DV file so far). */
 	if (exts && dovi_gl_has_ext(exts, "EGL_KHR_gl_colorspace") &&
 	    dovi_gl_has_ext(exts, "EGL_EXT_gl_colorspace_bt2020_pq")) {
+		eglDestroySurface(p->display, p->surface);
+		p->surface = EGL_NO_SURFACE;
 		EGLSurface cs_surface = eglCreateWindowSurface(
 			p->display, config, p->window,
 			(const EGLint[]) { EGL_GL_COLORSPACE,
-			                   EGL_GL_COLORSPACE_BT2020_PQ_EXT,
-			                   EGL_NONE });
+					   EGL_GL_COLORSPACE_BT2020_PQ_EXT,
+					   EGL_NONE });
 		if (cs_surface != EGL_NO_SURFACE) {
-			eglDestroySurface(p->display, p->surface);
 			p->surface = cs_surface;
 			p->surface_hdr = 1;
 		}
@@ -186,9 +379,38 @@ int dovi_gl_open(void **ctx, void *native_window)
 	serprintf(TAG ": EGL surface created (%s)\n",
 	          p->surface_hdr ? "HDR10 BT.2020+PQ" : "SDR fallback");
 
+	/* enable per-frame timestamp collection NOW: the surface in
+	 * p->surface is final at this point (the BT.2020-PQ recreation above
+	 * replaced the initial plain surface - an attrib set before this
+	 * point targeted a dead/EGL_NO_SURFACE handle and silently failed,
+	 * leaving every eglGetFrameTimestampsANDROID query EGL_BAD_SURFACE
+	 * and the sink's feedback probe permanently disabled: measured
+	 * fb=0 for every run while the extension was present and the ids
+	 * were correct). Spec: EGL_ANDROID_get_frame_timestamps §eglSurfaceAttrib
+	 * - 'initial value is false', queries on an un-enabled surface
+	 * generate EGL_BAD_SURFACE. */
+	if (p->has_frame_ts) {
+		if (!eglSurfaceAttrib(p->display, p->surface,
+		                      EGL_TIMESTAMPS_ANDROID, EGL_TRUE))
+			serprintf(TAG ": eglSurfaceAttrib(TIMESTAMPS) failed eglErr 0x%x\n",
+			          eglGetError());
+		else
+			serprintf(TAG ": frame timestamp collection enabled\n");
+		}
+
 	if (!eglMakeCurrent(p->display, p->surface, p->surface, p->context))
 		goto fail;
 
+	/* Present pacing belongs to the venc thread's deadline wait (mpv
+	 * flip_page model) with the DEFAULT swap interval: SF latches on its
+	 * own vsync. An interval-0 experiment (07:13+ builds) let eglSwapBuffers
+	 * return immediately but coincided with pipeline-wide degradation
+	 * (decode loops 1800→434/s, put rate 43→25/s) - unthrottled 120Hz
+	 * compositing of the 4K HDR layer loads the shared video bus and the
+	 * codec slows. Default interval keeps the 06:22-build behavior
+	 * (pres 41-43/s sustained).
+	 * NOTE: the context STAYS current here - pl_opengl_create below
+	 * probes GL extensions on the current context. */
 	p->log = pl_log_create(PL_API_VER, pl_log_params(
 		.log_cb   = dovi_gl_log_cb,
 		.log_level = PL_LOG_INFO,
@@ -205,10 +427,25 @@ int dovi_gl_open(void **ctx, void *native_window)
 
 	p->swap = pl_opengl_create_swapchain(p->gl, pl_opengl_swapchain_params(
 		.swap_buffers = dovi_gl_swap_buffers,
-		/* 3 frames in flight: the venc thread renders ahead into the EGL
-		 * back buffers while previous frames wait for their vsync; the
-		 * fence-wait inside swap_buffers is the backpressure point */
-		.max_swapchain_depth = 3,
+		/* 6 with scheduled presents + cadence-locked waits: depth 2 measured
+		 * a 30/s present ceiling with 33ms swaps on 60Hz - the fence wait
+		 * inside swap_buffers serializes on the oldest in-flight frame
+		 * retiring (2 vsyncs), and renders throttle to match, queue grows,
+		 * the drain skips (13-20/s). With present_at active SF HOLDS each
+		 * buffer to its target vsync instead of compositing immediately,
+		 * so the old depth-3 hazard (unthrottled 120Hz coalescing, ~19.5ms
+		 * SF holds) cannot recur. Depth is also the RENDER run-ahead budget:
+		 * pl_swapchain_start_frame's buffer acquire only releases when the
+		 * OLDEST buffer latches (SF holds it to its target), so the render
+		 * can only run ahead by depth-1 presents. At 24fps with depth 3/4
+		 * the acquire blocked 14-43ms serialized in front of the deadline
+		 * wait (measured rend avg 23-43ms, pres 17.6-18.5/s on GoT 4K24,
+		 * all drop counters zero): 4 slots = render + 2-3 held at targets
+		 * leaves <1 period of acquire headroom; a jitter spike anywhere
+		 * in the ring stalls the render a full extra period. Depth 6 gives
+		 * ~2 periods of headroom (mpv's Android sizing for high-fps 4K;
+		 * JRiver's fork: BufferCount = depth + slack + 1, up to 16). */
+		.max_swapchain_depth = 6,
 		.priv          = p,
 	));
 	if (!p->swap)
@@ -409,7 +646,14 @@ int dovi_gl_render(void *ctx, struct AVFrame *bl, struct AVFrame *el)
 /* Present the frame rendered by dovi_gl_render: swap at the frame's
  * deadline. Blocks (fence wait inside pl_swapchain_swap_buffers) only
  * when 3 frames are already queued - natural backpressure, identical to
- * mpv's flip_page + libplacebo max_swapchain_depth pacing. */
+ * mpv's flip_page + libplacebo max_swapchain_depth pacing.
+ *
+ * Frame-id capture (BEFORE the swap): eglGetNextFrameIdANDROID 'returns
+ * an identifier for the next frame to be swapped' (spec wording) - the
+ * value read here IS the id the swap immediately below queues. Staged
+ * into last_feedback_frame_id so dovi_gl_present_feedback polls the
+ * frame THIS swap queued (querying the after-swap value instead targets
+ * an unqueued frame and stays PENDING forever - measured fb=0). */
 void dovi_gl_present(void *ctx)
 {
 	dovi_gl_priv *p = ctx;
@@ -417,7 +661,92 @@ void dovi_gl_present(void *ctx)
 		return;
 	if (!eglMakeCurrent(p->display, p->surface, p->surface, p->context))
 		return;
+	/* id rotation (BEFORE the swap, per the spec): next_frame_id is
+	 * captured for the frame this swap queues; the id of the frame the
+	 * PREVIOUS present queued becomes prev_frame_id - the feedback query
+	 * target. One-behind model keeps the query non-blocking (see the
+	 * struct comment). */
+	if (p->has_frame_ts) {
+		EGLuint64KHR fid = 0;
+		if (p->eglGetNextFrameId(p->display, p->surface, &fid)) {
+			p->prev_frame_id = p->next_frame_id;
+			p->next_frame_id = fid;
+		}
+	}
 	pl_swapchain_swap_buffers(p->swap);
+}
+
+/* Scheduled present: tell SurfaceFlinger the CLOCK_MONOTONIC ns time at
+ * which this buffer should latch, THEN swap. SF holds the buffer until
+ * the vsync nearest that target (the swap itself returns immediately;
+ * the latch happens in the compositor). The sink still caps its own
+ * deadline-wait per mpv flip_page semantics, but with an accepted
+ * target the compositor does the fine pacing: on a 60Hz panel 48fps
+ * frames allocate to 5:4 vsyncs by SF, and no frame latches half a
+ * frame early. JRiver VideoClock parity on Windows uses the identical
+ * per-present desiredPresentTime concept via flip-model Present().
+ * Returns 0 if the hint was set, -1 if unsupported (caller presents
+ * unscheduled). */
+int dovi_gl_present_at(void *ctx, int64_t target_monotonic_ns)
+{
+	dovi_gl_priv *p = ctx;
+	if (!p)
+		return -1;
+	if (!p->has_present_at || !p->eglPresentationTime)
+		return -1;
+	if (!p->eglPresentationTime(p->display, p->surface,
+		                           (khronos_stime_nanoseconds_t) target_monotonic_ns))
+		return -1;
+	return 0;
+}
+
+/* Actual-latch feedback for the ONE-BEHIND frame: the frame queued by
+ * the PREVIOUS present. On a depth-3 swapchain the just-queued frame
+ * latches 2-3 vsyncs out - polling it blocked the venc thread ~28ms/
+ * present (measured 30/s ceiling, 18-23/s skips). The previous frame
+ * latched ~a frame ago: the query returns immediately with the ACTUAL
+ * display-present time (EGL_DISPLAY_PRESENT_TIME_ANDROID, CLOCK_
+ * MONOTONIC ns). Returns 0 with *actual_monotonic_ns set, 1 while
+ * still pending (short - only when the previous frame is still in
+ * flight), 2 when no one-behind frame is queued YET (first present -
+ * the caller's capability probe must NOT treat this as unsupported),
+ * -1 unsupported/invalid. */
+int dovi_gl_present_feedback(void *ctx, int64_t *actual_monotonic_ns)
+{
+	const EGLint names[1] = { EGL_DISPLAY_PRESENT_TIME_ANDROID };
+	EGLnsecsANDROID values[1] = { 0 };
+	dovi_gl_priv *p = ctx;
+	if (!p || !actual_monotonic_ns)
+		return -1;
+	if (!p->has_frame_ts || !p->eglGetFrameTimestamps)
+		return -1;
+	if (!p->prev_frame_id)
+		return 2;	/* no one-behind frame yet (first present) */
+	if (!p->eglGetFrameTimestamps(p->display, p->surface,
+		                          p->prev_frame_id, 1, names, values))
+		return -1;
+	if (values[0] == EGL_TIMESTAMP_PENDING_ANDROID) {
+		/* ONE-BEHIND ONLY. The earlier prev2/prev3 fallback returned the
+		 * latch of a frame 2-3 presents back while the caller paired it
+		 * with the ONE-BEHIND frame's blit anchor - an incoherent pair
+		 * off by 1-2 periods that mis-anchored the phys clock by a full
+		 * period (review finding 2: biased sync-acquisition jumps and
+		 * rate-trim steps on every compositor hiccup, exactly the
+		 * pacing machinery this branch fixes). The sample is NOT lost
+		 * by returning PENDING here: every wait/gate loop polls at its
+		 * 100us-2ms cadence, the ids only rotate at the NEXT present,
+		 * and the depth-2 inflight gate bounds how far the one-behind
+		 * sample can lag - the sample lands and is picked up on a
+		 * later poll. A PENDING result is the truthful answer for
+		 * 'the one-behind frame has not latched yet'. */
+		return 1;
+	}
+	if (values[0] == EGL_TIMESTAMP_INVALID_ANDROID)
+		return -1;
+	if (values[0] <= 0)
+		return -1;
+	*actual_monotonic_ns = (int64_t) values[0];
+	return 0;
 }
 
 /* Hardware path: import the MediaCodec AHardwareBuffer as an OES texture.

@@ -104,7 +104,11 @@ Native determines IEC support by inspecting codec flags set by Java:
 `audio_interface_audiotrack_java.c`:
 
 - **Mode 2**: uses codec-specific `AudioTrack` encodings (AC3/EAC3/DTS/TrueHD, etc.)
-  - output channels often forced to 2 (stereo container)
+  - unsupported route/codec combinations are rejected before `AudioTrack` setup and fall back to PCM decode unless passthrough is explicitly forced
+  - AC3/EAC3/DTS core use stereo channel masks as codec-specific compressed transport
+  - E-AC3 JOC uses `ENCODING_E_AC3_JOC` only on API 29+ when advertised; otherwise it falls back to base `ENCODING_E_AC3`
+  - DTS-HD MA uses `ENCODING_DTS_HD_MA` only on API 34+ when advertised; otherwise it falls back to generic `ENCODING_DTS_HD`, then DTS core
+  - TrueHD uses `ENCODING_DOLBY_TRUEHD` only when the route advertises TrueHD; multichannel masks follow the source channel count, with a stereo retry only if the platform rejects the multichannel `AudioTrack`
   - content sample rate is preserved (e.g., 48kHz)
 - **Mode 1**: IEC61937
   - container rates like 192kHz for EAC3/TrueHD/DTS-HD
@@ -116,29 +120,133 @@ Native determines IEC support by inspecting codec flags set by Java:
 
 - Compressed passthrough bursts (direct passthrough and AC3-recoded output) are
   written as whole bursts, not PCM-sized sub-chunks.
-- If `AudioTrack.write()` accepts only part of a compressed burst, Nova drops
-  the remainder of that burst instead of retrying the tail as if it were PCM.
-  Retrying a tail fragment would corrupt IEC / compressed framing.
+- A positive short `AudioTrack.write()` is continued from the remaining byte
+  offset until the same compressed unit is complete. No following unit may be
+  submitted, and logical duration is published exactly once after completion.
+  Pause/play is serialized with this transaction so IEC and raw access units
+  cannot be split across a track pause. Destructive aborts flush the incomplete
+  stream and restart its timing epoch.
 - Passthrough `can_write()` may use exact capacity gating when playback-head
   accounting is usable, but falls back to the previous permissive behavior if
   the exact gate stalls on a given track instance.
+- After a passthrough flush, `play()` is deferred until the first successful
+  post-flush write. This avoids starting an empty direct/compressed AudioTrack
+  while still ensuring the track restarts after seek/resume.
+- The permissive fallback is startup-aware:
+  - before the passthrough playhead has ever advanced, the stall threshold is
+    `250ms` so routes with frozen startup playhead accounting do not starve;
+  - after the playhead has advanced, the threshold is `latency + 250ms`,
+    clamped to `250..1500ms`, so high-latency full-buffer stalls get time to
+    recover before blind writes resume.
 
 ### AC3 recoding (Mode 3)
 
 `stream_audio_setup_ac3_sink()`:
 
 - If IEC supported: use mode 1
-- If IEC unsupported: switch to mode 2
+- If IEC unsupported: switch to mode 2 (e.g. an ARC/eARC route)
+
+**Mode-2 timing policy (`ac3_mode2_plain_policy`, default on).** When AC3 recoding
+resolves to mode 2, it must adopt the plain-mode2 timing, not the mode-1 policy it was
+historically left on. Two coupled changes apply together (the gate drives both):
+1. enter the PTS-seeded `STREAM_SYNC_SAMPLES` audio clock instead of the mode-1 CDATA
+   synthetic startup anchor (see Startup Anchoring below), and
+2. use the mode-2 latency policy described below.
+Under the synthetic anchor the static latency cancels, so the bug was invisible in mode 1
+but produced a fixed audio-leads-picture offset on real mode-2 (eARC) sinks; the samples
+clock and the latency selection apply together. Mode 1 and ordinary (non-recode) mode 2
+are unchanged. See [debug.md](debug.md) for the Shield eARC-emulation A/B workflow.
+
+**Mode-2 normalized latency.** Android's compressed `AudioTrack` latency and local
+buffer geometry cannot be interpreted with PCM bytes-per-frame math. AVOS therefore
+collects paired accepted compressed bytes and PCM-equivalent logical samples. After at
+least 250ms of logical audio, it estimates the duration represented by the configured
+compressed buffer:
+
+```
+capacity_ms = buf_size * logical_samples * 1000
+              / (compressed_bytes * sample_rate * speed)
+residual_ms = max(0, track_latency - buf_size * 1000 / sample_rate)
+selected_ms = max(residual_ms + capacity_ms,
+                  system_latency + capacity_ms)
+```
+
+The resulting value becomes the selected mode-2 latency for AC3 recode, direct
+AC3/EAC3/JOC, TrueHD, and the DTS family. Until the evidence window completes, or if
+valid paired evidence is unavailable, the existing codec-aware app/pipeline selection is
+retained as a startup fallback. There is no production ceiling: low-bitrate streams can
+legitimately represent more than one second of media in the configured compressed
+buffer, and truncating that capacity caused a persistent phase error after track changes.
+
+When AC3 recoding resolves to mode 2, fresh and stable direct `AudioTimestamp`
+evidence may replace this static fallback with submitted-minus-presented occupancy.
+The occupancy already includes the AC3 bursts admitted by the recode pacer, so pacer
+lead is not subtracted again from the dynamic heard timestamp. The pacer remains the
+write-ahead controller. Mode-1 AC3 recoding keeps static timing and records occupancy
+only as diagnostics.
 
 `audio_spdif.c` mode-2 handling for recoding:
 
 - In mode 2 with parser output: send raw codec frames (`ENCODING_AC3` path) and keep timing via `fakeSize`
 - In mode 2 with **no parser** (AC3 recoding path): bypass IEC wrapping and send raw AC3 syncframes directly (`PT_MODE2_NOPARSER` path)
-- During passthrough / AC3 recoding, dynamic AudioTrack delay is disabled and
-  sync uses the static passthrough latency path.
+- Mode 1 keeps static passthrough delay. Mode 2 uses the normalized compressed-buffer
+  latency as its selected delay after the evidence window.
+- The asynchronous presentation observer also samples Mode 1 IEC tracks in shadow
+  mode. Completed IEC bursts publish carrier frames at the configured container rate,
+  paired with the exact accepted byte frontier. `mode1_iec_occupancy_shadow` compares
+  that submitted frontier with an advancing `AudioTimestamp`, but does not yet change
+  Mode 1 heard time or video scheduling. Promotion requires device evidence that the
+  timestamp advances in the IEC carrier-frame domain and remains stable across start,
+  seek, pause/resume, and track recreation.
 - `atempo` may still be instantiated for later non-passthrough speed changes,
   but no samples flow through it in passthrough and its delay is not counted in
   passthrough / AC3 recoding sync or speed-anchor calculations.
+- Mode 2 uses platform latency as an input to the normalized route baseline. A
+  generation-scoped asynchronous observer now compares complete submitted units with
+  Android presentation progress. Mode 2 production promotion can be enabled for all
+  direct compressed profiles with `mode2_dynamic_all` (currently on for device
+  validation); disabling it restores the raw AC3/44.1 kHz allowlist. Mode 1 remains
+  shadow-only, and playback-head, byte, and alternate frame interpretations remain
+  diagnostic. See [`mode2.md`](../mode2.md).
+
+### Mode-2 heard-time interpolation
+
+Direct mode 2 advances `audio_time` when complete compressed writes are accepted. Those
+writes arrive in coarse batches, so `audio_time - selected_delay` is a submitted frontier,
+not a continuous presentation clock. `stream_get_heard_audio_ts()` maintains a separate
+wall-clock interpolator for direct mode 2:
+
+```
+raw_frontier = audio_time - selected_delay
+interpolated = previous_interpolated + monotonic_elapsed
+```
+
+The interpolated value is monotonic, snaps forward when a new raw frontier overtakes it,
+and may lead the full-buffer frontier only by the encoded-capacity portion of the selected
+delay (with a small starvation floor). AC3 recode is excluded because its dedicated burst
+pacer already provides continuous write timing.
+
+Epoch seeding depends on why the clock changed:
+
+- First playback starts from the raw full-buffer frontier.
+- A recreated or flushed mid-playback track starts empty, so
+  `mode2_heard_frontier_seed_pending` seeds at `audio_time - fixed_latency`, retaining only
+  downstream route delay while the new compressed buffer refills.
+- A normalized-latency change preserves monotonic phase once an authoritative playback
+  epoch exists; initial normalization before that epoch adopts the new raw phase.
+- Pause/resume preserves the interpolated phase and resets its wall epoch so paused time is
+  never counted as audio progress. A seek starts a new sync epoch but carries explicit
+  empty-track ownership when playback had already been established.
+
+For the enabled Mode 2 profile set, the submitted-unit ledger and asynchronous
+`AudioTimestamp` observer add a dynamic presentation bound above this fallback. Entry
+requires advancing rate and stable occupancy streaks. Heard time holds instead of moving
+backward when the measured delay grows. MediaCodec remains on its provisional anchor during
+that hold, then performs one audio-based reanchor when the dynamic phase becomes ready;
+later transition corrections use the bounded renderer slew. A non-flushing pause retains
+ledger occupancy and permits a 750ms observer-remapping grace period; other evidence
+loss returns gradually to the
+static interpolator.
 
 ## State Diagram
 
@@ -175,19 +283,116 @@ Native determines IEC support by inspecting codec flags set by Java:
                  +----------------+      +--------------------+
 ```
 
+## Passthrough A/V Startup Anchoring
+
+### `startup_anchor_commit`
+
+On the first write after seek/resume, mode 1 passthrough
+sets `audio_time = video_time + anchor_delay` and calls
+`sfdec2_refresh_sched_anchor()` in `stream_audio.c`:
+
+```c
+if( s->put_time_mode && passthrough_active && s->video_time >= 0 && anchor_delay > 0 ) {
+    start_time = s->video_time + anchor_delay;
+    sfdec2_refresh_sched_anchor( s );
+}
+```
+
+This restores the pre-refactoring startup alignment. Without it,
+`audio_time` was set to `audio_start_pts` (~24ms), making `heard_ts`
+deeply negative and causing the sfdec2 scheduler to stall video for
+hundreds of milliseconds before releasing in a burst.
+
+If the first Mode 1 audio PTS represents a real content gap, AVOS does not
+collapse it into that synthetic anchor. It holds the complete first IEC burst
+before writing until video approaches `audio_start_pts - anchor_delay`, then
+commits the original audio PTS. The exception is armed only when the first
+audio PTS is materially ahead of the first admitted video timestamp, so normal
+zero-start playback and coarse seek landings continue to use the legacy rule.
+
+PCM is excluded: it uses `startup_audio_hold` to achieve alignment by
+holding writes, not by adjusting `audio_time`.
+
+Plain mode 2 and AC3-recode mode 2 under `ac3_mode2_plain_policy` are excluded. They enter
+`STREAM_SYNC_SAMPLES`, count logical samples from the first PTS, and use the Mode-2 epoch
+and interpolator rules above. The presence or absence of this commit in the log is the
+quickest way to distinguish the mode-1 anchor policy from the mode-2 samples clock.
+
+### Pre-commit negative anchor guard
+
+Before a valid playback epoch exists, the selected delay can exceed the first
+audio PTS and make the centralized heard timestamp negative. Publishing that
+value as `put_time` with no scheduler anchor would establish a phantom reference.
+
+Current rule: `stream_sync_audio()` publishes `put_time` only when the final
+centralized anchor is non-negative. `sink_ref_time` remains `-1` until mode 1
+commits its startup anchor or direct mode 2 advances its interpolated heard epoch
+to an audible value.
+
+## Manual A/V Delay
+
+- **Positive internal `av_delay` (delay video) is supported on all routes**,
+  including passthrough. It is realized physically by the sfdec2 video-hold
+  (the effective delay slews into the blit schedule), independent of the audio
+  sink. This is the direction normally needed for AVR setups, where compressed
+  decode/DSP makes audio late and the player must hold video to match.
+- **Negative internal `av_delay` (delay audio) is not supported on compressed
+  passthrough.** It works only for decoded PCM, where the delay is realized by
+  inserting PCM silence on the audio path. On passthrough AVOS does not own
+  decoded samples, and on-device testing showed timestamp/anchor-only schemes
+  cannot realize it: the video pacer is anchored to physical audio progression,
+  and mode 2's heard clock is a write-derived bounded estimate rather than a
+  controllable decoded-audio queue. Shifting timestamps only makes the internal
+  clocks agree without physically delaying the audio the receiver hears. A real compressed-audio hold (IEC
+  pause/null bursts, codec-specific silent frames, or an AudioTrack pause/gap)
+  would be required and carries high AVR-mute / decoder-relock / drift risk.
+- **Guarding**: Nova's UI prevents selecting a negative passthrough delay (live
+  slider and remembered presets), so native code does not need to clamp it. If a
+  future path could bypass the UI, a defensive native clamp of `av_delay < 0` to
+  `0` for passthrough routes would be the place to add it.
+
 ## Edge Cases
 
 - **SPDIF reported without encodings**: fallback may enable IEC only when HDMI route is absent.
 - **ARC/eARC not active**: HDMI caps won’t be seen; SPDIF route may be used instead.
 - **PCM decode after passthrough**: sample rate must be re-anchored to avoid A/V drift.
-- **Mode 2 A/V timing**: timing is based on compressed-frame duration via `fakeSize`
-  (PCM-equivalent bytes), not raw payload size. For E-AC3/DD+, parser `frame_size`
-  is preferred when available; fixed 1536-sample fallback is used otherwise.
+- **Unsupported passthrough formats**: if passthrough is requested but the current route does not advertise the codec, native disables passthrough for that stream and decodes PCM. Mode 2 should not create a codec-specific `AudioTrack` for unsupported TrueHD/DTS-HD/JOC just by changing the channel mask.
+- **Forced passthrough**: force mode can expose codecs beyond route-reported support for devices with incomplete capability reporting. In that case `AudioTrack` construction is the final guard; if it rejects a codec-specific configuration, format-specific fallbacks may be attempted before giving up.
+- **Codec-specific fallback vs IEC fallback**: stereo in mode 1 describes the IEC transport container. Stereo in mode 2 is only valid for codec families that Android expects as stereo compressed transport, or as a compatibility retry after a route has advertised support but rejected a multichannel codec-specific mask.
+- **Mode 2 A/V timing**: timing is based on logical PCM-equivalent duration via `fakeSize`. For DTS/DTS-HD, raw mode 2 writes follow the parser's frame duration because DTS may use 512-sample frames; treating every DTS write as 1536 samples advances the AVOS audio clock too quickly. Other formats use codec metadata when available, then logical base units (1536 for EAC3/AC3, 1280 for TrueHD). Current diagnostics log the selected duration source (`parser`, `avctx`, codec fallback, or physical fallback) and the sink duration geometry (`dur_bpf`, `dur_rate`) used for analysis.
+- **Mode 2 sync mode**: mode 2 should use `STREAM_SYNC_SAMPLES`, not
+  `STREAM_SYNC_CDATA`, when the compressed packet PTS cadence is less reliable
+  than the logical submitted duration. This is a path-specific rule, not a
+  general rule for all audio. PCM keeps PTS anchoring plus committed-duration
+  advancement; FLAC can use sample sync because decoded sample count is the
+  stable clock. Mode 1 IEC passthrough and AC3 recoding must be validated
+  independently before inheriting the mode-2 policy.
+- **Mode 2 heard-time baseline**: mode 2 uses submitted compressed packet duration to advance `audio_time`, then subtracts the normalized compressed-buffer latency to form the raw heard frontier. The latency estimate freezes after a 250ms paired byte/sample evidence window. Existing codec-aware app/pipeline selection remains only as the startup fallback.
+- **Mode 2 continuous clock**: direct mode 2 wall-clock-interpolates between accepted compressed batches, bounded by the raw frontier plus encoded capacity. This is not the former synthetic fill-window experiment and does not measure actual AudioTrack occupancy.
+- **Latency terminology**: geometry/app latency is the PCM-style local AudioTrack buffer calculation and is not a reliable duration for compressed bytes. Raw pipeline latency is the platform maximum of AudioTrack-reported track latency and output/system latency plus app geometry. Normalized mode-2 latency replaces the platform's nominal compressed-buffer component with the duration derived from accepted compressed bytes and logical samples.
+- **Mode 2 dynamic evidence**: the asynchronous observer can promote trusted direct `AudioTimestamp` evidence for direct mode 2 and AC3 recoding resolved to mode 2. Mode 1, playback-head, byte, and frame-size interpretations remain diagnostic-only.
+- **Physical Route Latency Limit**: AudioTrack latency APIs stop at the Android output boundary. Unreported downstream latency added by a soundbar or AVR after HDMI/ARC still requires a route/user offset outside the scheduler model.
 
 ## Debug Tips
 
 - `adb shell dumpsys media.audio_policy` shows available devices and supported formats.
 - `adb shell dumpsys media.audio_flinger` shows active output device (SPDIF vs HDMI ARC).
+- `at_mode2_audit`: runtime debug parameter for mode2 passthrough. When
+  enabled, logs `mode2_playhead_audit` every ~2s with logical samples written
+  from `fakeSize`, AudioTrack playhead/timestamp frames, derived
+  playhead/timestamp delays, selected delay, pipeline latency, and app
+  latency. This invokes JNI from the writer path and has previously perturbed
+  timing, so it must remain off during normal playback. It is diagnostic-only:
+  it must not update `selected_delay` or reanchor audio/video clocks.
+- `mode2_epoch_seed`: records interpolator epoch ownership and the seed cause
+  (`initial_raw`, `restart_frontier`, `initial_latency`, `delay_monotonic`,
+  `delay_raw`, or `raw_discontinuity`).
+- `mode2_heard_interp`: records the raw submitted frontier, interpolated heard
+  time, frontier gap, selected delay, reset state, and pause state.
+- `mode2_normalized_latency`: a production record emitted when the normalized
+  estimate is calculated (normally once per mode-2 AudioTrack configuration),
+  showing format, raw track/system/app values, paired evidence, calculated
+  capacity, residual, and selected normalized latency.
 - Nova logs:
   - `refreshAudioOutputCapabilities(...)`
   - `updateIecEncapsulationCapability`

@@ -1,0 +1,24 @@
+# Nova Video Player SOFA HRTF Profiles
+# Metadata for spatial audio filter configuration
+
+[TV_SPEAKERS]
+file=HRIR_FULL2DEG_TV_speakers.sofa
+description=Neumann KU100 HRIR Full 2-degree resolution
+use_case=Spatial audio simulation for TV speakers (front-facing stereo pair)
+listener_position=far-field (>1m from speakers)
+sample_rate=96000
+channels=2
+type=HRTF
+
+[HEADPHONES]
+file=subject_003_headphones.sofa
+description=CIPIC Subject 003 Head-Related Transfer Functions
+use_case=Spatial audio simulation for ear-covering headphones
+listener_position=direct (headphone coupling)
+sample_rate=44100
+channels=2
+type=HRTF
+
+# SOFA Standard: AES69-2022
+# Format: Spatially Oriented Format for Acoustics
+# Reference: https://www.sofaconventions.org/

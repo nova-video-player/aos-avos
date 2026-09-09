@@ -127,6 +127,13 @@ int sfdec_buf_release(sfdec_t *sfdec, sfbuf_t *sfbuf)
 	return sfdec->itf->buf_release(sfdec->priv, sfbuf);
 }
 
+int sfdec_buf_discard(sfdec_t *sfdec, sfbuf_t *sfbuf)
+{
+	if (sfdec->itf->buf_discard)
+		return sfdec->itf->buf_discard(sfdec->priv, sfbuf);
+	return sfdec->itf->buf_release(sfdec->priv, sfbuf);
+}
+
 int sfdec_reset_ts(sfdec_t *sfdec)
 {
 	if (sfdec->itf->reset_ts != NULL)

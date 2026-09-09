@@ -130,8 +130,9 @@ static audio_format_t _convert_to_format(int bits)
 	return AUDIO_FORMAT_INVALID;
 }
 
-static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int bits, int format)
+static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int content_channels, int bits, int format)
 {
+	(void)content_channels;
 	uint32_t track_chanmask;
 	audio_format_t track_format;
 	int status;

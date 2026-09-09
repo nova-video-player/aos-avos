@@ -203,8 +203,9 @@ static void androidSimpleBufferQueueCallback(SLAndroidSimpleBufferQueueItf calle
 	__sync_fetch_and_sub(&p->buffer_count, 1);
 }
 
-static int opensles_set_output_params(audio_ctx_t *p, int rate, int channels, int bits, int format)
+static int opensles_set_output_params(audio_ctx_t *p, int rate, int channels, int content_channels, int bits, int format)
 {
+	(void)content_channels;
 	SLresult result;
 	SLuint16 bitsPerSample;
 	SLuint32 channelMask;

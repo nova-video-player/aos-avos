@@ -37,10 +37,13 @@ struct STREAM;
 #include "stream_buffer.h"
 
 #include <pthread.h>
+#include <stdint.h>
 
 #define STREAM_DEFAULT_BUFFER_SIZE 64
 #define STREAM_LARGE_BUFFER_SIZE   128
 #define STREAM_MAX_FRAMES 64
+#define STREAM_PCM_DELAY_STABLE_STREAK 3
+#define STREAM_ATEMPO_LEDGER_SIZE 64
 
 // in sync with android/vendor/archos/frameworks/ArchosFrameworks/java/com/archos/frameworks/media/AvosPlayer.java
 typedef enum
@@ -61,6 +64,121 @@ typedef enum
 	// ...
 	STREAM_ERROR_FATAL = 99, 
 } STREAM_ERROR_TYPE;
+
+typedef enum
+{
+	STREAM_PCM_REANCHOR_INACTIVE = 0,
+	STREAM_PCM_REANCHOR_ARMED,
+	STREAM_PCM_REANCHOR_APPLIED,
+	STREAM_PCM_REANCHOR_EXPIRED,
+} STREAM_PCM_REANCHOR_STATE;
+
+typedef enum
+{
+	STREAM_COMPRESSED_FRAMING_UNKNOWN = 0,
+	STREAM_COMPRESSED_FRAMING_IEC61937,
+	STREAM_COMPRESSED_FRAMING_ANDROID_RAW,
+} STREAM_COMPRESSED_FRAMING;
+
+typedef enum
+{
+	STREAM_PRESENTATION_UNOBSERVED = 0,
+	STREAM_PRESENTATION_INITIALIZING,
+	STREAM_PRESENTATION_OBSERVED,
+	STREAM_PRESENTATION_ADVANCING,
+	STREAM_PRESENTATION_UNAVAILABLE,
+	STREAM_PRESENTATION_REJECTED,
+} STREAM_PRESENTATION_STATE;
+
+#define STREAM_COMPRESSED_LEDGER_SIZE 256
+typedef struct STREAM_COMPRESSED_LEDGER_ENTRY {
+	UINT64	epoch;
+	UINT64	sequence;
+	UINT64	encoded_byte_start;
+	UINT64	logical_sample_start;
+	UINT32	encoded_bytes;
+	UINT32	logical_samples;
+	UINT32	logical_sample_rate;
+	int	codec;
+	int	framing;
+	int	submitted_wall_ms;
+} STREAM_COMPRESSED_LEDGER_ENTRY;
+
+typedef struct STREAM_COMPRESSED_LEDGER {
+	STREAM_COMPRESSED_LEDGER_ENTRY entries[STREAM_COMPRESSED_LEDGER_SIZE];
+	UINT64	epoch;
+	UINT64	next_sequence;
+	UINT64	total_encoded_bytes;
+	UINT64	total_logical_samples;
+	UINT64	discarded_encoded_bytes;
+	UINT64	discarded_logical_samples;
+	int	head;
+	int	count;
+} STREAM_COMPRESSED_LEDGER;
+
+// Raw platform counters stay separate from the logical submission ledger until
+// an observer has proved their unit and epoch relationship.
+typedef struct STREAM_PRESENTATION_OBSERVATION {
+	UINT64	epoch;
+	UINT64	generation;
+	int	state;
+	UINT64	timestamp_frames;
+	INT64	timestamp_ns;
+	UINT64	playback_head_frames;
+	int	source;
+	int	rate;
+	int	frame_size;
+	int	buffer_size;
+	int	format;
+	UINT64	logical_samples;
+	UINT64	encoded_bytes;
+	int	latency_ms;
+	int	fixed_latency_ms;
+	int	underrun_count;
+	int	observed_wall_ms;
+	int	last_advance_wall_ms;
+	int	direct_rate_hz;
+	int	direct_rate_streak;
+	int	direct_delay_ms;
+	int	direct_heard_ts;
+	int	direct_heard_wall_ms;
+	int	direct_stable_streak;
+	int	direct_trusted;
+	int	direct_last_sample_wall_ms;
+} STREAM_PRESENTATION_OBSERVATION;
+
+typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
+	UINT64	output_frames_start;
+	int	block_ts_start;
+	int	block_nframes;
+	int	rate;
+	// Media/RST span of this output block, advanced from af_atempo media-consumed
+	// deltas at reserve time. Keep both coordinates in microseconds so partial
+	// AudioTrack writes cannot cumulatively discard sub-millisecond fractions.
+	int64_t	block_rst_start_us;
+	int64_t	block_rst_span_us;
+	// Live Option-A media-frame delta (ns_in - ring) advanced into media_cursor for
+	// this block, tracked separately because the RST span may be
+	// sourced from the Option-B production map while media_cursor stays the A pointer.
+	INT64	block_media_frames;
+	// 1 when this block is an output-side manual-delay hold (inserted silence):
+	// the playhead crosses its output frames but heard media time must not advance.
+	int	block_is_hold;
+} STREAM_ATEMPO_LEDGER_ENTRY;
+
+// Deferred atempo video-commit checkpoint (one per speed step).
+#define STREAM_ATEMPO_COMMIT_MAX 16
+// Sentinel boundary: the ledger frame domain was invalidated (seek/flush/pause), so
+// this checkpoint must NOT drain against the stale timeline map.  The commit poll
+// applies it only once the new ledger is active and the playhead resolves state==0
+// (so the RST anchor is the fresh ledger value, not the poisoned TS_TO_RST_TIME()).
+#define STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER (~0ULL)
+typedef struct STREAM_ATEMPO_COMMIT {
+	float	speed;        // clamped target speed
+	float	prev_speed;   // mapping speed in effect before this checkpoint (diag)
+	UINT64	boundary;     // ledger-domain output frame boundary
+	int	wall_ms;      // request time (timeout safety)
+} STREAM_ATEMPO_COMMIT;
 
 typedef enum
 {
@@ -162,11 +280,18 @@ typedef int (*DEC_AUDIO_OPEN )  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_RE_OPEN)( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_CLOSE)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_DECODE) ( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int *time );
+typedef int (*DEC_AUDIO_DRAIN)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_FLUSH)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_DELAY)  ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_GET_RC) ( AUDIO_PROPERTIES *audio, STREAM_RC *rc );
 typedef int (*DEC_AUDIO_DELETE) ( AUDIO_PROPERTIES *audio );
 typedef int (*DEC_AUDIO_IS_SUPPORTED) ( AUDIO_PROPERTIES *audio );
+
+enum {
+	STREAM_DEC_AUDIO_OK = 0,
+	STREAM_DEC_AUDIO_ERROR = 1,
+	STREAM_DEC_AUDIO_DRAINED = 2,
+};
 
 typedef struct STREAM_DEC_AUDIO {
 	const char	  *name;
@@ -175,6 +300,7 @@ typedef struct STREAM_DEC_AUDIO {
 	DEC_AUDIO_OPEN    re_open;
 	DEC_AUDIO_CLOSE   close;
 	DEC_AUDIO_DECODE  decode;
+	DEC_AUDIO_DRAIN   drain;
 	DEC_AUDIO_FLUSH   flush;
 	DEC_AUDIO_DELAY   delay;
 	DEC_AUDIO_GET_RC  get_rc;
@@ -267,8 +393,10 @@ typedef int (*PARSER_SET_AUDIO_STREAM)( struct STREAM *s, int audio_stream );
 typedef int (*PARSER_GET_AUDIO_CDATA)( struct STREAM *s, CLEVER_BUFFER *buffer, STREAM_CDATA *cdata );
 typedef int (*PARSER_GET_VIDEO_CDATA)( struct STREAM *s, struct CBE *cbe,       STREAM_CDATA *cdata );
 typedef int (*PARSER_GET_SUBTITLE_CDATA)( struct STREAM *s, CLEVER_BUFFER *buffer, STREAM_CDATA *cdata );
-/* Dolby Vision tone-map mode: pull the next enhancement-layer packet (AVPacket*).
- * Returns 0 and fills the packet (caller must av_packet_unref) or 1 when empty. */
+/* Dolby Vision FEL: pull one queued EL packet (dovi_split BSF output or
+ * dual-track EL stream). Returns 0 and fills *pkt (AVPacket, caller unrefs)
+ * or 1 when empty. mpv pair_dovi_tracks parity - the EL track is decoded
+ * alongside the BL and paired by pts. */
 typedef int (*PARSER_GET_DOVI_EL_PACKET)( struct STREAM *s, void *pkt );
 typedef struct STREAM_CHUNK * 
          (*PARSER_PEEK_N_AUDIO_CHUNK)( struct STREAM *s, int n, UINT8 **data );
@@ -296,7 +424,7 @@ typedef struct stream_parser_str {
 	PARSER_GET_AUDIO_CDATA 	get_audio_cdata;
 	PARSER_GET_VIDEO_CDATA 	get_video_cdata;
 	PARSER_GET_SUBTITLE_CDATA get_subtitle_cdata;
-	PARSER_GET_DOVI_EL_PACKET get_dovi_el_packet;
+	PARSER_GET_DOVI_EL_PACKET	get_dovi_el_packet;
 	PARSER_PEEK_N_AUDIO_CHUNK peek_n_audio_chunk;
 	PARSER_SEEK_TIME	seek_time;
 	PARSER_SEEK_POS		seek_pos;
@@ -474,8 +602,12 @@ typedef struct STREAM {
 	int		sync_mode;
 	int		av_delay;		// user provided AV delay
 	int		put_time_mode;		// video sink uses put_time pacing
-	int		manual_audio_delay_target_ms;   // extra audio hold for android_sync=0, negative av_delay
+	int		manual_audio_delay_target_ms;   // extra audio hold for negative av_delay
 	int		manual_audio_delay_applied_ms;  // currently applied extra audio hold
+	int		manual_audio_hold_pending_ms;   // wall-clock gap intentionally inserted before next burst (PCM silence)
+	int		manual_delay_fmh_last;          // latest frame_minus_heard observed by the video scheduler
+	int		manual_delay_fmh_baseline;      // frame_minus_heard snapshot at the last av_delay set
+	int		manual_delay_log_until_ms;      // atime() until which to emit manual_delay_applied diagnostics
 	// PCM accumulation buffer to coalesce tiny decoder output chunks.
 	unsigned char	*pcm_accum_data;
 	int		pcm_accum_size;
@@ -498,10 +630,11 @@ typedef struct STREAM {
 	int 		delay;
 	int 		delay_valid;
 	int 		delay_fb;
-	int		smoothed_av_delay;
 	int		last_good_delay_ms;
 	int		last_good_delay_valid;
 	int		last_good_atempo_delay_ms;
+	int		last_good_candidate_ms;    // evidence candidate running average
+	int		last_good_candidate_count; // consecutive samples in current candidate band
 	
 	int		delay_history[3];
 	int		delay_history_count;
@@ -509,6 +642,7 @@ typedef struct STREAM {
 	int		av_delay_history[3];
 	int		av_delay_history_count;
 
+	pthread_mutex_t anchor_mutex;	// owns sink_ref_time/vid_ref_time and sink anchor publication
 	int		sink_ref_time;
 	int		vid_ref_time;
 	int 		drop;
@@ -550,6 +684,7 @@ typedef struct STREAM {
 	
 	pthread_t 	parser_thread_handle;
 	THREAD_STATE	parser_tstate;
+	volatile int	parser_interrupt;
 	
 	pthread_t 	sub_thread_handle;
 	THREAD_STATE	sub_tstate;
@@ -587,6 +722,7 @@ typedef struct STREAM {
 		
 	int 		error;
 	int		audio_parse_end;	// parser has parsed complete file
+	int		audio_decoder_draining;
 	int		video_parse_end;	// parser has parsed complete file
 	int		video_end;		// video is at the end of file
 	int		stream_end;		// stream is at it's end
@@ -637,7 +773,7 @@ typedef struct STREAM {
 
 	STREAM_SINK_AUDIO *audio_sink;
 	int		audio_sink_open;
-	pthread_mutex_t audio_sink_mutex;
+	pthread_mutex_t audio_sink_mutex;	// orders compressed transactions with AudioTrack pause/play
 	int		audio_session_id;
 	
 	STREAM_DEC_VIDEO *video_dec;
@@ -725,7 +861,31 @@ typedef struct STREAM {
 	int		audio_start_pending;
 	int		audio_start_pts;
 	int		audio_start_target_ts;
-		
+	int		audio_start_gap_hold;	// Mode 1 first PTS is intentionally ahead; preserve it and delay the first IEC burst
+	pthread_mutex_t mode2_heard_mutex;	// owns the complete Mode 2 heard-clock epoch state below
+	UINT64		mode2_heard_epoch;	// increments whenever the Mode 2 heard-clock state is reset
+	int		mode2_heard_interp_valid;	// direct-mode2 continuous heard clock seeded from submitted frontier
+	int		mode2_heard_interp_ts;	// last interpolated heard TS
+	int		mode2_heard_interp_wall_ms;	// monotonic wall sample for interpolation
+	int		mode2_heard_interp_raw_ts;	// latest submitted heard endpoint
+	int		mode2_heard_interp_delay_ms;	// selected delay used for the current epoch
+	int		mode2_heard_interp_last_log_ms;
+	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
+	int		mode2_heard_frontier_seed_pending;	// passthrough sink was recreated mid-playback (empty buffer): seed heard interp at the frontier
+	STREAM_COMPRESSED_LEDGER compressed_ledger;	// complete compressed units submitted in this clock epoch
+	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence
+	int		mode2_shadow_last_log_ms;
+	int		mode2_dynamic_clock_active;	// trusted AudioTimestamp currently bounds the heard clock
+	int		mode2_dynamic_clock_ready;	// measured frontier caught the monotonic phase; renderer may reanchor
+	int		mode2_dynamic_clock_ts;
+	int		mode2_dynamic_clock_wall_ms;
+	int		mode2_dynamic_clock_last_delay_ms;
+	int		mode2_dynamic_clock_grace_until_wall_ms;
+	int		mode2_dynamic_clock_last_log_ms;
+	int		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
+	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
+	int		ac3_recode_pacer_max_lead_ms;	// bounded write-ahead reservoir to subtract from heard time
+
 	int		play_n_video_frames;
 	int		play_n_video_one;
 	int		play_n_audio_frames;
@@ -733,20 +893,96 @@ typedef struct STREAM {
 	int		play_n_old_time;
 	int		seek_audio_target_ts;
 	int		seek_audio_drop;
+	int		seek_video_target_ts;
+	int		seek_video_drop;
+	volatile int	seek_video_target_pending;	// audio waits until video preroll reaches the seek target
+	volatile int	seek_video_ready_ts;	// first current-epoch video frame admitted after seek
 	int		seek_force_video_drop;
 	int		seek_skip_initial_play;
+	int		seek_preview_refining;	// exact preview pass after the immediate keyframe preview
+	int		seek_preview_superseded;	// atomically set when a newer async seek is queued
+	int		seek_preview_refine_deadline_ms;	// wall-clock deadline for partial preview fallback
 	int		seek_use_target_sync;
 	int		seek_target_sync_time;
 	int		seek_frame;
 	int		warmup_video_frames;
-	int		seek_converge_epoch;
-	int		seek_converge_until_ms;
-	int		seek_converge_done;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
 	int		audio_resume_valid_pending;
+	int		pcm_reanchor_state;
+	int		pcm_reanchor_seek_epoch;
+	int		pcm_reanchor_source;
+	int		pcm_reanchor_delay_ms;
+	int		pcm_startup_seed_delay_ms;
+	int		pcm_startup_correction_pending;
+	int		pcm_startup_correction_seek_epoch;
+	int		pcm_startup_correction_speed_epoch;
 	int		video_hold_for_delay;
 	int		video_hold_for_resume_audio;
+	int		audio_speed_diag_epoch;
+	int		audio_speed_diag_writes_left;
+	int		audio_speed_last_atempo_delay_ms;
+	int		audio_speed_atempo_stable_count;
+	int		audio_speed_last_atempo_state;
+	int		audio_speed_stabilized_atempo_delay_ms;
+	int		display_resample_applied_gen;	/* display-resample hint generation
+						 * already applied to THIS stream (0 = none): the dovi
+						 * sink publishes grid-lock speeds, the player thread
+						 * applies each hint once via stream_set_av_speed */
+
+	// AudioTrack PlaybackParams speed-epoch checkpoint.
+	// Re-armed on every AT speed change (including return to 1.0).
+	// Cleared on seek, flush, or stop.  Drives heard_ts from AT presented-frame
+	// delta rather than from the write-burst clock (audio_time - last_good_delay_ms).
+	int		at_speed_epoch_active;
+	int		at_speed_epoch_audio_time_ts;   // audio_time (TS) at checkpoint
+	int		at_speed_epoch_heard_ts;        // heard_ts (TS) at checkpoint
+	float		at_speed_epoch_speed;           // applied speed at checkpoint
+	UINT64		at_speed_epoch_presented_frames;// AT presented frame position at checkpoint
+	int		at_speed_epoch_rate;            // AT sample rate at checkpoint
+	int		at_speed_epoch_wall_ms;         // wall time at checkpoint (diagnostics)
+	UINT64		at_speed_epoch_frames_cached;   // last playhead sample read during epoch
+	int		at_speed_epoch_cache_wall_ms;   // wall time of last playhead sample
+	int		atempo_ledger_active;
+	int		atempo_ledger_count;
+	int		atempo_ledger_write;
+	UINT64		atempo_ledger_output_frames;
+	UINT64		atempo_ledger_base_written_frames;
+	int64_t		atempo_ledger_next_ts_us;
+	int		atempo_ledger_last_log_ms;
+	int		atempo_ledger_dense_until_ms;
+	// RST(media) baseline captured ONCE per ledger epoch (arm/seek/flush), NOT per
+	// speed step.  The commit poll anchors the timeline to this filter-paced media
+	// clock instead of the TS_TO_RST_TIME() projection, which lags the audible
+	// playhead by the sink+wrapper+ring backlog.
+	int		atempo_epoch_rst;               // RST(media) ms at ledger epoch
+	// Running media/RST cursor advanced per reserve from af media-consumed deltas
+	// (ns_in - ring).  next_rst_us is the RST(media) clock the ledger reports to
+	// the commit poll.
+	int64_t		atempo_ledger_next_rst_us;      // RST(media) us at next reserve
+	INT64		atempo_ledger_media_cursor;     // last (ns_in - ring) media frame
+	int		atempo_ledger_media_valid;      // media cursor initialised this epoch
+	// Post-playhead sink latency in output frames, self-calibrated at 1.0x
+	// against the legacy heard model.  Survives ledger re-arms (track property).
+	int64_t		atempo_ledger_lat_frames;
+	int		atempo_ledger_lat_samples;
+	int		atempo_ledger_lat_valid;
+	int		atempo_ledger_lat_last_ms;
+	// Playhead-gated video commit for atempo speed changes.
+	// The filter switches speed immediately, but ~300-400ms of old-speed output
+	// is still queued in the sink; switching the video timeline at write time
+	// makes video and audible content advance at different media rates during
+	// the drain, leaving a permanent offset of queue_ms * delta_speed per step.
+	// Defer the video-side commit until the playhead crosses the output-frame
+	// boundary where new-speed content begins.  Ramp steps can arrive faster
+	// than the ~400ms drain gate, so checkpoints are held in an ordered FIFO
+	// and promoted strictly in order (a single slot would collapse the ramp:
+	// later arms overwrote earlier un-promoted commits, jumping the video
+	// timeline straight to the final speed).
+	STREAM_ATEMPO_COMMIT atempo_commit_q[STREAM_ATEMPO_COMMIT_MAX];
+	int		atempo_commit_head;        // index of front (oldest) checkpoint
+	int		atempo_commit_count;       // number of queued checkpoints
+	STREAM_ATEMPO_LEDGER_ENTRY atempo_ledger[STREAM_ATEMPO_LEDGER_SIZE];
 
 	ID3_TAG		tag;
 	int		tag_new;
@@ -761,11 +997,11 @@ typedef struct STREAM {
 
 	int		cpu_prio;
 	
-	int 		fps_start;
+	int		fps_start;
 	int		fps_count;
 	void		*surface_handle;
-} STREAM;
 
+} STREAM;
 #define STREAM_POS_MAX 1000
 
 //
@@ -819,27 +1055,43 @@ int	stream_seek_time ( STREAM *s, int time,  int dir, int flags );
 int	stream_seek_time_frame_accurate( STREAM *s, int time, int target_ts, int dir, int flags );
 int	stream_seek_pos  ( STREAM *s, int pos,   int dir, int flags );
 int	stream_seek_frame( STREAM *s, int frame, int dir, int force_reload );
+void	stream_seek_preview_supersede( STREAM *s );
 int	stream_set_speed( STREAM *s, STREAM_SPEED speed );
 int	stream_set_audio_stream( STREAM *s, int audio_stream );
 int	stream_refresh_audio_stream( STREAM *s );
 int	stream_set_audio_filter_level( STREAM *s, int level, int night_on );
 void	stream_set_audio_downmix( int downmix );
 void	stream_disable_atempo_filter( int disable );
+int	stream_filter_audio_atempo_get_ledger_stats( STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate );
+int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate );
+int	stream_filter_audio_atempo_lookup_output_media( STREAM_FILTER_AUDIO *f, UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate );
 int	stream_check_subtitles( STREAM *s );
 int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
 void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
+int	stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts );
+int	stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state );
 int	stream_get_anchor_delay_ms( STREAM *s, int allow_static );
+int	stream_get_pcm_startup_seed_delay_ms( STREAM *s );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
 void    stream_audio_reset_ac3_passthrough_state(void);
 void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
 void	stream_un_pause ( STREAM *s, int was_paused );
+#ifdef CONFIG_SFDEC
+void    sfdec2_reset_sync_state_on_seek( STREAM *s );
 void    sfdec2_android_sync_on_pause( STREAM *s, int paused );
-void    sfdec2_android_sync_on_seek( STREAM *s );
+void    sfdec2_refresh_sched_anchor( STREAM *s );
+void    sfdec2_request_pcm_startup_correction( STREAM *s );
+#else
+static inline void sfdec2_reset_sync_state_on_seek( STREAM *s ) {}
+static inline void sfdec2_android_sync_on_pause( STREAM *s, int paused ) {}
+static inline void sfdec2_refresh_sched_anchor( STREAM *s ) {}
+static inline void sfdec2_request_pcm_startup_correction( STREAM *s ) {}
+#endif
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );
 int     stream_get_current_time ( STREAM *s, int *total_time );
@@ -858,6 +1110,7 @@ int	stream_set_progress_handler ( STREAM *s, PROGRESS_HANDLER progress   );
 int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
 int	stream_set_av_speed         ( STREAM *s, float av_speed );
+void	stream_atempo_commit_poll   ( STREAM *s );
 int	stream_can_apply_av_speed   ( STREAM *s );
 
 int 	stream_set_crypt( STREAM *s, int crypt, void *key );

@@ -22,5 +22,6 @@
  */
 int acodecs_is_type_supported(const char *type, int is_sw_allowed);
 const char* acodecs_get_for_profile(const char *mime_type, int profile);
+int acodecs_get_dovi_mode(void);
 
 #endif

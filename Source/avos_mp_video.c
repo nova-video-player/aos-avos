@@ -428,6 +428,12 @@ int avos_mp_video_seek(avos_mp_t *mp, avos_mp_video_t *video, uint32_t pos)
 	return AVOS_ERR_OK;
 }
 
+void avos_mp_video_supersede_seek_preview(avos_mp_video_t *video)
+{
+	if (video && video->s)
+		stream_seek_preview_supersede(video->s);
+}
+
 int avos_mp_video_getpos(avos_mp_t *mp, avos_mp_video_t *video, uint32_t *ret)
 {
 	*ret = stream_get_current_time(video->s, &video->last_duration);
@@ -469,14 +475,12 @@ int avos_mp_video_setaudiotrack(avos_mp_t *mp, avos_mp_video_t *video, int track
 
 int avos_mp_video_refreshaudiooutput(avos_mp_t *mp, avos_mp_video_t *video)
 {
-	stream_refresh_audio_stream(video->s);
-	return AVOS_ERR_OK;
+	return stream_refresh_audio_stream(video->s) == 0 ? AVOS_ERR_OK : AVOS_ERR;
 }
 
 int avos_mp_video_checksubtitles(avos_mp_t *mp, avos_mp_video_t *video)
 {
-	stream_check_subtitles(video->s);
-	return AVOS_ERR_OK;
+	return stream_check_subtitles(video->s) == 0 ? AVOS_ERR_OK : AVOS_ERR;
 }
 
 int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int track, int *ret)
@@ -507,18 +511,16 @@ int avos_mp_video_setaudiofilter(avos_mp_t *mp, avos_mp_video_t *video, int n, i
 {
 	// Pass user's audio boost and night mode settings directly to the filter
 	// The audio filter chain (compress -> AC3 -> AGC) handles AC3 recoding correctly
-	stream_set_audio_filter_level(video->s, n, night_on);
-	return AVOS_ERR_OK;
+	return stream_set_audio_filter_level(video->s, n, night_on) == 0 ?
+		AVOS_ERR_OK : AVOS_ERR;
 }
 
 int avos_mp_video_setavdelay(avos_mp_t *mp, avos_mp_video_t *video, int delay)
 {
-	stream_set_av_delay(video->s, delay);
-	return AVOS_ERR_OK;
+	return stream_set_av_delay(video->s, delay) == 0 ? AVOS_ERR_OK : AVOS_ERR;
 }
 
 int avos_mp_video_setavspeed(avos_mp_t *mp, avos_mp_video_t *video, float speed)
 {
-	stream_set_av_speed(video->s, speed);
-	return AVOS_ERR_OK;
+	return stream_set_av_speed(video->s, speed) == 0 ? AVOS_ERR_OK : AVOS_ERR;
 }

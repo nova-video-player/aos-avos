@@ -41,6 +41,7 @@ void libavos_set_decoder(int decoder);
 void libavos_set_dolby_vision_mode(int mode);
 void libavos_set_dolby_vision_target_nits(float nits);
 void libavos_set_dolby_vision_plane_scaler(int scaler);
+void libavos_set_present_free_run(int enable);
 void libavos_set_audio_interface(int audio_interface);
 void libavos_set_audio_decoder(int audio_decoder);
 void libavos_set_mediacodec_audio_capabilities(int64_t capabilities);
@@ -339,6 +340,14 @@ Java_com_archos_medialib_LibAvos_nativeSetDolbyVisionPlaneScaler(JNIEnv *env, jo
 }
 
 void
+Java_com_archos_medialib_LibAvos_nativeSetPresentFreeRun(JNIEnv *env, jobject thiz, jint enable)
+{
+    pthread_mutex_lock(&libavos.mtx);
+    libavos_set_present_free_run(enable);
+    pthread_mutex_unlock(&libavos.mtx);
+}
+
+void
 Java_com_archos_medialib_LibAvos_nativeSetDolbyVisionTargetNits(JNIEnv *env, jobject thiz, jfloat nits)
 {
     pthread_mutex_lock(&libavos.mtx);
@@ -465,14 +474,6 @@ Java_com_archos_medialib_LibAvos_nativeGetAudioSpeed(JNIEnv *env, jobject thiz)
 }
 
 void
-Java_com_archos_medialib_LibAvos_nativeSetAndroidFrameTiming(JNIEnv *env, jobject thiz, jboolean enable)
-{
-	pthread_mutex_lock(&libavos.mtx);
-	libavos_set_android_frame_timing(enable);
-	pthread_mutex_unlock(&libavos.mtx);
-}
-
-void
 Java_com_archos_medialib_LibAvos_nativeEnableAudioSpeed(JNIEnv *env, jobject thiz, jboolean enable)
 {
 	pthread_mutex_lock(&libavos.mtx);
@@ -577,7 +578,6 @@ Java_com_archos_medialib_LibAvos_nativeSetAudioTransformer(JNIEnv *env, jobject 
 jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out_width, uint32_t out_height)
 {
     jintArray array;
-    jint *ints;
     size_t ints_len;
 
     LOGV("avos_bitmap: %dx%d - %d -> %dx%d\n",
@@ -602,13 +602,18 @@ jobject create_bitmap(JNIEnv *env, avos_bgra_bitmap_t *avos_bitmap, uint32_t out
     array = (*env)->NewIntArray(env, (jsize)ints_len);
     if (!array)
         return NULL;
-    ints = (*env)->GetIntArrayElements(env, array, NULL);
-    if (!ints) {
+    // Use SetIntArrayRegion instead of GetIntArrayElements: on large frames
+    // (up to 8K source resolution) GetIntArrayElements can fail to allocate
+    // its pinned/copy buffer under memory pressure, and that failure throws
+    // a C++ exception inside ART that cannot unwind through this JNI code,
+    // aborting the process. SetIntArrayRegion reports the same out-of-memory
+    // condition as a normal pending Java exception instead.
+    (*env)->SetIntArrayRegion(env, array, 0, (jsize)ints_len, (const jint *)avos_bitmap->data);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
         (*env)->DeleteLocalRef(env, array);
         return NULL;
     }
-    memcpy(ints, avos_bitmap->data, avos_bitmap->data_size);
-    (*env)->ReleaseIntArrayElements(env, array, ints, 0);
 
     jobject jBitmap = (*env)->CallStaticObjectMethod(env, fields.AvosBitmapHelperClazz,
                                        fields.AvosBitmapHelper_createRGBBitmapMethod,

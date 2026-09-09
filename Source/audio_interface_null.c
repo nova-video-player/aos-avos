@@ -54,8 +54,9 @@ audio_ctx_t *null_open(int mode)
 	return p;
 }
 
-static int null_set_output_params(audio_ctx_t *p, int rate, int channels, int bits, int format)
+static int null_set_output_params(audio_ctx_t *p, int rate, int channels, int content_channels, int bits, int format)
 {
+	(void)content_channels;
 	return 0;
 }
 

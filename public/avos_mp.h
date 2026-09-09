@@ -144,6 +144,15 @@ enum media_info_type {
 	MEDIA_INFO_NOT_SEEKABLE = 801,
 	// New media metadata is available.
 	MEDIA_INFO_METADATA_UPDATE = 802,
+	// AVOS-specific: asynchronous playback-speed request completed. The applied
+	// speed is carried in arg2 as speed * 1000.
+	MEDIA_INFO_AUDIO_SPEED_APPLIED = 803,
+	// AVOS-specific asynchronous track-selection results. The requested track
+	// is carried in arg2.
+	MEDIA_INFO_AUDIO_TRACK_APPLIED = 10001,
+	MEDIA_INFO_AUDIO_TRACK_FAILED = 10002,
+	MEDIA_INFO_SUBTITLE_TRACK_APPLIED = 10003,
+	MEDIA_INFO_SUBTITLE_TRACK_FAILED = 10004,
 };
 
 #if __cplusplus

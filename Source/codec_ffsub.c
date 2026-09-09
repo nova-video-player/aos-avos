@@ -201,6 +201,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		// Check for valid dimensions
 		if (bb_width <= 0 || bb_height <= 0) {
 			serprintf("codec_ffsub: Invalid bitmap dimensions: %dx%d\n", bb_width, bb_height);
+			avsubtitle_free(&sub);
 			av_packet_free(&avpkt);
 			return 1;
 		}
@@ -214,6 +215,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			char error_buffer[AV_ERROR_MAX_STRING_SIZE] = {0};
 			av_strerror(ret, error_buffer, AV_ERROR_MAX_STRING_SIZE);
 			serprintf("codec_ffsub: Failed to allocate BGRA bitmap (%dx%d). Error: %s\n", bb_width, bb_height, error_buffer);
+			avsubtitle_free(&sub);
 			av_packet_free(&avpkt);
 			return 1;
 		}
@@ -386,7 +388,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			sws_scale(sws_ctx, src_data, src_linesize, 0, rect->h, dst_data, dst_linesize);
 
 			// Free the SwsContext
-			sws_freeContext(sws_ctx);
+			sws_free_context(&sws_ctx);
 		}
 	}
 
@@ -434,6 +436,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	DBGS serprintf("codec_ffsub: decoded sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, frame->duration, frame->time);
 
+	avsubtitle_free(&sub);
 	av_packet_free(&avpkt);
 
 	return 0;

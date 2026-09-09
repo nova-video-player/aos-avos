@@ -109,9 +109,7 @@ void mainloop_enter( void )
 
 //serprintf("mainloop_enter: level %d\r\n", mainloop_level );
 	while (now == mainloop_level) {
-		int next_timer_msec;
-		
-		ULONG tm = atime();
+		int64_t next_timer_msec = -1;
 
 		// how long may we sleep?
 #ifdef CONFIG_GUI
@@ -120,7 +118,13 @@ void mainloop_enter( void )
 		} else
 #endif
 		{
-			next_timer_msec = Timers_nextTimeout( &gui_timers ) - tm;
+			int64_t next_timeout;
+			if( Timers_nextTimeout( &gui_timers, &next_timeout ) ) {
+				next_timer_msec = next_timeout - atime64();
+				if( next_timer_msec < 0 ) {
+					next_timer_msec = 0;
+				}
+			}
 		}
 		if( next_timer_msec < 0 ){
 			// No timers, we sleep indefinitely,
@@ -128,8 +132,8 @@ void mainloop_enter( void )
 			service_data_events( &mainloop_events, NULL);
 		} else {
 			struct timeval tv;
-			tv.tv_sec = 0;
-			tv.tv_usec = next_timer_msec * 1000;
+			tv.tv_sec = next_timer_msec / 1000;
+			tv.tv_usec = (next_timer_msec % 1000) * 1000;
 			service_data_events( &mainloop_events, &tv);
 		}
 

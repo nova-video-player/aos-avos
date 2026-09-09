@@ -60,6 +60,21 @@ DECLARE_DEBUG_TOGGLE("forf", _force_realloc_fail);
 #define DBGCV4 	if(Debug[DBG_CV] > 3 )
 #define DBGCV5 	if(Debug[DBG_CV] > 4 )
 
+/* AVCodecContext frees extradata, therefore it must not borrow stream memory. */
+static int lavc_async_copy_extradata( AVCodecContext *ctx, const void *data, int size )
+{
+	if( !data || size <= 0 )
+		return 0;
+
+	ctx->extradata = av_mallocz( (size_t)size + AV_INPUT_BUFFER_PADDING_SIZE );
+	if( !ctx->extradata )
+		return 1;
+
+	memcpy( ctx->extradata, data, size );
+	ctx->extradata_size = size;
+	return 0;
+}
+
 #ifdef LOG
 void av_log_cb(void*, int, const char*, va_list);
 #endif
@@ -68,6 +83,7 @@ typedef struct PRIV {
 	AVCodecContext 	*vctx;
 	const AVCodec 	*vcodec;
 	AVFrame		*vframe;
+	AVPacket	*avpkt;
 	
 	VIDEO_FRAME	*in_frame;
 	VIDEO_FRAME	*out_frame;
@@ -97,6 +113,7 @@ DBGS serprintf( "FFMA: open");
 	int need_reorder  = 0;
 	int no_extra      = 0;
 	int codec_id;
+	AVCodecContext *vctx = NULL;
 	
 	switch( dec->video->format ) {
 	case VIDEO_FORMAT_MPG4:
@@ -132,21 +149,24 @@ serprintf("cannot find codec\r\n");
 		goto ErrorExit2;
 	}
 
+	p->vctx = avcodec_alloc_context3(p->vcodec);
+	if( !p->vctx ) {
+		goto ErrorExit;
+	}
+	vctx = p->vctx;
 #ifdef LOG
 	vctx->debug |= FF_DEBUG_PICT_INFO;
 	av_log_set_callback( av_log_cb );
 #endif
 
-	p->vctx = avcodec_alloc_context3(p->vcodec);
-	AVCodecContext *vctx = p->vctx;
-
 	// provide all the data that the decoder might need
 	vctx->coded_width    = dec->video->width;
 	vctx->coded_height   = dec->video->height;
 	
-	if(!no_extra) {
-		vctx->extradata      = dec->video->extraData;
-		vctx->extradata_size = dec->video->extraDataSize;
+	if(!no_extra && lavc_async_copy_extradata( vctx, dec->video->extraData,
+			dec->video->extraDataSize ) ) {
+		serprintf( "cannot allocate codec extradata\r\n" );
+		goto ErrorExit;
 	}
 	
 	if (avcodec_open2(vctx, vcodec, NULL) < 0) {
@@ -154,12 +174,12 @@ serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
 
-	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
-	vctx->extradata      = NULL;
-	vctx->extradata_size = 0;
-
 DBGS serprintf("name %s  type %d  id %d \r\n", vcodec->name, vcodec->type, vcodec->id);
 	p->vframe = av_frame_alloc();
+	p->avpkt  = av_packet_alloc();
+	if( !p->vframe || !p->avpkt ) {
+		goto ErrorExit;
+	}
 	
 	dec->is_open = 1;
 
@@ -182,6 +202,12 @@ DBGS serprintf("LAVC_A: drop extra\r\n");
 	
 ErrorExit:
 	// Close the codec
+	if( p->vframe ) {
+		av_frame_free( &p->vframe );
+	}
+	if( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 	if( vctx ) {
 		avcodec_free_context( &vctx );
 	}
@@ -202,8 +228,12 @@ serprintf("ffvd not open!\r\n");
  
 	PRIV *p = (PRIV*)dec->priv;
 
- 	// Free the YUV frame
-	av_free( p->vframe );
+	// Free the YUV frame
+	av_frame_free( &p->vframe );
+
+	if( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 
 	// Close the codec
 	if( p->vctx ) {
@@ -271,19 +301,20 @@ Dump( data, 64 );
 	// decode the frame
 	int got_picture = 0;
 
-	AVPacket avpkt = { .data = data, .size = size };
-	av_init_packet(&avpkt);
+	av_packet_unref( p->avpkt );
+	p->avpkt->data = data;
+	p->avpkt->size = size;
 	if( dec->video->reorder_pts ) {
 		vframe->opaque = (void*)(intptr_t)avos_frame->time;
-		avpkt.pts = avos_frame->time;
+		p->avpkt->pts = avos_frame->time;
 	} else {
 		vframe->opaque = (void*)(intptr_t)avos_frame->user_ID;
-		avpkt.pts = avos_frame->user_ID;
+		p->avpkt->pts = avos_frame->user_ID;
 	}
 DBGCV2 serprintf("<"); 
 	int start = time_update_time();
 	int ret = 0;
-        ret = avcodec_send_packet(vctx, &avpkt);
+        ret = avcodec_send_packet(vctx, p->avpkt);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
              //try again later -- ignore error silently
              ret = 0;

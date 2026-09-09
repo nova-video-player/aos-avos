@@ -39,6 +39,7 @@ typedef int	(*sfdec_stop_input_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_read_t)(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);
 typedef int (*sfdec_buf_render_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int asap, int64_t render_ts_ns);
 typedef int	(*sfdec_buf_release_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf);
+typedef int	(*sfdec_buf_discard_t)(sfdec_priv_t *sfdec, sfbuf_t *sfbuf);
 typedef int	(*sfdec_reset_ts_t)(sfdec_priv_t *sfdec);
 typedef int	(*sfdec_set_playback_speed_t)(sfdec_priv_t *sfdec, int den, int num);
 typedef int (*sfdec_pause_t)(sfdec_priv_t *sfdec);
@@ -62,6 +63,7 @@ typedef struct sfdec_itf {
 	sfdec_pause_t pause;
 	sfdec_resume_t resume;
 	sfdec_seek_reset_t seek_reset;
+	sfdec_buf_discard_t buf_discard;
 } sfdec_itf_t;
 
 struct sfdec {

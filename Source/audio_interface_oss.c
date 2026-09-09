@@ -325,8 +325,9 @@ DBG serprintf( "OSS: _set_bufersize(bits %d, count %d) %08x \r\n", fsize, fcount
 	return 0;
 }
 
-static int oss_set_output_params(audio_ctx_t *ctx, int freq, int channels, int bits, int format)
+static int oss_set_output_params(audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format)
 {
+	(void)content_channels;
 	if( bits != 16 ) {
 serprintf( "OSS: %d bits != 16\r\n", bits );
 		return 1;

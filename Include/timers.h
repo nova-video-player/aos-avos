@@ -23,6 +23,7 @@
 #define TIMERS_H
 
 #include <pthread.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,14 +92,14 @@ enum timer_mode {
 // these are normally only used inside the main loop
 void Timers_init(       Timers *obj);
 void Timers_trigger(    Timers *obj);
-int  Timers_nextTimeout(Timers *obj);
+int  Timers_nextTimeout(Timers *obj, int64_t *timeout);
 
 int Timers_haveListener(Timers *obj, void *listener);
 
 // internal
 typedef struct Timer_str {
 	int id;
-	int timeout;
+	int64_t timeout;
 	int interval;
 	// for standard callbacks
 	void (*callback) ();

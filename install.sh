@@ -12,8 +12,24 @@ trap 'echo ""; echo "🛑 Interrupted. Log file: avos-$(printf "%02d" $LOG_NUM).
 # This script is in native/avos/, so Video/ is two levels up
 SCRIPT_LOCATION="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_LOCATION/../../Video" && pwd)"
-#APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-arm64-v8a-debug.apk"
-APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-armeabi-v7a-debug.apk"
+# Detect device architecture
+echo "📱 Detecting device architecture..."
+ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
+if [ -z "$ABI" ]; then
+    echo "❌ ERROR: Could not detect device ABI. Is the device connected?"
+    exit 5
+fi
+echo "✅ Device ABI: $ABI"
+
+if [[ "$ABI" == "arm64-v8a" ]]; then
+    APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-arm64-v8a-debug.apk"
+elif [[ "$ABI" == "armeabi-v7a" ]]; then
+    APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-armeabi-v7a-debug.apk"
+else
+    echo "⚠️ WARNING: Unknown ABI $ABI, defaulting to arm64-v8a"
+    APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-arm64-v8a-debug.apk"
+fi
+
 BUILD_LOG="build.log"
 VIDEO_PATH="file:///sdcard/Download/Silicon_Valley-S05E02-Reorientation-small.mkv"
 

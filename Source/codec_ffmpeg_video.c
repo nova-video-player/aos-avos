@@ -29,6 +29,7 @@
 #include "codec_utils.h"
 #include "device_config.h"
 #include "pts_reorder.h"
+#include <pthread.h>
 #include "stream_sink_video.h"
 
 /* libavos.c */
@@ -52,6 +53,21 @@ static int _ff_render_count = 0;
 static int _ff_fake         = 0;
 static int _ff_deinterlace  = 1;
 static int _ff_deinterlacing_max_height = 600;
+
+/* AVCodecContext owns extradata; video properties retain ownership of theirs. */
+static int ffmpeg_video_copy_extradata( AVCodecContext *ctx, const void *data, int size )
+{
+	if( !data || size <= 0 )
+		return 0;
+
+	ctx->extradata = av_mallocz( (size_t)size + AV_INPUT_BUFFER_PADDING_SIZE );
+	if( !ctx->extradata )
+		return 1;
+
+	memcpy( ctx->extradata, data, size );
+	ctx->extradata_size = size;
+	return 0;
+}
 
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_TOGGLE("ffca", _ff_force_cached );
@@ -157,8 +173,10 @@ typedef struct PRIV {
 	AVCodecContext 	*vctx;
 	const AVCodec 	*vcodec;
 	AVFrame		*vframe;
+	AVPacket	*avpkt;
 	void		*mt_ctx;
 	int		reorder_pts;
+	pthread_mutex_t mutex;
 
 	// Dolby Vision tone-map: enhancement-layer decoder + BL/EL frame pairing
 	// (mpv f_enhancement_pair policy: decode EL ahead, pair by exact PTS,
@@ -218,6 +236,7 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 	int codec_id;
 	int codec_tag     = 0;
 	int supported     = 1;
+	AVCodecContext *vctx = NULL;
 	
 	if (!device_config_is_video_format_supported(dec->video->format)) {
 		supported = 0;
@@ -350,7 +369,10 @@ serprintf("cannot find codec\r\n");
 	}
 
 	p->vctx = avcodec_alloc_context3(p->vcodec);
-	AVCodecContext *vctx = p->vctx;
+	if( !p->vctx ) {
+		goto ErrorExit;
+	}
+	vctx = p->vctx;
 #ifdef LOG
 	vctx->debug |= FF_DEBUG_PICT_INFO;
 	av_log_set_callback( av_log_cb );
@@ -381,8 +403,10 @@ serprintf("cannot find codec\r\n");
 				extra_size = 0;
 			}
 		}
-		vctx->extradata      = extra;
-		vctx->extradata_size = extra_size;
+		if( ffmpeg_video_copy_extradata( vctx, extra, extra_size ) ) {
+			serprintf( "cannot allocate codec extradata\r\n" );
+			goto ErrorExit;
+		}
 	}
 	vctx->thread_count = _ff_thread_count ? _ff_thread_count : device_get_cpu_count();
 	
@@ -391,12 +415,12 @@ serprintf("cannot open codec\r\n");
 		goto ErrorExit;
 	}
 
-	// Clear extradata after open - we don't own this memory, so prevent avcodec_free_context from freeing it
-	vctx->extradata      = NULL;
-	vctx->extradata_size = 0;
-
 DBGS serprintf("name %s  type %d  id %d  extra %d  threads %d\r\n", vcodec->name, vcodec->type, vcodec->id, vctx->extradata_size, vctx->thread_count);
 	p->vframe = av_frame_alloc();
+	p->avpkt  = av_packet_alloc();
+	if( !p->vframe || !p->avpkt ) {
+		goto ErrorExit;
+	}
 
 	// Dolby Vision tone-map mode: second (software) HEVC decoder instance for
 	// the enhancement layer, mirroring mpv's EL decoder in f_enhancement_pair.
@@ -412,7 +436,7 @@ DBGS serprintf("name %s  type %d  id %d  extra %d  threads %d\r\n", vcodec->name
 			p->el_ctx->extradata = av_mallocz( video->dv_el_extraDataSize + AV_INPUT_BUFFER_PADDING_SIZE );
 			if( p->el_ctx->extradata ) {
 				memcpy( p->el_ctx->extradata, video->dv_el_extraData, video->dv_el_extraDataSize );
-				p->el_ctx->extradata_size = video->dv_el_extraDataSize;
+			p->el_ctx->extradata_size = video->dv_el_extraDataSize;
 			}
 			p->el_ctx->width  = video->width;
 			p->el_ctx->height = video->height;
@@ -454,6 +478,12 @@ DBGS serprintf("FFMPEG: drop extra\r\n");
 	
 ErrorExit:
 	// Close the codec
+	if ( p->vframe ) {
+		av_frame_free( &p->vframe );
+	}
+	if ( p->avpkt ) {
+		av_packet_free( &p->avpkt );
+	}
 	if ( vctx ) {
 		avcodec_free_context( &vctx );
 	}
@@ -483,6 +513,10 @@ serprintf("ffvd not open!\r\n");
  	// free the YUV frame
 	if (p->vframe) {
 		av_frame_free( &p->vframe );
+	}
+
+	if (p->avpkt) {
+		av_packet_free( &p->avpkt );
 	}
 
 	if( p->mt_ctx ) {
@@ -531,6 +565,11 @@ serprintf("ffmpeg_video_codec_prepare\n");
 static int ffmpeg_video_codec_cleanup(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **frames, int num_frames)
 {
 serprintf("ffmpeg_video_codec_cleanup\n");
+	PRIV *p = (PRIV*)dec->priv;
+	if( !p )
+		return 1;
+
+	pthread_mutex_lock( &p->mutex );
 	int i;
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
@@ -548,6 +587,7 @@ serprintf("ffmpeg_video_codec_cleanup\n");
 			f->dec = NULL;
 		}
 	}
+	pthread_mutex_unlock( &p->mutex );
 
 	return 0;
 }
@@ -695,20 +735,21 @@ Dump( data, 64 );
 		}
 	}
 
-	AVPacket avpkt = { .data = data, .size = size };
-	av_init_packet(&avpkt);
+	av_packet_unref( p->avpkt );
+	p->avpkt->data = data;
+	p->avpkt->size = size;
 	if (p->reorder_pts) {
 		vframe->opaque = (void*)(intptr_t)avos_frame->time;
-		avpkt.pts = avos_frame->time;
+		p->avpkt->pts = avos_frame->time;
 	} else {
 		vframe->opaque = (void*)(intptr_t)avos_frame->user_ID;
-		avpkt.pts = avos_frame->user_ID;
+		p->avpkt->pts = avos_frame->user_ID;
 	}
 DBGCV2 serprintf("<"); 
 	int start = time_update_time();
 	int ret = 0;
 	if( !_ff_fake ) {
-        ret = avcodec_send_packet(vctx, &avpkt);
+        ret = avcodec_send_packet(vctx, p->avpkt);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
              //try again later -- ignore error silently
              ret = 0;
@@ -881,14 +922,21 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	if( !dec || !src )
 		return 1;
 	PRIV *p = (PRIV*)dec->priv;
-	if( !p || !p->vctx || !src->priv ) {
-		// decoder already cleaned up, skip render
-		src->dec = NULL;
+	if( !p || !p->vctx ) {
 		return 1;
 	}
+	
+	pthread_mutex_lock( &p->mutex );
+	
+	if( !src->priv || src->dec != dec ) {
+		pthread_mutex_unlock( &p->mutex );
+		return 1;
+	}
+	
 	AVCodecContext *vctx = p->vctx;
 	AVFrame	*avframe = (AVFrame*)src->priv;
-DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );
+	
+	DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );
 	if( dst ) {
 		dst->color_space = avframe->colorspace;
 		if( p->mt_ctx ) {
@@ -908,6 +956,8 @@ DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avf
 			av_frame_free((AVFrame**)&src->handle[1]);
 		src->dec = NULL;
 	}
+	
+	pthread_mutex_unlock( &p->mutex );
 
 	return 0;
 }
@@ -957,8 +1007,12 @@ static int ffmpeg_video_codec_destroy( STREAM_DEC_VIDEO *dec )
 	if( !dec ) 
 		return 1;
 		
-DBGS serprintf( "FFM: delete\n");
-	afree( dec->priv );
+	DBGS serprintf( "FFM: delete\n");
+	PRIV *p = (PRIV*)dec->priv;
+	if( p ) {
+		pthread_mutex_destroy( &p->mutex );
+		afree( p );
+	}
 	afree( dec );
 
 	return 0;
@@ -1018,6 +1072,9 @@ serprintf("FFM: cannot alloc priv\n");
 		free( dec );
 		return NULL;		
 	}
+	
+	PRIV *p = (PRIV*)dec->priv;
+	pthread_mutex_init( &p->mutex, NULL );
 	
 	return dec;
 }

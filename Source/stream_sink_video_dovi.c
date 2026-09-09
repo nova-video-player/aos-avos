@@ -275,6 +275,23 @@ typedef struct {
 				 * a 120Hz grid buckets at 5 vsync slots). */
 	int fb_slot_hist[12];	/* 1Hz: latch-delta histogram in 120Hz vsync
 				 * slots (index 0 = 1 slot, i.e. 8.33ms). */
+	int fb_latch_on_grid;	/* present-ahead window gate + feedback-anchor
+				 * freeze: the panel is latching ON the content grid (video-refresh
+				 * mode / SF holding to the 24Hz scan) so early swaps still latch at
+				 * the target vsync and the verified pipelining cushion is safe. 0
+				 * while a Samsung HRR touch boost runs the panel at 120Hz with
+				 * as-available latching: every early-queued buffer latches one
+				 * vsync EARLY (the 4-slot 33.3ms runaway, diag17/18/20). Cleared
+				 * by an EARLY delta (>half a vsync slot ahead of cadence);
+				 * re-armed after 2s with NO early delta (the boost emits them
+				 * continuously while it lasts, so only its end re-arms).
+				 * Direction-aware: LATE deltas never clear it - the off-state
+				 * itself biases latches late and must stay self-transient
+				 * (diag19/diag21: delta-band re-arms locked the mitigation ON
+				 * through normal pacing; pres 46-56ms, audio underruns). */
+	int64_t fb_ongrid_since_ns;	/* CLOCK_MONOTONIC ns when the current streak
+				 * of NON-early latch deltas started (0 = an early delta was just
+				 * seen, clock restarted): the re-arm hysteresis clock. */
 	int stat_fr_over_us;	/* 1Hz free-run: us the swap entry overshoots
 				 * the chain slot (sum, with the count below = mean) */
 	int stat_fr_over_n;
@@ -378,6 +395,17 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 	 * at its 150ms bound on every tail present (review finding 5). */
 	if( p->venc_flush_gen == my_gen &&
 	    ( p->pending_frame || p->fb_prev_blit_time > 0 ) ) {
+	/* ANCHOR FREEZE (off-grid/boost): while the probe reports an
+		 * early-latch stream, the sync re-anchor, rate trim and the
+		 * anchor pair below would follow the boost down and drag every
+		 * future deadline early (the runaway) - they are gated below
+		 * on fb_latch_on_grid. The probe itself and the diagnostics
+		 * (histogram/frjag/grid-estimator) run UNCONDITIONALLY: the
+		 * probe must keep classifying deltas while the anchor is
+		 * frozen or the off-grid state could never re-arm (measured
+		 * diag22: probe inside the frozen gate -> zero classified
+		 * deltas -> deadlock until the next seek epoch reset, 6.5min
+		 * of forced_late judder between seeks). */
 		/* clock-at-latch computed inline (venc_put_time + elapsed-since-ref):
 		 * calling dovi_sink_get_time() here would evaluate atime() AFTER the
 		 * poll, skewing the estimate by the poll latency. */
@@ -386,6 +414,7 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 		int ideal = p->fb_prev_blit_time > 0 ?
 			p->fb_prev_blit_time : p->pending_frame->blit_time;
 		int step = ideal - clock_at_latch;
+		if( p->fb_latch_on_grid ) {  /* frozen: skip re-anchor/rate/anchors */
 		if( !p->fb_locked ) {
 			/* SYNC ACQUISITION: the FIRST valid latch closes the banked
 			 * startup lead in ONE jump (mpv seek-epoch semantics); after
@@ -424,7 +453,10 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 			 * cascades, gate_to=0 forever. */
 			if( p->fb_active < 0 )
 				p->fb_active = 1;
-			p->fb_last_latch_ns = actual_ns;
+		}		/* end on-grid anchor gate (frozen off-grid: the anchor
+			 * pair keeps its last on-grid value; dovi_phys_from coasts
+			 * on it at the content period) */
+		p->fb_last_latch_ns = actual_ns;
 		p->fb_phys_blit = ideal;	/* coherent pair for dovi_phys_time */
 		/* free-run display-cadence diagnosis: bucket the actual
 		 * latch-to-latch delta in 120Hz vsync slots (8.33ms) - the
@@ -436,6 +468,60 @@ static void dovi_fb_apply( priv_t *p, int64_t actual_ns, int my_gen )
 			int slots = (int)((d_ns + 4166666LL) / 8333333LL);
 			if( slots >= 1 && slots <= 12 )
 				p->fb_slot_hist[slots - 1]++;
+
+			/* PANEL-HOLD PROBE (window gate + feedback-anchor freeze):
+			 * classify the latch delta against the content cadence,
+			 * DIRECTION-AWARE. The boost signature is an EARLY latch
+			 * stream: the 120Hz as-available panel latches each
+			 * early-queued buffer one vsync EARLY and deltas run at
+			 * period-8.3ms (33.3ms on 24fps, the 4-slot runaway,
+			 * diag17/18/20 swipe windows). Clear the flag ONLY on
+			 * deltas EARLY by more than 4.17ms (half a vsync slot):
+			 * one latch (~41ms) after a boost begins, the window and
+			 * the anchor updates are already off. LATE deltas NEVER
+			 * clear the flag. RE-ARM: 2s with NO early delta - the
+			 * clock restarts at each early delta, so only the boost
+			 * end (its early stream stops) can re-arm, regardless of
+			 * how late the off-state biases its own latches (self-
+			 * transient; diag19/diag21 locked with delta-matched
+			 * bands). The anchor freeze: while off-grid, the early
+			 * latches MUST NOT re-anchor the phys clock - the anchor
+			 * writes below are skipped, the phys clock coasts on the
+			 * last on-grid anchor extrapolated at the content period
+			 * (dovi_phys_from), and the deadline chain stops following
+			 * the boost down. That is what actually breaks the
+			 * runaway: the loop is already deadline-anchored when the
+			 * feedback returns and the boost is over. */
+			{
+				int64_t cad_ns = ( p->pres_grid_ns > 0 ) ?
+					p->pres_grid_ns :
+					( ( p->pres_period_ns > 0 ) ? p->pres_period_ns
+					  : ( p->pending_frame ? (int64_t)p->pending_frame->duration * 1000000LL
+							: 0 ) );
+				if( cad_ns > 0 ) {
+					int64_t early_ns = cad_ns - d_ns;
+					if( early_ns > 4166666LL ) {
+						/* boost LIVE: clear the flag, restart the quiet clock */
+						p->fb_latch_on_grid = 0;
+						p->fb_ongrid_since_ns = 0;
+					} else if( !p->fb_latch_on_grid ) {
+						struct timespec og;
+						clock_gettime(CLOCK_MONOTONIC, &og);
+						int64_t og_ns = (int64_t)og.tv_sec * 1000000000LL +
+							og.tv_nsec;
+						if( p->fb_ongrid_since_ns == 0 ) {
+							p->fb_ongrid_since_ns = og_ns;
+						}
+						if( og_ns - p->fb_ongrid_since_ns >= 2000000000LL ) {
+							int64_t held_ns = og_ns - p->fb_ongrid_since_ns;
+							p->fb_latch_on_grid = 1;
+							p->fb_ongrid_since_ns = og_ns;
+							serprintf("dovi sink: panel grid re-hold after %lldms: present-ahead window re-enabled\n",
+								         (long long)(held_ns / 1000000LL));
+						}
+					}
+				}
+			}
 			/* GRID ESTIMATOR (display-resample basis, both modes): the
 			 * steady latch deltas ARE the panel's true scan cadence.
 			 * On this Samsung panel video playback drops the scan
@@ -1400,6 +1486,55 @@ static void *dovi_venc_thread( void *ctx )
 					if( since_pres_ns < slot_ns )
 						blit_duration = (int)((slot_ns - since_pres_ns) / 1000000LL);
 				}
+				/* OFF-GRID PRESENT FLOOR (HRR boost onset): while the probe
+				 * reports the as-available regime, a banked queue (vencq 7-9
+				 * pre-boost) enters the boost with frames whose deadlines
+				 * already passed on the frozen-anchor timeline - the deadline
+				 * break below would present them in a catch-up burst (29-31/s
+				 * swaps measured diag24/25 02:49:34) and the 120Hz as-available
+				 * panel shows the burst at 2-3x content rate (2/3-slot latches,
+				 * the visible onset judder). FLOOR the wait at the swap-wall
+				 * remainder: never swap sooner than one content period after
+				 * the previous swap, even when the deadline says due. The
+				 * floor cannot push the swap LATER than the deadline: it only
+				 * extends a too-short wait (max, not min). Present cadence
+				 * stays exactly on-period through the whole boost; the banked
+				 * queue drains at content rate instead of bursting. */
+				{
+					int grid_hold_f;
+					pthread_mutex_lock( &p->venc_mutex );
+					grid_hold_f = p->fb_latch_on_grid;
+					pthread_mutex_unlock( &p->venc_mutex );
+					if( !grid_hold_f && p->pres_wall_ns > 0 &&
+					    p->pending_frame->duration > 0 ) {
+						struct timespec fns;
+						clock_gettime(CLOCK_MONOTONIC, &fns);
+						int64_t wall_f = (int64_t)fns.tv_sec * 1000000000LL +
+							fns.tv_nsec;
+						int64_t period_f = ( p->pres_grid_ns > 0 ) ?
+							p->pres_grid_ns :
+							(int64_t)p->pending_frame->duration * 1000000LL;
+						int64_t since_f = wall_f - p->pres_wall_ns;
+						int64_t remain_f = period_f - since_f;
+						if( remain_f > 2 * 1000000LL ) {
+							/* LEAD: the break->present path costs ~5-7ms after
+							 * the wait ends (2ms nap quantization, the inflight
+							 * gate spin, the feedback poll, the swap ~0.6ms;
+							 * measured pres avg 48.7ms with a bare remain floor
+							 * = period+7ms overshoot, build 0256). Subtract the
+							 * lead so the SWAP COMPLETES at the period mark: the
+							 * floor fires 5ms early, the residual path cost lands
+							 * inside it, present spacing ~= one content period. */
+							int64_t lead_ns = 5 * 1000000LL;
+							int64_t fl_ns = remain_f - lead_ns;
+							if( fl_ns < 2 * 1000000LL )
+								fl_ns = 2 * 1000000LL;
+							int floor_ms = (int)(fl_ns / 1000000LL);
+							if( floor_ms > blit_duration )
+								blit_duration = floor_ms;
+						}
+					}
+				}
 				/* PRESENT-AHEAD WINDOW (pipelining cushion): break out of the
 				 * wait when the frame is within ONE 120Hz vsync slot (8.33ms)
 				 * of its blit deadline - not at the deadline exactly. The swap
@@ -1422,11 +1557,30 @@ static void *dovi_venc_thread( void *ctx )
 				 * Bounded: the depth-2 inflight gate below the swap still
 				 * enforces at most 1 queued + 1 rendering, and the drop
 				 * policy above still drops STALE frames - only the wait
-				 * bound changed (2ms -> one vsync slot early). */
+				 * bound changed (2ms -> one vsync slot early).
+				 *
+				 * GRID-CONDITIONAL (HRR touch boost): while the panel holds
+				 * the content grid (fb_latch_on_grid, the probe in
+				 * dovi_fb_apply) the early window runs exactly as verified.
+				 * While a Samsung HRR boost runs the panel at 120Hz with
+				 * as-available latching, an 8ms-early swap latches one FULL
+				 * vsync early every frame (the 4-slot 33.3ms runaway,
+				 * diag17/18/20) - do NOT break early; the exact-deadline
+				 * break below paces the swap, the anchor freeze keeps the
+				 * phys clock on the content grid, and the 2s no-early
+				 * re-arm restores the cushion when the boost ends. */
 				{
-					int vsync_early_ms = 8;
-					if( blit_duration <= vsync_early_ms && blit_duration > 2 )
-						break;		/* inside the present-ahead window */
+					int grid_hold;
+					pthread_mutex_lock( &p->venc_mutex );
+					grid_hold = p->fb_latch_on_grid;
+					pthread_mutex_unlock( &p->venc_mutex );
+					if( grid_hold ) {
+						int vsync_early_ms = 8;
+						if( blit_duration <= vsync_early_ms && blit_duration > 2 )
+							break;		/* inside the present-ahead window (panel holds) */
+					}
+					/* window off: fall through - the exact-deadline break below
+					 * paces the swap with the frozen anchor */
 				}
 				if( blit_duration <= 2 )
 					break;
@@ -1949,6 +2103,13 @@ static int sink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx
 	p->fb_rate_ppm = 0;	/* latch-feedback rate trim starts neutral */
 	p->fb_last_latch_ns = 0;
 	p->fb_phys_blit = 0;
+	p->fb_latch_on_grid = 1;	/* assume the panel holds the content grid
+				 * (video-refresh mode) until a latch delta proves otherwise:
+				 * the present-ahead window and the feedback anchor updates
+				 * run from the first present; an EARLY delta (HRR boost)
+				 * flips them off within one latch (~41ms) and the 2s
+				 * no-early hysteresis re-arms only when the boost ends */
+	p->fb_ongrid_since_ns = 0;
 	p->fb_prev_blit_time = 0;
 	p->cur_epoch = 0;		/* epoch tracking: a fresh open has seen no epochs;
 					 * the engine's seek_epoch also starts at 0 so the
@@ -2147,6 +2308,11 @@ static void dvhw_sink_epoch_rearm( priv_t *p, UINT64 new_epoch )
 	p->fb_rate_ppm = 0;
 	p->fb_last_latch_ns = 0;
 	p->fb_prev_latch_ns = 0;
+	p->fb_latch_on_grid = 1;	/* epoch re-arm: panel state unknown mid-
+				 * disturbance - re-enable the window/anchor conservatively
+				 * and let the first post-seek latch deltas re-classify (an
+				 * EARLY delta clears it within one latch) */
+	p->fb_ongrid_since_ns = 0;
 	p->fr_grid_pairs = 0;
 	p->fr_grid_sum_ns = 0;
 	p->fr_grid_last_ns = 0;
@@ -2343,6 +2509,10 @@ static int sink_flush(STREAM_SINK_VIDEO *sink)
 	p->fb_locked = 0;
 	p->fb_rate_ppm = 0;
 	p->fb_last_latch_ns = 0;
+	p->fb_latch_on_grid = 1;	/* rebuild: panel state unknown - re-enable
+				 * the window/anchor conservatively, first latch deltas
+				 * re-classify */
+	p->fb_ongrid_since_ns = 0;
 	p->fb_prev_latch_ns = 0;
 	/* FULL anchor reset (review finding 7: consistency with the epoch
 	 * re-arm's reset list). fb_prev_blit_time survives a rebuild as a

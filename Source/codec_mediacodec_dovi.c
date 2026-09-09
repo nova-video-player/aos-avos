@@ -218,8 +218,15 @@ typedef struct {
 	size_t   size[DVHW_BUFPOOL_MAX];	/* full allocation size incl. hdr */
 	int      count;
 	int      dead;
+	int      refs;		/* lifetime: 1 decoder ref + 1 per LIVE pool-backed
+				 * buffer handed out. The pool is a heap object, NOT
+				 * inside PRIV: sink-held AVFrames can outlive
+				 * dvhw_destroy's afree(priv) (sink_delete frees late
+				 * frames), so hdr->owner must point at self-owned,
+				 * still-allocated storage. Freed when refs hits 0. */
 	pthread_mutex_t mtx;	/* take (copy worker) races release (frame death on the
-				 * sink/decode/flush threads) - lock the stash */
+				 * sink/decode/flush threads) - lock the stash; destroyed
+				 * ONLY when refs hits 0 (no release can follow) */
 } dvhw_bufpool_t;
 
 /* BL buffer-mode copy job (async copy worker): the decode thread
@@ -305,19 +312,45 @@ static void dvhw_bufpool_init(dvhw_bufpool_t *bp)
 {
 	bp->count = 0;
 	bp->dead = 0;
+	bp->refs = 1;	/* the decoder's own reference (dropped by kill) */
 	pthread_mutex_init(&bp->mtx, NULL);
+}
+
+/* drop one pool reference; the LAST holder frees the pool - and only
+ * then destroys the stash mutex, which by construction (refs==0: no
+ * live pool-backed buffer, no decoder) nothing can lock afterwards */
+static void dvhw_bufpool_unref(dvhw_bufpool_t *bp)
+{
+	int last;
+	pthread_mutex_lock(&bp->mtx);
+	last = (--bp->refs == 0);
+	pthread_mutex_unlock(&bp->mtx);
+	if (last) {
+		pthread_mutex_destroy(&bp->mtx);
+		av_free(bp);
+	}
 }
 
 static void dvhw_bufpool_kill(dvhw_bufpool_t *bp)
 {
 	int i;
+	if (!bp)
+		return;
 	pthread_mutex_lock(&bp->mtx);
 	bp->dead = 1;	/* late unrefs of in-flight buffers free directly */
 	for (i = 0; i < bp->count; i++)
 		av_freep(&bp->ptr[i]);
 	bp->count = 0;
 	pthread_mutex_unlock(&bp->mtx);
-	pthread_mutex_destroy(&bp->mtx);
+	/* decoder ref out: the pool survives while any in-flight AVFrame
+	 * still holds a buffer (sink-held frames die in sink_delete, AFTER
+	 * dvhw_destroy's afree(priv)) and frees itself on the last release.
+	 * The stash mutex is never destroyed here - destroying it while
+	 * close-time or sink-time av_frame_free paths still released into
+	 * the pool was the FORTIFY abort 'pthread_mutex_lock called on a
+	 * destroyed mutex' (tombstone 04:29:56: main -> stream_stop ->
+	 * dvhw_close -> av_frame_unref -> dvhw_bufpool_release). */
+	dvhw_bufpool_unref(bp);
 }
 
 typedef struct {
@@ -325,12 +358,14 @@ typedef struct {
 	size_t          size;	/* total allocation (hdr + payload) */
 } dvhw_bufpool_hdr;
 
-/* take a stashed allocation of >= payload size, or malloc fresh */
+/* take a stashed allocation of >= payload size, or malloc fresh. Every
+ * successful take hands out ONE live pool-backed buffer: refs++ so the
+ * pool cannot die while that buffer's AVBufferRef exists */
 static uint8_t *dvhw_bufpool_take(dvhw_bufpool_t *bp, size_t payload)
 {
 	int i, best = -1;
 	size_t need = payload + DVHW_BUFPOOL_HDR;
-	uint8_t *mem;
+	uint8_t *mem = NULL;
 	pthread_mutex_lock(&bp->mtx);
 	for (i = 0; i < bp->count; i++) {
 		if (bp->size[i] >= need && (best < 0 || bp->size[i] < bp->size[best]))
@@ -341,33 +376,43 @@ static uint8_t *dvhw_bufpool_take(dvhw_bufpool_t *bp, size_t payload)
 		bp->size[best] = bp->size[bp->count - 1];
 		bp->ptr[best] = bp->ptr[bp->count - 1];
 		bp->count--;
-		pthread_mutex_unlock(&bp->mtx);
-		return mem;
+		bp->refs++;	/* stash entry becomes a live buffer again */
 	}
 	pthread_mutex_unlock(&bp->mtx);
-	return (uint8_t *) av_malloc(need);
+	if (!mem) {
+		mem = (uint8_t *) av_malloc(need);
+		if (mem) {
+			pthread_mutex_lock(&bp->mtx);
+			bp->refs++;	/* fresh allocation: a live buffer exists */
+			pthread_mutex_unlock(&bp->mtx);
+		}
+	}
+	return mem;
 }
 
-/* AVBuffer free-callback: last AVFrame ref died - return to the stash */
+/* AVBuffer free-callback: last AVFrame ref died - return to the stash
+ * and drop the buffer's pool reference; the LAST reference frees the
+ * pool (its stash mutex with it - no further release can exist) */
 static void dvhw_bufpool_release(void *opaque, uint8_t *data)
 {
 	dvhw_bufpool_hdr *hdr = (dvhw_bufpool_hdr *) (data - DVHW_BUFPOOL_HDR);
 	dvhw_bufpool_t *bp = hdr->owner;
+	int last;
 	pthread_mutex_lock(&bp->mtx);
-	if (bp->dead) {
-		pthread_mutex_unlock(&bp->mtx);
+	if (bp->dead)
 		av_free(hdr);	/* hdr IS the allocation base */
-		return;
-	}
-	if (bp->count < DVHW_BUFPOOL_MAX) {
+	else if (bp->count < DVHW_BUFPOOL_MAX) {
 		bp->ptr[bp->count] = (uint8_t *) hdr;
 		bp->size[bp->count] = hdr->size;
 		bp->count++;
-		pthread_mutex_unlock(&bp->mtx);
-		return;
-	}
+	} else
+		av_free(hdr);	/* stash full: normal free */
+	last = (--bp->refs == 0);
 	pthread_mutex_unlock(&bp->mtx);
-	av_free(hdr);	/* stash full: normal free */
+	if (last) {
+		pthread_mutex_destroy(&bp->mtx);
+		av_free(bp);
+	}
 }
 
 typedef struct {
@@ -460,7 +505,11 @@ pthread_cond_t	feed_cond;
 pthread_t	feed_thread;
 int		feed_started;
 pthread_mutex_t	pending_mtx;	/* pending[] map: push (feed worker) races take (decode thread) */
-dvhw_bufpool_t	bufpool;	/* recycled 4K frame-buffer stash (see dvhw_bufpool_*) */
+	dvhw_bufpool_t	*bufpool;	/* recycled 4K frame-buffer stash (see dvhw_bufpool_*):
+				 * heap object with its own refcount - sink-held AVFrames
+				 * can outlive dvhw_destroy's afree(priv) (sink_delete
+				 * frees late frames), so the pool must not live inside
+				 * PRIV */
 dvhw_copyq_t	copyq;	/* BL copy worker ring (see dvhw_copyjob_t) */
 	pthread_mutex_t	th_mtx;
 	pthread_cond_t	th_cond;
@@ -766,7 +815,15 @@ static int dvhw_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx,
 	p->run = 1;
 	p->flushing = 0;
 	p->th_busy = 0;
-	dvhw_bufpool_init(&p->bufpool);
+	if (!p->bufpool) {
+		p->bufpool = (dvhw_bufpool_t *) av_mallocz(sizeof(dvhw_bufpool_t));
+		if (!p->bufpool) {
+			dec->is_open = 0;	/* pool is mandatory: fail this open,
+						 * close/destroy must not run the clears */
+			goto fail;
+		}
+		dvhw_bufpool_init(p->bufpool);
+	}
 	/* BL copy workers: mutex+cond first, ring state zeroed, then start */
 	p->copyq.head = p->copyq.count = 0;
 	p->copyq.ready_head = p->copyq.ready_count = 0;
@@ -965,14 +1022,21 @@ static AVFrame *dvhw_copy_yuv420(PRIV *p, AMediaCodec *codec, ssize_t index,
 	 * first-touch page faults at 4K P010; the pool recycles touched pages,
 	 * measured wall: emit ceiling 40/s vs content 48/s). */
 	total = l0 * (size_t) height + (l1 + l2) * rows1;
-	uint8_t *base = dvhw_bufpool_take(&p->bufpool, total);
+	uint8_t *base = dvhw_bufpool_take(p->bufpool, total);
+	if (!base) {
+		av_frame_free(&f);
+		f = NULL;
+		goto done;
+	}
 	dvhw_bufpool_hdr *hdr = (dvhw_bufpool_hdr *) base;
-	hdr->owner = &p->bufpool;
+	hdr->owner = p->bufpool;
 	hdr->size = total + DVHW_BUFPOOL_HDR;
 	uint8_t *mem = base + DVHW_BUFPOOL_HDR;
 	AVBufferRef *buf = av_buffer_create(mem, total, dvhw_bufpool_release, NULL, 0);
 	if (!buf) {
 		av_free(base);
+		dvhw_bufpool_unref(p->bufpool);	/* take() counted a buffer
+						 * that never came to life */
 		av_frame_free(&f);
 		f = NULL;
 		goto done;
@@ -1065,15 +1129,24 @@ static int dvhw_close(STREAM_DEC_VIDEO *dec)
 {
 	PRIV *p = (PRIV *) dec->priv;
 	int i;
+	int pending_mtx_alive;
 
 	if (!dec->is_open)
 		return 0;
+	/* pending_mtx was initialized (all-or-nothing with feed_mtx in the
+	 * open path) only when the feed worker reached 'started'; if the
+	 * open failed at feed-thread creation, pending_mtx was already
+	 * destroyed there and must not be locked/cleared/destroyed again */
+	pending_mtx_alive = p->feed_started;
 
 	/* stop the async threads: park them (flush handshake) so none is
 	 * inside a codec call, then signal run=0 and join. The buffer pool
-	 * is killed AFTER the joins: in-flight frames can still die later
-	 * (the sink may hold AVFrames), but the hdr owner pointer handles
-	 * that (dvhw_bufpool_release frees directly once dead).
+	 * kill runs at the TAIL of this function, after every internal
+	 * pool-backed frame free; frames that outlive close (the sink may
+	 * hold AVFrames, freed in sink_delete after dvhw_destroy's
+	 * afree(priv)) release through the pool's own refcount - the hdr
+	 * owner pointer still points at valid, self-owned pool storage
+	 * (dvhw_bufpool_release frees directly once dead).
 	 *
 	 * ORDER: the TH thread (dvhw_async_thread) is stopped FIRST. It is
 	 * the only thread that cross-locks the other subsystems' mutexes
@@ -1106,7 +1179,11 @@ static int dvhw_close(STREAM_DEC_VIDEO *dec)
 		p->feed_started = 0;
 		pthread_mutex_destroy(&p->feed_mtx);
 		pthread_cond_destroy(&p->feed_cond);
-		pthread_mutex_destroy(&p->pending_mtx);
+		/* pending_mtx stays alive: the RPU-map drain (dvhw_pending_clear)
+		 * at the tail still locks it; destroyed after that drain. (The
+		 * old code destroyed it here and then locked the destroyed mutex
+		 * in the tail clear - undefined behavior, a FORTIFY abort waiting
+		 * on bionic builds that scribble destroy markers.) */
 	}
 	if (p->copyq_started) {
 		pthread_mutex_lock(&p->copyq.mtx);
@@ -1117,13 +1194,25 @@ static int dvhw_close(STREAM_DEC_VIDEO *dec)
 		for (i = 0; i < p->copyq_started && i < DVHW_COPY_WORKERS; i++)
 			pthread_join(p->copyq.thread[i], NULL);
 		p->copyq_started = 0;
+		/* the workers exit on !run WITHOUT draining: finished copies sit
+		 * on the ready ring and posted jobs keep their RPU. Free both
+		 * here - the ready frames are pool-backed and MUST die before
+		 * the bufpool kill at the tail (they were also a straight leak
+		 * in the old close: the ring was never freed). */
+		pthread_mutex_lock(&p->copyq.mtx);
+		for (i = 0; i < p->copyq.ready_count; i++)
+			av_frame_free(&p->copyq.ready[(p->copyq.ready_head + i) % DVHW_COPY_Q_MAX]);
+		p->copyq.ready_count = 0;
+		for (i = 0; i < p->copyq.count; i++)
+			av_free(p->copyq.job[(p->copyq.head + i) % DVHW_COPY_Q_MAX].rpu);
+		p->copyq.count = 0;
+		pthread_mutex_unlock(&p->copyq.mtx);
 		pthread_mutex_destroy(&p->copyq.mtx);
 		pthread_cond_destroy(&p->copyq.cond);
 	}
 	if (p->th_mtx_inited) {
 		dvhw_in_q_clear(p);
 		dvhw_out_q_clear(p);
-		dvhw_bufpool_kill(&p->bufpool);
 		pthread_mutex_destroy(&p->th.mtx);
 		pthread_cond_destroy(&p->th.cond);
 		p->th_mtx_inited = 0;
@@ -1139,9 +1228,25 @@ static int dvhw_close(STREAM_DEC_VIDEO *dec)
 		AMediaCodec_delete(p->el_codec);
 		p->el_codec = NULL;
 	}
+	/* ALL pool-backed AVFrame frees happen while the bufpool is still
+	 * alive: the old order killed the pool (destroying its stash mutex)
+	 * BEFORE el_q/bl_q/out_q clearing, and those av_frame_free calls land
+	 * in dvhw_bufpool_release, which locks the stash mutex - FORTIFY
+	 * abort 'pthread_mutex_lock called on a destroyed mutex' (measured
+	 * tombstone 04:29:56: main -> stream_stop -> stream_close_video_dec
+	 * -> dvhw_close -> av_frame_unref -> dvhw_bufpool_release). The kill
+	 * runs LAST; the pool is refcounted, so any frame that STILL
+	 * outlives close (sink-held frames die in sink_delete, after
+	 * dvhw_destroy's afree(priv)) releases through valid, self-owned
+	 * pool memory and frees the pool on its last release. */
 	dvhw_el_q_clear(p);
 	dvhw_bl_q_clear(p);
-	dvhw_pending_clear(p);
+	if (pending_mtx_alive) {
+		dvhw_pending_clear(p);
+		pthread_mutex_destroy(&p->pending_mtx);
+	}
+	dvhw_bufpool_kill(p->bufpool);
+	p->bufpool = NULL;
 	dec->is_open = 0;
 	return 0;
 }
@@ -2714,12 +2819,27 @@ static void *dvhw_async_thread(void *ctx)
 				tw.tv_sec++;
 				tw.tv_nsec -= 1000000000L;
 			}
-			p->th_busy = 0;
+				p->th_busy = 0;
 			pthread_cond_broadcast(&p->th.cond);
 			pthread_cond_timedwait(&p->th.cond, &p->th.mtx, &tw);
 		}
 		(void) 0;
 	}
+	/* EXIT: th_busy MUST be cleared and broadcast before unlocking -
+	 * dvhw_close's park handshake (flushing=1, run=0, then
+	 * while(th_busy) cond_wait) races THIS exit: when run flips 0
+	 * mid-iteration (app backgrounded mid-playback), the loop condition
+	 * fails at the top of the next pass and the thread exits WITHOUT
+	 * any of the body's th_busy=0 clears running (the flush-park loop
+	 * needs run==1; the idle timedwait needs both queues empty - with
+	 * AUs still queued at close, neither runs). The leaked th_busy=1
+	 * then wedges dvhw_close's wait FOREVER - the main (UI) thread
+	 * blocked in stream_stop -> dvhw_close = the measured 'Nova not
+	 * responding' ANR on switching away mid-playback (5x tonight:
+	 * 23:43, 00:30, 00:43, 02:23, 03:15; stack: main -> avos_mp_close
+	 * -> stream_stop -> dvhw_close+0x60 -> pthread_cond_wait). */
+	p->th_busy = 0;
+	pthread_cond_broadcast(&p->th.cond);
 	pthread_mutex_unlock(&p->th.mtx);
 	return NULL;
 }
@@ -2887,6 +3007,16 @@ static int dvhw_get_rc(STREAM_DEC_VIDEO *dec, STREAM_RC *rc)
 
 static int dvhw_destroy(STREAM_DEC_VIDEO *dec)
 {
+	PRIV *p = (PRIV *) dec->priv;
+	/* close-and-destroy contract: close already killed (and NULLed)
+	 * the pool - possibly leaving it alive on in-flight sink frames,
+	 * which then own its lifetime. A NON-NULL pool here means close
+	 * never ran (open-failure corner): release the decoder ref so the
+	 * pool dies with its last buffer instead of leaking. */
+	if (p && p->bufpool) {
+		dvhw_bufpool_kill(p->bufpool);
+		p->bufpool = NULL;
+	}
 	afree(dec->priv);
 	afree(dec);
 	return 0;

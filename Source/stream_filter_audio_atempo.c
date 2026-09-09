@@ -61,13 +61,20 @@
 
 // Read-only af_atempo state accessor added to the vendored filter: reports
 // media counters and WSOLA ring occupancy used by the atempo output ledger.
+// Both accessors are WEAK and NULL-checked at call time: the prebuilt
+// FFmpeg dists in this tree do not export them (the vendored af_atempo
+// extension landed upstream but the local dist-full libs predate it), and
+// a missing weak symbol resolves to NULL - calling it unconditionally is
+// a null-pc crash (measured: SIGSEGV pc=0 in atempo_get_state from the
+// audio decoder thread). Callers must treat a NULL accessor as 'no state
+// available' and keep their own fallback accounting.
 extern void avfilter_atempo_get_state(AVFilterContext *ctx,
                                   int *ring_size,
                                   int64_t *pos_in,
                                   int64_t *pos_out,
                                   int64_t *ns_in,
                                   int64_t *ns_out,
-                                  double *tempo);
+                                  double *tempo) __attribute__((weak));
 extern void avfilter_atempo_get_state_v2(AVFilterContext *ctx,
                                      int *ring_size,
                                      int64_t *pos_in,
@@ -84,10 +91,15 @@ static void atempo_get_state(AVFilterContext *ctx,
 	if (media_out) {
 		*media_out = -1;
 	}
+	/* NULL-check BOTH weak accessors: with a prebuilt FFmpeg that does not
+	 * export the vendored af_atempo extension, each resolves to NULL and an
+	 * unguarded call is a jump to 0 (pc=0 SIGSEGV, measured on SM-F946B).
+	 * Leave the outputs untouched when unavailable: callers initialize
+	 * ring_size/pos_* to their own conservative defaults beforehand. */
 	if (avfilter_atempo_get_state_v2) {
 		avfilter_atempo_get_state_v2(ctx, ring_size, pos_in, pos_out,
 			ns_in, ns_out, tempo, media_out);
-	} else {
+	} else if (avfilter_atempo_get_state) {
 		avfilter_atempo_get_state(ctx, ring_size, pos_in, pos_out,
 			ns_in, ns_out, tempo);
 	}

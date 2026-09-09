@@ -171,7 +171,8 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             void *extradata, size_t extradata_size,
             int *pts_reorder,
             int color_primaries, int color_trc, int color_space, int color_range,
-            const char* codec_name, int video_frame_rate_den, int video_frame_rate_num)
+            const char* codec_name, int video_frame_rate_den, int video_frame_rate_num,
+            int dv_profile, int dv_level)
 {
     media_status_t err;
     const char *mime_type;
@@ -241,6 +242,18 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
 
     // Priority hint (0 = realtime priority)
     AMediaFormat_setInt32(sfdec->mFormat, "priority", 0);
+
+    // Dolby Vision: signal profile/level to the framework as required by the
+    // Android MediaCodec DV contract (values are MediaCodecInfo.CodecProfileLevel
+    // DolbyVisionProfile* constants, same ones used for decoder selection)
+    if (codec == SFDEC_VIDEO_DOLBY_VISION && dv_profile > 0) {
+        AMediaFormat_setInt32(sfdec->mFormat, "dolby-vision-profile", dv_profile);
+        LOG("dolby-vision-profile: %d", dv_profile);
+        if (dv_level > 0) {
+            AMediaFormat_setInt32(sfdec->mFormat, "dolby-vision-level", dv_level);
+            LOG("dolby-vision-level: %d", dv_level);
+        }
+    }
 
     // Set color metadata for HDR/color space signaling
     {

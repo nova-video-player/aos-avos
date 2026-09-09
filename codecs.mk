@@ -132,6 +132,16 @@ ifeq ($(VIDEO),ON)
 			INCLUDES += -I$(LIBAV_CONFIG_DIR)/include
 		endif
 		AVOS_SHARED_LIBS += -lavcodec -lavutil -lavformat -lavfilter -lswscale -lswresample
+
+		# Dolby Vision tone-mapping stack (libplacebo + libdovi), full FFmpeg config only
+		ifneq ($(wildcard $(LIBPLACEBO_DIR)/lib/$(TARGET_ARCH_ABI)/libplacebo.a),)
+			INCLUDES += -I$(LIBPLACEBO_DIR)/include
+			AVOS_STATIC_LIBS += libplacebo libdovi
+			SHARED_LIBS += -lEGL -lGLESv3 -landroid -lmediandk -lm
+			DEFINES += -DCONFIG_DOVI_TONEMAP
+			CSRC_STREAM_SINK += stream_sink_video_dovi.c
+			CSRC_STREAM_CODEC += codec_mediacodec_dovi.c
+		endif
 	endif
 
 	ifeq ($(VIDEO_REALVIDEO),ON)

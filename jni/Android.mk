@@ -27,6 +27,11 @@ ifeq ($(LIBAV_CONFIG),)
 endif
 LIBAV_CONFIG_DIR := $(LIBAV_DIR)/dist-$(LIBAV_CONFIG)-$(TARGET_ARCH_ABI)
 
+LIBPLACEBO_DIR := $(AVOS_DIR)/../prebuilt/libplacebo
+ifneq ($(wildcard $(LIBPLACEBO_DIR)/lib/$(TARGET_ARCH_ABI)/libplacebo.a),)
+HAVE_LIBPLACEBO := true
+endif
+
 AUDIOCOMPRESS_DIR := $(AVOS_DIR)/../audiocompress
 
 ifeq ($(TARGET_ARCH_ABI),armeabi)

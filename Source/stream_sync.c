@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -210,8 +210,8 @@ static int stream_mode2_dynamic_all = 1;
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
 // Evidence stability filter: prevents AT burst/drain oscillation from overwriting last_good.
 // delta <= COMMIT_DELTA: direct commit (normal slow drift).
-// delta 12..60ms (medium zone): ignored — EAC3 burst/drain amplitude; not a valid new baseline.
-// delta >= DRIFT_CORRECT_MS: candidate path — require CANDIDATE_COUNT samples within CANDIDATE_BAND.
+// delta 12..60ms (medium zone): ignored â€” EAC3 burst/drain amplitude; not a valid new baseline.
+// delta >= DRIFT_CORRECT_MS: candidate path â€” require CANDIDATE_COUNT samples within CANDIDATE_BAND.
 #define STREAM_PCM_EVIDENCE_COMMIT_DELTA_MS   12
 #define STREAM_PCM_EVIDENCE_CANDIDATE_BAND_MS  6
 #define STREAM_PCM_EVIDENCE_CANDIDATE_COUNT    3
@@ -491,7 +491,7 @@ static int _stream_is_sink_driven(STREAM *s)
 //                                startup clamp no longer blocks sync even if still active
 //   - both video hold flags set: pre-first-write resume hold (released on first write)
 // Note: video_hold_for_delay alone (after video_hold_for_resume_audio clears) means
-// the video thread is still waiting for delay validity, but audio is already running —
+// the video thread is still waiting for delay validity, but audio is already running â€”
 // that is not "waiting for audio" from the sync-state perspective.
 static int _stream_is_waiting_for_audio(STREAM *s, const stream_delay_status_t *delay_status)
 {
@@ -2324,7 +2324,7 @@ static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	if( tag ) {
 		*tag = delay_source;
 	}
-	// Priority: last_good → static latency → skip.
+	// Priority: last_good â†’ static latency â†’ skip.
 	// Do not wait for dynamic delay stability here. Dynamic delay is a
 	// selected-delay provider during normal playback; the Phase 2 drift gate
 	// handles later correction if last_good is stale.
@@ -2381,7 +2381,7 @@ int stream_sync_pcm_reanchor_update( STREAM *s, int passthrough_active )
 	}
 
 	// One-shot apply: attempt to select a delay and apply immediately.
-	// Clear the latch whether the reanchor applies or is skipped — no WAITING_STABLE retry.
+	// Clear the latch whether the reanchor applies or is skipped â€” no WAITING_STABLE retry.
 	int delay = 0;
 	int source = PCM_REANCHOR_SOURCE_NONE;
 	const char *tag = NULL;
@@ -2515,7 +2515,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			_stream_pcm_update_delay_cache( s, current_av_delay, delay_streak, sensitive_phase );
 		}
 	}
-	// Log when delay is valid but source is not DYNAMIC and no evidence carried —
+	// Log when delay is valid but source is not DYNAMIC and no evidence carried â€”
 	// these are true non-dynamic sources (static, fallback) that cannot refresh last_good.
 	if( delay_valid && delay_status.source != STREAM_DELAY_SOURCE_DYNAMIC &&
 		!delay_status.has_dynamic_evidence ) {
@@ -2536,26 +2536,26 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	// block above never fires again after the first write.
 	//
 	// Filter rules (prevents AT burst/drain oscillation poisoning last_good):
-	//   !sensitive_phase required — no bypass; warmup/resume spikes must not leak in.
-	//   delta ≤ COMMIT_DELTA (12ms):    commit directly (normal slow drift).
-	//   delta 12–60ms (medium zone):    ignore + reset candidate; this is the EAC3
+	//   !sensitive_phase required â€” no bypass; warmup/resume spikes must not leak in.
+	//   delta â‰¤ COMMIT_DELTA (12ms):    commit directly (normal slow drift).
+	//   delta 12â€“60ms (medium zone):    ignore + reset candidate; this is the EAC3
 	//                                   burst/drain amplitude; neither extreme is a
 	//                                   valid new baseline for resume anchoring.
-	//   delta ≥ DRIFT_CORRECT (60ms):   candidate accumulation — route-change / HW
+	//   delta â‰¥ DRIFT_CORRECT (60ms):   candidate accumulation â€” route-change / HW
 	//                                   reset scale; requires CANDIDATE_COUNT stable
 	//                                   samples within CANDIDATE_BAND before commit.
 	//   sensitive_phase active:         reset candidate accumulator, do nothing.
 	if( delay_status.has_dynamic_evidence && delay_status.dynamic_evidence_ms > 0 ) {
 		int sensitive_phase = _stream_pcm_delay_sensitive_phase( s, delay_valid );
 		if( sensitive_phase ) {
-			// Discard any candidate in progress — don't accumulate during warmup/seek/resume.
+			// Discard any candidate in progress â€” don't accumulate during warmup/seek/resume.
 			s->last_good_candidate_ms    = 0;
 			s->last_good_candidate_count = 0;
 		} else {
 			int evidence_ms = delay_status.dynamic_evidence_ms;
 			int evidence_streak = delay_status.dynamic_evidence_streak;
 			if( !s->last_good_delay_valid ) {
-				// No baseline yet — commit immediately.
+				// No baseline yet â€” commit immediately.
 				_stream_pcm_update_delay_cache( s, evidence_ms, evidence_streak, sensitive_phase );
 				s->last_good_candidate_ms    = 0;
 				s->last_good_candidate_count = 0;
@@ -2564,12 +2564,12 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				int delta = evidence_ms - last_good_total;
 				if( delta < 0 ) delta = -delta;
 				if( delta <= STREAM_PCM_EVIDENCE_COMMIT_DELTA_MS ) {
-					// Close enough — commit directly, discard any stale candidate.
+					// Close enough â€” commit directly, discard any stale candidate.
 					_stream_pcm_update_delay_cache( s, evidence_ms, evidence_streak, sensitive_phase );
 					s->last_good_candidate_ms    = 0;
 					s->last_good_candidate_count = 0;
 				} else if( delta >= STREAM_PCM_DELAY_DRIFT_CORRECT_MS ) {
-					// Very large drift (≥60ms): route-change or major HW reset —
+					// Very large drift (â‰¥60ms): route-change or major HW reset â€”
 					// allow candidate accumulation to commit.
 					if( s->last_good_candidate_count == 0 ) {
 						// Start fresh candidate.
@@ -2579,7 +2579,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 						int cand_delta = evidence_ms - s->last_good_candidate_ms;
 						if( cand_delta < 0 ) cand_delta = -cand_delta;
 						if( cand_delta <= STREAM_PCM_EVIDENCE_CANDIDATE_BAND_MS ) {
-							// Still within band — accumulate running average.
+							// Still within band â€” accumulate running average.
 							s->last_good_candidate_ms = ( s->last_good_candidate_ms *
 								s->last_good_candidate_count + evidence_ms ) /
 								( s->last_good_candidate_count + 1 );
@@ -2594,13 +2594,13 @@ int stream_sync_audio( STREAM *s, int audio_time )
 								s->last_good_candidate_count = 0;
 							}
 						} else {
-							// Jumped outside band — restart candidate.
+							// Jumped outside band â€” restart candidate.
 							s->last_good_candidate_ms    = evidence_ms;
 							s->last_good_candidate_count = 1;
 						}
 					}
 				} else {
-					// Medium drift (12–60ms): EAC3 burst/drain oscillation zone —
+					// Medium drift (12â€“60ms): EAC3 burst/drain oscillation zone â€”
 					// ignore and discard any candidate to prevent phase-locked flipping.
 					s->last_good_candidate_ms    = 0;
 					s->last_good_candidate_count = 0;

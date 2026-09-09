@@ -36,6 +36,22 @@ LOCAL_SRC_FILES := $(LIBYUV_DIR)/obj/local/$(TARGET_ARCH_ABI)/libyuv_static.a
 LOCAL_EXPORT_C_INCLUDES := $(LIBYUV_DIR)/include
 include $(PREBUILT_STATIC_LIBRARY)
 
+### libplacebo (Dolby Vision tone-mapping, mpv/libplacebo path) ###
+ifneq ($(wildcard $(LIBPLACEBO_DIR)/lib/$(TARGET_ARCH_ABI)/libplacebo.a),)
+HAVE_LIBPLACEBO := true
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libplacebo
+LOCAL_SRC_FILES := $(LIBPLACEBO_DIR)/lib/$(TARGET_ARCH_ABI)/libplacebo.a
+LOCAL_EXPORT_C_INCLUDES := $(LIBPLACEBO_DIR)/include
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libdovi
+LOCAL_SRC_FILES := $(LIBPLACEBO_DIR)/lib/$(TARGET_ARCH_ABI)/libdovi.a
+LOCAL_EXPORT_C_INCLUDES := $(LIBPLACEBO_DIR)/include
+include $(PREBUILT_STATIC_LIBRARY)
+endif
+
 ### libavos ###
 
 include $(CLEAR_VARS)
@@ -63,6 +79,10 @@ LOCAL_LDLIBS := -L$(TARGET_OUT) -lz \
 
 LOCAL_STATIC_LIBRARIES := $(sort $(addsuffix $(AVOS_LIBS_SUFFIX), $(AVOS_STATIC_LIBS))) \
 	cpufeatures libyuv
+ifeq ($(HAVE_LIBPLACEBO),true)
+LOCAL_STATIC_LIBRARIES += libplacebo libdovi
+LOCAL_SRC_FILES += $(ANDROID_DIR)/libavos_android/dovi_gl.c Source/libplacebo_cxx_stub.cpp
+endif
 
 LOCAL_MODULE := libavos$(AVOS_LIBS_SUFFIX)
 

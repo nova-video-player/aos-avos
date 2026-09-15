@@ -124,7 +124,10 @@ reaches `audio_start_pts - anchor_delay`. Hold threshold:
   cadence (~1200 bursts/sec) that would cause a freeze on a tight threshold.
 
 `startup_audio_hold` runs as long as needed (not only for `video_time < 1000`),
-so seeks late in a file are also covered.
+so seeks late in a file are also covered. After seek, the first admitted
+current-epoch video frame is an initial floor; the hold then follows live
+`video_time` until it reaches the first audible timestamp. This allows playback
+to cross a container-level gap before the selected audio track begins.
 
 ### PCM startup latency convergence
 
@@ -148,43 +151,35 @@ and is reset across playback lifecycle boundaries. A speed change during warmup
 rearms the comparison for the new speed epoch. This path is decoded-PCM-only;
 passthrough and AC3 recoding do not participate.
 
-### PCM resume reanchor state machine
+### Legacy PCM resume reanchor state machine
 
 On the first write after resume, `stream_sync_pcm_reanchor_arm()` arms a
-state machine that selects delay in priority order:
+state machine only for non-`put_time` PCM sinks. It selects delay in priority
+order:
 
-1. Dynamic delay (streak ≥ 3) — most accurate
-2. `last_good_delay_ms + live_atempo_delay` — warm fallback
-3. Static latency — cold fallback
+1. `last_good_delay_ms + live_atempo_delay`, clamped up to static latency
+2. Static latency as a cold fallback
 
 The reanchor sets `audio_time = sync_v_time + delay` (using the video
 thread's last reported position, not the potentially stale `video_time`).
 It expires if `seek_epoch` changes mid-resume to prevent stale rebases.
+Android `put_time` sinks do not use this state machine: the first committed
+post-resume audio output republishes the centralized heard-time anchor.
 
-### Post-seek convergence
+### Post-seek restart
 
-`_stream_seek_converge_update()` runs a three-part strategy:
-
-- **Part A**: Every `stream_sync_video()` call in put_time mode immediately
-  calls `put_time(heard_ts)` — continuous scheduler updates during the
-  convergence window instead of one shot at T+500ms.
-- **Part B**: If `heard_ts` leads `sync_v_time` by more than
-  `STREAM_SEEK_CONVERGE_APPLY_DIFF_MS` (80ms), audio writes are gated so
-  audio cannot run away while video catches up.
-- **Part C**: After `STREAM_SEEK_CONVERGE_WINDOW_MS` (500ms), a dedicated
-  `sfdec2_refresh_sched_anchor() + put_time()` fires and marks convergence
-  done. Max wait: `STREAM_SEEK_CONVERGE_MAX_WAIT_MS` (1500ms).
+Seek starts a new audio, video, and renderer epoch. Video preroll admits the
+first current-epoch frame at or beyond the target and records it in
+`seek_video_ready_ts`; audio startup uses that value as a floor while following
+live video progress. The first valid post-seek heard timestamp publishes the
+new sink anchor. There is no separate timed seek-convergence state machine.
 
 ### PCM audio lead gate
 
-`stream_sync_pcm_audio_lead_gate()` holds audio writes when heard_ts
-leads `sync_v_time` by too much — a failure mode where AudioTrack accepts
-PCM fast after seek while video is still catching up.
-
-- Enter HOLDING: heard_ts leads by ≥ 220ms for 3 consecutive calls, or
-  immediately at 250ms.
-- Release HOLDING: lead drops below 120ms (100ms hysteresis).
-- Maximum 30 holds (~300ms) before forced expiry.
+`stream_sync_pcm_audio_lead_gate()` holds an audio write whenever `heard_ts`
+leads `sync_v_time` by more than 200ms. The gate is stateless: it has no streak,
+hysteresis, or forced-expiry counter. Positive user A/V delay is included in
+the permitted lead; negative delay is realized separately as an audio hold.
 
 Applies only to PCM (not passthrough), and not during passthrough bursts.
 
@@ -205,10 +200,15 @@ used elsewhere (e.g. `pcm_audio_lead_gate`).
 
 ## Pause/Resume and Seek
 
-- **Pause**: direct Mode 2 preserves its heard phase and compressed ledger while resetting the observation epoch, so paused duration is not credited. A valid MediaCodec render offset is shifted by the paused wall duration rather than force-reanchored. Trusted presentation evidence has a bounded remapping grace period after resume.
+- **Pause**: a non-flushing pause preserves the AudioTrack PlaybackParams checkpoint, atempo output ledger and pending commits, and direct Mode 2 heard phase/compressed ledger. Wall references are shifted so paused duration is credited neither as audio progress nor renderer drift. Trusted Mode 2 presentation evidence has a bounded remapping grace period after resume. Decoded PCM already produced when pause wins the pre-write race remains pending in the audio thread and is committed after the track is started again; seek/stop still discard it through their normal flush and epoch reset.
+- **Backend pause capability**: `pause_preserves_output` defaults to false; Java AudioTrack explicitly opts in because it freezes queued output. OpenSL ES clears its queue through stop, and legacy native AudioTrack maps pause to stop. These backends use the destructive synchronization restart and the PCM preload policy instead of preserving old queue timing. Compressed output is excluded from PCM silence preload.
+- **Retained output**: capacity and lead waits yield to pause/resume. Java AudioTrack resumes without flush/preload at every speed, including plain 1.0x PCM. A positive short write keeps its accepted prefix in AudioTrack and only its unwritten suffix is retried; a zero-byte write interrupted by pause consumes no media. The pre-filter PCM accumulator also survives. An untouched compressed unit that loses the pause race releases the transaction mutex and retains the entire remaining output until resume. Seek/stop can abort these waits through the normal thread-state reset.
+- **Resume video hold**: the paused decode branch, retained-output waits, interrupted-write retries, and explicit resume path share `stream_audio_prepare_resume()`. It arms both hold flags for non-seek playback so compressed video waits for the first resumed write, subject to the existing bounded timeout. Seek preview does not arm this hold. PCM retains its existing policy of skipping the compressed first-write wait.
+- **Manual negative audio delay**: a non-flushing pause/resume preserves both the delay already inserted and the hold notification still pending for the renderer. A partially applied delay resumes with only the remaining amount. Seek/reset and an actual PCM preload flush clear both fields so the new audio phase receives the requested delay once.
+- **Speed timing on resume**: atempo stays non-flushing at neutral 1.0x, and a PlaybackParams checkpoint survives returning to 1.0x. Preserved atempo commits retain their frame boundaries, order, and elapsed running time toward the three-second fallback. Only paused time is excluded; commits created or reset during pause start their timeout at resume. Commits cannot be promoted while paused. An in-flight renderer correction target shifts with its render offset.
 - **Seek**: synchronization state is reset (`sink_ref_time = -1`). When playback was already established, the flushed compressed track is explicitly marked empty and the next Mode 2 epoch seeds at the submitted frontier minus fixed route latency.
   - Audio preroll cannot establish the new epoch until video preroll reaches `seek_video_target_ts`. The audio thread waits on epoch-tagged `seek_video_target_pending`; the video thread clears it only when a frame from the current epoch reaches the target. This handshake is independent from audio occupancy or latency estimation.
-  - **PCM**: `startup_audio_hold` gates writes; `pcm_reanchor` then sets the anchor from dynamic/last-good/static delay. If the initial decoded-PCM anchor used a provisional pipeline seed, the epoch-scoped direct-timestamp correction may subsequently converge it without synthesizing another seek or pause/resume.
+  - **PCM**: `startup_audio_hold` gates writes. Android `put_time` sinks publish the centralized heard clock on committed output; legacy sinks may apply the last-good/static `pcm_reanchor`. If the initial decoded-PCM anchor used a provisional pipeline seed, the epoch-scoped direct-timestamp correction may subsequently converge it without synthesizing another seek or pause/resume.
   - **EAC3/AC3 passthrough**: `startup_anchor_commit` sets `audio_time = video_time + latency`; pre-commit negative anchors are suppressed (see below).
   - **TrueHD passthrough**: Uses a relaxed 300ms hold threshold to accommodate extremely high packet cadence (1200/sec) and prevent video freezes while filling the HAL pipeline.
 

@@ -378,24 +378,31 @@ Rules:
      defer sink re-anchoring (avoid fast catch-up).
 
 5) Resume:
-   - PCM free-runs while delay is invalid; when delay becomes valid
-     (streak), a one-time rebase aligns to measured delay.
-   - On the first resumed PCM write, AVOS may perform an invalid-delay rebase
-     using static latency to avoid a large offset while AudioTrack timing warms
-     up. At normal speed, if that rebase fired, the later measured-delay rebase
-     is disarmed because it has caused visible snaps when sync is already near
-     zero. Non-1x PCM keeps the measured-delay rebase armed.
+   - Java AudioTrack resumes without flushing queued PCM, at 1.0x as well
+     as other speeds. Positive short writes interrupted by pause remain
+     accounted for and queued; only the unwritten remainder is retried.
+     This requires the backend's `pause_preserves_output` capability.
+     OpenSL ES and legacy native AudioTrack do not opt in: their stop-based
+     pause invalidates queued-media timing, and PCM uses the preload policy.
+   - Android PCM `put_time` sinks disable the legacy PCM resume reanchor.
+     Committed output republishes the centralized heard-time anchor after
+     the track starts and renderer wall references have been shifted.
+     Non-`put_time` PCM sinks retain the one-shot reanchor using last-good
+     delay plus atempo delay, clamped to static latency, or static fallback.
    - Passthrough / AC3 recoding: static passthrough delay is considered valid
      immediately for mode 1 and as the mode 2 baseline. Video resume hold is
      released only after the first resumed audio write commits, avoiding anchors
      before post-resume compressed output has actually restarted.
+     Retained-output waits and explicit resume arm the same non-seek hold as
+     the paused decode branch; the existing timeout bounds the wait.
 - Playback-head availability:
   - PCM and passthrough mode 1 (IEC): playhead is used when valid.
-  - Passthrough mode 2 (raw): playhead/timestamp evidence is treated
-    conservatively. The scheduler uses normalized compressed-buffer latency as
-    its baseline after the 250ms evidence window, with the platform/app policy
-    retained for startup fallback. Current playhead/timestamp comparisons are
-    diagnostic-only and do not change the selected Mode 2 delay or heard clock.
+  - Passthrough mode 2 (raw): normalized compressed-buffer latency provides
+    the baseline after the 250ms evidence window, with platform/app policy
+    retained for startup fallback. Trusted, fresh presentation evidence can
+    drive the centralized dynamic heard clock. Direct raw routes are broadly
+    eligible by default (`stream_mode2_dynamic_all=1`); AC3 recode uses its
+    48 kHz profile. Adoption still requires the presentation trust checks.
 - Cached/throttled AudioTrack delay reads preserve validity when the last
   trusted source was playhead-based (`last_good_dynamic_valid`), so
   `cached(throttle)` does not immediately invalidate a newly trusted delay.

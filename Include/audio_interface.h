@@ -18,6 +18,10 @@
 #define _AUDIO_INTERFACE_H
 
 #include "types.h"
+#include <errno.h>
+
+// No bytes accepted because playback was interrupted; retain and retry output.
+#define AUDIO_WRITE_RETRY (-EAGAIN)
 
 #define AUDIO_VOLUME_MAX 100
 #define AUDIO_VOLUME_MIN 0
@@ -153,6 +157,8 @@ typedef struct audio_interface_impl {
 	audio_interface_impl_get_presented_frames get_presented_frames;
 	audio_interface_impl_get_written_frames get_written_frames;
 	audio_interface_impl_get_presentation_snapshot get_presentation_snapshot;
+	// Opt in only when pause freezes queued output without draining or clearing it.
+	int pause_preserves_output;
 } audio_interface_impl_t;
 
 int audio_interface_init(void);
@@ -163,6 +169,7 @@ int audio_interface_start(audio_ctx_t *ctx);
 int audio_interface_stop(audio_ctx_t *ctx);
 int audio_interface_pause(audio_ctx_t *ctx);
 int audio_interface_unpause(audio_ctx_t *ctx);
+int audio_interface_pause_preserves_output(audio_ctx_t *ctx);
 int audio_interface_can_write(audio_ctx_t *ctx, int len);
 int audio_interface_write(audio_ctx_t *ctx, unsigned char *data, int data_length);
 int audio_interface_set_output_params(audio_ctx_t *ctx, int freq, int channels, int content_channels, int bits, int format);

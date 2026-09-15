@@ -177,6 +177,11 @@ int audio_interface_unpause(audio_ctx_t *ctx)
 	return impl->start ? impl->start(ctx) : -1;
 }
 
+int audio_interface_pause_preserves_output(audio_ctx_t *ctx)
+{
+	return ctx && impl && impl->pause && impl->pause_preserves_output;
+}
+
 int audio_interface_can_write(audio_ctx_t *ctx, int len)
 {
 	return impl->can_write(ctx, len);

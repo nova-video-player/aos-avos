@@ -840,6 +840,8 @@ typedef struct STREAM {
 	int 		audio_error_qualifier;
 
 	int		paused;
+	int		pause_started_ms;          // start of the current playback pause
+	int		pause_timing_valid;
 	int		paused_internal;
 	int		speed;
 	int		seek_paused;
@@ -1163,6 +1165,7 @@ void 	stream_show_rc( STREAM_RC *rc );
 void 	*stream_audio_dec_thread( void *data );
 
 void 	stream_audio_flush( STREAM *s );
+void	stream_audio_prepare_resume( STREAM *s );
 
 int	stream_sync_video( STREAM *s, int video_time );
 int	stream_sync_audio( STREAM *s, int audio_time );

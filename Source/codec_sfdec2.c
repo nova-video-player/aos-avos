@@ -2220,9 +2220,25 @@ void sfdec2_android_sync_on_pause( STREAM *s, int paused )
 
 	// Shift render_offset_ns by paused duration to avoid fast catch-up on resume.
 	if( p->pause_start_ms > 0 && p->render_offset_ns != -1 ) {
-		int pause_ms = atime() - p->pause_start_ms;
+		int resume_ms = atime();
+		int pause_ms = resume_ms - p->pause_start_ms;
 		if( pause_ms > 0 ) {
 			p->render_offset_ns += (int64_t)pause_ms * 1000000LL;
+			// Keep an in-flight correction relative to the shifted timeline.
+			// Otherwise its old target slews the preserved offset back toward
+			// the pre-pause wall clock.
+			p->target_offset_ns += (int64_t)pause_ms * 1000000LL;
+			if( p->venc_ref_time > 0 ) {
+				// put_time drift is measured from venc_ref_time. Exclude the
+				// same paused wall interval from that reference, otherwise the
+				// first resumed write can classify a long pause as hard drift
+				// and undo the preserved Mode 2 renderer phase.
+				int paused_ref_start = MAX( p->pause_start_ms, p->venc_ref_time );
+				int ref_pause_ms = resume_ms - paused_ref_start;
+				if( ref_pause_ms > 0 ) {
+					p->venc_ref_time += ref_pause_ms;
+				}
+			}
 			if( p->last_mode2_dynamic_active ) {
 				// The first compressed writes after play refill AudioTrack and can
 				// move heard time by tens of milliseconds. Finish that explicit

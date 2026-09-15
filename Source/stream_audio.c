@@ -842,8 +842,9 @@ static compressed_write_result_t _stream_write_compressed_unit(
 
 	while( pending.size > 0 ) {
 		// Legacy Mode 2, or the global debug pause, may interrupt a transaction
-		// between physical writes. An untouched unit can return to the outer
-		// paused loop; retain a positive prefix here until resume.
+		// between physical writes. Return an untouched unit to the caller so
+		// it can release the transaction mutex and retry the unit after resume;
+		// retain a positive prefix here until resume.
 		if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
 			if( *accepted_bytes == 0 ) {
 				return COMPRESSED_WRITE_PAUSED;
@@ -881,7 +882,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 			return COMPRESSED_WRITE_ABORTED;
 		}
 		int written = s->audio_sink->write( s, &pending );
-		if( written == 0 ) {
+		if( written == 0 || written == AUDIO_WRITE_RETRY ) {
 			// API 23+ compressed AudioTrack writes are non-blocking. Zero is
 			// ordinary queue backpressure; retain the same unit and retry after
 			// yielding so pause can wait only for its remaining media duration.
@@ -971,12 +972,14 @@ static int _wait( STREAM *s, int wait )
 			frame.format = WAVE_FORMAT_PCM;
 
 			while( !s->audio_sink->can_write( s, frame.size ) ) {
-				if( _abort( s ) ) {
+				if( _abort( s ) || s->audio_preload ||
+					((s->paused || stream_audio_paused) && !s->play_n_audio_frames) ) {
 					return inserted;
 				}
 				stream_yield_RT();
 			}
-			if( _abort( s ) ) {
+			if( _abort( s ) || s->audio_preload ||
+				((s->paused || stream_audio_paused) && !s->play_n_audio_frames) ) {
 				return inserted;
 			}
 
@@ -1033,6 +1036,62 @@ DBGA serprintf("-Z-");
 	afree(zero);
 }
 
+static void _stream_audio_apply_preload( STREAM *s )
+{
+	if( !s || !s->audio_sink || !s->audio_preload ) {
+		return;
+	}
+
+	s->audio_preload = 0;
+	int passthrough = s->audio_sink->get_passthrough( s );
+	if( s->audio_sink->syncable( s ) && !passthrough ) {
+		s->at_speed_epoch_active = 0;
+		_stream_atempo_ledger_reset( s );
+		s->audio_sink->flush( s );
+		s->manual_audio_delay_applied_ms = 0;
+		s->manual_audio_hold_pending_ms = 0;
+		s->audio_sink->preload( s );
+		// AudioTrack.pause()+flush leaves the track paused.
+		s->audio_sink->start( s );
+		if( s->audio_stuff_zero ) {
+			s->audio_stuff_zero = 0;
+			_write_zero_data( s, zero_time );
+		}
+	}
+}
+
+void stream_audio_prepare_resume( STREAM *s )
+{
+	s->audio_resume_pending = 1;
+	s->audio_resume_valid_pending = 0;
+	// Seek preview must not wait for audio: its decoder is intentionally idle.
+	if( !s->seek_paused ) {
+		s->video_hold_for_delay = 1;
+		s->video_hold_for_resume_audio = 1;
+	}
+	// Preserve manual delay and the PCM accumulator until an actual reset.
+}
+
+static int _stream_audio_wait_for_resume( STREAM *s )
+{
+	while( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+		// A retained frame does not return to _audio_decode's paused branch.
+		// Arm its first-write state here as well.
+		stream_audio_prepare_resume( s );
+		if( _abort( s ) ) {
+			return 1;
+		}
+		stream_yield_RT();
+	}
+	if( _abort( s ) ) {
+		return 1;
+	}
+	// Run before capacity/lead waits: a full paused track cannot drain until
+	// this audio thread performs the normal-speed deferred restart.
+	_stream_audio_apply_preload( s );
+	return 0;
+}
+
 // ************************************************************
 //
 //	_audio_decode
@@ -1043,41 +1102,11 @@ static void _audio_decode( STREAM *s )
 	static int out_of_audio;
 	
 	if( s->paused || stream_audio_paused ) {
-		s->audio_resume_pending = 1;
-		s->audio_resume_valid_pending = 0;
-		// Only arm the video hold for real pause/resume, not during seek preview.
-		// Seek sets seek_paused before paused, so this distinguishes the two cases.
-		// Arming the hold during seek would block every preview frame behind audio
-		// readiness, destroying smooth scrubbing feedback.
-		if( !s->seek_paused ) {
-			s->video_hold_for_delay = 1;
-			s->video_hold_for_resume_audio = 1;
-		}
-		s->manual_audio_delay_applied_ms = 0;
-		s->manual_audio_hold_pending_ms = 0;
-		s->pcm_accum_size = 0;
+		stream_audio_prepare_resume( s );
 	}
 
 	if( s->audio->valid && (!(s->paused || stream_audio_paused) || s->play_n_audio_frames ) ) {
-		if( s->audio_sink && s->audio_preload ) {
-			s->audio_preload = 0;
-			// restuff the audio pipe! - unless this is a passthrough sink
-			int passthrough = s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
-			if( s->audio_sink->syncable( s ) && !passthrough ) {
-				s->at_speed_epoch_active = 0;
-				_stream_atempo_ledger_reset( s );
-				s->audio_sink->flush( s );
-				s->manual_audio_delay_applied_ms = 0;
-				s->manual_audio_hold_pending_ms = 0;
-				s->audio_sink->preload( s );
-				/* AudioTrack.pause()+flush leaves the track paused; resume playback so subsequent writes succeed. */
-				s->audio_sink->start( s );
-				if( s->audio_stuff_zero ) {
-					s->audio_stuff_zero = 0;
-					_write_zero_data( s, zero_time );
-				}
-			}
-		}
+		_stream_audio_apply_preload( s );
 
 		if( s->play_n_audio_frames > 0 ) {
 			s->play_n_audio_frames --;
@@ -2071,6 +2100,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( _abort( s ) ) {
 						return;
 					}
+					if( _stream_audio_wait_for_resume( s ) ) {
+						return;
+					}
 					// Startup A/V alignment: if audio is significantly ahead at the very
 					// beginning or after a seek, delay audio output briefly so video can catch up.
 					int mode1_gap_hold_supported = passthrough_active &&
@@ -2107,7 +2139,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// Only hold if we have a valid video time to compare against.
 						if (s->video_time >= 0 && (!s->put_time_mode || s->sync_v_time != -1)) {
 							int startup_video_time = s->video_time;
-							if( s->seek_video_ready_ts != STREAM_NO_PTS_VALUE ) {
+							// The first admitted seek frame is a floor, not a frozen clock.
+							// Keep following live video progress so a seek into an audio gap
+							// can eventually reach the first audible timestamp.
+							if( s->seek_video_ready_ts != STREAM_NO_PTS_VALUE &&
+								startup_video_time < s->seek_video_ready_ts ) {
 								startup_video_time = s->seek_video_ready_ts;
 							}
 							int diff = startup_video_time - s->audio_start_target_ts;
@@ -2179,12 +2215,18 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// Normal IEC mode1 passthrough and AC3 recode are exempt (the gate
 					// returns 0 for them); AC3 recode is paced by the wall-clock burst
 					// rate limiter below instead.
-					while( !_abort( s ) && stream_sync_pcm_audio_lead_gate( s, ac3_recoding ) ) {
+					while( !_abort( s ) && !s->audio_preload &&
+						!((s->paused || stream_audio_paused) && !s->play_n_audio_frames) &&
+						stream_sync_pcm_audio_lead_gate( s, ac3_recoding ) ) {
 							msec_sleep( 10 );
 							stream_yield_RT();
 					}
 					if( _abort( s ) ) {
 						return;
+					}
+					if( !compressed_unit && (s->audio_preload ||
+						((s->paused || stream_audio_paused) && !s->play_n_audio_frames)) ) {
+						continue;
 					}
 
 					// AC3 recode wall-clock burst pacer (entry wait). AC3 recode reports
@@ -2251,6 +2293,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						DBG3 serprintf("stream_audio: checking if sink can_write %d bytes\n", audio_frame.size);
 						int can_write_retries = 0;
 						while( !s->audio_sink->can_write( s, audio_frame.size ) ) {
+							if( s->audio_preload ||
+								((s->paused || stream_audio_paused) && !s->play_n_audio_frames) ) {
+								break;
+							}
 							can_write_retries++;
 							if( can_write_retries % 100 == 0 ) {
 								DBG serprintf("stream_audio: sink->can_write still returning false after %d attempts\n",
@@ -2264,11 +2310,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( _abort( s ) ) {
 							return;
 						}
-						if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
-							DBG serprintf("stream_audio: pause raced before write, dropping pending audio frame (%d bytes)\n",
-								audio_frame.size);
-							size = 0;
-							break;
+						if( s->audio_preload ||
+							((s->paused || stream_audio_paused) && !s->play_n_audio_frames) ) {
+							// Retry the same output after resume/preload and recheck gates.
+							continue;
 						}
 						if( use_atempo && bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
 							ledger_bpf = bytes_per_sample * channels;
@@ -2293,6 +2338,22 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							size_written / ledger_bpf : 0;
 						_stream_atempo_ledger_finalize(
 							s, ledger_reserved_frames, written_frames, sample_rate );
+					}
+					if( !compressed_unit && size_written == AUDIO_WRITE_RETRY ) {
+						stream_audio_prepare_resume( s );
+						stream_yield_RT();
+						continue;
+					}
+					if( compressed_result == COMPRESSED_WRITE_PAUSED ) {
+						// No bytes were accepted. Keep this unit and all remaining
+						// output, but release the mutex needed by stream_un_pause().
+						if( compressed_transaction_locked ) {
+							pthread_mutex_unlock( &s->audio_sink_mutex );
+							compressed_transaction_locked = 0;
+						}
+						stream_audio_prepare_resume( s );
+						stream_yield_RT();
+						continue;
 					}
 
 					if( compressed_result != COMPRESSED_WRITE_COMPLETE ) {

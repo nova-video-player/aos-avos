@@ -273,7 +273,7 @@ static void _sync_diag_reset(void)
 	sync_diag_last_reanchor_pending = -1;
 }
 
-static void _stream_pcm_delay_memory_reset( STREAM *s )
+static void _stream_pcm_delay_memory_reset( STREAM *s, int preserve_speed_timing )
 {
 	if( !s ) {
 		return;
@@ -287,23 +287,27 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	s->delay_history_count = 0;
 	s->av_delay_history_count = 0;
 	s->manual_audio_delay_target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
-	s->manual_audio_delay_applied_ms = 0;
-	s->manual_audio_hold_pending_ms = 0;
 	s->ac3_recode_next_write_wall_ms = 0;
 	s->ac3_recode_pacer_valid = 0;
 	s->ac3_recode_pacer_max_lead_ms = 0;
-	s->at_speed_epoch_active = 0;
-	s->atempo_ledger_active = 0;
-	s->atempo_ledger_count = 0;
-	s->atempo_ledger_write = 0;
-	s->atempo_ledger_output_frames = 0;
-	s->atempo_ledger_base_written_frames = 0;
-	s->atempo_ledger_next_ts_us = 0;
-	s->atempo_ledger_last_log_ms = 0;
-	s->atempo_ledger_dense_until_ms = 0;
-	s->atempo_ledger_next_rst_us = 0;
-	s->atempo_ledger_media_cursor = 0;
-	s->atempo_ledger_media_valid = 0;
+	if( !preserve_speed_timing ) {
+		// A non-flushing resume retains the inserted manual delay and any
+		// hold the renderer has not yet consumed along with the audio phase.
+		s->manual_audio_delay_applied_ms = 0;
+		s->manual_audio_hold_pending_ms = 0;
+		s->at_speed_epoch_active = 0;
+		s->atempo_ledger_active = 0;
+		s->atempo_ledger_count = 0;
+		s->atempo_ledger_write = 0;
+		s->atempo_ledger_output_frames = 0;
+		s->atempo_ledger_base_written_frames = 0;
+		s->atempo_ledger_next_ts_us = 0;
+		s->atempo_ledger_last_log_ms = 0;
+		s->atempo_ledger_dense_until_ms = 0;
+		s->atempo_ledger_next_rst_us = 0;
+		s->atempo_ledger_media_cursor = 0;
+		s->atempo_ledger_media_valid = 0;
+	}
 	s->pcm_startup_seed_delay_ms = 0;
 	s->pcm_startup_correction_pending = 0;
 	s->pcm_startup_correction_seek_epoch = -1;
@@ -317,7 +321,7 @@ static void _stream_pcm_delay_memory_reset( STREAM *s )
 	// collapse the queue to the single latest target speed and mark it DEFER, so the
 	// poll applies it once the new ledger is active and resolves state==0 (a fresh,
 	// correct RST anchor), not before.
-	if( s->atempo_commit_count > 0 ) {
+	if( !preserve_speed_timing && s->atempo_commit_count > 0 ) {
 		int last = ( s->atempo_commit_head + s->atempo_commit_count - 1 ) % STREAM_ATEMPO_COMMIT_MAX;
 		STREAM_ATEMPO_COMMIT collapsed = s->atempo_commit_q[last];
 		collapsed.boundary = STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER;
@@ -964,10 +968,11 @@ int stream_sync_mode2_dynamic_active( STREAM *s )
 
 // Caller owns anchor_mutex followed by mode2_heard_mutex so the renderer anchor
 // and Mode 2 heard-clock epoch reset as one transaction.
-static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger )
+static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger,
+	int preserve_speed_timing )
 {
 	s->delay         = 0;
-	_stream_pcm_delay_memory_reset( s );
+	_stream_pcm_delay_memory_reset( s, preserve_speed_timing );
 	_stream_pcm_reanchor_reset( s );
 	s->drop          = 0;
 	s->drop_P        = 0;
@@ -989,7 +994,7 @@ int stream_sync_restart( STREAM *s )
 	int ret;
 	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	ret = _stream_sync_restart_locked( s, 1 );
+	ret = _stream_sync_restart_locked( s, 1, 0 );
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	pthread_mutex_unlock( &s->anchor_mutex );
 	return ret;
@@ -1000,19 +1005,26 @@ int stream_sync_restart_with_mode2_frontier( STREAM *s )
 	int ret;
 	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	ret = _stream_sync_restart_locked( s, 1 );
+	ret = _stream_sync_restart_locked( s, 1, 0 );
 	s->mode2_heard_frontier_seed_pending = 1;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	pthread_mutex_unlock( &s->anchor_mutex );
 	return ret;
 }
 
-// Pause keeps the compressed AudioTrack and its buffered media intact. Preserve
-// the interpolated heard phase, but move its wall epoch to now so paused wall
-// time is not credited as audio progress. Seeks and sink recreation continue to
-// use stream_sync_restart(), which deliberately starts a new Mode 2 epoch.
+// A preserving backend keeps its buffered media intact on pause. Preserve the
+// PlaybackParams checkpoint, atempo output ledger, and compressed heard phase,
+// but move wall-clock epochs to now so paused time is not credited as progress.
+// Seeks and sink recreation continue to use stream_sync_restart(), which
+// deliberately starts a new timing epoch.
 int stream_sync_restart_after_pause( STREAM *s )
 {
+	// Stop-based backends can drain or clear their queue during pause. Their
+	// speed ledger, manual delay, and compressed phase no longer describe
+	// retained output and must follow the destructive restart path.
+	if( !audio_interface_pause_preserves_output( s->audio_ctx ) ) {
+		return stream_sync_restart( s );
+	}
 	int passthrough_mode = (s->audio_sink && s->audio_sink->get_passthrough) ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	int keep_mode2_phase;
@@ -1046,7 +1058,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	// AudioTrack.pause() preserves compressed queue occupancy. Start a new
 	// presentation-observation epoch, but retain the submitted-unit ledger so
 	// the next observer can remap the still-buffered media after resume.
-	_stream_sync_restart_locked( s, 0 );
+	_stream_sync_restart_locked( s, 0, 1 );
 	if( keep_mode2_phase ) {
 		s->mode2_heard_interp_valid = 1;
 		s->mode2_heard_interp_ts = interp_ts;
@@ -1971,7 +1983,7 @@ int stream_sync_init( STREAM *s, int time )
 	s->audio_start_pts = STREAM_NO_PTS_VALUE;
 	s->audio_start_target_ts = STREAM_NO_PTS_VALUE;
 	s->audio_start_gap_hold = 0;
-	_stream_pcm_delay_memory_reset( s );
+	_stream_pcm_delay_memory_reset( s, 0 );
 	s->warmup_video_frames = 0;
 
 	if( time != -1 ) {

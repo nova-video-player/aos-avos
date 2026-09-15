@@ -925,7 +925,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 // Called from stream_sync_audio (audio sync path) on every audio write.
 void stream_atempo_commit_poll( STREAM *s )
 {
-	if( !s || s->atempo_commit_count <= 0 )
+	if( !s || s->atempo_commit_count <= 0 || s->paused || s->paused_internal )
 		return;
 	UINT64 playhead = 0;
 	int rate = 0, src = 0, age = 0;

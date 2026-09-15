@@ -74,10 +74,12 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   preferably through a fresh `put_time`. Initial and seek reanchors clamp an
   implausible forward lead and prevent a backward seek from anchoring behind the
   current video frame.
-- On the validated raw AC3/44.1 kHz route, trusted asynchronous `AudioTimestamp`
-  evidence dynamically bounds that interpolator. The renderer observes clock
-  entry/exit and slews its existing offset; it does not create a second audio
-  clock.
+- Trusted asynchronous presentation evidence dynamically bounds that
+  interpolator. Direct raw routes are broadly eligible by default
+  (`stream_mode2_dynamic_all=1`), extending the validated AC3/44.1 kHz profile;
+  AC3 recode uses its 48 kHz profile. Freshness and trust checks still gate
+  adoption. The renderer observes clock entry/exit and slews its existing
+  offset; it does not create a second audio clock.
 - Pause preserves the Mode 2 audio phase and shifts an established render offset
   by the paused wall duration. It retains the compressed ledger while resetting
   the presentation-observation epoch. Seek and mid-playback track recreation

@@ -2873,6 +2873,8 @@ DBGS serprintf("stream_pause\r\n");
 		if ( s->parser && s->parser->pause ) {
 			s->parser->pause( s, 1 );
 		}
+		s->pause_started_ms = atime();
+		s->pause_timing_valid = 1;
 		s->paused = 1;
 		sfdec2_android_sync_on_pause( s, 1 );
 		stream_audio_mute( s );
@@ -2902,42 +2904,22 @@ serprintf("UNP: not_open\r\n");
 	}
 	if ( !was_paused ) {
 DBGS serprintf("stream_un_pause\r\n");
-		float audio_speed = audio_interface_get_audio_speed();
-		int using_atempo = audio_interface_is_using_atempo() &&
-			fabsf(audio_speed - 1.0f) > 1e-6f;
-		if ( using_atempo || fabsf(audio_speed - 1.0f) > 1e-6f ) {
-			int last_good_delay_ms = s->last_good_delay_ms;
-			int last_good_delay_valid = s->last_good_delay_valid;
-			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
-			stream_sync_anchor_reset( s );
-			stream_sync_restart( s );
-			// Pause/resume restarts the scheduler, not the audio device. Keep the
-			// last measured HW delay so a rapid resume can avoid static latency.
-			s->last_good_delay_ms = last_good_delay_ms;
-			s->last_good_delay_valid = last_good_delay_valid;
-			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
-			if ( s->video_sink && s->audio && s->audio->valid && s->audio_time != -1 ) {
-				stream_sync_audio( s, s->audio_time );
-			}
-		} else {
-			// Normal 1x resume resets scheduler state, but the AudioTrack and its
-			// buffered compressed media survive pause. Preserve the Mode 2 heard
-			// phase instead of snapping back to audio_time - static latency.
-			// Snapshot and restore so the one-shot reanchor in Commit B can prefer last_good
-			// over static latency on the first audio write after resume.
-			int last_good_delay_ms = s->last_good_delay_ms;
-			int last_good_delay_valid = s->last_good_delay_valid;
-			int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
-			DBG serprintf("WALLCLOCK_RESET: by pause resume\n");
-			stream_sync_anchor_reset( s );
-			stream_sync_restart_after_pause( s );
-			s->last_good_delay_ms = last_good_delay_ms;
-			s->last_good_delay_valid = last_good_delay_valid;
-			s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
-		}
+		int preserve_output = audio_interface_pause_preserves_output( s->audio_ctx );
+		// The backend capability determines whether the restart can retain
+		// queued-media timing or must invalidate a stopped/drained queue.
+		int last_good_delay_ms = s->last_good_delay_ms;
+		int last_good_delay_valid = s->last_good_delay_valid;
+		int last_good_atempo_delay_ms = s->last_good_atempo_delay_ms;
+		DBG serprintf("WALLCLOCK_RESET: by pause resume\n");
+		stream_sync_anchor_reset( s );
+		stream_sync_restart_after_pause( s );
+		s->last_good_delay_ms = last_good_delay_ms;
+		s->last_good_delay_valid = last_good_delay_valid;
+		s->last_good_atempo_delay_ms = last_good_atempo_delay_ms;
 
-		// when we unpause, we re-fill the audio sink with 0 samples
-		// so that we are back to the same a2v sync as before
+		// Java AudioTrack freezes its queue, including positive short writes.
+		// OpenSL ES and legacy AudioTrack use stop semantics: refill PCM on
+		// those routes after the old timing state has been invalidated.
 		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
 			s->audio_sink->get_passthrough( s ) : 0;
 		int requested_passthrough = 0;
@@ -2952,10 +2934,10 @@ DBGS serprintf("stream_un_pause\r\n");
 #endif
 		int compressed_resume = passthrough > 0 || requested_passthrough > 0;
 		int do_audio_preload = stream_zero_fill && s->audio->valid && s->speed == STREAM_SPEED_NORMAL &&
-			!using_atempo && fabsf(audio_speed - 1.0f) < 1e-6f && !compressed_resume;
-		DBG serprintf("audio_resume_route: active_passthrough=%d requested_passthrough=%d compressed=%d preload=%d ctx=%d sink_open=%d\n",
+			!preserve_output && !compressed_resume;
+		DBG serprintf("audio_resume_route: active_passthrough=%d requested_passthrough=%d compressed=%d preload=%d ctx=%d sink_open=%d preserve_output=%d\n",
 			passthrough, requested_passthrough, compressed_resume, do_audio_preload,
-			s->audio_ctx != NULL, s->audio_sink_open);
+			s->audio_ctx != NULL, s->audio_sink_open, preserve_output);
 		if ( do_audio_preload ) {
 			s->audio_preload = 1;
 		} else {
@@ -2971,21 +2953,36 @@ DBGS serprintf("stream_un_pause\r\n");
 		if( serialize_transaction ) {
 			pthread_mutex_lock( &s->audio_sink_mutex );
 		}
-		if ( s->audio_ctx && compressed_resume ) {
+		if( s->audio_ctx && (compressed_resume ||
+			(!do_audio_preload && s->audio_sink_open)) ) {
 			audio_interface_unpause( s->audio_ctx );
 		}
-		s->paused = 0;
+		// Shift renderer wall references before the audio thread can publish a
+		// post-resume put_time sample. Otherwise a long pause is first observed
+		// as hard drift and destroys the phase this hook is meant to preserve.
 		sfdec2_android_sync_on_pause( s, 0 );
+		if( s->pause_timing_valid ) {
+			// Preserve running time already spent waiting for each checkpoint.
+			// A checkpoint created (or reset by seek) during pause starts with
+			// zero elapsed time. Repeated pauses must not renew the timeout.
+			int resume_ms = atime();
+			for( int i = 0; i < s->atempo_commit_count; i++ ) {
+				int slot = (s->atempo_commit_head + i) % STREAM_ATEMPO_COMMIT_MAX;
+				STREAM_ATEMPO_COMMIT *cp = &s->atempo_commit_q[slot];
+				int elapsed_ms = s->pause_started_ms - cp->wall_ms;
+				cp->wall_ms = resume_ms - MAX( 0, elapsed_ms );
+			}
+			s->pause_timing_valid = 0;
+		}
+		if( s->paused && s->audio->valid ) {
+			// Also cover a pause/resume that completed inside a sink write:
+			// the audio thread may never have observed the paused state.
+			stream_audio_prepare_resume( s );
+		}
+		s->paused = 0;
 
 		if ( s->speed == STREAM_SPEED_NORMAL ) {
 			stream_audio_unmute( s );
-		}
-
-		// stream_pause() paused every open AudioTrack. Passthrough cannot use the
-		// PCM zero-preload path, and its sink-open flag may lag the live AudioTrack
-		// across format setup. Always issue play() for a live compressed route.
-		if ( s->audio_ctx && !compressed_resume && !do_audio_preload && s->audio_sink_open ) {
-			audio_interface_unpause( s->audio_ctx );
 		}
 		if( serialize_transaction ) {
 			pthread_mutex_unlock( &s->audio_sink_mutex );

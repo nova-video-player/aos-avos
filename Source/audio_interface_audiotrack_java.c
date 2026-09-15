@@ -171,6 +171,7 @@ struct audio_ctx {
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
 	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
 	int track_paused;                        // AudioTrack.pause() called; a blocking write() racing it returns 0 (full paused buffer), which is not a dead track
+	unsigned int pause_generation;           // detects pause/resume entirely inside a blocking write
 	int passthrough_playhead_ever_advanced;  // set once playhead advances; queried by audiotrack_passthrough_playhead_advanced()
 	uint64_t compressed_logical_samples;     // complete-unit media/carrier samples accumulated per write
 	uint64_t mode2_latency_bytes_accum;       // paired cumulative compressed bytes written
@@ -1559,7 +1560,7 @@ ERR		LOG("audiotrack_start: track not valid, error");
 	if (!env_local) {
 		return -1;
 	}
-	at->track_paused = 0;
+	__atomic_store_n(&at->track_paused, 0, __ATOMIC_RELEASE);
 	if (at->passthrough && at->passthrough_restart_after_flush) {
 DBG		LOG("audiotrack_start: deferring passthrough restart until first post-flush write");
 		return 0;
@@ -1594,8 +1595,9 @@ ERR		LOG("audiotrack_pause: track not valid, error");
 	if (!env_local) {
 		return -1;
 	}
+	__atomic_store_n(&at->track_paused, 1, __ATOMIC_RELEASE);
+	__atomic_add_fetch(&at->pause_generation, 1, __ATOMIC_RELEASE);
 	call_void_method_with_env(at, env_local, "pause", "()V");
-	at->track_paused = 1;
 	at->last_timestamp_ns = 0;
 	at->last_timestamp_frames = 0;
 
@@ -2071,6 +2073,8 @@ ERR		LOG("audiotrack_write: track not valid, error");
 
 	attach_thread(at);
 
+	unsigned int write_pause_generation = __atomic_load_n(&at->pause_generation, __ATOMIC_ACQUIRE);
+	int write_started_paused = __atomic_load_n(&at->track_paused, __ATOMIC_ACQUIRE);
 	ssize_t ret = 0;
 	ssize_t len_to_write = MIN(at->buf_size, len);
 	int nonblocking_write = at->passthrough && device_get_android_api() >= 23;
@@ -2097,7 +2101,7 @@ DBG	LOG("audiotrack_write: wrote %d out of %d bytes (format=%04X, passthrough=%d
 DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush write");
 			call_void_method(at, "play", "()V");
 			at->passthrough_restart_after_flush = 0;
-			at->track_paused = 0;
+			__atomic_store_n(&at->track_paused, 0, __ATOMIC_RELEASE);
 		}
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
 
@@ -2118,13 +2122,13 @@ DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush
 	// Returning 0 immediately prevents tight loops that cause ANRs on devices with
 	// slow/broken audio HALs (e.g., MediaTek HAL timeouts on Google TV devices).
 	if (ret == 0 || ret == -6 /* ERROR_DEAD_OBJECT */) {
-		if (ret == 0 && at->track_paused) {
+		if (ret == 0 && (write_started_paused || __atomic_load_n(&at->track_paused, __ATOMIC_ACQUIRE) ||
+			write_pause_generation != __atomic_load_n(&at->pause_generation, __ATOMIC_ACQUIRE))) {
 			// Not a dead track: a blocking write() racing AudioTrack.pause()
-			// returns 0 once the paused buffer is full. Drop just this chunk
-			// (the audio thread stops on s->paused right after) and do not
-			// trigger recovery/recreation.
-DBG			LOG("audiotrack_write: write returned 0 on paused track (pause race) -> dropping chunk, no recovery");
-			return -1;
+			// returns 0 once the paused buffer is full. Preserve this result even
+			// if resume wins the race before the writer inspects s->paused.
+DBG			LOG("audiotrack_write: write interrupted by pause, retry without recovery");
+			return AUDIO_WRITE_RETRY;
 		}
 		if (ret == 0) {
 ERR			LOG("audiotrack_write: write returned 0 (AudioTrack dead/broken) -> recovering track");
@@ -2702,7 +2706,7 @@ ERR		LOG("track not valid, error");
 	}
 	call_void_method_with_env(at, env_local, "pause", "()V");
 	call_void_method_with_env(at, env_local, "flush", "()V");
-	at->track_paused = 1;
+	__atomic_store_n(&at->track_paused, 1, __ATOMIC_RELEASE);
 
 	// Reset timing state after flush
 	at->i_samples_written = 0;
@@ -3314,6 +3318,7 @@ void libavos_set_dynamic_audio_delay(int enable)
 
 const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 	.name = "audiotrack_java",
+	.pause_preserves_output = 1,
 	.init = audiotrack_init,
 	.exit = audiotrack_exit,
 	.open = audiotrack_open,

@@ -1543,6 +1543,10 @@ ErrorExit:
 void stream_audio_samplerate_changed( STREAM *s )
 {
 serprintf("stream_audio_samplerate_changed!\r\n");
+	if( !s->audio_sink ) {
+		stream_audio_sink_failed( s, "sample-rate change without an audio sink" );
+		return;
+	}
 	// Reset sample counter to prevent sync drift from samples accumulated at old rate
 	s->audio_ref_time = -1;
 	s->audio_samples  = 0;
@@ -1559,10 +1563,9 @@ serprintf("stream_audio_samplerate_changed!\r\n");
 	stream_audio_copy_sink_from_source( s );
 
 	if( s->audio_sink->start( s ) ) {
-		// no audio, close the codec
-		stream_close_audio_dec( s );
-		// drop audio
-		stream_drop_audio( s );
+		// The caller still owns a frame from this decoder. Leave its storage
+		// intact until normal teardown and prevent the caller from writing it.
+		stream_audio_sink_failed( s, "sample-rate change sink restart" );
 	}
 }
 
@@ -1651,10 +1654,15 @@ for( i = 0; i < s->av.as_max; i++ ) {
 		stream_audio_copy_sink_from_source( s );
 
 		if( s->audio_sink->start( s ) ) {
-			// no audio, close the codec
-			stream_close_audio_dec( s );
-			// drop audio
-			stream_drop_audio( s );
+			// This is a chunk boundary: no decoded frame is outstanding, so
+			// direct passthrough can safely reopen as PCM. AC3 recoding must
+			// stop on failure; merely disabling passthrough leaves its encoder
+			// enabled and would send compressed data to a PCM sink.
+			if( libavos_get_ac3_recoding_enabled() ||
+				stream_restart_audio_as_pcm( s, "audio property-change sink failure" ) ) {
+				stream_audio_sink_failed( s, "audio property-change sink restart" );
+				goto ErrorExit;
+			}
 		}
 
 		if( s->sync_mode == STREAM_SYNC_SAMPLES ) {

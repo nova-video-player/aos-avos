@@ -56,10 +56,15 @@ static int start( STREAM *s )
 	if( audio_interface_set_output_params( s->audio_ctx, sink->samplesPerSec, sink->channels,
 		content_channels, sink->bitsPerSample, sink->format ) ) {
 serprintf("stream_sink_audio_start: cannot set params: fs %d  ch %d  bits %d\r\n", sink->samplesPerSec, sink->channels, sink->bitsPerSample );
+		s->audio_sink_open = 0;
 		return 1;
 	}
 
-	audio_interface_start( s->audio_ctx);
+	if( audio_interface_start( s->audio_ctx ) ) {
+		serprintf("stream_sink_audio_start: cannot start audio output\n");
+		s->audio_sink_open = 0;
+		return 1;
+	}
 
 	s->audio_sink_open = 1;
 	s->audio_sink->set_vol(s);

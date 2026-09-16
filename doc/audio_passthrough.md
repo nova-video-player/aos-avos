@@ -150,6 +150,18 @@ Native determines IEC support by inspecting codec flags set by Java:
     clamped to `250..1500ms`, so high-latency full-buffer stalls get time to
     recover before blind writes resume.
 
+### Output reconfiguration failures
+
+Midstream output reconfiguration must not continue after a failed sink reopen,
+parameter setup, start, or muxer initialization. At an audio-property-change
+chunk boundary, direct passthrough can use the existing PCM decoder fallback.
+Failures while a decoded or encoded frame is outstanding, including AC3 recode
+setup/reconfiguration, terminate through the playback-error path. Decoder and
+filter storage remain alive until teardown so pending frame pointers cannot be
+used after being freed. The audio thread stops submitting output and releases
+resume holds on this error path. Startup and explicit track switching retain
+their existing fallback behavior; IEC carrier geometry is unchanged.
+
 ### AC3 recoding (Mode 3)
 
 `stream_audio_setup_ac3_sink()`:

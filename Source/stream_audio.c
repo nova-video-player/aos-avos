@@ -456,6 +456,30 @@ void stream_audio_reset_ac3_passthrough_state(void)
 	pcm_channel_cap = libavos_get_max_pcm_channels();
 }
 
+void stream_audio_sink_failed( STREAM *s, const char *reason )
+{
+	serprintf("audio output failure: %s\n", reason);
+	s->audio_sink_open = 0;
+	ac3_sink_configured = 0;
+	ac3_reconfigure_pending = 0;
+	s->audio_preload = 0;
+	s->audio_resume_pending = 0;
+	s->audio_resume_valid_pending = 0;
+	s->video_hold_for_resume_audio = 0;
+	s->video_hold_for_delay = 0;
+	s->pcm_accum_size = 0;
+	s->audio_yield = 1;
+	// A mid-frame failure cannot safely reopen the decoder/filter: the current
+	// output may point into their storage. Stop through the normal error path
+	// and let teardown release resources after the audio thread is idle.
+	if( !s->aborted && s->video_error != VE_USER_ABORT ) {
+		s->video_error_qualifier = VEQ_NONE;
+		strnZcpy( s->video_error_desc, "Could not initialize audio output",
+			sizeof(s->video_error_desc) - 1 );
+		stream_set_error( s, VE_ERROR );
+	}
+}
+
 #define PASSTHROUGH_HAL_STANDBY_WAIT_MS 100
 
 void stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason)
@@ -1075,7 +1099,10 @@ static void _stream_audio_apply_preload( STREAM *s )
 		s->manual_audio_hold_pending_ms = 0;
 		s->audio_sink->preload( s );
 		// AudioTrack.pause()+flush leaves the track paused.
-		s->audio_sink->start( s );
+		if( s->audio_sink->start( s ) ) {
+			stream_audio_sink_failed( s, "PCM preload sink restart" );
+			return;
+		}
 		if( s->audio_stuff_zero ) {
 			s->audio_stuff_zero = 0;
 			_write_zero_data( s, zero_time );
@@ -1113,7 +1140,7 @@ static int _stream_audio_wait_for_resume( STREAM *s )
 	// Run before capacity/lead waits: a full paused track cannot drain until
 	// this audio thread performs the normal-speed deferred restart.
 	_stream_audio_apply_preload( s );
-	return 0;
+	return s->video_error != VE_NO_ERROR;
 }
 
 // ************************************************************
@@ -1131,6 +1158,9 @@ static void _audio_decode( STREAM *s )
 
 	if( s->audio->valid && (!(s->paused || stream_audio_paused) || s->play_n_audio_frames ) ) {
 		_stream_audio_apply_preload( s );
+		if( s->video_error ) {
+			return;
+		}
 
 		if( s->play_n_audio_frames > 0 ) {
 			s->play_n_audio_frames --;
@@ -1365,6 +1395,9 @@ DBGS {					static int _nopts_target   = 0;
 				// check if some audio props changed
 				if( cdata.changed ) {
 					stream_audio_props_changed( s, &cdata );
+					if( s->video_error || !s->audio->valid ) {
+						return;
+					}
 				}
 
 				// we have a valid chunk
@@ -1519,7 +1552,10 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
 					s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
 				}
-				stream_audio_samplerate_changed( s );		
+				stream_audio_samplerate_changed( s );
+				if( s->video_error || !s->audio->valid ) {
+					return;
+				}
 			}
 		
 		} else {
@@ -1855,7 +1891,8 @@ serprintf(" ae! ");
 				if( is_ac3_recoding ) {
 					if( !ac3_sink_configured ) {
 						if( stream_audio_setup_ac3_sink( s ) ) {
-							DBG serprintf("stream_audio: failed to configure AC3 sink, fallback to PCM\n");
+							stream_audio_sink_failed( s, "AC3 sink setup" );
+							return;
 						} else if( ac3_recode_mode2_sync &&
 						           s->sync_mode != STREAM_SYNC_SAMPLES &&
 						           s->audio_sink->get_passthrough &&
@@ -1950,8 +1987,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									s->audio_sink->close( s );
 									stream_audio_wait_for_passthrough_idle(s, "passthrough-reopen");
 									if( s->audio_sink->open( s ) ) {
-										DBG serprintf("failed to reopen audio sink for passthrough\n");
-										s->audio_sink_open = 0;
+										stream_audio_sink_failed( s, "passthrough sink reopen" );
+										return;
 									}
 								}
 								// A recreated mid-playback track starts empty, so preserve its
@@ -1971,8 +2008,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							           s->audio_sink->close && s->audio_sink->open ) {
 								s->audio_sink->close( s );
 								if( s->audio_sink->open( s ) ) {
-									DBG serprintf("failed to reopen audio sink after PCM format change\n");
-									s->audio_sink_open = 0;
+									stream_audio_sink_failed( s, "PCM format-change sink reopen" );
+									return;
 								}
 							}
 						}
@@ -1984,8 +2021,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( is_ac3_recoding ) {
 							DBG serprintf("AC3 recoding: configuring sink for compressed passthrough mode 1 (IEC61937)\n");
 
-							AUDIO_PROPERTIES saved_sink = *sink;
-
 							// Configure sink to emit IEC61937-wrapped AC3 regardless of source layout
 							sink->format = WAVE_FORMAT_AC3;
 							sink->channels = 2;
@@ -1995,35 +2030,27 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							sink->bytesPerSec = sink->samplesPerSec * sink->bytesPerFrame;
 
 #ifdef CONFIG_SPDIF
-							int ac3_sink_started = 0;
 							if( spdif_init(sink) ) {
 								int passthrough_mode = stream_audio_select_ac3_passthrough_mode(
 									"AC3 recoding reconfigure" );
 								s->audio_sink->set_passthrough( s, passthrough_mode );
 								// Call start() with AC3 2-channel format
 								if( s->audio_sink->start( s ) ) {
-									DBG serprintf("failed to restart audio sink after AC3 recoding\n");
-									s->audio_sink_open = 0;
-									ac3_sink_configured = 0;
-									*sink = saved_sink;
+									stream_audio_sink_failed( s, "AC3 sink restart" );
+									return;
 								} else {
 									s->audio_sink_open = 1;
 									ac3_sink_configured = 1;
 									ac3_reconfigure_pending = 0;
-									ac3_sink_started = 1;
 									audio_format_configured = sink->format;
 								}
 							} else {
-								DBG serprintf("AC3 recoding: failed to initialize SPDIF muxer\n");
-								*sink = saved_sink;
-								s->audio_sink->set_passthrough( s, 0 );
-								ac3_sink_configured = 0;
-								ac3_reconfigure_pending = 1;
-								s->audio_sink_open = 0;
+								stream_audio_sink_failed( s, "AC3 muxer reinitialization" );
+								return;
 							}
-							(void)ac3_sink_started;
 #else
-							(void)sink;
+							stream_audio_sink_failed( s, "AC3 passthrough unavailable" );
+							return;
 #endif
 						} else {
 							// For non-AC3 recoding, copy source properties to sink and reconfigure.
@@ -2035,7 +2062,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Set passthrough mode based on whether this route supports the sink format.
 							int passthrough_mode = stream_audio_requested_passthrough_for_format( sink->format );
 #ifdef CONFIG_SPDIF
-							if(passthrough_mode && spdif_init(sink)) {
+							if( passthrough_mode && !spdif_init(sink) ) {
+								stream_audio_sink_failed( s, "passthrough muxer reinitialization" );
+								return;
+							}
+							if( passthrough_mode ) {
 								DBG serprintf("stream_audio: regular passthrough enabled, mode=%d\n", passthrough_mode);
 							}
 #endif
@@ -2045,8 +2076,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								ac3_reconfigure_pending = 1;
 							}
 							if( s->audio_sink->start( s ) ) {
-								DBG serprintf("failed to restart audio sink after format change\n");
-								s->audio_sink_open = 0;
+								stream_audio_sink_failed( s, "format-change sink restart" );
+								return;
 							} else {
 								s->audio_sink_open = 1;
 								audio_format_configured = sink->format;
@@ -2840,6 +2871,9 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 	audio_format_configured = stream_audio_get_sink_props( s )->format;
 
 	while( thread_state_get( &s->audio_tstate ) != THREAD_EXIT ) {
+		if( s->video_error ) {
+			goto skip_format_change;
+		}
 		float current_audio_speed = audio_interface_get_audio_speed();
 		if( fabsf(current_audio_speed - last_audio_speed) > 0.001f ) {
 			if( s->pcm_accum_size > 0 ) {
@@ -2882,7 +2916,11 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 					s->audio->format, sink->format);
 			} else {
 				int passthrough_mode = stream_audio_requested_passthrough_for_format( sink->format );
-				if(passthrough_mode && spdif_init(sink) && s->audio_sink) {
+				if( passthrough_mode ) {
+					if( !s->audio_sink || !spdif_init(sink) ) {
+						stream_audio_sink_failed( s, "audio-thread passthrough setup" );
+						goto skip_format_change;
+					}
 					// Only call spdif_init if passthrough is actually enabled to avoid unnecessary side effects
 					s->audio_sink->set_passthrough(s, passthrough_mode );
 					audio_format_configured = sink->format;
@@ -2900,7 +2938,7 @@ skip_format_change:
 
 		thread_state_ack( &s->audio_tstate );
 		s->audio_yield = 1;
-		if( thread_state_get( &s->audio_tstate ) == THREAD_RUNNING ) {
+		if( !s->video_error && thread_state_get( &s->audio_tstate ) == THREAD_RUNNING ) {
 			_audio_decode( s );
 		}
 		

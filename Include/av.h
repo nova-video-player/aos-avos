@@ -544,9 +544,9 @@ enum {
 	SUB_FORMAT_WEBVTT,
 };
 
-#define AUDIO_TRACK_MAX		32
+#define AUDIO_TRACK_MAX		16
 #define VIDEO_TRACK_MAX		6
-#define SUB_TRACK_MAX		128
+#define SUB_TRACK_MAX		64
 #define AV_NAME_LEN			256
 
 enum {
@@ -599,10 +599,10 @@ enum {
 	int	header_sent;		/* we have sent the "setup" header*/\
 	int	extra_sent;		/* we have sent the extradata inline*/\
 	int	no_extra;		/* do not send extradata inline */\
-	int 	disposition;
+	int 	disposition;\
+
 
 typedef struct _audio_props {
-
 	AV_COMMON_PROPS
 	
 	int 	samplesPerSec;
@@ -660,8 +660,19 @@ typedef struct _video_props {
 	int	sprite_usage;
 
     // for dolby vision
-    int dv_profile;
-    int dv_bl_signal_compatibility_id;
+    int dv_profile;		// Android MediaCodec DV profile constant (e.g. 256 = DvheSt)
+    int dv_profile_source;	// original DV profile number from the dvcC/dvvC record (e.g. 7)
+    int dv_level;		// DV level from the dvcC/dvvC record
+    int dv_el_present;		// el_present_flag from the dvcC/dvvC record
+    int dv_el_dual_track;	// container carries a separate EL track (dual-track layout)
+    int dv_bl_present;		// bl_present_flag from the dvcC/dvvC record
+    int dv_compat_id;		// dv_bl_signal_compatibility_id from the dvcC/dvvC record
+    int dv_bl_signal_compatibility_id; // upstream name for dv_compat_id (aliased semantics)
+    // Dolby Vision tone-map mode: enhancement-layer config for the EL decoder.
+    // Dual-track: EL track CodecPrivate; interleaved: dovi_split BSF output extradata.
+    // Same ownership model as extraData (points into parser/BSF-owned memory).
+    unsigned char *dv_el_extraData;
+    int dv_el_extraDataSize;
 
     // for color metadata (values from FFmpeg AVCOL_* enums)
     int color_primaries;    // AVCOL_PRI_* (e.g. BT709=1, BT2020=9)

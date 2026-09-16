@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -254,6 +254,31 @@ int libavos_get_ac3_recoding_enabled(void)
 	return ac3_recoding_enabled;
 }
 
+/*
+ * Dolby Vision / libplacebo plane scaler (EL residual + chroma upscaling,
+ * the libplacebo SAMPLER_PLANE stage - mpv --cscale). 0 = default
+ * (inherit from the main scaler = lanczos, mpv's default), 1 = bilinear
+ * (cheapest), 2 = bicubic, 3 = ewa_lanczossharp (highest quality, most
+ * GPU expensive). Read by dovi_gl at every render.
+ */
+static int dolby_vision_plane_scaler = 0;
+
+int libavos_get_dolby_vision_plane_scaler(void)
+{
+	return dolby_vision_plane_scaler;
+}
+
+void libavos_set_dolby_vision_plane_scaler(int scaler)
+{
+	serprintf("libavos_set_dolby_vision_plane_scaler: %d (%s)\n", scaler,
+	          scaler == 0 ? "default (lanczos)" :
+	          scaler == 1 ? "bilinear" :
+	          scaler == 2 ? "bicubic" :
+	          scaler == 3 ? "ewa_lanczossharp" : "?");
+	if (scaler >= 0 && scaler <= 3)
+		dolby_vision_plane_scaler = scaler;
+}
+
 void libavos_set_ac3_recode_target_stereo(int stereo)
 {
 	__atomic_store_n(&ac3_recode_target_stereo, stereo ? 1 : 0, __ATOMIC_RELEASE);
@@ -387,3 +412,118 @@ int (*libavos_transform_audio)(float* buf, int nsamples);
 void libavos_set_audio_transform(int (*transformer)(float* buf, int nsamples)) {
 	libavos_transform_audio = transformer;
 }
+
+/* Dolby Vision playback mode:
+ * 0 = passthrough: route DV bitstream to the device Dolby Vision decoder (MediaCodec)
+ * 1 = tone-map:    software HEVC decode + libplacebo GPU reshaping to HDR10 (mpv-style)
+ */
+static int dolby_vision_mode = 0;
+
+int libavos_get_dolby_vision_mode(void)
+{
+	return dolby_vision_mode;
+}
+
+void libavos_set_dolby_vision_mode(int mode)
+{
+	serprintf("libavos_set_dolby_vision_mode: mode=%d (%s)\n", mode,
+	          mode ? "tone-map to HDR10" : "passthrough");
+	dolby_vision_mode = (mode != 0) ? 1 : 0;
+}
+
+/* Presentation "no sync" free-run mode (GUI refresh-rate sync == 4):
+ * 1 = the dovi sink swaps at a uniform content-fps grid and ignores
+ * vsync entirely - no present_at, no display-mode switch, no latch-
+ * feedback pacing correction. For panels (e.g. Samsung HRR) that
+ * override every refresh-rate hint and misbehave under scheduled
+ * presents. 0 = default paced path. */
+static int present_free_run = 0;
+
+int libavos_get_present_free_run(void)
+{
+	return present_free_run;
+}
+
+void libavos_set_present_free_run(int enable)
+{
+	serprintf("libavos_set_present_free_run: %d (%s)\n", enable,
+	          enable ? "no-sync free-run presents" : "default pacing");
+	present_free_run = (enable != 0) ? 1 : 0;
+}
+
+/*
+ * DISPLAY-RESAMPLE hint (mpv display-resample semantics, free-run mode):
+ * the dovi sink measures the content cadence (TS) and the panel's ACTUAL
+ * latch cadence and publishes the ratio as the audio speed that phase-
+ * locks content to the panel grid (e.g. 23.976fps content on Samsung's
+ * 24.000Hz video-refresh grid -> 1.001001x). The engine's player thread
+ * polls the hint generation and applies it ONCE per STREAM through the
+ * normal speed machinery (stream_set_av_speed -> atempo). A new playback
+ * overwrites the hint; 0 speed means "no hint". Thread safety: the sink
+ * (venc thread) writes, the player thread reads a coherent pair under a
+ * mutex (same pattern as the sink's own anchor pair).
+ */
+static pthread_mutex_t display_resample_mtx = PTHREAD_MUTEX_INITIALIZER;
+static float display_resample_speed = 0.f;
+static int display_resample_generation = 0;
+
+void libavos_set_display_resample_hint(float speed)
+{
+	pthread_mutex_lock(&display_resample_mtx);
+	display_resample_speed = speed;
+	display_resample_generation++;
+	pthread_mutex_unlock(&display_resample_mtx);
+}
+
+int libavos_get_display_resample_hint(float *speed, int *generation)
+{
+	int gen;
+	pthread_mutex_lock(&display_resample_mtx);
+	if (speed)
+		*speed = display_resample_speed;
+	gen = display_resample_generation;
+	pthread_mutex_unlock(&display_resample_mtx);
+	if (generation)
+		*generation = gen;
+	return gen;
+}
+
+void libavos_clear_display_resample_hint(void)
+{
+	/* HINT LIFETIME IS PER PLAYBACK (review finding 3: cross-playback
+	 * leak). The hint is a PROCESS-GLOBAL with a MONOTONIC generation:
+	 * a fresh STREAM (applied_gen == 0) would otherwise apply the
+	 * PREVIOUS file's ratio at its first _do_stuff poll - and when the
+	 * new sink's grid never publishes (ratio out of band, or the file
+	 * is already on-grid and the sink correctly publishes nothing), the
+	 * stale speed persists for the whole playback with no correction
+	 * path (stream_video.c's apply guard refuses any change once
+	 * fabsf(cur - 1.0f) is non-zero and no new hint arrives). The dovi
+	 * sink clears the hint at OPEN: each playback starts neutral and
+	 * only its OWN measured grid can publish a ratio. */
+	pthread_mutex_lock(&display_resample_mtx);
+	display_resample_speed = 0.f;
+	display_resample_generation++;
+	pthread_mutex_unlock(&display_resample_mtx);
+}
+
+/*
+ * Dolby Vision tone-map target luminance (nits).
+ * 0 = automatic: the renderer falls back to the source HDR max_luma/default.
+ * The Java layer resolves "auto from display" to the display's reported max
+ * luminance (HdrCapabilities) before calling the setter.
+ */
+static float dolby_vision_target_nits = 0.f;
+
+float libavos_get_dolby_vision_target_nits(void)
+{
+	return dolby_vision_target_nits;
+}
+
+void libavos_set_dolby_vision_target_nits(float nits)
+{
+	serprintf("libavos_set_dolby_vision_target_nits: %.1f nits%s\n", nits,
+	          nits > 0.f ? "" : " (auto)");
+	dolby_vision_target_nits = (nits > 0.f) ? nits : 0.f;
+}
+

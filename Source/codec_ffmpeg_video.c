@@ -30,6 +30,10 @@
 #include "device_config.h"
 #include "pts_reorder.h"
 #include <pthread.h>
+#include "stream_sink_video.h"
+
+/* libavos.c */
+extern int libavos_get_dolby_vision_mode(void);
 
 #ifdef CONFIG_SINK_VIDEO_ANDROID
 #include "android_config.h"
@@ -173,7 +177,41 @@ typedef struct PRIV {
 	void		*mt_ctx;
 	int		reorder_pts;
 	pthread_mutex_t mutex;
+
+	// Dolby Vision tone-map: enhancement-layer decoder + BL/EL frame pairing
+	// (mpv f_enhancement_pair policy: decode EL ahead, pair by exact PTS,
+	// drop stale EL, emit BL alone when no EL matches)
+	const AVCodec	*el_codec;
+	AVCodecContext	*el_ctx;
+	AVFrame		*el_frame;
+	AVFrame		*el_q[8];
+	int		el_q_count;
 } PRIV;
+
+#define DV_EL_PAIR_MAX 8
+
+// Copy one side-data type from src to dst (replacing any existing entry)
+static void _dovi_copy_side_data( AVFrame *dst, const AVFrame *src, enum AVFrameSideDataType type )
+{
+	const AVFrameSideData *sd = av_frame_get_side_data( src, type );
+	AVFrameSideData *new_sd;
+	if( !sd )
+		return;
+	if( av_frame_get_side_data( dst, type ) )
+		av_frame_remove_side_data( dst, type );
+	new_sd = av_frame_new_side_data( dst, type, sd->size );
+	if( new_sd )
+		memcpy( new_sd->data, sd->data, sd->size );
+}
+
+// Dual-track profile 7 carries the RPU on the EL stream; mirror mpv's
+// inherit_dovi_from_el() by moving the DV metadata onto the BL frame so the
+// libplacebo reshaper sees it on the base layer.
+static void _dovi_inherit_from_el( AVFrame *bl, const AVFrame *el )
+{
+	_dovi_copy_side_data( bl, el, AV_FRAME_DATA_DOVI_METADATA );
+	_dovi_copy_side_data( bl, el, AV_FRAME_DATA_DOVI_RPU_BUFFER );
+}
 
 //
 // VIDEO
@@ -231,6 +269,13 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 		break;
 #ifdef CONFIG_FF_HEVC
 	case VIDEO_FORMAT_HEVC:
+		codec_id         = AV_CODEC_ID_HEVC;
+		need_flush       = 0;
+		break;
+	case VIDEO_FORMAT_DOLBY_VISION:
+		// DV tone-map path: the base layer is plain HEVC; FFmpeg's common decode code
+		// parses the RPU (NAL type 62) and attaches AV_FRAME_DATA_DOVI_METADATA /
+		// AV_FRAME_DATA_DOVI_RPU_BUFFER which libplacebo applies during rendering.
 		codec_id         = AV_CODEC_ID_HEVC;
 		need_flush       = 0;
 		break;
@@ -339,11 +384,29 @@ serprintf("cannot find codec\r\n");
 		vctx->codec_tag = codec_tag;
 	}
 	
-	if(!no_extra && ffmpeg_video_copy_extradata( vctx,
-			dec->video->extraDataSize ? dec->video->extraData : dec->video->extraData2,
-			dec->video->extraDataSize ? dec->video->extraDataSize : dec->video->extraDataSize2 ) ) {
-		serprintf( "cannot allocate codec extradata\r\n" );
-		goto ErrorExit;
+	if(!no_extra) {
+		uint8_t *extra      = dec->video->extraDataSize ? dec->video->extraData  : dec->video->extraData2;
+		int      extra_size = dec->video->extraDataSize ? dec->video->extraDataSize : dec->video->extraDataSize2;
+		// Legacy DV MKV files carry the dvcC/dvvC record as CodecPrivate. The HEVC
+		// decoder would misparse it as hvcC and fail to init; drop it and rely on
+		// in-band parameter sets instead (modern files store hvcC here and are kept).
+		if( dec->video->format == VIDEO_FORMAT_DOLBY_VISION && extra && extra_size >= 5 &&
+		    extra[0] == 1 ) {
+			int dv_profile = ( extra[2] >> 1 ) & 0x7f;
+			int dv_level   = ( ( extra[2] & 0x01 ) << 5 ) | ( extra[3] >> 3 );
+			int rpu_flag   = extra[3] & 0x04;
+			if( rpu_flag && dv_level <= 15 &&
+			    ( dv_profile == 4 || dv_profile == 5 || dv_profile == 7 ||
+			      dv_profile == 8 || dv_profile == 9 || dv_profile == 10 ) ) {
+				serprintf("FFV: dropping legacy dvcC/dvvC CodecPrivate (profile %d) for software DV decode\n", dv_profile);
+				extra      = NULL;
+				extra_size = 0;
+			}
+		}
+		if( ffmpeg_video_copy_extradata( vctx, extra, extra_size ) ) {
+			serprintf( "cannot allocate codec extradata\r\n" );
+			goto ErrorExit;
+		}
 	}
 	vctx->thread_count = _ff_thread_count ? _ff_thread_count : device_get_cpu_count();
 	
@@ -357,6 +420,36 @@ DBGS serprintf("name %s  type %d  id %d  extra %d  threads %d\r\n", vcodec->name
 	p->avpkt  = av_packet_alloc();
 	if( !p->vframe || !p->avpkt ) {
 		goto ErrorExit;
+	}
+
+	// Dolby Vision tone-map mode: second (software) HEVC decoder instance for
+	// the enhancement layer, mirroring mpv's EL decoder in f_enhancement_pair.
+	// Extradata source: EL track CodecPrivate (dual-track) or the dovi_split
+	// BSF output (interleaved), published by the parser in dv_el_extraData.
+	if( dec->video->format == VIDEO_FORMAT_DOLBY_VISION &&
+	    libavos_get_dolby_vision_mode() != 0 &&
+	    video->dv_el_extraData && video->dv_el_extraDataSize > 0 ) {
+		p->el_codec = avcodec_find_decoder( AV_CODEC_ID_HEVC );
+		if( p->el_codec )
+			p->el_ctx = avcodec_alloc_context3( p->el_codec );
+		if( p->el_ctx ) {
+			p->el_ctx->extradata = av_mallocz( video->dv_el_extraDataSize + AV_INPUT_BUFFER_PADDING_SIZE );
+			if( p->el_ctx->extradata ) {
+				memcpy( p->el_ctx->extradata, video->dv_el_extraData, video->dv_el_extraDataSize );
+			p->el_ctx->extradata_size = video->dv_el_extraDataSize;
+			}
+			p->el_ctx->width  = video->width;
+			p->el_ctx->height = video->height;
+			p->el_ctx->thread_count = vctx->thread_count;
+			if( avcodec_open2( p->el_ctx, p->el_codec, NULL ) < 0 ) {
+				serprintf("FFV: cannot open DV enhancement-layer decoder\n");
+				avcodec_free_context( &p->el_ctx );
+			} else {
+				p->el_frame = av_frame_alloc();
+				serprintf("FFV: DV enhancement-layer decoder ready (%d bytes extradata)\n",
+				          video->dv_el_extraDataSize );
+			}
+		}
 	}
 	
 	dec->is_open = 1;
@@ -440,6 +533,14 @@ serprintf("ffvd not open!\r\n");
 		avcodec_free_context( &p->vctx );
 		p->vctx = NULL;
 	}
+
+	// Close the Dolby Vision enhancement-layer decoder
+	if( p->el_ctx )
+		avcodec_free_context( &p->el_ctx );
+	if( p->el_frame )
+		av_frame_free( &p->el_frame );
+	while( p->el_q_count )
+		av_frame_free( &p->el_q[--p->el_q_count] );
 	
 	dec->is_open = 0;
 
@@ -453,6 +554,7 @@ serprintf("ffmpeg_video_codec_prepare\n");
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
 		f->priv = NULL;
+		f->handle[1] = NULL;
 		// clear decoder ownership; set only when we clone an AVFrame
 		f->dec  = NULL;
 	}
@@ -471,10 +573,18 @@ serprintf("ffmpeg_video_codec_cleanup\n");
 	int i;
 	for( i = 0; i < num_frames; i++ ) {
 		VIDEO_FRAME *f = frames[i];
-		if (f && f->priv && f->dec == dec) {
-			av_frame_free((AVFrame**)&f->priv);
-			f->priv = NULL;
-			f->dec  = NULL;
+		if (f && f->dec == dec) {
+			/* free both attachments while the ownership marker is still
+			 * intact: clearing f->dec first would skip the EL free */
+			if (f->handle[1]) {
+				av_frame_free((AVFrame**)&f->handle[1]);
+				f->handle[1] = NULL;
+			}
+			if (f->priv) {
+				av_frame_free((AVFrame**)&f->priv);
+				f->priv = NULL;
+			}
+			f->dec = NULL;
 		}
 	}
 	pthread_mutex_unlock( &p->mutex );
@@ -596,6 +706,35 @@ Dump( data, 64 );
 	// decode the frame
 	int got_picture = 0;
 
+	// Dolby Vision tone-map: decode all EL packets the parser has queued so
+	// far, so the pairing queue is populated before the BL frame is produced.
+	// Only meaningful when reorder_pts is active: then the BL decode packet
+	// carries avos_frame->time as pts, matching the parser-converted EL pts.
+	if( p->el_ctx && p->reorder_pts ) {
+		STREAM *s = (STREAM *)dec->ctx;
+		AVPacket el_pkt;
+		if( s && s->parser && s->parser->get_dovi_el_packet ) {
+			while( s->parser->get_dovi_el_packet( s, &el_pkt ) == 0 ) {
+				if( avcodec_send_packet( p->el_ctx, &el_pkt ) >= 0 ) {
+					while( avcodec_receive_frame( p->el_ctx, p->el_frame ) == 0 ) {
+						if( p->el_q_count >= DV_EL_PAIR_MAX ) {
+							// queue full: drop the oldest EL (mpv drops stale EL)
+							av_frame_free( &p->el_q[0] );
+							memmove( &p->el_q[0], &p->el_q[1],
+							         ( DV_EL_PAIR_MAX - 1 ) * sizeof( p->el_q[0] ) );
+							p->el_q_count--;
+						}
+						p->el_q[p->el_q_count] = av_frame_clone( p->el_frame );
+						if( p->el_q[p->el_q_count] )
+							p->el_q_count++;
+						av_frame_unref( p->el_frame );
+					}
+				}
+				av_packet_unref( &el_pkt );
+			}
+		}
+	}
+
 	av_packet_unref( p->avpkt );
 	p->avpkt->data = data;
 	p->avpkt->size = size;
@@ -687,9 +826,42 @@ DBGCV2 serprintf("[");
 			}
 			if( !avos_frame->data[0] ) {
 				avos_frame->dec = dec;
+				// Dolby Vision tone-map: pair this BL frame with an EL frame by
+				// exact PTS (both in avos ms domain); drop stale EL frames
+				AVFrame *el_match = NULL;
+				if( p->el_ctx && p->reorder_pts && p->el_q_count ) {
+					int i;
+					for( i = 0; i < p->el_q_count; i++ ) {
+						if( p->el_q[i]->pts < vframe->pts ) {
+							av_frame_free( &p->el_q[i] );
+							memmove( &p->el_q[i], &p->el_q[i + 1],
+							         ( p->el_q_count - i - 1 ) * sizeof( p->el_q[0] ) );
+							p->el_q_count--;
+							i--;
+							continue;
+						}
+						if( p->el_q[i]->pts == vframe->pts ) {
+							el_match = p->el_q[i];
+							memmove( &p->el_q[i], &p->el_q[i + 1],
+							         ( p->el_q_count - i - 1 ) * sizeof( p->el_q[0] ) );
+							p->el_q_count--;
+							break;
+						}
+					}
+				}
+				if( el_match ) {
+					// dual-track P7: the RPU rides on the EL stream
+					_dovi_inherit_from_el( vframe, el_match );
+				}
 				// keep the frame:
 				av_frame_free((AVFrame**)&avos_frame->priv);
 				avos_frame->priv = (void*)av_frame_clone(vframe);
+				// attach the paired EL for the libplacebo enhancement_layer
+				av_frame_free((AVFrame**)&avos_frame->handle[1]);
+				if( el_match ) {
+					avos_frame->handle[1] = av_frame_clone( el_match );
+					av_frame_free( &el_match );
+				}
 			} else {
 				avos_frame->dec = NULL;
 				avos_frame->color_space = vframe->colorspace;
@@ -773,9 +945,17 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 			codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
 		}
 	}
-	
-	av_frame_free((AVFrame**)&src->priv);
-	src->dec = NULL;
+	if( src->priv && src->dec == dec ) {
+		av_frame_free((AVFrame**)&src->priv);
+		/* paired EL clone (dovi zero-copy path), same ownership point as
+		 * the BL: ~3MB/frame if the render hook is ever reached with an
+		 * unpaired EL (unreachable on the dovi pipeline today - the
+		 * sink consumes both frames - but the symmetric free keeps the
+		 * contract total like the cleanup path does) */
+		if (src->handle[1])
+			av_frame_free((AVFrame**)&src->handle[1]);
+		src->dec = NULL;
+	}
 	
 	pthread_mutex_unlock( &p->mutex );
 
@@ -787,6 +967,11 @@ static int ffmpeg_video_codec_flush( STREAM_DEC_VIDEO *dec  )
 	PRIV *p = (PRIV*)dec->priv;
 	if( p->vctx )
 		avcodec_flush_buffers( p->vctx );
+	if( p->el_ctx ) {
+		avcodec_flush_buffers( p->el_ctx );
+		while( p->el_q_count )
+			av_frame_free( &p->el_q[--p->el_q_count] );
+	}
 	return 0;
 }
 
@@ -833,6 +1018,33 @@ static int ffmpeg_video_codec_destroy( STREAM_DEC_VIDEO *dec )
 	return 0;
 } 
 
+static STREAM_SINK_VIDEO *ffmpeg_video_codec_get_sink(STREAM_DEC_VIDEO *dec)
+{
+#ifdef CONFIG_DOVI_TONEMAP
+	/* Dolby Vision tone-map mode: render through the libplacebo GPU sink instead
+	 * of the default CPU blit sink. The decoder delivers cloned AVFrames carrying
+	 * DV metadata side data in frame->priv. */
+	if (dec && dec->video && dec->video->format == VIDEO_FORMAT_DOLBY_VISION &&
+	    libavos_get_dolby_vision_mode() != 0) {
+		STREAM *s = (STREAM *) dec->ctx;
+		void *surface = s ? stream_get_surface_handle(s) : NULL;
+		if (surface) {
+			STREAM_SINK_VIDEO *sink = stream_sink_video_dovi_new(surface);
+			if (sink) {
+				serprintf("FFM: Dolby Vision tone-map sink (libplacebo)\n");
+				return sink;
+			}
+			serprintf("FFM: DV tone-map sink creation failed, using default sink\n");
+		} else {
+			serprintf("FFM: no surface handle for DV tone-map sink\n");
+		}
+	}
+#else
+	(void) dec;
+#endif
+	return NULL;
+}
+
 static STREAM_DEC_VIDEO *_new( void ) 
 { 
 	STREAM_DEC_VIDEO *dec = (STREAM_DEC_VIDEO *)amalloc( sizeof( STREAM_DEC_VIDEO ) );
@@ -853,6 +1065,7 @@ static STREAM_DEC_VIDEO *_new( void )
 	dec->flush   = ffmpeg_video_codec_flush;
 	dec->get_rc  = ffmpeg_video_codec_get_rc;
 	dec->render  = ffmpeg_video_codec_render;
+	dec->get_sink = ffmpeg_video_codec_get_sink;
 	
 	if( !(dec->priv = acalloc( 1, sizeof( PRIV ) ) ) ) {
 serprintf("FFM: cannot alloc priv\n");
@@ -904,6 +1117,8 @@ STREAM_REGISTER_DEC_VIDEO2( VIDEO_FORMAT_H264, 0,                 MAXW, MAXH, H2
 
 #ifdef CONFIG_FF_HEVC
 STREAM_REGISTER_DEC_VIDEO2( VIDEO_FORMAT_HEVC, 0,                 MAXW, MAXH, H264_PROFILE_HIGH, GPP, _new ,"ffmpeg", NULL );
+// Software Dolby Vision decode (tone-map mode / fallback when the device DV decoder is unusable)
+STREAM_REGISTER_DEC_VIDEO2( VIDEO_FORMAT_DOLBY_VISION, 0,         MAXW, MAXH, H264_PROFILE_HIGH, GPP, _new ,"ffmpeg", NULL );
 #endif
 
 #ifdef CONFIG_FF_WMV
@@ -948,6 +1163,7 @@ static STREAM_REG_DEC_VIDEO reg_mpeg4 = { VIDEO_FORMAT_MPG4,   0,               
 static STREAM_REG_DEC_VIDEO reg_h263  = { VIDEO_FORMAT_H263,   0,                MAXW, MAXH, 0,                 GPP, _new, "ffmpeg", NULL			 };
 static STREAM_REG_DEC_VIDEO reg_h264  = { VIDEO_FORMAT_H264,   0,                MAXW, MAXH, H264_PROFILE_HIGH, GPP, _new, "ffmpeg", &stream_video_mangler_H264  };
 static STREAM_REG_DEC_VIDEO reg_hevc  = { VIDEO_FORMAT_HEVC,   0,                MAXW, MAXH, H264_PROFILE_HIGH, GPP, _new, "ffmpeg", NULL                        };
+static STREAM_REG_DEC_VIDEO reg_dovi  = { VIDEO_FORMAT_DOLBY_VISION, 0,          MAXW, MAXH, H264_PROFILE_HIGH, GPP, _new, "ffmpeg", NULL                        };
 static STREAM_REG_DEC_VIDEO reg_mp4v1 = { VIDEO_FORMAT_MSMP41, 0,                MAXW, MAXH, 0,                 GPP, _new, "ffmpeg", NULL			 };
 static STREAM_REG_DEC_VIDEO reg_mp4v2 = { VIDEO_FORMAT_MSMP42, 0,                MAXW, MAXH, 0,                 GPP, _new, "ffmpeg", NULL			 };
 static STREAM_REG_DEC_VIDEO reg_mp4v3 = { VIDEO_FORMAT_MSMP43, 0,                MAXW, MAXH, 0,                 GPP, _new, "ffmpeg", NULL			 };
@@ -975,6 +1191,10 @@ serprintf("register lavc for VIDEO_FORMAT_H264\r\n");
 serprintf("register lavc for VIDEO_FORMAT_HEVC\r\n");
 	stream_unregister_dec_video( VIDEO_FORMAT_HEVC );
 	stream_register_dec_video( &reg_hevc );
+
+serprintf("register lavc for VIDEO_FORMAT_DOLBY_VISION\r\n");
+	stream_unregister_dec_video( VIDEO_FORMAT_DOLBY_VISION );
+	stream_register_dec_video( &reg_dovi );
 
 serprintf("register lavc for VIDEO_FORMAT_MSMP41\r\n");
 	stream_unregister_dec_video( VIDEO_FORMAT_MSMP41 );

@@ -147,7 +147,14 @@ CSRC_STREAM_IO = \
 CSRC_STREAM_PARSER = \
 	stream_parser.c \
 	stream_parser_ffmpeg.c \
+	dovi_nal.c \
 	dts.c
+
+# RPU -> AVDOVIMetadata converter requires libdovi; only compiled for ABIs
+# where the libdovi static prebuilt is staged (alongside libplacebo).
+ifneq ($(wildcard $(LOCAL_PATH)/../prebuilt/libplacebo/lib/$(TARGET_ARCH_ABI)/libdovi.a),)
+CSRC_STREAM_PARSER += dovi_rpu_meta.c
+endif
 	
 CSRC_STREAM_CODEC = \
 	codec_yuv.c \

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -59,7 +59,7 @@ static int ac3_reconfigure_pending = 1;  // Force initial reconfiguration when A
 static int ac3_force_mode2 = 0;  // Debug A/B: force raw AC3 AudioTrack mode2 for recoding
 // AC3-recode mode2 plain-policy gate. When the AC3-recode sink resolves to passthrough
 // mode2 (raw AC3, e.g. an eARC route), adopt TWO elements of the ordinary-mode2 timing
-// policy (NOT the whole policy — recode keeps its dedicated wall-clock pacer and stays
+// policy (NOT the whole policy â€” recode keeps its dedicated wall-clock pacer and stays
 // exempt from the ordinary mode2 lead gate):
 //   (1) PTS-seeded STREAM_SYNC_SAMPLES audio clock instead of the mode1 CDATA synthetic
 //       startup anchor (handled in this file), and

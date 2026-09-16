@@ -47,6 +47,8 @@ struct avos_mp_video {
 	int width;
 	int height;
 	int aspect_n;
+	int msPerFrame;
+	int milli_fps;
 	int aspect_d;
 };
 
@@ -175,6 +177,29 @@ static void stream_msg_cb(STREAM *s, STREAM_MESSAGE message)
 			video->height = vp->interlaced == VIDEO_INTERLACED_ONE_FIELD ? vp->height * 2 : vp->height;
 			avos_mp_sendevent(mp, MEDIA_SET_VIDEO_SIZE, video->width, video->height);
 		}
+		/* frame rate for display-mode matching (closest refresh): send
+		 * fps * 1000 in ext1 so the Java layer can pick a 24Hz mode for
+		 * 23.976/24fps films without float event args. Sent whenever the
+		 * container reports a new value (0 = unknown). */
+		/* frame rate for display-mode matching (closest refresh): send
+		 * the exact rational fps (r_frame_rate num/den) as milli-fps
+		 * (num * 1000 / den, e.g. 24000 for 24/1, 23976 for 24000/1001),
+		 * falling back to msPerFrame-derived rate. 0 = unknown. */
+		{
+			int milli_fps = 0;
+			if (video->msPerFrame != vp->msPerFrame || video->milli_fps != (vp->frame_rate_num > 0 && vp->frame_rate_den > 0 ? (int)((int64_t)vp->frame_rate_num * 1000 / vp->frame_rate_den) : 0)) {
+				video->msPerFrame = vp->msPerFrame;
+				if (vp->frame_rate_num > 0 && vp->frame_rate_den > 0)
+					video->milli_fps = (int)((int64_t)vp->frame_rate_num * 1000 / vp->frame_rate_den);
+				else if (vp->msPerFrame > 0)
+					video->milli_fps = 1000000 / vp->msPerFrame;
+				else
+					video->milli_fps = 0;
+				MPLOG("fps event: rate=%d/%d msPerFrame=%d -> %d milli-fps", vp->frame_rate_num, vp->frame_rate_den, vp->msPerFrame, video->milli_fps);
+				avos_mp_sendevent(mp, MEDIA_SET_VIDEO_FPS, video->milli_fps, 0);
+			}
+		}
+
 		break;
 	case STREAM_AUDIO_PROPS_CHANGED:
 	case STREAM_SUB_PROPS_CHANGED:

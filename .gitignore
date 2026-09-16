@@ -32,3 +32,4 @@ test/sdl
 test/ifo
 obj
 libs
+compile_commands.json

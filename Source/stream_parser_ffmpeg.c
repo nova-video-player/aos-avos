@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2017 Archos SA
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,6 +42,9 @@
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/intreadwrite.h>
+
+#include "dovi_nal.h"
 
 #include <string.h>
 #include <strings.h>
@@ -151,6 +154,10 @@ typedef struct AVQueue {
 	int 		packets;
 } AVQueue;
 
+// max number of Dolby Vision enhancement-layer packets kept while waiting
+// for the matching base-layer packet
+#define DV_EL_PENDING_MAX 32
+
 typedef struct FF_PRIV 
 {
 	AVFormatContext *fmt;
@@ -188,6 +195,22 @@ typedef struct FF_PRIV
 	int		vpid;
 
 	STREAM_CHUNK	sc;
+
+	// Dolby Vision profile 7 dual-track: enhancement-layer merge state
+	int		dv_el_stream;		// FFmpeg stream index of the EL track (-1: none)
+	int		dv_el_merge;		// 1: merge EL packets into BL access units
+	AVRational	dv_el_time_base;	// time base of the EL stream
+	int		dv_el_pending_count;
+	AVPacket	dv_el_pending[DV_EL_PENDING_MAX];
+
+	// Dolby Vision tone-map mode: EL exposed as a separate packet queue
+	int		dv_el_expose;		// 1: route EL packets to elq for the EL decoder
+	int		elq_inited;
+	AVQueue		elq;			// enhancement-layer packet queue
+	int		dv_split_active;	// interleaved P7 tone-map NAL split active
+	int		dv_nal_length_size;	// hvcC NAL length size (0 = Annex-B)
+	unsigned char	*dv_el_hvcc;	// hvcE EL config (AV_PKT_DATA_HEVC_CONF) copy
+	int		dv_el_hvcc_size;
 	
 } FF_PRIV;
 
@@ -198,6 +221,12 @@ DECLARE_DEBUG_PARAM( "fffs", ff_force_seek );
 
 static int _close( STREAM *s );
 static int _flush_packets( AVQueue *q, const char *tag );
+static void _dv_el_flush( FF_PRIV *priv );
+static void _dv_elq_flush( FF_PRIV *priv );
+static int _dv_tonemap_setup_interleaved( FF_PRIV *priv );
+
+/* libavos.c */
+extern int libavos_get_dolby_vision_mode(void);
 
 #define ff_p	((FF_PRIV*)s->parser_priv)
 
@@ -330,6 +359,155 @@ static int get_ff_format( int id, UINT32 *fourcc )
 
 // ************************************************************
 //
+//	_parse_dovi_conf_record
+//	parse the raw dvcC/dvvC DOVIDecoderConfigurationRecord bit layout,
+//	mirroring FFmpeg's ff_isom_parse_dvcc_dvvc (libavformat/dovi_isom.c).
+//	used as a fallback for old MKV files that store the record in
+//	CodecPrivate instead of a track BlockAdditionMapping.
+// ************************************************************
+static int _parse_dovi_conf_record( const uint8_t *data, int size, AVDOVIDecoderConfigurationRecord *out )
+{
+	uint32_t buf;
+
+	if( !data || size < 4 || !out )
+		return 0;
+
+	memset( out, 0, sizeof( *out ) );
+	out->dv_version_major = data[0];
+	out->dv_version_minor = data[1];
+	buf = ( data[2] << 8 ) | data[3];
+	out->dv_profile       = ( buf >> 9 ) & 0x7f;
+	out->dv_level         = ( buf >> 3 ) & 0x3f;
+	out->rpu_present_flag = ( buf >> 2 ) & 0x01;
+	out->el_present_flag  = ( buf >> 1 ) & 0x01;
+	out->bl_present_flag  = buf & 0x01;
+	if( size >= 5 )
+		out->dv_bl_signal_compatibility_id = ( data[4] >> 4 ) & 0x0f;
+
+	// sanity: reject anything that cannot be a dvcC/dvvC record
+	if( out->dv_version_major != 1 || out->dv_profile == 0 || out->dv_profile > 20 )
+		return 0;
+	// a valid record always signals the RPU and at least one layer; this also
+	// rejects HEVC hvcC extradata whose bytes happen to decode as plausible DV fields
+	if( !out->rpu_present_flag || ( !out->el_present_flag && !out->bl_present_flag ) )
+		return 0;
+	return 1;
+}
+
+// ************************************************************
+//
+//	_pair_dovi_tracks
+//	Dolby Vision profile 7 dual-track files store the base layer (BL)
+//	and the enhancement layer (EL) in two separate HEVC tracks. Android
+//	MediaCodec DV decoders expect a single combined bitstream, so pick
+//	the BL as the video track to play, hide the EL track, and remember
+//	it so that _parse_once can merge EL packets into BL access units.
+//	Logic adapted from mpv's demux_mkv.c pair_dovi_tracks().
+// ************************************************************
+static void _pair_dovi_tracks( FF_PRIV *priv )
+{
+	AV_PROPERTIES *av = &priv->av;
+	VIDEO_PROPERTIES *el;
+	AVStream *bl_st;
+	int el_idx = -1, bl_idx = -1;
+	int el_stream;
+	int gcd;
+	int i;
+
+	if( av->vs_max < 2 )
+		return;
+
+	for( i = 0; i < av->vs_max; i++ ) {
+		VIDEO_PROPERTIES *v = &av->video[i];
+		if( !v->valid )
+			continue;
+		if( v->format != VIDEO_FORMAT_DOLBY_VISION && v->format != VIDEO_FORMAT_HEVC )
+			continue;
+		if( v->dv_profile_source == 7 && v->dv_el_present ) {
+			// bl_present_flag is not checked: files in the wild set it
+			// to 1 even for the EL track
+			if( el_idx != -1 )
+				return; // ambiguous
+			el_idx = i;
+		} else {
+			if( bl_idx != -1 )
+				return; // ambiguous
+			bl_idx = i;
+		}
+	}
+
+	if( el_idx == -1 || bl_idx == -1 )
+		return;
+
+	el = &av->video[el_idx];
+	el_stream = el->stream;
+
+serprintf("DV: profile 7 dual-track: BL video[%d] (stream %d) + EL video[%d] (stream %d)\n",
+		bl_idx, av->video[bl_idx].stream, el_idx, el_stream );
+
+	// the player always decodes video track 0: make it the BL
+	if( bl_idx != 0 ) {
+		VIDEO_PROPERTIES tmp = av->video[0];
+		av->video[0] = av->video[bl_idx];
+		av->video[bl_idx] = tmp;
+		if( el_idx == 0 )
+			el_idx = bl_idx;
+	}
+
+	// hide the EL track from the track list
+	for( i = el_idx; i < av->vs_max - 1; i++ )
+		av->video[i] = av->video[i + 1];
+	av->vs_max--;
+	memset( &av->video[av->vs_max], 0, sizeof( VIDEO_PROPERTIES ) );
+	av->video[av->vs_max].aspect_n = 1;
+	av->video[av->vs_max].aspect_d = 1;
+
+	priv->dv_el_stream = el_stream;
+	priv->dv_el_time_base = priv->fmt->streams[el_stream]->time_base;
+
+	// a real EL track exists in the container: flag it on the BL properties
+	// so codec-level FEL gates (HW path) route dual-track P7 to the
+	// software path for full reshaping/NLQ composition, exactly like a
+	// single-track interleaved file whose dvcC sets el_present_flag.
+	// The BL track's own dvcC often reads el_present_flag=0 in this layout.
+	av->video[0].dv_el_present = 1;
+	av->video[0].dv_el_dual_track = 1;
+
+	// video timestamps must be computed with the BL stream time base
+	bl_st = priv->fmt->streams[av->video[0].stream];
+	gcd = av_gcd( bl_st->time_base.num, bl_st->time_base.den );
+	if( gcd ) {
+		priv->time_base_num = bl_st->time_base.num / gcd;
+		priv->time_base_den = bl_st->time_base.den / gcd;
+	}
+
+	// EL decoder config for tone-map mode: the EL track's CodecPrivate (hvcC)
+	// points into the demuxer context, same ownership model as extraData
+	{
+		AVCodecParameters *el_par = priv->fmt->streams[el_stream]->codecpar;
+		if( el_par->extradata && el_par->extradata_size > 0 ) {
+			av->video[0].dv_el_extraData     = el_par->extradata;
+			av->video[0].dv_el_extraDataSize = el_par->extradata_size;
+		}
+	}
+
+	// Passthrough mode: merge EL packets into BL access units for the device
+	// DV decoder. Tone-map mode: expose EL packets on a separate queue; the
+	// video codec runs a second decoder instance and libplacebo composites the
+	// enhancement layer (mpv f_enhancement_pair style).
+	if( av->video[0].format == VIDEO_FORMAT_DOLBY_VISION &&
+	    libavos_get_dolby_vision_mode() != 0 ) {
+		priv->dv_el_merge  = 0;
+		priv->dv_el_expose = 1;
+	} else {
+		// only merge when the BL is actually sent to a Dolby Vision decoder;
+		// otherwise the EL packets are simply dropped
+		priv->dv_el_merge = ( av->video[0].format == VIDEO_FORMAT_DOLBY_VISION );
+	}
+}
+
+// ************************************************************
+//
 //	_parse_format
 //
 // ************************************************************
@@ -430,9 +608,28 @@ DBGP serprintf("\tPAR        %d/%d (stream %d/%d, codec %d/%d)\r\n",
 				VIDEO_PROPERTIES *video = priv->av.video + priv->av.vs_max;
 				
 				video->stream = i;
+                /* Frame rate for display-mode matching: r_frame_rate is the
+                 * coded cadence (exact for fixed-rate content like this 48/1
+                 * FEL file), but MKV headers often report avg != r on long
+                 * files (per-frame timestamp rounding accumulates, avg drifts
+                 * a hair below the true rate) - the equality gate then left
+                 * frame_rate_num/den 0 and NO fps ever reached Java
+                 * (MEDIA_SET_VIDEO_FPS) or the dovi sink's SF hint
+                 * (framerate_set), measured: the 48fps FEL file played on a
+                 * 120Hz panel with presents pinned ~40/s. Use r when it
+                 * matches, else fall back to r alone when sane, else avg:
+                 * mode matching wants the content cadence, not the
+                 * long-average; avg is still written to rate/scale below
+                 * for msPerFrame math. */
                 if (st->avg_frame_rate.den && st->r_frame_rate.den && av_q2d(st->avg_frame_rate) == av_q2d(st->r_frame_rate)) {
                     video->frame_rate_den = st->r_frame_rate.den;
                     video->frame_rate_num = st->r_frame_rate.num;
+                } else if (st->r_frame_rate.den && st->r_frame_rate.num && av_q2d(st->r_frame_rate) > 1.0 && av_q2d(st->r_frame_rate) < 500.0) {
+                    video->frame_rate_den = st->r_frame_rate.den;
+                    video->frame_rate_num = st->r_frame_rate.num;
+                } else if (st->avg_frame_rate.den && st->avg_frame_rate.num) {
+                    video->frame_rate_den = st->avg_frame_rate.den;
+                    video->frame_rate_num = st->avg_frame_rate.num;
                 }
 
 				if(st->avg_frame_rate.den && st->avg_frame_rate.num) {
@@ -528,6 +725,8 @@ serprintf("FF: parse H264 SPS\n");
 
                         int side_data_size = 0;
                         uint8_t* side_data = NULL;
+                        AVDOVIDecoderConfigurationRecord dovi_rec;
+                        AVDOVIDecoderConfigurationRecord *dovi_record = NULL;
 
                         // FFmpeg 8+ replacement for deprecated av_stream_get_side_data
                         for (int j = 0; j < codecpar->nb_coded_side_data; j++) {
@@ -537,14 +736,31 @@ serprintf("FF: parse H264 SPS\n");
                                 break;
                             }
                         }
+
+                        if (side_data && side_data_size > 0) {
+                            dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
+                        } else if (video->format == VIDEO_FORMAT_HEVC &&
+                                   video->extraDataSize >= 5 &&
+                                   video->extraData[0] == 1 && video->extraData[1] == 0 &&
+                                   _parse_dovi_conf_record(video->extraData, video->extraDataSize, &dovi_rec)) {
+                            // old MKV muxings store the dvcC/dvvC record in CodecPrivate,
+                            // which FFmpeg's matroska demuxer does not parse: fall back to
+                            // parsing it here. extraData is kept as-is and still sent as CSD.
+                            dovi_record = &dovi_rec;
+                            serprintf("DV: found dvcC/dvvC record in extradata (legacy CodecPrivate)\n");
+                        }
+#ifdef CONFIG_ANDROID
+                        // Tone-map mode renders DV through libplacebo and does not
+                        // need a device DV decoder, so detect DV from the container
+                        // metadata regardless of "video/dolby-vision" HW support.
+                        int dovi_codec_supported = acodecs_is_type_supported("video/dolby-vision", 0);
+                        int dovi_mode = acodecs_get_dovi_mode();
+                        if(dovi_record && (libavos_get_dolby_vision_mode() != 0 || dovi_codec_supported)) {
+#else
                         int dovi_codec_supported = 1;
                         int dovi_mode = 0;
-#ifdef CONFIG_ANDROID
-                        dovi_codec_supported = acodecs_is_type_supported("video/dolby-vision", 0);
-                        dovi_mode = acodecs_get_dovi_mode();
+                        if(dovi_record) {
 #endif
-                        if(side_data && side_data_size > 0 && dovi_codec_supported) {
-                            AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                             int force_dovi = 0;
                             int prefer_hevc_fallback = 0;
                             char *dovi_decoder = NULL;
@@ -590,6 +806,39 @@ serprintf("FF: parse H264 SPS\n");
                                 serprintf("Dolby Vision in an unknown codec %d", video->format);
                             }
 
+								// capture raw DV metadata for the tone-map pipeline (mpv-style EL handling)
+                            video->dv_profile_source = dovi_record->dv_profile;
+                            video->dv_level      = dovi_record->dv_level;
+                            video->dv_el_present = dovi_record->el_present_flag;
+                            video->dv_bl_present = dovi_record->bl_present_flag;
+                            video->dv_compat_id  = dovi_record->dv_bl_signal_compatibility_id;
+
+								#ifdef CONFIG_ANDROID
+                            // Tone-map mode (libavos_get_dolby_vision_mode()==1): the EL is
+                            // decoded in software and composited on the GPU - no device DV
+                            // decoder is needed or consulted. Force the DV format for every
+                            // profile the tone-map pipeline handles (P4/5/7/8/9 HEVC, P10 AV1)
+                            // so the dovi sink/decoder chain engages regardless of
+                            // bl_signal_compatibility_id (P7 FEL bl=6 would otherwise take the
+                            // HDR10 fallback - measured regression after the android_sync_back
+                            // rebase: file played through sfdec2 and never reached the dovi
+                            // tone-map path). LAST gate: nothing after this may reset it.
+                            int dovi_tonemap = (libavos_get_dolby_vision_mode() != 0 &&
+                                                video->dv_profile != 0);
+                            if (dovi_tonemap) {
+                                force_dovi = 1;
+                                prefer_hevc_fallback = 0;
+                            }
+                            if (video->dv_profile) {
+                                dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+                                if (!dovi_tonemap)
+                                    force_dovi = (dovi_decoder != NULL);
+                            }
+
+                            if (dovi_mode == 2 && dovi_codec_supported) {
+                                force_dovi = 1;
+                            }
+#else
                             if (video->dv_profile) {
                                 dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
                                 force_dovi = (dovi_decoder != NULL);
@@ -598,8 +847,16 @@ serprintf("FF: parse H264 SPS\n");
                             if (dovi_mode == 2 && dovi_codec_supported) {
                                 force_dovi = 1;
                             }
+#endif
 
-                            if (video->format == VIDEO_FORMAT_HEVC &&
+#ifdef CONFIG_ANDROID
+                            // HEVC fallback for profile-7 BLs applies ONLY to the device
+                            // passthrough path (dovi_mode 0/1): a hardware DV decoder that
+                            // must render the BL alone benefits from the HDR10-compatible
+                            // base layer. It must never override tone-map mode.
+                            if (libavos_get_dolby_vision_mode() == 0 &&
+#endif
+                                video->format == VIDEO_FORMAT_HEVC &&
                                 dovi_record->dv_profile == 7 &&
                                 dovi_mode != 2 &&
                                 dovi_record->dv_bl_signal_compatibility_id != 0 &&
@@ -793,6 +1050,14 @@ DBGP serprintf("\tDISCARD!\n" );
 DBGP serprintf("\r\n");
 	}
 
+	// Dolby Vision profile 7 dual-track: pair BL + EL tracks so that the
+	// EL is hidden and its packets get merged into the BL access units
+	_pair_dovi_tracks( priv );
+
+	// Dolby Vision profile 7 single-track interleaved in tone-map mode:
+	// split the combined stream into BL(+RPU) and EL via dovi_split BSFs
+	_dv_tonemap_setup_interleaved( priv );
+
 	if( fmt->nb_chapters ) {
 DBGP serprintf("chapters:\r\n");	
 		for( i =0; i < fmt->nb_chapters; i++ ) {
@@ -850,6 +1115,7 @@ DBGS serprintf("FFMPEG: open: %s, buffer_size: %d\r\n", s->src.url, buffer_size)
 	}
 	
 	memset( ff_p, 0, sizeof( FF_PRIV ) );
+	ff_p->dv_el_stream = -1;
 	av_init_props( ff_p );
 	ff_p->s = s;
 	
@@ -971,10 +1237,13 @@ DBGP serprintf("info\r\n");
 	LinkedList_init( &ff_p->aq.list );
 	LinkedList_init( &ff_p->vq.list );
 	LinkedList_init( &ff_p->sq.list );
+	LinkedList_init( &ff_p->elq.list );
+	ff_p->elq_inited = 1;
 
 	pthread_mutex_init( &ff_p->aq.mutex, NULL );
 	pthread_mutex_init( &ff_p->vq.mutex, NULL );
 	pthread_mutex_init( &ff_p->sq.mutex, NULL );
+	pthread_mutex_init( &ff_p->elq.mutex, NULL );
 
 	// make lavf parser use this sync mode! 0 is for STREAM_SYNC_CDATA (PTS) and 1 for STREAM_SYNC_SAMPLES
 	//s->sync_mode = STREAM_SYNC_SAMPLES;
@@ -1029,6 +1298,9 @@ serprintf("FFMPEG: not open!\r\n" );
 		_flush_packets( &ff_p->vq, "VID" );
 		_flush_packets( &ff_p->aq, "AUD" );
 		_flush_packets( &ff_p->sq, "SUB" );
+		_dv_el_flush( ff_p );
+		_dv_elq_flush( ff_p );
+		av_freep( &ff_p->dv_el_hvcc );
 
 		av_dict_free(&ff_p->fmt_opts);
 
@@ -1163,6 +1435,24 @@ static int _get_video_time( STREAM *s, AVPacket *packet )
 	return RST_TO_TS_TIME(t, int);
 }
 
+// Convert an enhancement-layer packet's timestamps into the same avos time
+// domain as the BL cdata->time (_get_video_time: ms offset by start_time), so
+// decoded EL frame pts matches BL vframe->pts for pairing in codec_ffmpeg_video.c
+static void _dv_el_convert_time( FF_PRIV *priv, AVPacket *pkt, int tb_num, int tb_den )
+{
+	int64_t t;
+	if( !tb_den )
+		return;
+	if( pkt->pts != AV_NOPTS_VALUE ) {
+		t = (int64_t)pkt->pts * 1000 * tb_num / tb_den - priv->start_time;
+		pkt->pts = RST_TO_TS_TIME( t, int );
+	}
+	if( pkt->dts != AV_NOPTS_VALUE ) {
+		t = (int64_t)pkt->dts * 1000 * tb_num / tb_den - priv->start_time;
+		pkt->dts = RST_TO_TS_TIME( t, int );
+	}
+}
+
 // ************************************************************
 //
 //	_get_audio_time
@@ -1194,13 +1484,280 @@ static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 
 // ************************************************************
 //
+//	Dolby Vision profile 7 pending enhancement-layer packets
+//
+// ************************************************************
+static void _dv_el_flush( FF_PRIV *priv )
+{
+	int i;
+	for( i = 0; i < priv->dv_el_pending_count; i++ )
+		av_packet_unref( &priv->dv_el_pending[i] );
+	priv->dv_el_pending_count = 0;
+}
+
+static void _dv_el_push( FF_PRIV *priv, AVPacket *packet )
+{
+	if( priv->dv_el_pending_count >= DV_EL_PENDING_MAX ) {
+		// window overflow: drop the oldest EL packet
+		av_packet_unref( &priv->dv_el_pending[0] );
+		memmove( &priv->dv_el_pending[0], &priv->dv_el_pending[1],
+		         ( DV_EL_PENDING_MAX - 1 ) * sizeof( AVPacket ) );
+		priv->dv_el_pending_count--;
+		memset( &priv->dv_el_pending[priv->dv_el_pending_count], 0, sizeof( AVPacket ) );
+	}
+	if( av_packet_ref( &priv->dv_el_pending[priv->dv_el_pending_count], packet ) < 0 )
+		return; // OOM: leave the blank slot uncounted, drop this EL packet
+	priv->dv_el_pending_count++;
+}
+
+// ************************************************************
+//
+//	Dolby Vision tone-map mode: EL packet queue + dovi_split BSFs
+//
+// ************************************************************
+static void _dv_elq_flush( FF_PRIV *priv )
+{
+	AVPacket pkt;
+	if( !priv->elq_inited )
+		return;
+	while( _get_packet( &priv->elq, &pkt ) )
+		av_packet_unref( &pkt );
+}
+
+// Standalone port of the core NAL filtering from FFmpeg's
+// libavcodec/bsf/dovi_split.c (that BSF does not exist in Nova's FFmpeg 8.0.1).
+// Splits an interleaved profile 7 access unit into BL(+RPU) and EL streams:
+//   - NAL type 63 (HEVC_NAL_UNSPEC63): enhancement layer, outer two-byte NAL
+//     header stripped on output (the EL is a self-contained HEVC stream)
+//   - NAL type 62 (HEVC_NAL_UNSPEC62): RPU metadata, kept with the BL
+//   - everything else: base layer
+// NAL walking itself lives in the shared dovi_nal helpers.
+
+// build one output stream (el_mode 0: BL+RPU, 1: EL) from an interleaved AU.
+// Returns 0 on success (*out_buf NULL when nothing was kept).
+static int _dv_split_build( const uint8_t *data, int size, int lsize, int el_mode,
+                            uint8_t **out_buf, int *out_size )
+{
+	int prefix = lsize ? lsize : 4;
+	size_t total = 0;
+	int kept = 0, pass, pos, nal_size, i;
+	const uint8_t *nal;
+	uint8_t *buf = NULL, *dst;
+
+	for( pass = 0; pass < 2; pass++ ) {
+		pos = 0;
+		dst = buf;
+		while( ( nal = dovi_next_nal( data, size, lsize, &pos, &nal_size ) ) != NULL ) {
+			int type = ( nal[0] >> 1 ) & 0x3F;
+			const uint8_t *payload;
+			int psize;
+			if( type == DOVI_NAL_TYPE_EL ) {
+				if( !el_mode || nal_size <= 2 )
+					continue;
+				payload = nal + 2;	// strip outer EL NAL header
+				psize = nal_size - 2;
+			} else if( type == DOVI_NAL_TYPE_RPU ) {
+				if( el_mode )
+					continue;
+				payload = nal;
+				psize = nal_size;
+			} else {
+				if( el_mode )
+					continue;
+				payload = nal;
+				psize = nal_size;
+			}
+			if( pass == 0 ) {
+				total += prefix + psize;
+				kept++;
+			} else {
+				if( lsize ) {
+					for( i = lsize - 1; i >= 0; i-- )
+						*dst++ = ( psize >> ( 8 * i ) ) & 0xFF;
+				} else {
+					*dst++ = 0; *dst++ = 0; *dst++ = 0; *dst++ = 1;
+				}
+				memcpy( dst, payload, psize );
+				dst += psize;
+			}
+		}
+		if( pass == 0 ) {
+			if( !kept ) {
+				*out_buf = NULL;
+				*out_size = 0;
+				return 0;
+			}
+			buf = (uint8_t *) av_malloc( total + AV_INPUT_BUFFER_PADDING_SIZE );
+			if( !buf )
+				return 1;
+		}
+	}
+	memset( dst, 0, AV_INPUT_BUFFER_PADDING_SIZE );
+	*out_buf = buf;
+	*out_size = (int) total;
+	return 0;
+}
+
+// wrap a freshly built buffer into an AVPacket inheriting in's timestamps
+static int _dv_make_packet( AVPacket *in, AVPacket *out, uint8_t *buf, int size )
+{
+	AVBufferRef *bref = av_buffer_create( buf, size + AV_INPUT_BUFFER_PADDING_SIZE, NULL, NULL, 0 );
+	if( !bref ) {
+		av_free( buf );
+		return 1;
+	}
+	if( av_packet_copy_props( out, in ) < 0 ) {
+		av_buffer_unref( &bref );
+		return 1;
+	}
+	out->buf  = bref;
+	out->data = buf;
+	out->size = size;
+	return 0;
+}
+
+// split one interleaved P7 access unit into BL(+RPU) and EL packets
+static int _dv_split_packet( FF_PRIV *priv, AVPacket *in, AVPacket *bl_out, AVPacket *el_out )
+{
+	uint8_t *bl_buf = NULL, *el_buf = NULL;
+	int bl_size = 0, el_size = 0;
+
+	if( _dv_split_build( in->data, in->size, priv->dv_nal_length_size, 0, &bl_buf, &bl_size ) )
+		return 1;
+	if( _dv_split_build( in->data, in->size, priv->dv_nal_length_size, 1, &el_buf, &el_size ) ) {
+		av_free( bl_buf );
+		return 1;
+	}
+	if( bl_buf && _dv_make_packet( in, bl_out, bl_buf, bl_size ) )
+		bl_buf = NULL;	// consumed/failed inside
+	if( el_buf && _dv_make_packet( in, el_out, el_buf, el_size ) )
+		el_buf = NULL;
+	return 0;
+}
+
+// Single-track interleaved profile 7 in tone-map mode: activate the NAL split so
+// the codec receives BL(+RPU) packets on the normal video path and EL packets
+// via the EL queue, exactly like the dual-track layout.
+static int _dv_tonemap_setup_interleaved( FF_PRIV *priv )
+{
+	VIDEO_PROPERTIES *v = &priv->av.video[0];
+	AVStream *st;
+
+	if( priv->dv_el_stream >= 0 )
+		return 0;			// dual-track handled elsewhere
+	if( v->format != VIDEO_FORMAT_DOLBY_VISION )
+		return 0;
+	if( v->dv_profile_source != 7 || !v->dv_el_present )
+		return 0;
+	if( libavos_get_dolby_vision_mode() == 0 )
+		return 0;			// passthrough keeps the combined stream
+
+	st = priv->fmt->streams[v->stream];
+	priv->dv_nal_length_size = dovi_hvcc_nal_length_size( st->codecpar->extradata,
+	                                                     st->codecpar->extradata_size );
+	priv->dv_split_active = 1;
+	priv->dv_el_expose = 1;
+
+	// EL config: prefer the hvcE BlockAdditionMapping config that FFmpeg >= 9
+	// exposes as AV_PKT_DATA_HEVC_CONF coded side data (mkvmerge dual-layer
+	// single-track layout); fall back to the BL hvcC for interleaved files
+	// where the EL shares the track framing.
+	for( int i = 0; i < st->codecpar->nb_coded_side_data; i++ ) {
+		AVPacketSideData *sd = &st->codecpar->coded_side_data[i];
+		if( sd->type == AV_PKT_DATA_HEVC_CONF && sd->size >= 23 ) {
+			priv->dv_el_hvcc = av_malloc( sd->size );
+			if( priv->dv_el_hvcc ) {
+				memcpy( priv->dv_el_hvcc, sd->data, sd->size );
+				priv->dv_el_hvcc_size = sd->size;
+			}
+			break;
+		}
+	}
+	if( priv->dv_el_hvcc ) {
+		v->dv_el_extraData     = priv->dv_el_hvcc;
+		v->dv_el_extraDataSize = priv->dv_el_hvcc_size;
+		serprintf("FFM: interleaved DV P7 tone-map: hvcE EL config (%d bytes)\n",
+		          priv->dv_el_hvcc_size );
+	} else {
+		v->dv_el_extraData     = v->extraData;
+		v->dv_el_extraDataSize = v->extraDataSize;
+	}
+
+	serprintf("FFM: interleaved DV P7 tone-map: dovi_split active (nal_length_size %d)\n",
+	          priv->dv_nal_length_size );
+	return 0;
+}
+
+// Codec pull API: next enhancement-layer packet (tone-map mode)
+static int _get_dovi_el_packet( STREAM *s, void *pkt )
+{
+	AVPacket *out = (AVPacket *)pkt;
+	if( !ff_p->elq_inited || !out )
+		return 1;
+	if( !_get_packet( &ff_p->elq, out ) )
+		return 1;
+	return 0;
+}
+
+// find and remove the pending EL packet with the same timestamp as the BL packet
+static int _dv_el_take_match( FF_PRIV *priv, AVPacket *bl, AVPacket *el_out )
+{
+	AVRational bl_tb;
+	int i;
+
+	if( bl->pts == AV_NOPTS_VALUE || !priv->time_base_den )
+		return 0;
+
+	bl_tb.num = priv->time_base_num;
+	bl_tb.den = priv->time_base_den;
+
+	for( i = 0; i < priv->dv_el_pending_count; i++ ) {
+		AVPacket *el = &priv->dv_el_pending[i];
+		if( el->pts != AV_NOPTS_VALUE &&
+		    av_compare_ts( bl->pts, bl_tb, el->pts, priv->dv_el_time_base ) == 0 ) {
+			*el_out = *el;
+			for( ; i < priv->dv_el_pending_count - 1; i++ )
+				priv->dv_el_pending[i] = priv->dv_el_pending[i + 1];
+			priv->dv_el_pending_count--;
+			memset( &priv->dv_el_pending[priv->dv_el_pending_count], 0, sizeof( AVPacket ) );
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// ************************************************************
+//
 //	_parse_once
 //
 // ************************************************************
 static int _parse_once( STREAM *s, int *timestamp)
 {
 	AVFormatContext *fmt = ff_p->fmt;
-	
+
+	/* 1Hz demux-queue diagnostics: packet counts + memory of every queue
+	 * plus this thread's parse rate - pinpoints parser starvation */
+	{
+		static int64_t last_us;
+		static int parse_count;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		parse_count++;
+		if (!last_us)
+			last_us = now_us;
+		else if (now_us - last_us >= 1000000) {
+			serprintf("FFMPEG: parse=%d/s vq=%d(%dKB) aq=%d(%dKB) elq=%d(%dKB) sleeping=%d\n",
+			          parse_count,
+			          ff_p->vq.packets, ff_p->vq.mem_used / 1024,
+			          ff_p->aq.packets, ff_p->aq.mem_used / 1024,
+			          ff_p->elq.packets, ff_p->elq.mem_used / 1024,
+			          ff_p->sleeping);
+			parse_count = 0;
+			last_us = now_us;
+		}
+	}
+
 	if( ff_p->sleeping ) {
 		// we are sleeping, decide whether to wake up
 		if( s->time_parsed < stream_drive_wake_sleep ) {
@@ -1227,7 +1784,7 @@ DBGP serprintf("FFMPEG: wake\r\n");
 DBGP2 serprintf("FFMPEG full %d %d %d %d\r\n", ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, ff_p->buffer_size);
 		if( s->time_parsed > stream_drive_wake_sleep && !(ff_p->flags & STREAM_PARSER_FILE_NONLOCAL) ) {
 			// time to sleep
-DBGP serprintf("FFMPEG: sleep\r\n");
+DBGP		serprintf("FFMPEG: sleep\r\n");
 			ff_p->sleeping = 1;
 		}
 		return 0;
@@ -1303,6 +1860,25 @@ DBGC1 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X  %d\r\n"
 		_add_packet( &ff_p->aq, &packet );
 		if( timestamp )
 			*timestamp = GET_AUDIO_TS( packet.pts );
+	} else if( ff_p->dv_el_merge && stream == ff_p->dv_el_stream ) {
+DBGP2 serprintf("VIDEO EL   dts/pts %8lld/%8lld  size %d\r\n",
+					(long long)GET_VIDEO_TS( packet.dts ), (long long)GET_VIDEO_TS( packet.pts ), packet.size );
+		// Dolby Vision profile 7 enhancement layer: hold until paired with
+		// the matching base-layer packet
+		_dv_el_push( ff_p, &packet );
+		if( timestamp )
+			*timestamp = -1;
+	} else if( ff_p->dv_el_expose && stream == ff_p->dv_el_stream ) {
+DBGP2 serprintf("VIDEO EL(q) dts/pts %8lld/%8lld  size %d\r\n",
+					(long long)GET_VIDEO_TS( packet.dts ), (long long)GET_VIDEO_TS( packet.pts ), packet.size );
+		// Dolby Vision tone-map mode, dual-track: EL packets go to the EL
+		// queue; the video codec decodes them separately and libplacebo
+		// composites the enhancement layer (mpv f_enhancement_pair style).
+		// Convert to the BL time domain first so pts pairing works.
+		_dv_el_convert_time( ff_p, &packet, ff_p->dv_el_time_base.num, ff_p->dv_el_time_base.den );
+		_add_packet( &ff_p->elq, &packet );
+		if( timestamp )
+			*timestamp = -1;
 	} else if( s->video->valid && stream == s->video->stream ) {
 		_rt_video_pkts++;
 DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
@@ -1317,6 +1893,59 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 			// Keyframes are still queued so playback can resync cleanly once
 			// audio is found.
 			_rt_video_search_pkts++;
+		} else if( ff_p->dv_split_active ) {
+			// Dolby Vision tone-map mode, single-track interleaved P7: split
+			// the combined access unit into BL(+RPU) -> vq and EL -> elq
+			// (mpv runs the same dovi_split at demux level). mkvmerge
+			// dual-layer files instead carry the EL as an hvcE block
+			// addition (AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL, id 'hvcE').
+			uint8_t *hvce_el = NULL;
+			int hvce_el_size = 0;
+			for( int i = 0; i < packet.side_data_elems; i++ ) {
+				if( packet.side_data[i].type == AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL &&
+				    packet.side_data[i].size > 8 &&
+				    AV_RB64( packet.side_data[i].data ) == 0x68766345ULL ) {
+					hvce_el = packet.side_data[i].data + 8;
+					hvce_el_size = packet.side_data[i].size - 8;
+					break;
+				}
+			}
+			AVPacket *bl_out = av_packet_alloc();
+			AVPacket *el_out = av_packet_alloc();
+			int split_ok = 0;
+			if( bl_out && el_out &&
+			    _dv_split_packet( ff_p, &packet, bl_out, el_out ) == 0 )
+				split_ok = 1;
+			if( split_ok ) {
+				if( bl_out->data ) {
+					// drop the hvcE block addition copy from the BL packet
+					av_packet_side_data_remove( bl_out->side_data,
+					                            &bl_out->side_data_elems,
+					                            AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL );
+					_add_packet( &ff_p->vq, bl_out );
+				}
+				if( !el_out->data && hvce_el_size > 0 ) {
+					// EL arrives as a block addition, not in-band NALs
+					if( av_new_packet( el_out, hvce_el_size ) == 0 ) {
+						memcpy( el_out->data, hvce_el, hvce_el_size );
+						el_out->pts = packet.pts;
+						el_out->dts = packet.dts;
+					}
+				}
+				if( el_out->data ) {
+					// EL inherits the combined packet's pts (BL track timebase);
+				// convert to the BL time domain so pts pairing works
+					_dv_el_convert_time( ff_p, el_out, ff_p->time_base_num, ff_p->time_base_den );
+					_add_packet( &ff_p->elq, el_out );
+				}
+			} else {
+				serprintf("FFM: dovi_split failed on AU, decoding BL only\n");
+				_add_packet( &ff_p->vq, &packet );
+			}
+			if( bl_out ) av_packet_free( &bl_out );
+			if( el_out ) av_packet_free( &el_out );
+			if( timestamp )
+				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
 		} else {
 			// add video packet
 			_add_packet( &ff_p->vq, &packet );
@@ -1464,6 +2093,8 @@ serprintf("FFMPEG: seek error\r\n");
 	_flush_packets( &ff_p->vq, "VID" );
 	_flush_packets( &ff_p->aq, "AUD" );
 	_flush_packets( &ff_p->sq, "SUB" );
+	_dv_el_flush( ff_p );
+	_dv_elq_flush( ff_p );
 
 	ff_p->sleeping = 0;
 	
@@ -1940,6 +2571,7 @@ static STREAM_PARSER stream_parser_FFMPEG = {
 	_get_audio_cdata,
 	_get_video_cdata,
 	_get_subtitle_cdata,
+	_get_dovi_el_packet,
 	_peek_n_audio_chunk,
 	_seek_time,	//_seek_time
 	_seek_pos,	//_seek_pos

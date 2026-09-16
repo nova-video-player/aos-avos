@@ -78,6 +78,9 @@ typedef struct STREAM_SINK_VIDEO {
 
 #define STREAM_SINK_DEFAULT_SCREEN ((STREAM_SCREEN_PARAMS){ { 0, 0, 320, 240 }, 1, 1, 0, 1.0f, DISPFMT_ORIGINAL_PICTURE })
 
+/* Dolby Vision tone-map sink (libplacebo GPU path), Android only */
+STREAM_SINK_VIDEO *stream_sink_video_dovi_new(void *surface_handle);
+
 static inline int stream_sink_video_set_output( struct STREAM_SINK_VIDEO *sink, int output, STREAM_SCREEN_PARAMS *primary, STREAM_SCREEN_PARAMS *secondary ) 
 {
 	if( !sink ) 

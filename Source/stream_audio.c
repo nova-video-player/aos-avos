@@ -537,9 +537,10 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 	memcpy( sink, s->audio, sizeof( AUDIO_PROPERTIES ) );
 	stream_audio_init_sink_defaults( sink );
 
-	// If a downmix was requested, reflect it in sink properties so AudioTrack
-	// is created with the correct channel count.
-	if( s->audio->request_channels > 0 &&
+	// Apply downmix requests only to decoded output. Compressed carrier
+	// geometry must stay identical to the SPDIF muxer's configuration.
+	if( !stream_audio_requested_passthrough_for_format( sink->format ) &&
+	    s->audio->request_channels > 0 &&
 	    s->audio->request_channels < sink->channels ) {
 		sink->channels = s->audio->request_channels;
 		if( sink->bitsPerSample ) {
@@ -822,9 +823,14 @@ static int64_t _stream_ac3_recode_written_duration_us(int size_written, int fram
 typedef enum {
 	COMPRESSED_WRITE_COMPLETE = 0,
 	COMPRESSED_WRITE_PAUSED,
+	COMPRESSED_WRITE_STALLED,
 	COMPRESSED_WRITE_ABORTED,
 	COMPRESSED_WRITE_ERROR,
 } compressed_write_result_t;
+
+// A nonblocking AudioTrack call can keep returning zero on a stalled route.
+// Bound lack of progress across both the capacity gate and the actual writes.
+#define COMPRESSED_WRITE_STALL_MS 3000
 
 // AudioTrack may accept only a prefix even for a blocking compressed write.
 // Keep the access unit/burst as one clock transaction while continuing the byte
@@ -838,10 +844,15 @@ static compressed_write_result_t _stream_write_compressed_unit(
 	int zero_write_start_ms = -1;
 	int zero_write_last_log_ms = -1;
 	int zero_write_reported = 0;
+	int last_progress_ms = atime();
 	*accepted_bytes = 0;
 
 	while( pending.size > 0 ) {
-		// Legacy Mode 2, or the global debug pause, may interrupt a transaction
+		if( *accepted_bytes == 0 &&
+			__atomic_load_n( &s->audio_pause_requested, __ATOMIC_ACQUIRE ) ) {
+			return COMPRESSED_WRITE_PAUSED;
+		}
+		// Legacy blocking writes, or the global debug pause, may interrupt a transaction
 		// between physical writes. Return an untouched unit to the caller so
 		// it can release the transaction mutex and retry the unit after resume;
 		// retain a positive prefix here until resume.
@@ -855,9 +866,20 @@ static compressed_write_result_t _stream_write_compressed_unit(
 				}
 				stream_yield_RT();
 			}
+			last_progress_ms = atime();
+		}
+		if( atime() - last_progress_ms >= COMPRESSED_WRITE_STALL_MS ) {
+			return COMPRESSED_WRITE_STALLED;
 		}
 
 		while( !s->audio_sink->can_write( s, pending.size ) ) {
+			if( *accepted_bytes == 0 &&
+				__atomic_load_n( &s->audio_pause_requested, __ATOMIC_ACQUIRE ) ) {
+				return COMPRESSED_WRITE_PAUSED;
+			}
+			if( atime() - last_progress_ms >= COMPRESSED_WRITE_STALL_MS ) {
+				return COMPRESSED_WRITE_STALLED;
+			}
 			can_write_retries++;
 			if( can_write_retries % 100 == 0 ) {
 				DBG serprintf("stream_audio: compressed can_write still false after %d attempts (remaining=%d)\n",
@@ -885,7 +907,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 		if( written == 0 || written == AUDIO_WRITE_RETRY ) {
 			// API 23+ compressed AudioTrack writes are non-blocking. Zero is
 			// ordinary queue backpressure; retain the same unit and retry after
-			// yielding so pause can wait only for its remaining media duration.
+			// yielding; the no-progress deadline also bounds a stalled route.
 			int now_ms = atime();
 			if( zero_write_start_ms < 0 ) {
 				zero_write_start_ms = now_ms;
@@ -927,6 +949,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 		zero_write_reported = 0;
 
 		*accepted_bytes += written;
+		last_progress_ms = atime();
 		if( written < pending.size ) {
 			DBG serprintf("stream_audio: compressed short write %d/%d fmt=%04X, continuing unit at %d/%d\n",
 				written, pending.size, frame->format, *accepted_bytes, frame->size);
@@ -1074,7 +1097,8 @@ void stream_audio_prepare_resume( STREAM *s )
 
 static int _stream_audio_wait_for_resume( STREAM *s )
 {
-	while( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+	while( __atomic_load_n( &s->audio_pause_requested, __ATOMIC_ACQUIRE ) ||
+		((s->paused || stream_audio_paused) && !s->play_n_audio_frames) ) {
 		// A retained frame does not return to _audio_decode's paused branch.
 		// Arm its first-write state here as well.
 		stream_audio_prepare_resume( s );
@@ -1130,6 +1154,15 @@ decode_next_chunk:
 					if( s->audio_end == 0 ) {
 						int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
 							s->audio_sink->get_passthrough( s ) : 0;
+						if( passthrough && !libavos_get_ac3_recoding_enabled() &&
+							stream_audio_format_passthrough_available( s->audio->format ) ) {
+							// Drain parser lookahead through the same output transaction
+							// and clock accounting as ordinary compressed units.
+							s->audio_decoder_draining = 1;
+							s->audio_buffer = NULL;
+							s->audio_buffer_size = 0;
+							break;
+						}
 						int decoder_active = s->audio_dec &&
 							(!passthrough || libavos_get_ac3_recoding_enabled());
 						if( decoder_active && s->audio_dec->drain ) {
@@ -1494,6 +1527,16 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 			AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );
 			spdif_props->ctx = s;
 			spdif_encapsulate( spdif_props, s->audio_buffer, s->audio_buffer_size, &audio_frame, &decoded );
+			if( s->audio_decoder_draining && !audio_frame.size && !audio_frame.error ) {
+				s->audio_decoder_draining = 0;
+				s->audio_end = 1;
+				// Partial muxer assembly is not a valid IEC burst. Only parser
+				// output that produced a complete burst has reached the sink.
+				if( s->audio_sink ) {
+					s->audio_sink->end( s );
+				}
+				return;
+			}
 #endif
 		}
 
@@ -2281,8 +2324,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// API 23+ passthrough writes are non-blocking, so serialize the
 						// complete unit with pause/play without waiting behind a blocking
 						// Java call. This keeps raw and IEC framing intact at pause.
-						int serialize_transaction = passthrough == 1 ||
-							(passthrough >= 2 && device_get_android_api() >= 23);
+						int serialize_transaction = passthrough >= 1 &&
+							device_get_android_api() >= 23;
 						if( serialize_transaction ) {
 							pthread_mutex_lock( &s->audio_sink_mutex );
 							compressed_transaction_locked = 1;
@@ -2347,6 +2390,20 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					if( compressed_result == COMPRESSED_WRITE_PAUSED ) {
 						// No bytes were accepted. Keep this unit and all remaining
 						// output, but release the mutex needed by stream_un_pause().
+						if( compressed_transaction_locked ) {
+							pthread_mutex_unlock( &s->audio_sink_mutex );
+							compressed_transaction_locked = 0;
+						}
+						stream_audio_prepare_resume( s );
+						stream_yield_RT();
+						continue;
+					}
+					if( compressed_result == COMPRESSED_WRITE_STALLED ) {
+						// Discard any accepted prefix and reset the sink epoch, then
+						// retain the entire unit for retry. Never commit its duration
+						// or send just its suffix to the emptied track.
+						_stream_abort_incomplete_compressed_unit( s, size_written,
+							audio_frame.size, passthrough, ac3_recoding );
 						if( compressed_transaction_locked ) {
 							pthread_mutex_unlock( &s->audio_sink_mutex );
 							compressed_transaction_locked = 0;

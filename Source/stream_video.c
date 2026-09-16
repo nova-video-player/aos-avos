@@ -2857,11 +2857,12 @@ DBGS serprintf("stream_pause\r\n");
 		int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
 			s->audio_sink->get_passthrough( s ) : 0;
 		int serialize_transaction = s->audio_ctx && s->audio_sink_open &&
-			(passthrough == 1 || (passthrough >= 2 && device_get_android_api() >= 23));
+			passthrough >= 1 && device_get_android_api() >= 23;
 		if( serialize_transaction ) {
+			__atomic_store_n( &s->audio_pause_requested, 1, __ATOMIC_RELEASE );
 			// Keep IEC and raw access units intact across pause. API 23+ uses
-			// non-blocking writes, so a Mode 2 barrier waits only for the current
-			// unit's remaining capacity, never a long blocking Java call.
+			// non-blocking writes. The writer yields untouched units immediately
+			// and bounds no-progress waits for an already accepted prefix.
 			int barrier_start_ms = atime();
 			pthread_mutex_lock( &s->audio_sink_mutex );
 			int barrier_wait_ms = atime() - barrier_start_ms;
@@ -2882,6 +2883,7 @@ DBGS serprintf("stream_pause\r\n");
 			audio_interface_pause( s->audio_ctx );
 		}
 		if( serialize_transaction ) {
+			__atomic_store_n( &s->audio_pause_requested, 0, __ATOMIC_RELEASE );
 			pthread_mutex_unlock( &s->audio_sink_mutex );
 		}
 	}
@@ -2946,10 +2948,9 @@ DBGS serprintf("stream_un_pause\r\n");
 		}
 
 		// Keep paused=1 until play() completes so a compressed remainder cannot
-		// reach a paused Java track. API 23+ Mode 2 shares the transaction mutex;
-		// legacy Mode 2 retains an interrupted remainder in the audio thread.
-		int serialize_transaction = passthrough == 1 ||
-			(passthrough >= 2 && device_get_android_api() >= 23);
+		// reach a paused Java track. API 23+ shares the transaction mutex;
+		// legacy blocking writes must remain interruptible by AudioTrack.pause().
+		int serialize_transaction = passthrough >= 1 && device_get_android_api() >= 23;
 		if( serialize_transaction ) {
 			pthread_mutex_lock( &s->audio_sink_mutex );
 		}

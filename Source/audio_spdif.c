@@ -41,6 +41,7 @@
 extern int libavos_get_ac3_recoding_enabled(void);
 
 int spdif_format_passthrough_supported(int format);
+int get_hdmi_supports_iec_8ch192khz(void);
 
 // check if bit at position in value is 1
 #define CHECK_BIT(value,position) (((value)>>(position)) & 1)
@@ -120,6 +121,14 @@ static int spdif_mode1_dts_core_fallback(int format)
 	(void)format;
 	return 0;
 #endif
+}
+
+// Resolve DTS-HD transport once for both the muxer and carrier geometry.
+static int spdif_mode1_dts_hd_carrier(int format)
+{
+	return spdif_is_dts_hd_format(format) &&
+	       !spdif_mode1_dts_core_fallback(format) &&
+	       get_hdmi_supports_iec_8ch192khz();
 }
 
 static int _spdif_frame_samples(const AUDIO_PROPERTIES *a, int passthrough_mode)
@@ -265,8 +274,15 @@ static int spdif_put( UCHAR *data, int size, int *decoded )
 
 	*decoded = size;
 
-	av_write_frame( fctxt, spdif_pkt );
+	int ret = av_write_frame( fctxt, spdif_pkt );
+	// Expose only complete packets emitted by the muxer, including the last
+	// burst at EOF; never depend on the AVIO buffer filling up first.
+	avio_flush(fctxt->pb);
 	av_packet_unref( spdif_pkt );
+	if (ret < 0 || fctxt->pb->error < 0) {
+		b.pos = 0;
+		return ret < 0 ? ret : fctxt->pb->error;
+	}
 	return 0;
 }
 
@@ -292,7 +308,16 @@ static int spdif_get( AUDIO_FRAME *frame )
 
 int spdif_encapsulate_frames( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_FRAME *frame, int *decoded, int frame_count )
 {
-	if (!size)
+	*decoded = 0;
+	frame->size = 0;
+	frame->fakeSize = 0;
+	if (!fctxt || !avctx || !spdif_pkt) {
+		frame->error = STREAM_ERROR_FATAL;
+		return -1;
+	}
+	// A zero-sized input drains buffered parser output at EOF. An encoder
+	// without a parser has nothing to drain here.
+	if (!size && !aparser)
 		return 0;
 	if (frame_count < 1 || size % frame_count != 0) {
 		frame_count = 1;
@@ -333,7 +358,10 @@ int spdif_encapsulate_frames( AUDIO_PROPERTIES *a, UCHAR *data, int size, AUDIO_
 		b.pos = 0;
 		for (int i = 0; i < frame_count; i++) {
 			int packet_decoded = 0;
-			spdif_put(data + i * packet_size, packet_size, &packet_decoded);
+			if (spdif_put(data + i * packet_size, packet_size, &packet_decoded) < 0) {
+				frame->error = STREAM_ERROR_FATAL;
+				return -1;
+			}
 		}
 		spdif_get(frame);
 		frame->fakeSize = frame_count * AC3_RECODE_FRAME_SAMPLES * a->bytesPerFrame;
@@ -355,6 +383,11 @@ DBGCA2 serprintf("spdif_encapsulate %5d", size );
 						AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0 );
 DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 		*decoded = parsed;
+		if (parsed < 0) {
+			*decoded = 0;
+			frame->error = STREAM_ERROR_FATAL;
+			return -1;
+		}
 
 		if (passthrough_on == 2) {
 			// Mode 2: Send raw compressed data to Android, let it handle encapsulation
@@ -397,7 +430,10 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 		} else {
 			// Mode 1: Manual IEC61937 wrapping via FFmpeg SPDIF muxer
 			int dummy;
-			spdif_put( out, out_size, &dummy );
+			if (spdif_put( out, out_size, &dummy ) < 0) {
+				frame->error = STREAM_ERROR_FATAL;
+				return -1;
+			}
 			spdif_get( frame );
 			{
 				int samples = _spdif_frame_samples(a, passthrough_on);
@@ -412,7 +448,10 @@ DBGCA2 serprintf("  parsed %5d/%5d\n", parsed, out_size );
 	}
 DBGCA2 serprintf("\n", size );
 
-	spdif_put( data, size, decoded );
+	if (spdif_put( data, size, decoded ) < 0) {
+		frame->error = STREAM_ERROR_FATAL;
+		return -1;
+	}
 	spdif_get( frame );
 	return 0;
 }
@@ -429,6 +468,12 @@ static int spdif_free( void )
 		aparser = NULL;
 	}
 	if (fctxt) {
+		// The custom AVIO buffer is separate from b.buf and owned by us.
+		// Free it on every reset, including repeated seeks and failed opens.
+		if (fctxt->pb) {
+			av_freep(&fctxt->pb->buffer);
+			avio_context_free(&fctxt->pb);
+		}
 		avformat_free_context(fctxt);
 		fctxt = NULL;
 	}
@@ -450,7 +495,7 @@ static int buf_write( void *opaque, const uint8_t *buf, int size )
 {
 	buf_t *b = ( buf_t* ) opaque;
 	if ( b->pos + size > sizeof( b->buf ) ) {
-		return 0;
+		return AVERROR(ENOSPC);
 	}
 	memcpy( b->buf + b->pos, buf, size );
 	b->pos += size;
@@ -547,6 +592,7 @@ long get_hdmi_supported_audio_codecs()
 // Supporting one of DTS-HD or TrueHD is a likely indicator for supporting IEC61937 8ch 192khz
 int get_hdmi_supports_iec_8ch192khz() {
     return CHECK_BIT(get_hdmi_supported_audio_codecs(), ENCODING_DTS_HD) ||
+				CHECK_BIT(get_hdmi_supported_audio_codecs(), ENCODING_DTS_HD_MA) ||
                 CHECK_BIT(get_hdmi_supported_audio_codecs(), ENCODING_DOLBY_TRUEHD);
 }
 
@@ -570,17 +616,31 @@ DBGS serprintf( "spdif_init\n");
 	}
 
 	fctxt = avformat_alloc_context(  );
+	if (!fctxt)
+		return 0;
 	fctxt->oformat = fmt;
 
-	fctxt->pb = avio_alloc_context( b.buf, sizeof( b.buf ), AVIO_FLAG_WRITE, ( void* ) &b, NULL, buf_write, NULL );
+	unsigned char *io_buffer = av_malloc(sizeof(b.buf));
+	if (!io_buffer)
+		goto fail;
+	fctxt->pb = avio_alloc_context( io_buffer, sizeof( b.buf ), AVIO_FLAG_WRITE, ( void* ) &b, NULL, buf_write, NULL );
+	if (!fctxt->pb) {
+		av_free(io_buffer);
+		goto fail;
+	}
 	fctxt->pb->seekable = 0;
 	fctxt->flags |= AVFMT_NOFILE | AVFMT_FLAG_IGNIDX;
 
 	AVStream *stream = avformat_new_stream( fctxt, NULL );
+	if (!stream)
+		goto fail;
 	stream->id = 1;
 	stream->codecpar->codec_id = wave2libav_codecid( codecid );
 	stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-	stream->codecpar->sample_rate = a->samplesPerSec;
+	// Codec metadata describes content, never the IEC carrier. AC3 recoding
+	// has already selected its encoder rate in the sink properties.
+	stream->codecpar->sample_rate = !libavos_get_ac3_recoding_enabled() && a->sourceSamples > 0 ?
+		a->sourceSamples : a->samplesPerSec;
 
 	const char *dtshd_rate = NULL;
 	if (a->format == WAVE_FORMAT_DTS_HD_MA || a->format == WAVE_FORMAT_DTS_HD) {
@@ -589,7 +649,7 @@ DBGS serprintf( "spdif_init\n");
 			// embedded core instead of producing high-bitrate DTS-HD bursts.
 			dtshd_rate = "0";
 			serprintf("spdif_init: DTS-HD mode 1 core fallback, dtshd_rate=0\n");
-		} else if (get_hdmi_supports_iec_8ch192khz()) {
+		} else if (spdif_mode1_dts_hd_carrier(a->format)) {
 			dtshd_rate = "768000";
 		} else {
 			dtshd_rate = "0";
@@ -603,18 +663,18 @@ DBGS serprintf( "spdif_init\n");
 	int header_ret = avformat_write_header( fctxt, opts ? &opts : NULL );
 	av_dict_free( &opts );
 	if ( header_ret < 0 )
-		return 0;
+		goto fail;
 
 	// try to get a parser for this codec
 	// Skip parser for AC3 recoding - the encoder already produces complete syncframes
 	avctx = avcodec_alloc_context3(NULL);
-	if (avctx) {
-		avcodec_parameters_to_context(avctx, stream->codecpar);
-	}
+	if (!avctx || avcodec_parameters_to_context(avctx, stream->codecpar) < 0)
+		goto fail;
 	if ( !libavos_get_ac3_recoding_enabled() ) {
 		aparser = av_parser_init(stream->codecpar->codec_id);
 		if( !aparser ) {
 serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
+			goto fail;
 		}
 	} else {
 		aparser = NULL;
@@ -623,11 +683,13 @@ serprintf("cannot open parser for %04X\r\n", stream->codecpar->codec_id );
 
 	spdif_pkt = av_packet_alloc();
 	if( !spdif_pkt ) {
-		spdif_free();
-		return 0;
+		goto fail;
 	}
 
 	return 1;
+fail:
+	spdif_free();
+	return 0;
 }
 
 static int spdif_new( AUDIO_PROPERTIES *audio )
@@ -672,8 +734,7 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 	// Mode 1 (IEC61937 wrapping): Apply IEC-specific rate/channel/bit-depth adjustments
 	// Mode 2 (raw data to Android): Must match AudioTrack configuration for timing sync
 	if (passthrough_on == 1) {
-		int orig_rate = audio->samplesPerSec;
-		int dts_core_iec_fallback = spdif_mode1_dts_core_fallback(codecid);
+		int orig_rate = audio->sourceSamples > 0 ? audio->sourceSamples : 48000;
 		// IEC61937 container is always 16-bit, 2-channel stereo (or 8ch for high-bitrate)
 		audio->bitsPerSample = 16;
 		audio->channels = 2;
@@ -682,12 +743,12 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 		switch (codecid) {
 		case WAVE_FORMAT_EAC3:
 		case WAVE_FORMAT_E_AC3_JOC:
-			// EAC3 IEC61937 requires 192kHz container
-			audio->samplesPerSec = 192000;
+			// One 6144-carrier-sample burst carries 1536 content samples.
+			audio->samplesPerSec = orig_rate * 4;
 			break;
 		case WAVE_FORMAT_DTS_HD:
 		case WAVE_FORMAT_DTS_HD_MA:
-			if (dts_core_iec_fallback) {
+			if (!spdif_mode1_dts_hd_carrier(codecid)) {
 				serprintf("spdif_open: DTS-HD mode 1 core fallback, using DTS IEC container\n");
 				if (orig_rate == 32000 || orig_rate == 44100) {
 					audio->samplesPerSec = orig_rate;
@@ -701,9 +762,10 @@ DBGS			serprintf("cannot open parser for %04X\r\n", codecid );
 			audio->samplesPerSec = 192000;
 			break;
 		case WAVE_FORMAT_TRUEHD:
-			// High-bitrate formats need higher IEC rate
+			// MAT uses the same bytes per frame in both source-rate families.
 			audio->channels      = 8;
-			audio->samplesPerSec = 192000;
+			audio->samplesPerSec = orig_rate > 0 && orig_rate % 44100 == 0 ?
+				176400 : 192000;
 			break;
 		case WAVE_FORMAT_DTS:
 		case WAVE_FORMAT_AC3:
@@ -755,6 +817,12 @@ static int spdif_decode( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_F
 
 static int spdif_flush( AUDIO_PROPERTIES *audio )
 {
+	// Seek/track flushes must discard parser lookahead and partial IEC/MAT
+	// assembly together. Ordinary pause never calls this decoder flush.
+	if (!spdif_init(audio)) {
+		serprintf("spdif_flush: failed to reset compressed parser/muxer\n");
+		return 1;
+	}
 	return 0;
 }
 

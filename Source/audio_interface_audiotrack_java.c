@@ -33,7 +33,6 @@
 #include "util.h"
 #include "ac3_recode.h"
 
-extern int get_hdmi_supports_iec_8ch192khz(void);
 extern int get_hdmi_supports_iec(void);
 extern long get_hdmi_supported_audio_codecs(void);
 extern int libavos_get_ac3_recoding_enabled(void);
@@ -973,43 +972,15 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		DBG LOG("Mode 2: codec-specific encoding=%d for format=%04X, logical_channels=%d content_channels=%d output_channels=%d rate=%d",
 			track_format, at->format, channels, content_channels, output_channels, rate);
 	} else if(at->passthrough == 1 && device_get_android_api() >= 24 && get_hdmi_supports_iec()) {
-        track_format = 13; // AudioFormat.ENCODING_IEC61937
-        switch(at->format) {
-            case WAVE_FORMAT_AC3:
-            case WAVE_FORMAT_DTS:
-                track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-                output_channels = 2;
-                // Keep native 32/44.1kHz for AC3/DTS to avoid timing drift.
-                if (rate != 32000 && rate != 44100) {
-                    rate = 48000;
-                }
-                break;
-			case WAVE_FORMAT_EAC3:
-			case WAVE_FORMAT_E_AC3_JOC:
-                track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-                output_channels = 2;
-                rate = 192000;
-                break;
-            case WAVE_FORMAT_DTS_HD_MA:
-            case WAVE_FORMAT_DTS_HD:
-                // Note: the logic to select DTS-core vs DTS-HD needs to be identical with the one selecting dtshd_rate
-                if (get_hdmi_supports_iec_8ch192khz()) {
-                    track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-                    output_channels = 8;
-                    rate = 192000;
-                } else {
-                    track_chanmask = AUDIO_CHANNEL_OUT_STEREO;
-                    output_channels = 2;
-                    rate = 48000;
-                }
-                break;
-            case WAVE_FORMAT_TRUEHD:
-                track_chanmask = AUDIO_CHANNEL_OUT_7POINT1;
-                output_channels = 8;
-                rate = 192000;
-                break;
-        }
-    }
+		// The SPDIF path already selected the carrier for the actual burst
+		// format (including DTS-core fallback and 44.1 kHz-family carriers).
+		// Reinterpreting codec capability bits here can disagree with the muxer.
+		track_format = 13; // AudioFormat.ENCODING_IEC61937
+		if (bits != 16 || (channels != 2 && channels != 8) || rate <= 0) {
+			ERR LOG("invalid IEC carrier: rate=%d channels=%d bits=%d", rate, channels, bits);
+			return -1;
+		}
+	}
 
 	if( at->passthrough != 2 ) {
 		frame_size = (bits / 8) * output_channels;
@@ -1401,7 +1372,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				return audiotrack_set_output_params(at, rate, 2, 2, 16, WAVE_FORMAT_EAC3);
 			}
 			// If DTS HD failed, fallback to DTS for DTS core mode
-			if ((at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) &&
+			if (at->passthrough == 2 && (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) &&
 			    track_format != 7 && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
 				DBG LOG("audiotrack_set_output_params: DTS-HD multichannel AudioTrack failed, retrying with stereo channel mask");
 				return audiotrack_set_output_params(at, rate, retry_channels, 2, bits, at->format);
@@ -1411,10 +1382,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 				return audiotrack_set_output_params(at, rate, retry_channels,
 					retry_content_channels, bits, WAVE_FORMAT_DTS_HD);
 			}
-			if (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA) {
+			if (at->passthrough == 2 && (at->format == WAVE_FORMAT_DTS_HD || at->format == WAVE_FORMAT_DTS_HD_MA)) {
 				return audiotrack_set_output_params(at, 48000, 2, 2, 16, WAVE_FORMAT_DTS);
 			}
-			if (at->format == WAVE_FORMAT_TRUEHD && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
+			if (at->passthrough == 2 && at->format == WAVE_FORMAT_TRUEHD && track_chanmask != AUDIO_CHANNEL_OUT_STEREO) {
 				DBG LOG("audiotrack_set_output_params: TrueHD multichannel AudioTrack failed, retrying with stereo channel mask");
 				return audiotrack_set_output_params(at, rate, retry_channels, 2, bits, WAVE_FORMAT_TRUEHD);
 			}

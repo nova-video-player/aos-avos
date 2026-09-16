@@ -111,8 +111,11 @@ Native determines IEC support by inspecting codec flags set by Java:
   - TrueHD uses `ENCODING_DOLBY_TRUEHD` only when the route advertises TrueHD; multichannel masks follow the source channel count, with a stereo retry only if the platform rejects the multichannel `AudioTrack`
   - content sample rate is preserved (e.g., 48kHz)
 - **Mode 1**: IEC61937
-  - container rates like 192kHz for EAC3/TrueHD/DTS-HD
+  - EAC3 uses four times the content sample rate; TrueHD uses an eight-channel
+    192kHz or 176.4kHz carrier according to the content's sample-rate family
   - stereo or 8ch depending on format and IEC 8ch support
+  - DTS-core fallback uses the same decision for muxing and carrier geometry;
+    AudioTrack preserves that geometry rather than selecting it again from codec caps
   - compressed IEC bursts are written atomically; they must not be split into
     PCM-sized chunks
 
@@ -123,9 +126,17 @@ Native determines IEC support by inspecting codec flags set by Java:
 - A positive short `AudioTrack.write()` is continued from the remaining byte
   offset until the same compressed unit is complete. No following unit may be
   submitted, and logical duration is published exactly once after completion.
-  Pause/play is serialized with this transaction so IEC and raw access units
-  cannot be split across a track pause. Destructive aborts flush the incomplete
-  stream and restart its timing epoch.
+  On API 23+, pause/play is serialized with this nonblocking transaction.
+  An untouched unit yields immediately to a pending pause. A writer with no
+  progress for three seconds flushes the sink, resets its timing epoch, releases
+  the transaction mutex, and retains the whole unit for retry without crediting
+  the accepted prefix. On older APIs, blocking writes remain interruptible by
+  AudioTrack.pause(), and the audio thread retains the unwritten suffix.
+  Destructive aborts flush the incomplete stream and restart its timing epoch.
+- Seek resets the compressed parser and IEC muxer as well as the sink, discarding
+  parser lookahead and partial EAC3/TrueHD assembly. Ordinary pause preserves them.
+- EOF drains buffered parser output through normal compressed writes and duration
+  accounting before ending the sink. Incomplete IEC assembly is not submitted.
 - Passthrough `can_write()` may use exact capacity gating when playback-head
   accounting is usable, but falls back to the previous permissive behavior if
   the exact gate stalls on a given track instance.

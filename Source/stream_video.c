@@ -535,6 +535,10 @@ static int stream_open_audio_filter( STREAM *s )
 	// Force enable audio filter if AC3 recoding is enabled (passthrough mode 3)
 	if( ac3_recoding ) {
 		s->audio_filter_enabled = 1;
+		// A new decoder/filter chain must not inherit the previous track's EOF.
+		s->audio_end = 0;
+		s->audio_decoder_draining = 0;
+		s->audio_ac3_draining = 0;
 	}
 #endif
 
@@ -951,6 +955,7 @@ DBGS serprintf("stream_close_audio_dec\r\n");
 static void stream_close_audio_filter( STREAM *s )
 {
 DBGS serprintf("stream_close_audio_filter\r\n");
+	s->audio_ac3_draining = 0;
 	// Close and delete JNI filter
 	if( s->audio_filter_jni ) {
 		if( s->audio_filter_jni->close ) {

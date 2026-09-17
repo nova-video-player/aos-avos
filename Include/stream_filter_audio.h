@@ -28,6 +28,10 @@ typedef int (*FILTER_AUDIO_FILTER) ( struct STREAM_FILTER_AUDIO *f, AUDIO_FRAME 
 typedef int (*FILTER_AUDIO_FLUSH)  ( struct STREAM_FILTER_AUDIO *f );
 typedef int (*FILTER_AUDIO_PARAM)  ( struct STREAM_FILTER_AUDIO *f, void *params , void *night_on);
 typedef int (*FILTER_AUDIO_DELAY)  ( struct STREAM_FILTER_AUDIO *f );
+// Optional bounded output drain: end=0 emits queued complete frames, end=1
+// finishes the filter. Returns <0 on error, otherwise frame->size=0 when empty.
+// Consume each returned frame before calling filter/drain again.
+typedef int (*FILTER_AUDIO_DRAIN)  ( struct STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame, int end );
 
 typedef struct STREAM_FILTER_AUDIO {
 	const char	     *name;
@@ -38,6 +42,7 @@ typedef struct STREAM_FILTER_AUDIO {
 	FILTER_AUDIO_FLUSH   flush;
 	FILTER_AUDIO_PARAM   set_param;
 	FILTER_AUDIO_DELAY   delay;
+	FILTER_AUDIO_DRAIN   drain;
 
 	void		*priv;
 } STREAM_FILTER_AUDIO;

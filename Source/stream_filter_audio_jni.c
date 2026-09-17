@@ -44,10 +44,15 @@ int stream_filter_audio_jni_close( STREAM_FILTER_AUDIO *f )
 
 int stream_filter_audio_jni_filter( STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame )
 {
-	if(!libavos_transform_audio) return 0;
-	//Yes that's ugly but I'm too lazy
-static float buf[96000];
+	if (!libavos_transform_audio || !frame || frame->format != WAVE_FORMAT_PCM ||
+	    frame->bits != 16 || !frame->data || frame->size <= 0)
+		return 0;
 	int samples = frame->size / 2;
+	// Decoder blocks can exceed the former fixed buffer, especially before
+	// multichannel AC3 encoding. Preserve one callback per complete PCM block.
+	float *buf = amalloc((size_t)samples * sizeof(*buf));
+	if (!buf)
+		return -1;
 	short *data = (short*) frame->data;
 	for(int i=0; i < samples; i++) {
 		buf[i] = data[i] / 32768.0;
@@ -59,6 +64,7 @@ static float buf[96000];
 		if (a > SHRT_MAX) a = SHRT_MAX;
 		data[i] = a;
 	}
+	afree(buf);
 
 	return 0;
 }

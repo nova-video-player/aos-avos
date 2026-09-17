@@ -643,6 +643,7 @@ void stream_audio_flush( STREAM *s )
 	s->audio_buffer_size = 0;
 	s->audio_end = 0;
 	s->audio_decoder_draining = 0;
+	s->audio_ac3_draining = 0;
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
 	// Discard any stale frontier seed; the paths that empty the sink buffer
@@ -1148,6 +1149,25 @@ static int _stream_audio_wait_for_resume( STREAM *s )
 //	_audio_decode
 //
 // ************************************************************
+// Emit queued recoder output before accepting more decoder input. At EOF,
+// finish all recoder stages before signaling the sink.
+static int _stream_audio_drain_ac3(STREAM *s, AUDIO_FRAME *frame)
+{
+	if (!s->audio_filter_ac3 || !s->audio_filter_ac3->drain ||
+	    s->audio_filter_ac3->drain(s->audio_filter_ac3, frame, s->audio_ac3_draining) < 0) {
+		stream_audio_sink_failed(s, "AC3 encoder drain");
+		return -1;
+	}
+	if (s->audio_ac3_draining && !frame->size) {
+		s->audio_decoder_draining = 0;
+		s->audio_ac3_draining = 0;
+		s->audio_end = 1;
+		if (s->audio_sink)
+			s->audio_sink->end(s);
+	}
+	return frame->size > 0;
+}
+
 static void _audio_decode( STREAM *s )
 {
 	static int out_of_audio;
@@ -1169,12 +1189,23 @@ static void _audio_decode( STREAM *s )
 		// Capture the sanitized PTS of the most recently fetched chunk so it remains
 		// accessible after the inner cdata loop exits (cdata is scoped to that loop).
 		int chunk_pts = STREAM_NO_PTS_VALUE;
+		AUDIO_FRAME audio_frame = { 0 };
+		int ac3_output_ready = 0;
 decode_next_chunk:
+		memset(&audio_frame, 0, sizeof(audio_frame));
+		ac3_output_ready = 0;
+		if (libavos_get_ac3_recoding_enabled()) {
+			if (s->audio_end)
+				return;
+			ac3_output_ready = _stream_audio_drain_ac3(s, &audio_frame);
+			if (ac3_output_ready < 0 || s->audio_end)
+				return;
+		}
 		// no more audio in this chunk, then look for next
 		{
 		int starve_start_ms = atime();
 		int starve_last_log_ms = starve_start_ms;
-		while( s->audio_buffer_size <= 0 && !_abort( s ) ){
+		while( !ac3_output_ready && s->audio_buffer_size <= 0 && !_abort( s ) ){
 
 			STREAM_CDATA cdata = { 0 };
 
@@ -1208,6 +1239,11 @@ serprintf("audio drain\r\n");
 							}
 							s->audio_buffer = NULL;
 							s->audio_buffer_size = 0;
+							break;
+						}
+						if (libavos_get_ac3_recoding_enabled()) {
+							// A decoder without a drain callback still leaves recoder audio.
+							s->audio_ac3_draining = 1;
 							break;
 						}
 serprintf("audio end\r\n");
@@ -1512,14 +1548,17 @@ DBGS serprintf("~");
 			}
 		}
 
-		AUDIO_FRAME audio_frame = { 0 };
 		int decoded = 0;
 
 		audio_frame.time = s->audio_time;
 
 		// For AC3 recoding, always decode ALL formats (including AC3) to PCM to enable filters
 		// This provides consistent audio boost/night mode support for all source formats
-		if( s->audio_dec && (!passthrough_active || ac3_recoding) ) {
+		if (!ac3_output_ready && s->audio_ac3_draining) {
+			ac3_output_ready = _stream_audio_drain_ac3(s, &audio_frame);
+			if (ac3_output_ready < 0 || s->audio_end)
+				return;
+		} else if( !ac3_output_ready && s->audio_dec && (!passthrough_active || ac3_recoding) ) {
 			// Decode audio to PCM
 			audio_frame.samplesPerSec = s->audio->samplesPerSec;	
 
@@ -1527,18 +1566,25 @@ DBGS serprintf("~");
 			s->audio->ctx = s;
 			int decode_ret = _decode( s->audio, s->audio_buffer, s->audio_buffer_size, &audio_frame, &decoded );
 			if( decode_ret == STREAM_DEC_AUDIO_DRAINED ) {
-				s->audio_decoder_draining = 0;
-				s->audio_end = 1;
+				if (ac3_recoding) {
+					s->audio_ac3_draining = 1;
+					ac3_output_ready = _stream_audio_drain_ac3(s, &audio_frame);
+					if (ac3_output_ready < 0 || s->audio_end)
+						return;
+				} else {
+					s->audio_decoder_draining = 0;
+					s->audio_end = 1;
 serprintf("audio drain complete\r\n");
-				if( s->audio_sink ) {
-					_pcm_accum_flush_to_sink( s );
-					s->audio_sink->end( s );
+					if( s->audio_sink ) {
+						_pcm_accum_flush_to_sink( s );
+						s->audio_sink->end( s );
+					}
+					return;
 				}
-				return;
 			}
 		
 			// did the sample rate change?
-			if( !audio_frame.error && audio_frame.size && audio_frame.samplesPerSec && audio_frame.samplesPerSec != s->audio->samplesPerSec ) {
+			if( !ac3_output_ready && !audio_frame.error && audio_frame.size && audio_frame.samplesPerSec && audio_frame.samplesPerSec != s->audio->samplesPerSec ) {
 serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				s->audio->sourceSamples = s->audio->samplesPerSec;
 				s->audio->samplesPerSec = audio_frame.samplesPerSec;
@@ -1558,7 +1604,7 @@ serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				}
 			}
 		
-		} else {
+		} else if (!ac3_output_ready) {
 #ifdef CONFIG_SPDIF
 			AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );
 			spdif_props->ctx = s;
@@ -1611,7 +1657,7 @@ serprintf(" ae! ");
 			// to account for actual output size (important for atempo filter)
 		}
 		
-		if( s->dump_pcm_fd > 0 ) {
+		if( !ac3_output_ready && s->dump_pcm_fd > 0 ) {
 			file_write( s->dump_pcm_fd, audio_frame.data, audio_frame.size );
 		}
 
@@ -1743,7 +1789,7 @@ serprintf(" ae! ");
 
 				// For AC3 recoding, always run filters on ALL decoded formats
 				// This provides consistent audio boost/night mode for all sources
-				int run_filter = (!passthrough_active || ac3_recoding);
+				int run_filter = !ac3_output_ready && (!passthrough_active || ac3_recoding);
 				frame_channels = audio_frame.channels ? audio_frame.channels : s->audio->channels;
 
 				// Apply atempo speed control filter FIRST (changes audio duration)
@@ -1760,7 +1806,7 @@ serprintf(" ae! ");
 				if (!using_atempo_pref) {
 					use_atempo = 0;  // User chose AudioTrack-based speed
 				}
-				if (passthrough > 0) {
+				if (passthrough > 0 || ac3_recoding) {
 					use_atempo = 0;  // Passthrough mode active
 				}
 				if (atempo_gate_log_count < 10) {
@@ -1802,7 +1848,7 @@ serprintf(" ae! ");
 				}
 
 				if( run_filter ) {
-					// Apply filters in order: compress -> AC3 -> JNI
+					// Apply PCM transforms before the AC3 encoder.
 															// 1. Compression/boost filter
 															if( s->audio_filter_compress && audio_frame.size > 0 ) {
 																// For multichannel audio, skip compression if both boost and night mode are disabled.
@@ -1841,23 +1887,36 @@ serprintf(" ae! ");
 																	}
 																}
 															}					}
+					// Mode 3 transforms PCM before it becomes compressed AC3.
+					if (ac3_recoding && s->audio_filter_jni &&
+					    s->audio_filter_jni->filter(s->audio_filter_jni, &audio_frame) < 0) {
+						stream_audio_sink_failed(s, "PCM transform before AC3 encoding");
+						return;
+					}
 					// 2. AC3 encoding filter (only in AC3 recoding mode)
 					// Use audio_frame.channels if set, otherwise fall back to s->audio->channels
 					if( s->audio_filter_ac3 && audio_frame.size > 0 ) {
 						DBG serprintf("stream_audio: applying AC3 filter (pre format=%04X size=%d channels=%d)\n",
 							audio_frame.format, audio_frame.size, frame_channels);
-						s->audio_filter_ac3->filter( s->audio_filter_ac3, &audio_frame );
+						if (s->audio_filter_ac3->filter(s->audio_filter_ac3, &audio_frame) < 0) {
+							stream_audio_sink_failed(s, "AC3 encoding");
+							return;
+						}
 						DBG serprintf("stream_audio: AC3 filter applied (post format=%04X size=%d fakeSize=%d)\n",
 							audio_frame.format, audio_frame.size, audio_frame.fakeSize);
 					}
 					// 3. Legacy AGC filter (fallback if compress not available)
-					if( s->audio_filter && audio_frame.size > 0 ) {
+					if( s->audio_filter && audio_frame.size > 0 && audio_frame.format == WAVE_FORMAT_PCM ) {
 						DBG serprintf("stream_audio: applying AGC filter\n");
 						s->audio_filter->filter( s->audio_filter, &audio_frame );
 					}
 				}
-				// 4. JNI filter always runs
-				s->audio_filter_jni->filter( s->audio_filter_jni, &audio_frame );
+				if (!ac3_recoding && s->audio_filter_jni)
+					s->audio_filter_jni->filter(s->audio_filter_jni, &audio_frame);
+				if (ac3_recoding && audio_frame.size > 0 && audio_frame.format != WAVE_FORMAT_AC3) {
+					stream_audio_sink_failed(s, "AC3 encoder produced non-AC3 output");
+					return;
+				}
 
 					DBG3 serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);

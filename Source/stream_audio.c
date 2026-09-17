@@ -221,6 +221,15 @@ static void _stream_atempo_ledger_append_hold(STREAM *s, int nframes, int sample
 	if (s->atempo_ledger_count < STREAM_ATEMPO_LEDGER_SIZE) {
 		s->atempo_ledger_count++;
 	}
+	// A queued tempo boundary follows media, so silence inserted ahead of
+	// that media must shift the boundary as well as the sink frame cursor.
+	for( int i = 0; i < s->atempo_commit_count; ++i ) {
+		STREAM_ATEMPO_COMMIT *cp = &s->atempo_commit_q[
+			(s->atempo_commit_head + i) % STREAM_ATEMPO_COMMIT_MAX];
+		if( cp->boundary != STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER &&
+		    cp->boundary >= entry->output_frames_start )
+			cp->boundary += nframes;
+	}
 	s->atempo_ledger_output_frames += (UINT64)nframes;
 	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
 		DBG serprintf("at_ledger_hold: out_start=%llu ts=%d nframes=%d rate=%d out_next=%llu\n",
@@ -229,22 +238,32 @@ static void _stream_atempo_ledger_append_hold(STREAM *s, int nframes, int sample
 	}
 }
 
-static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate)
+static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate, UINT64 wrapper_start)
 {
 	if (!s || nframes <= 0 || sample_rate <= 0) {
 		return 0;
 	}
-	if (!s->atempo_ledger_active && !_stream_atempo_ledger_arm(s, sample_rate)) {
-		return 0;
+	int have_ledger = s->atempo_ledger_active || _stream_atempo_ledger_arm(s, sample_rate);
+	float commit_speed;
+	UINT64 wrapper_boundary;
+	while( stream_filter_audio_atempo_take_speed_commit(s->audio_filter_atempo,
+		&commit_speed, &wrapper_boundary) ) {
+		UINT64 boundary = have_ledger ? s->atempo_ledger_output_frames +
+			(wrapper_boundary > wrapper_start ? wrapper_boundary - wrapper_start : 0) :
+			STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER;
+		if( stream_atempo_commit_queue(s, commit_speed, boundary) < 0 )
+			return -1;
 	}
+	if( !have_ledger )
+		return 0;
 	STREAM_ATEMPO_LEDGER_ENTRY *entry = &s->atempo_ledger[s->atempo_ledger_write];
 	entry->output_frames_start = s->atempo_ledger_output_frames;
 	entry->block_ts_start = (int)(s->atempo_ledger_next_ts_us / 1000);
 	entry->block_nframes = nframes;
 	entry->rate = sample_rate;
 	// Advance the media/RST span of this output block.  Option B (primary): the
-	// wrapper production output->media map records, at PRODUCTION time, the media
-	// (ns_in - ring) consumed for each output-sample burst; look this block's span
+	// wrapper production output->media map records the published media frontier
+	// for each output burst; look this block's span
 	// up by its output-frame index.  This avoids the Option-A bias where sampling
 	// ns_in-ring at this (write) time over-attributes media to output still queued
 	// in the wrapper FIFO.  Option A (live ns_in-ring delta) is kept as the fallback
@@ -275,24 +294,14 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 				span_source = 1;
 			}
 		}
-		// Option B: production-map lookup by output-frame index.  This reserve runs
-		// immediately AFTER _filter() produced and read exactly `nframes` output
-		// samples from the wrapper FIFO (1:1, verified at the call site), so the
-		// wrapper's cumulative output cursor now sits at the END of this block; the
-		// block occupies wrapper range [out_cursor - nframes, out_cursor).  Reading
-		// the cursor fresh each reserve needs no base bridge and is robust to partial
-		// AudioTrack writes: wrapper output space is independent of how many frames
-		// the sink accepted, so it never diverges from written-frame space.
+		// The caller supplies this write's exact slice of the returned buffer.
+		// Wrapper output and sink output differ after partial writes or holds.
 		{
-			UINT64 wrap_out_now = 0;
-			int wrap_fifo_now = 0, wrap_rate_now = 0;
 			INT64 b_span_frames = 0;
 			int b_rate = 0;
-			if( stream_filter_audio_atempo_get_ledger_stats( s->audio_filter_atempo, &wrap_out_now, &wrap_fifo_now, &wrap_rate_now )
-				&& wrap_out_now >= (UINT64)nframes
-				&& stream_filter_audio_atempo_lookup_output_media( s->audio_filter_atempo,
-					wrap_out_now - (UINT64)nframes, nframes, &b_span_frames, &b_rate ) && b_rate > 0 ) {
-				UINT64 w_start = wrap_out_now - (UINT64)nframes;
+			if( stream_filter_audio_atempo_lookup_output_media( s->audio_filter_atempo,
+				wrapper_start, nframes, &b_span_frames, &b_rate ) && b_rate > 0 ) {
+				UINT64 w_start = wrapper_start;
 				if( b_span_frames < 0 ) {
 					b_span_frames = 0;
 				}
@@ -325,7 +334,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 	return 1;
 }
 
-static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int written_frames, int sample_rate)
+static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int written_frames, int sample_rate, UINT64 wrapper_start)
 {
 	if (!s || !s->atempo_ledger_active || reserved_frames <= 0 || sample_rate <= 0) {
 		return;
@@ -362,14 +371,19 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 			s->atempo_ledger_output_frames -= (UINT64)(-delta);
 		}
 		s->atempo_ledger_next_ts_us += _stream_atempo_ledger_frames_to_us(delta, sample_rate);
-		// Scale this block's media/RST span by the written/reserved ratio so the RST
-		// slope stays consistent on a partial write, and roll the RST cursor + media
-		// cursor by the same shrink/grow. block_rst_span_us (chosen source) drives
-		// next_rst_us; block_media_frames (live A delta) drives media_cursor.
+		// Prefer the exact accepted map range; proportional scaling remains the
+		// fallback for legacy live-state estimates.
 		int64_t old_span_us = entry->block_rst_span_us;
 		int64_t new_span_us = reserved_frames > 0
 			? (old_span_us * written_frames) / reserved_frames
 			: old_span_us;
+		// A short write may end before a tempo boundary within the reservation.
+		// Look up its accepted prefix instead of scaling the whole mixed span.
+		INT64 media_frames = 0;
+		int media_rate = 0;
+		if( stream_filter_audio_atempo_lookup_output_media(s->audio_filter_atempo,
+			wrapper_start, written_frames, &media_frames, &media_rate) && media_rate > 0 )
+			new_span_us = (media_frames * 1000000) / media_rate;
 		entry->block_rst_span_us = new_span_us;
 		s->atempo_ledger_next_rst_us += new_span_us - old_span_us;
 		if( s->atempo_ledger_media_valid ) {
@@ -644,6 +658,7 @@ void stream_audio_flush( STREAM *s )
 	s->audio_end = 0;
 	s->audio_decoder_draining = 0;
 	s->audio_ac3_draining = 0;
+	s->audio_atempo_draining = 0;
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
 	// Discard any stale frontier seed; the paths that empty the sink buffer
@@ -664,7 +679,11 @@ void stream_audio_flush( STREAM *s )
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
 	}
-	// Flush all active filters
+	// Flush all active filters. A seek must discard the WSOLA ring and FIFO;
+	// ordinary pause does not call this destructive reset.
+	if( s->audio_filter_atempo && s->audio_filter_atempo->flush ) {
+		s->audio_filter_atempo->flush( s->audio_filter_atempo );
+	}
 	if( s->audio_filter_compress && s->audio_filter_compress->flush ) {
 		s->audio_filter_compress->flush( s->audio_filter_compress );
 	}
@@ -1168,6 +1187,44 @@ static int _stream_audio_drain_ac3(STREAM *s, AUDIO_FRAME *frame)
 	return frame->size > 0;
 }
 
+static int _stream_audio_uses_atempo(STREAM *s)
+{
+	return s->audio_filter_atempo && audio_interface_is_audio_speed_enabled() &&
+		audio_interface_is_using_atempo() && !libavos_get_ac3_recoding_enabled() &&
+		(!s->audio_sink || !s->audio_sink->get_passthrough(s));
+}
+
+// First feed any unfinished decoder batch, then drain the filter and its FIFO.
+// All returned output still passes through the ordinary PCM writer/accounting.
+static int _stream_audio_drain_atempo(STREAM *s, AUDIO_FRAME *frame, int *output_ready)
+{
+	*output_ready = 0;
+	if( s->pcm_accum_size > 0 ) {
+		frame->data = s->pcm_accum_data;
+		frame->size = s->pcm_accum_size;
+		frame->format = s->pcm_accum_format;
+		frame->channels = s->pcm_accum_channels;
+		frame->bits = s->pcm_accum_bits;
+		frame->samplesPerSec = s->pcm_accum_rate;
+		s->pcm_accum_size = 0;
+		return 1;
+	}
+	if( !s->audio_filter_atempo || !s->audio_filter_atempo->drain ||
+	    s->audio_filter_atempo->drain(s->audio_filter_atempo, frame, 1) < 0 ) {
+		stream_audio_sink_failed(s, "atempo drain failed");
+		return -1;
+	}
+	*output_ready = 1;
+	if( frame->size > 0 )
+		return 1;
+	s->audio_atempo_draining = 0;
+	s->audio_decoder_draining = 0;
+	s->audio_end = 1;
+	if( s->audio_sink )
+		s->audio_sink->end(s);
+	return 0;
+}
+
 static void _audio_decode( STREAM *s )
 {
 	static int out_of_audio;
@@ -1191,9 +1248,16 @@ static void _audio_decode( STREAM *s )
 		int chunk_pts = STREAM_NO_PTS_VALUE;
 		AUDIO_FRAME audio_frame = { 0 };
 		int ac3_output_ready = 0;
+		int atempo_output_ready = 0;
 decode_next_chunk:
 		memset(&audio_frame, 0, sizeof(audio_frame));
 		ac3_output_ready = 0;
+		atempo_output_ready = 0;
+		if( _stream_audio_uses_atempo(s) && s->audio_end )
+			return;
+		if( s->audio_atempo_draining &&
+		    _stream_audio_drain_atempo(s, &audio_frame, &atempo_output_ready) <= 0 )
+			return;
 		if (libavos_get_ac3_recoding_enabled()) {
 			if (s->audio_end)
 				return;
@@ -1205,7 +1269,7 @@ decode_next_chunk:
 		{
 		int starve_start_ms = atime();
 		int starve_last_log_ms = starve_start_ms;
-		while( !ac3_output_ready && s->audio_buffer_size <= 0 && !_abort( s ) ){
+		while( !ac3_output_ready && !s->audio_atempo_draining && s->audio_buffer_size <= 0 && !_abort( s ) ){
 
 			STREAM_CDATA cdata = { 0 };
 
@@ -1244,6 +1308,12 @@ serprintf("audio drain\r\n");
 						if (libavos_get_ac3_recoding_enabled()) {
 							// A decoder without a drain callback still leaves recoder audio.
 							s->audio_ac3_draining = 1;
+							break;
+						}
+						if( _stream_audio_uses_atempo(s) ) {
+							s->audio_atempo_draining = 1;
+							if( _stream_audio_drain_atempo(s, &audio_frame, &atempo_output_ready) <= 0 )
+								return;
 							break;
 						}
 serprintf("audio end\r\n");
@@ -1554,7 +1624,9 @@ DBGS serprintf("~");
 
 		// For AC3 recoding, always decode ALL formats (including AC3) to PCM to enable filters
 		// This provides consistent audio boost/night mode support for all source formats
-		if (!ac3_output_ready && s->audio_ac3_draining) {
+		if( s->audio_atempo_draining ) {
+			// The EOF helper above supplied pending PCM or already-filtered output.
+		} else if (!ac3_output_ready && s->audio_ac3_draining) {
 			ac3_output_ready = _stream_audio_drain_ac3(s, &audio_frame);
 			if (ac3_output_ready < 0 || s->audio_end)
 				return;
@@ -1571,6 +1643,10 @@ DBGS serprintf("~");
 					ac3_output_ready = _stream_audio_drain_ac3(s, &audio_frame);
 					if (ac3_output_ready < 0 || s->audio_end)
 						return;
+				} else if( _stream_audio_uses_atempo(s) ) {
+					s->audio_atempo_draining = 1;
+					if( _stream_audio_drain_atempo(s, &audio_frame, &atempo_output_ready) <= 0 )
+						return;
 				} else {
 					s->audio_decoder_draining = 0;
 					s->audio_end = 1;
@@ -1584,7 +1660,7 @@ serprintf("audio drain complete\r\n");
 			}
 		
 			// did the sample rate change?
-			if( !ac3_output_ready && !audio_frame.error && audio_frame.size && audio_frame.samplesPerSec && audio_frame.samplesPerSec != s->audio->samplesPerSec ) {
+			if( !ac3_output_ready && !atempo_output_ready && !audio_frame.error && audio_frame.size && audio_frame.samplesPerSec && audio_frame.samplesPerSec != s->audio->samplesPerSec ) {
 serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
 				s->audio->sourceSamples = s->audio->samplesPerSec;
 				s->audio->samplesPerSec = audio_frame.samplesPerSec;
@@ -1698,7 +1774,15 @@ serprintf(" ae! ");
 			fabsf(audio_interface_get_audio_speed() - 1.0f) <= 1e-6f &&
 			_pcm_frame_is_shorter_than( &audio_frame,
 				stream_audio_pcm_normal_max_frame_ms );
-		int pcm_eligible = ((atempo_accum_enabled || normal_speed_accum_enabled) &&
+		// Finish a pending batch even when returning to 1x disables coalescing.
+		// Otherwise the fallback below replaces (and loses) the new decoded frame.
+		int finish_pending_pcm = s->pcm_accum_size > 0 &&
+			s->pcm_accum_format == audio_frame.format &&
+			s->pcm_accum_channels == audio_frame.channels &&
+			s->pcm_accum_bits == audio_frame.bits &&
+			s->pcm_accum_rate == audio_frame.samplesPerSec;
+		int pcm_eligible = (!s->audio_atempo_draining &&
+			(atempo_accum_enabled || normal_speed_accum_enabled || finish_pending_pcm) &&
 			!passthrough_active &&
 			!ac3_recoding &&
 			!audio_frame.error &&
@@ -1731,7 +1815,8 @@ serprintf(" ae! ");
 				int new_cap = MAX( s->pcm_accum_capacity * 2, s->pcm_accum_size + audio_frame.size );
 				unsigned char *new_buf = arealloc( s->pcm_accum_data, new_cap );
 				if( !new_buf ) {
-					DBG serprintf("stream_audio: pcm_accum alloc failed (%d), fallback to direct frame\n", new_cap);
+					stream_audio_sink_failed(s, "PCM accumulation allocation failed");
+					return;
 				} else {
 					s->pcm_accum_data = new_buf;
 					s->pcm_accum_capacity = new_cap;
@@ -1745,7 +1830,8 @@ serprintf(" ae! ");
 				int pcm_accum_target = _pcm_accum_target_bytes( &audio_frame,
 					normal_speed_accum_enabled ? stream_audio_pcm_normal_accum_ms :
 					stream_audio_pcm_accum_ms );
-				if( s->pcm_accum_size < pcm_accum_target ) {
+				if( (atempo_accum_enabled || normal_speed_accum_enabled) &&
+				    s->pcm_accum_size < pcm_accum_target ) {
 					// Keep decoding in this call to avoid thread-loop overhead
 					// and produce a steady batch cadence for tiny-frame codecs.
 					goto decode_next_chunk;
@@ -1817,7 +1903,7 @@ serprintf(" ae! ");
 					atempo_gate_log_count++;
 				}
 
-				if (use_atempo && audio_frame.size > 0) {
+				if (use_atempo && !atempo_output_ready && audio_frame.size > 0) {
 					int _atempo_before_fifo = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
 						s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
 					if( _stream_audio_speed_diag_active( s ) ) {
@@ -1831,7 +1917,10 @@ serprintf(" ae! ");
 						dbg_atempo_fifo = _atempo_before_fifo;
 					}
 					DBG serprintf("stream_audio: applying atempo filter\n");
-					s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame);
+					if( s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame) < 0 || audio_frame.error ) {
+						stream_audio_sink_failed(s, "atempo processing failed");
+						return;
+					}
 					if (resume_write_log_count < 3) {
 						dbg_atempo_out = audio_frame.size;
 						dbg_atempo_fifo = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
@@ -2218,6 +2307,18 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				// slowly drain the audio data we have, while updating the audio time...
 				int size = audio_frame.size;
 				int total_size = audio_frame.size;
+				UINT64 atempo_output_start = 0;
+				if( use_atempo && total_size > 0 ) {
+					UINT64 output_end = 0;
+					int fifo = 0, rate = 0;
+					int frames = total_size / (bytes_per_sample * channels);
+					if( !stream_filter_audio_atempo_get_ledger_stats(s->audio_filter_atempo,
+						&output_end, &fifo, &rate) || output_end < (UINT64)frames ) {
+						stream_audio_sink_failed(s, "invalid atempo output cursor");
+						return;
+					}
+					atempo_output_start = output_end - frames;
+				}
 				int ac3_recode_packet_size = 0;
 				int ac3_recode_fake_per_packet = 0;
 				int compressed_unit = passthrough_active || ac3_recoding;
@@ -2399,6 +2500,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					int ledger_reserved = 0;
 					int ledger_reserved_frames = 0;
 					int ledger_bpf = 0;
+					UINT64 wrapper_start = atempo_output_start;
 					int size_written = 0;
 					int compressed_transaction_locked = 0;
 					compressed_write_result_t compressed_result = COMPRESSED_WRITE_COMPLETE;
@@ -2451,8 +2553,13 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( use_atempo && bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
 							ledger_bpf = bytes_per_sample * channels;
 							ledger_reserved_frames = ledger_bpf > 0 ? audio_frame.size / ledger_bpf : 0;
+							wrapper_start += (total_size - size) / ledger_bpf;
 							ledger_reserved = _stream_atempo_ledger_reserve(
-								s, ledger_reserved_frames, sample_rate );
+								s, ledger_reserved_frames, sample_rate, wrapper_start );
+							if( ledger_reserved < 0 ) {
+								stream_audio_sink_failed(s, "atempo commit queue exhausted");
+								return;
+							}
 						}
 						// Arm the one-shot reanchor immediately before the first write.
 						if( s->audio_resume_pending ) {
@@ -2470,7 +2577,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						int written_frames = (size_written > 0 && ledger_bpf > 0) ?
 							size_written / ledger_bpf : 0;
 						_stream_atempo_ledger_finalize(
-							s, ledger_reserved_frames, written_frames, sample_rate );
+							s, ledger_reserved_frames, written_frames, sample_rate, wrapper_start );
 					}
 					if( !compressed_unit && size_written == AUDIO_WRITE_RETRY ) {
 						stream_audio_prepare_resume( s );
@@ -2913,7 +3020,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 void *stream_audio_dec_thread( void *data )
 {
 	STREAM *s = (STREAM *)data;
-	float last_audio_speed = audio_interface_get_audio_speed();
 DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 
 	// Reset AC3 sink configuration flag for new playback session
@@ -2932,15 +3038,6 @@ DBGS serprintf("PID[%5d] stream_audio_thread::Starting\r\n", getpid() );
 	while( thread_state_get( &s->audio_tstate ) != THREAD_EXIT ) {
 		if( s->video_error ) {
 			goto skip_format_change;
-		}
-		float current_audio_speed = audio_interface_get_audio_speed();
-		if( fabsf(current_audio_speed - last_audio_speed) > 0.001f ) {
-			if( s->pcm_accum_size > 0 ) {
-				DBG serprintf("stream_audio: pcm_accum reset on speed change %.3f->%.3f (pending=%d)\n",
-					last_audio_speed, current_audio_speed, s->pcm_accum_size);
-				s->pcm_accum_size = 0;
-			}
-			last_audio_speed = current_audio_speed;
 		}
 
 		AUDIO_PROPERTIES *sink = stream_audio_get_sink_props( s );

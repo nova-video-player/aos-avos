@@ -188,6 +188,8 @@ int audio_interface_passthrough_playhead_advanced(audio_ctx_t *ctx);
 void audio_interface_invalidate_delay_cache(audio_ctx_t *ctx);
 void audio_interface_add_logical_samples(audio_ctx_t *ctx, int samples, int accepted_bytes);
 int  audio_interface_get_and_clear_latency_delta(audio_ctx_t *ctx);
+// prefer_fresh: 0 permits cached evidence, 1 requires recent evidence,
+// 2 requires a direct playhead query (PlaybackParams rate checkpoints).
 int  audio_interface_get_presented_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh);
 int  audio_interface_get_written_frames(audio_ctx_t *ctx, uint64_t *frames, int *rate);
 int  audio_interface_get_presentation_snapshot(audio_ctx_t *ctx,

@@ -3022,10 +3022,11 @@ static int audiotrack_change_audio_speed(audio_ctx_t *at, float speed)
 	// Bail out if context is not initialized or was released
 	if( !at || !at->init ) {
 		ERR LOG("audiotrack_change_audio_speed: AudioTrack context not initialized");
-		return 0;
+		return -1;
 	}
 
 	int using_atempo = audio_interface_is_using_atempo();
+	float previous_speed = audio_interface_get_audio_speed();
 
 	if(audio_interface_is_audio_speed_enabled() && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23) { // adapt audio_speed only when passthrough disabled and API23+
 DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f", speed);
@@ -3034,14 +3035,14 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 			at->format, at->frame_size, at->buf_size, at->obj, audio_interface_get_audio_speed());
 
 		JNIEnv *myEnv = attach_thread_current_vm();
-		if (*myEnv == NULL) return 0;
+		if (!myEnv) return -1;
 
 		DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed attached to current thread" );
 
 		// Check if AudioTrack object is still valid (could be NULL during teardown)
 		if (!at->obj) {
 			ERR LOG("audiotrack_change_audio_speed: AudioTrack object is NULL, cannot change speed");
-			return 0;
+			return -1;
 		}
 
 		// reuse already created audioTrack
@@ -3115,6 +3116,10 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		int status =
 			( *myEnv ) ->CallIntMethod( myEnv, audioTrack,
 									   ( *myEnv ) ->GetMethodID( myEnv, at->audiotrackClass, "getState", "()I" ) );
+		if( (*myEnv)->ExceptionCheck(myEnv) ) {
+			(*myEnv)->ExceptionClear(myEnv);
+			failed = 1;
+		}
 		if( status != 1 ) { // STATE_INITIALIZED is 1 ; 0 for uninit
 			failed = 1;
 		}
@@ -3124,9 +3129,9 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 		// Read back the speed that was actually accepted by the hardware.
 		// On some routes (e.g., multichannel PCM via HDMI/AVR) Android silently
 		// accepts setPlaybackParams() but the driver clamps the speed to 1.0.
-		float applied_speed = failed ? 1.0f : speed;
+		float applied_speed = failed ? previous_speed : speed;
 		int readback_ok = 0;
-		if( !failed ) {
+		{
 			jobject readback_params = ( *myEnv )->CallObjectMethod( myEnv, audioTrack,
 				( *myEnv )->GetMethodID( myEnv, at->audiotrackClass, "getPlaybackParams",
 					"()Landroid/media/PlaybackParams;" ) );
@@ -3136,7 +3141,7 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 				jfloat hw_speed = ( *myEnv )->CallFloatMethod( myEnv, readback_params,
 					( *myEnv )->GetMethodID( myEnv, at->playbackParamsClass, "getSpeed", "()F" ) );
 				jthrowable gs_ex = ( *myEnv )->ExceptionOccurred( myEnv );
-				if( !gs_ex ) {
+				if( !gs_ex && isfinite(hw_speed) && hw_speed > 0.0f ) {
 					applied_speed = (float)hw_speed;
 					readback_ok = 1;
 				} else {
@@ -3160,18 +3165,22 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 				speed, applied_speed, readback_ok, at->channel_count, at->rate );
 		}
 
-		if( failed ) {
-			ERR LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audiotrack change params failed: reverting to 1x" );
-			audio_interface_set_audio_speed(1.0f);
-		} else {
-			DBG LOG( "audio_interface_audiotrack_java:audiotrack_change_audio_speed audio speed changed" );
-			audio_interface_set_audio_speed(applied_speed);
-		}
+		// A failed setter does not roll the hardware back to 1x. Keep the
+		// read-back rate, or the last confirmed rate if readback also failed.
+		audio_interface_set_audio_speed(applied_speed);
+		if( playbackParams )
+			( *myEnv )->DeleteLocalRef(myEnv, playbackParams);
 
-		// PlaybackParams does not flush the AudioTrack. Keep playhead/timestamp
-		// continuity across speed changes; resetting here makes rapid ramps run
-		// permanently with invalid delay evidence and unstable video pacing.
+		// Keep the frame epoch and queued audio, but an old timestamp cannot
+		// be extrapolated across this rate change using only the new speed.
+		if( fabsf(applied_speed - previous_speed) > 1e-6f ) {
+			at->last_timestamp_ns = 0;
+			at->last_timestamp_frames = 0;
+			at->ts_last_query_ms = 0;
+			audiotrack_invalidate_delay_cache(at);
+		}
 		audiotrack_update_latency(at, myEnv);
+		return failed ? -1 : 0;
 	} else {
 		DBG LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed skipped speed=%f speed_enabled=%d using_atempo=%d passthrough=%d api=%d init=%d obj=%p",
 			speed, audio_interface_is_audio_speed_enabled(), using_atempo, at ? at->passthrough : -1,
@@ -3181,8 +3190,8 @@ DBG	LOG("audio_interface_audiotrack_java:audiotrack_change_audio_speed speed=%f"
 }
 
 // Returns the current AudioTrack presented frame position and sample rate.
-// Prefers getTimestamp if it was queried within 500ms (well within the 2000ms throttle window).
-// Falls back to a fresh getPlaybackHeadPosition() JNI call otherwise.
+// Fresh mode permits only recent timestamps; mode 2 always queries the playhead.
+// Cached mode can extrapolate timestamps across the normal query throttle.
 // Frame position is in the RST/media-sample domain — do not divide by speed;
 // use RST_TO_TS_DELTA() in the stream layer to convert a delta to TS domain.
 static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, int *rate, int *source, int *age_ms, int prefer_fresh)
@@ -3192,14 +3201,14 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 	// DAC-accurate source: extrapolate the last stable AudioTrack timestamp to now.
 	// framePosition is the frame actually presented at the DAC, so this position is
 	// latency-free, unlike getPlaybackHeadPosition() (frames handed to the mixer).
-	// Extrapolation covers the 2000ms getTimestamp throttle window; if the sample is
-	// older than 2500ms (pause, stall) fall through to the playhead query below.
-	if (at->ts_use_timestamp && at->last_timestamp_ns > 0 && at->last_timestamp_frames > 0) {
+	// Cached callers may bridge the timestamp throttle; fresh callers allow only
+	// 100ms. PlaybackParams checkpoints bypass timestamp extrapolation entirely.
+	if (prefer_fresh != 2 && at->ts_use_timestamp && at->last_timestamp_ns > 0 && at->last_timestamp_frames > 0) {
 		struct timespec now_ts;
 		clock_gettime(CLOCK_MONOTONIC, &now_ts);
 		int64_t now_ns = (int64_t)now_ts.tv_sec * 1000000000LL + now_ts.tv_nsec;
 		int64_t age_ns = now_ns - at->last_timestamp_ns;
-		if (age_ns >= 0 && age_ns < 2500LL * 1000000LL) {
+		if (age_ns >= 0 && age_ns < (prefer_fresh ? 100LL : 2500LL) * 1000000LL) {
 			int64_t adv = (age_ns * at->rate) / 1000000000LL;
 			// With AudioTrack PlaybackParams(speed S) the DAC consumes frames at
 			// rate*S; with atempo the track drains at 1x (filter already resampled).
@@ -3234,7 +3243,7 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 		}
 	}
 
-	// prefer_fresh=1, or timestamp cache is stale — call getPlaybackHeadPosition() directly.
+	// prefer_fresh=2, or timestamp cache is stale — call getPlaybackHeadPosition() directly.
 	// This bypasses the delay throttle for this lightweight 32-bit position query only.
 	JNIEnv *env = attach_thread_current_vm();
 	if (!env || !at->obj) return 0;

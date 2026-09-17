@@ -21,7 +21,7 @@ decoding is active. This restriction concerns MediaCodec audio decoding, not
 MediaCodec video presentation scheduling. See
 `doc/mediacodec_audio_decoder.md`.
 
-## Current State (2026-07-20)
+## Current State (2026-09-17)
 
 The current implementation uses the atempo path as a software speed backend with
 three separate clocks/anchors:
@@ -40,7 +40,8 @@ three separate clocks/anchors:
   inside a ledger block.
 
 Speed changes are no longer committed to the video side immediately. The atempo
-tempo command is applied to the audio filter immediately, but
+target is published by the control thread. The audio thread applies the tempo
+command at its next filter call, but
 `timeline_map_apply()`, `set_playback_speed()`, and the video-sink re-anchor are
 deferred until the AudioTrack playhead crosses the output-frame boundary where
 the new-speed content is audible. Pending speed commits are queued and promoted
@@ -57,18 +58,26 @@ Option A's caveat is that write-time sampling includes variable wrapper-FIFO
 lead between filter output production and AudioTrack write. This is why it is no
 longer the primary source when the production map can resolve a block.
 
-**Option B (current, validated):** media/RST assignment happens in
+**Option B (primary):** media/RST assignment happens in
 `stream_filter_audio_atempo.c` at output-production time. The atempo wrapper
 keeps an output-position to media/RST map keyed by cumulative atempo output
 frames. Each drained output burst records the media span produced from the
-patched atempo state (`ns_in - ring`). The AVOS ledger queries this map by the
-output frame range just read from the wrapper FIFO. If the map misses, the code
+patched v2 accessor's published media frontier. This frontier advances only
+when FFmpeg delivers an output frame; it excludes the partially filled internal
+output buffer. The first burst starts at media position zero in each graph
+epoch. The AVOS ledger queries the exact range of each write within the buffer
+returned by the wrapper, including its offset after previous or partial writes. If the map misses, the code
 falls back to Option A; if Option A cannot read state, it falls back to the 1:1
 TS slope.
 
 Both Option A and Option B depend on the local FFmpeg patch
 `native/ffmpeg-android-builder/atempo.patch`, which exposes atempo's internal
-WSOLA state (`ns_in`, `ns_out`, and ring occupancy). A stock-FFmpeg strategy
+WSOLA state and the published output media frontier. With an older patch that
+lacks the v2 accessor, production mapping uses `ns_in - ring` as an estimate.
+The edited source lives in `ext/ffmpeg/libavfilter/af_atempo.c`; regenerate the
+patch from that tree and rebuild the FFmpeg libraries before deploying these
+changes. The AVOS build alone uses the existing prebuilt FFmpeg libraries.
+A stock-FFmpeg strategy
 would require a less precise tempo-schedule estimate or proper filter PTS
 ownership and is a separate design goal.
 
@@ -241,28 +250,35 @@ audio_time += output_time_ms;  // = 667ms ✓ CORRECT!
 
 When speed changes:
 
-```c
-int using_atempo = (s->audio_filter_atempo != NULL);
-audio_interface_set_using_atempo(using_atempo);
+The control thread publishes the clamped target speed (0.5x–2.0x). It does not
+inspect the live FIFO or create a commit from a potentially stale write cursor.
+On the audio thread:
 
-if (using_atempo) {
-    float clamped_speed = clamp(av_speed, 0.25f, 2.0f);
-    audio_interface_set_audio_speed(clamped_speed);
+1. The wrapper applies the tempo command successfully. FFmpeg publishes any
+   partially filled old-tempo output buffer before updating the WSOLA origin;
+   its input ring and overlap history remain intact.
+2. The wrapper collects that old output and records the new tempo boundary as
+   `wrapper_read_cursor + fifo_samples`.
+3. Before the next PCM write, after manual-delay silence, the writer translates
+   that boundary into AudioTrack frame space using the current write's wrapper
+   offset and the sink ledger cursor. PCM already returned by an earlier filter
+   call has finished writing before the command is applied.
+4. The audio thread queues the accepted speed and translated boundary. Requests
+   superseded before the filter sees them do not create phantom commits.
 
-    // Queue the video-side speed commit. The filter sees the target now,
-    // but timeline/video speed are promoted only when AudioTrack playhead
-    // reaches the output-frame boundary where new-speed content is audible.
-    atempo_commit_q.push({
-        speed = clamped_speed,
-        boundary = atempo_ledger_output_frames + wrapper_fifo_samples
-    });
-}
-```
+Backends without written-frame evidence use the existing deferred fallback.
+Manual-delay silence inserted before an outstanding boundary shifts that boundary
+with the media it labels. Pending pre-filter PCM also survives speed changes;
+returning to 1x finishes its batch together with the next decoded frame.
+Pending commits retain their three-second active-playback timeout across pause;
+resume shifts their timestamps by the pause duration without renewing elapsed
+waiting time. Queue exhaustion reports an error instead of dropping a transition.
 
 When the playhead crosses a queued boundary, `stream_atempo_commit_poll()`:
 
-1. computes `anchor_ts` from the current heard-audio clock;
-2. resolves the playhead in the atempo ledger;
+1. obtains one presentation observation for the boundary and both clocks;
+2. subtracts calibrated post-playhead latency for mixer-playhead evidence and
+   resolves TS and RST at that same adjusted position;
 3. uses the ledger media/RST value as the first `timeline_map_apply()` argument
    when the lookup is strictly inside a ledger block (`state == 0`);
 4. falls back to `TS_TO_RST_TIME(anchor_ts)` if the ledger is unavailable,
@@ -397,8 +413,11 @@ during software speed changes. Instead:
   - media/RST start and span.
 - The media/RST span normally comes from the Option B production map in
   `stream_filter_audio_atempo.c`, keyed by the wrapper output-sample index. The
-  stream ledger queries the range `[output_cursor - nframes, output_cursor)` for
-  the block just read from the wrapper FIFO.
+  stream ledger queries `[buffer_start + written_offset, buffer_start +
+  written_offset + requested_frames)`. Positive partial writes finalize only the
+  accepted prefix using a fresh map lookup; zero/retry writes cancel the
+  reservation. Endpoint interpolation keeps partitioned media sample counts
+  additive across split writes.
 - If the production map does not cover the full range, the ledger falls back to
   the Option A live `ns_in - ring` delta sampled at reserve time; a final 1:1
   TS-slope fallback keeps the clock progressing if the patched state is
@@ -447,7 +466,7 @@ Example at 48 kHz, 1.5x speed:
 ### FFmpeg Filter Graph
 
 ```
-abuffer → atempo → abuffersink
+abuffer → aformat(float) → atempo → aformat(native PCM) → abuffersink
 ```
 
 **abuffer (input):**
@@ -455,9 +474,9 @@ abuffer → atempo → abuffersink
 - Config: sample_rate, channel_layout, sample_format
 
 **atempo:**
-- Config: `tempo=<speed>` (chained for speeds < 0.5x)
-- Range per filter: 0.5 to 2.0
-- Overall support: 0.25x to 2.0x
+- Config: `tempo=<speed>` (one atempo instance)
+- AVOS configured range: 0.5 to 2.0
+- Overall support: 0.5x to 2.0x
 - Algorithm: WSOLA (Waveform Similarity Overlap-Add)
 
 **abuffersink (output):**
@@ -466,11 +485,11 @@ abuffer → atempo → abuffersink
 
 ### Speed Range
 
-**Supported:** 0.25x to 2.0x
+**Supported:** 0.5x to 2.0x
 
 **Implementation:**
-- Single atempo filter: 0.5x - 2.0x (native FFmpeg constraint)
-- Automatic chaining: for speeds < 0.5x (e.g., 0.25x = two 0.5x filters)
+- Single atempo filter, with requests clamped to 0.5x–2.0x
+- No automatic chaining is implemented
 - Covers typical use cases with high quality
 
 ### Hot Filter at 1.0x
@@ -531,12 +550,17 @@ render_ts_ns = snap(frame_ts) + render_offset_ns + user_video_delay_ns;
 3. Parser scales new timestamps to **TS** domain
 4. Playback resumes with correct TS values
 
-Timeline mapping anchors are re-established after seek completes.
+Timeline mapping anchors are re-established after seek completes. The seek
+flush destroys the atempo graph and clears its FIFO, production map, and pending
+wrapper boundary; the next PCM frame creates a fresh graph at the target speed.
+Sending EOF is not a reusable reset. Ordinary non-flushing pause preserves this
+state and any pending output.
 
 ### Speed Changes (`stream_set_av_speed` + `stream_atempo_commit_poll`)
 
-1. Apply the new atempo tempo command immediately.
-2. Queue a video-side commit at the current atempo output boundary.
+1. Publish the requested target for the audio thread.
+2. After successful filter application, queue a video-side commit at the actual
+   new-tempo output boundary translated into sink frame space.
 3. Keep the video timeline and decoder playback speed at the previous committed
    speed while old-speed content is still queued in AudioTrack.
 4. Promote queued commits in order when the playhead crosses each boundary.
@@ -545,8 +569,22 @@ Timeline mapping anchors are re-established after seek completes.
    - `anchor_rst`: the ledger media/RST at the same audible playhead when
      available (`state == 0`), otherwise a projection fallback.
 6. On seek/flush/reset, clear the ledger and collapse pending commits to the
-   latest target speed using a deferred sentinel. The collapsed commit waits for
-   the new ledger to become active before applying, avoiding stale-map drains.
+   latest target speed using a deferred sentinel. The fresh graph publishes a
+   replacement boundary in the new frame domain. Without new output evidence,
+   the existing timeout fallback remains available.
+
+### End of stream and filter failures
+
+At decoder EOF, any unfinished pre-filter PCM batch is fed through atempo before
+the graph receives EOF. The wrapper then drains WSOLA output and its FIFO in
+bounded PCM blocks through the normal filters, writer, ledger, and clock
+accounting. The sink receives `end()` only after those blocks are exhausted.
+Drained output is not filtered through atempo a second time.
+
+Graph creation, runtime commands, FIFO operations, input submission, and output
+collection propagate failures. Failed frames are cleared and playback reports
+an audio error; unscaled input PCM is never written as if atempo succeeded.
+Runtime command failure does not rebuild and discard a live graph.
 
 ## Time Domain Variable Reference
 
@@ -613,7 +651,7 @@ Timeline mapping anchors are re-established after seek completes.
 - `Source/audio_interface.c` - Atempo flag setter/getter
 - `Source/audio_interface_audiotrack_java.c` - Skip buffer scaling/PlaybackParams, expose presented/written frames
 - `codecs.mk` - Added to build system
-- `native/ffmpeg-android-builder/atempo.patch` - Required local FFmpeg patch exposing atempo internal media/ring state
+- `ext/ffmpeg/libavfilter/af_atempo.c` - Source for the local FFmpeg patch, including published media state and command-boundary output delivery
 
 ## Debugging
 
@@ -633,7 +671,7 @@ int Debug[DBG_MAX_ENTRIES] = {
 ```
 stream_open_audio_filter: opened [atempo]
 at_ledger_arm: written=... playhead=... queued=... audio=... epoch_rst=...
-atempo_commit_arm: prev=1.000 target=1.500 boundary=... out_cursor=... flt_fifo=...
+atempo_commit_arm: prev=1.000 target=1.500 boundary=... qlen=...
 at_ledger_omap: w_start=... nframes=... b_span_us=... a_span_us=... diff_us=...
 at_ledger: ledger_heard=... heard=... applied=1 playhead=... state=0 speed=1.500
 atempo_commit_apply: prev=1.000 speed=1.500 boundary=... crossed=1 anchor_ts=...
@@ -656,7 +694,7 @@ atempo_rst_anchor: speed=1.500 anchor_rst_proj=... anchor_rst_ledger=... state=0
 7. Confirm the FFmpeg atempo patch is present when building this path
 
 ### Audio Quality Issues
-1. Verify filter graph rebuilds correctly on speed changes
+1. Verify runtime tempo commands succeed without rebuilding the live graph
 2. Check sample format (S16, S32, or FLT)
 3. Ensure FIFO buffer is properly sized
 

@@ -718,6 +718,7 @@ typedef struct STREAM {
 	int		audio_parse_end;	// parser has parsed complete file
 	int		audio_decoder_draining;
 	int		audio_ac3_draining;
+	int		audio_atempo_draining;
 	int		video_parse_end;	// parser has parsed complete file
 	int		video_end;		// video is at the end of file
 	int		stream_end;		// stream is at it's end
@@ -1057,6 +1058,7 @@ int	stream_set_audio_filter_level( STREAM *s, int level, int night_on );
 void	stream_set_audio_downmix( int downmix );
 void	stream_disable_atempo_filter( int disable );
 int	stream_filter_audio_atempo_get_ledger_stats( STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate );
+int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f, float *speed, UINT64 *boundary);
 int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate );
 int	stream_filter_audio_atempo_lookup_output_media( STREAM_FILTER_AUDIO *f, UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate );
 int	stream_check_subtitles( STREAM *s );
@@ -1067,6 +1069,7 @@ int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
 int	stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts );
 int	stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state );
+int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate, int *ts, int *rst, int *state);
 int	stream_get_anchor_delay_ms( STREAM *s, int allow_static );
 int	stream_get_pcm_startup_seed_delay_ms( STREAM *s );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
@@ -1106,6 +1109,7 @@ int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
 int	stream_set_av_speed         ( STREAM *s, float av_speed );
 void	stream_atempo_commit_poll   ( STREAM *s );
+int stream_atempo_commit_queue(STREAM *s, float speed, UINT64 boundary);
 int	stream_can_apply_av_speed   ( STREAM *s );
 
 int 	stream_set_crypt( STREAM *s, int crypt, void *key );

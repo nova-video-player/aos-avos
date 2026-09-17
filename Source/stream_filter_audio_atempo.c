@@ -26,7 +26,6 @@
  * - Pitch preservation via atempo algorithm
  * - Works on all Android API levels (no PlaybackParams dependency)
  * - Handles PCM audio in various sample formats
- * - Dynamic filter chaining keeps each atempo instance within its supported range
  * - Runtime tempo updates (no graph rebuild on speed changes)
  *
  * Architecture:
@@ -38,7 +37,7 @@
  * Integration:
  * - Initialized in stream audio pipeline via stream_filter_audio_atempo_new()
  * - Speed controlled via audio_interface_get_audio_speed()
- * - Filter automatically enabled when speed != 1.0
+ * - Selected filter stays active at 1.0x to preserve seamless transitions
  */
 
 #include "global.h"
@@ -96,7 +95,7 @@ static void atempo_get_state(AVFilterContext *ctx,
 #define DBGA DBG_IF(Debug[DBG_AUD])
 #define DBG DBG_IF(Debug[DBG_AUD])
 
-// atempo filter constraints (FFmpeg limitation per filter instance)
+// atempo range configured by AVOS
 #define ATEMPO_MIN 0.5f
 #define ATEMPO_MAX 2.0f
 
@@ -148,6 +147,15 @@ struct ctx {
 	UINT64 total_output_samples;        // cumulative samples read from wrapper FIFO
 	int tempo_change_seq;               // diagnostic sequence for runtime tempo changes
 	int post_tempo_marker_pending;      // first output block after tempo command not yet logged
+	int eof;
+	// A command can arrive before the first output at the previous tempo.
+	// Keep both boundaries until the writer consumes them; equal boundaries
+	// coalesce when no output was produced between requests.
+	int commit_count;
+	struct {
+		float speed;
+		UINT64 boundary;
+	} commits[2];
 
 	// Option B production-time output->media map. Each drain burst records the
 	// media frontier represented by that burst of output samples, keyed by the
@@ -163,14 +171,13 @@ struct ctx {
 	struct atempo_omap_entry {
 		UINT64 out_start;               // cumulative output-sample index at burst start
 		int    nsamples;                // output samples produced in this burst
-		INT64  media_start;             // media (ns_in - ring) at burst start
+		INT64  media_start;             // published media frontier at burst start
 		INT64  media_span;              // media consumed across this burst (af samples)
 	} omap[ATEMPO_OMAP_SIZE];
 	int    omap_head;                   // index of oldest live entry
 	int    omap_count;                  // number of live entries
 	UINT64 omap_write_cursor;           // cumulative output samples WRITTEN to FIFO
 	INT64  omap_prev_media;             // last emitted-media frontier sampled
-	int    omap_prev_valid;             // prev_media initialised
 };
 
 static int _flush(STREAM_FILTER_AUDIO *f);
@@ -190,26 +197,17 @@ static void atempo_omap_reset(struct ctx *ctx, UINT64 write_origin)
 	ctx->omap_count = 0;
 	ctx->omap_write_cursor = write_origin;
 	ctx->omap_prev_media = 0;
-	ctx->omap_prev_valid = 0;
 }
 
 // Record one drain burst: output samples [write_cursor, write_cursor+nsamples)
-// consumed (media_now - prev_media) of media.  media_now = af ns_in - ring.
+// consumed (media_now - prev_media) of media. Prefer the published v2 frontier;
+// older FFmpeg builds fall back to the ns_in - ring estimate.
 static void atempo_omap_push(struct ctx *ctx, int nsamples, INT64 media_now)
 {
 	if (!ctx || nsamples <= 0) {
 		return;
 	}
-	if (!ctx->omap_prev_valid) {
-		// First burst after a reset has no prior media reference, so its true span
-		// is unknown (would be a spurious zero).  Seed the reference and advance the
-		// write cursor past this burst WITHOUT emitting an entry: that output range
-		// then misses the map and the consumer falls back to Option A for it.
-		ctx->omap_prev_media = media_now;
-		ctx->omap_prev_valid = 1;
-		ctx->omap_write_cursor += (UINT64)nsamples;
-		return;
-	}
+
 	INT64 span = media_now - ctx->omap_prev_media;
 	if (span < 0) {
 		span = 0;
@@ -228,6 +226,64 @@ static void atempo_omap_push(struct ctx *ctx, int nsamples, INT64 media_now)
 	ctx->omap[tail].media_span = span;
 	ctx->omap_write_cursor += (UINT64)nsamples;
 	ctx->omap_prev_media = media_now;
+}
+
+// Drain all frames delivered by FFmpeg and pair that burst with its published
+// media frontier. The patched accessor excludes the partially filled dst_buffer.
+static int atempo_collect_output(struct ctx *ctx)
+{
+	int samples = 0;
+	for (;;) {
+		int ret = av_buffersink_get_frame(ctx->abuffersink_ctx, ctx->out_frame);
+		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+			break;
+		if (ret < 0)
+			return ret;
+		int count = ctx->out_frame->nb_samples;
+		if (av_audio_fifo_realloc(ctx->fifo, av_audio_fifo_size(ctx->fifo) + count) < 0 ||
+		    av_audio_fifo_write(ctx->fifo, (void **)ctx->out_frame->data, count) != count) {
+			av_frame_unref(ctx->out_frame);
+			return AVERROR(ENOMEM);
+		}
+		samples += count;
+		av_frame_unref(ctx->out_frame);
+	}
+	if (samples > 0) {
+		int ring = -1;
+		int64_t ns_in = 0, media_out = -1;
+		atempo_get_state(ctx->atempo_ctx, &ring, NULL, NULL, &ns_in, NULL, NULL, &media_out);
+		INT64 media = media_out >= 0 ? media_out : MAX(0, ns_in - ring);
+		atempo_omap_push(ctx, samples, media);
+	}
+	return samples;
+}
+
+static int atempo_read_output(struct ctx *ctx, AUDIO_FRAME *frame, int count)
+{
+	int bpf = av_get_bytes_per_sample(ctx->format) * ctx->channels;
+	frame->size = 0;
+	frame->fakeSize = 0;
+	if (count <= 0)
+		return 0;
+	int bytes = count * bpf;
+	if (bytes > ctx->output_buffer_size) {
+		uint8_t *buffer = arealloc(ctx->output_buffer, bytes);
+		if (!buffer)
+			return AVERROR(ENOMEM);
+		ctx->output_buffer = buffer;
+		ctx->output_buffer_size = bytes;
+	}
+	void *planes[] = { ctx->output_buffer };
+	if (av_audio_fifo_read(ctx->fifo, planes, count) != count)
+		return AVERROR(EIO);
+	frame->data = ctx->output_buffer;
+	frame->size = bytes;
+	frame->format = WAVE_FORMAT_PCM;
+	frame->channels = ctx->channels;
+	frame->samplesPerSec = ctx->sample_rate;
+	frame->bits = av_get_bytes_per_sample(ctx->format) * 8;
+	ctx->total_output_samples += count;
+	return 0;
 }
 
 static void atempo_reset_runtime_baseline(struct ctx *ctx, const char *reason)
@@ -256,6 +312,20 @@ static void atempo_reset_runtime_baseline(struct ctx *ctx, const char *reason)
 	ctx->last_input_samples = -1;
 	ctx->last_target_samples = -1;
 	ctx->last_output_samples = -1;
+}
+
+static int atempo_publish_speed(struct ctx *ctx, float speed)
+{
+	UINT64 boundary = ctx->total_output_samples + av_audio_fifo_size(ctx->fifo);
+	if (ctx->commit_count && ctx->commits[ctx->commit_count - 1].boundary == boundary) {
+		ctx->commits[ctx->commit_count - 1].speed = speed;
+		return 0;
+	}
+	if (ctx->commit_count == 2)
+		return AVERROR(ENOSPC);
+	ctx->commits[ctx->commit_count].speed = speed;
+	ctx->commits[ctx->commit_count++].boundary = boundary;
+	return 0;
 }
 
 static int atempo_update_speed(struct ctx *ctx, float speed)
@@ -291,6 +361,10 @@ static int atempo_update_speed(struct ctx *ctx, float speed)
 			(unsigned long long)ctx->total_output_samples, fifo_samples,
 			(unsigned long long)boundary_out, ctx->sample_rate);
 	}
+	if (atempo_collect_output(ctx) < 0)
+		return -1;
+	if (atempo_publish_speed(ctx, speed) < 0)
+		return -1;
 	ctx->current_speed = speed;
 
 	// Reset the wrapper diagnostics on every tempo change and let the normal
@@ -354,56 +428,10 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 {
 	int ret;
 
-	// Flush existing graph before destruction
-	if (ctx->filter_graph && ctx->abuffer_ctx && ctx->abuffersink_ctx) {
-		DBGA serprintf("atempo: flushing graph. speed=%.3f current=%.3f FIFO size before: %d\n",
-			speed, ctx->current_speed, av_audio_fifo_size(ctx->fifo));
-		// Push EOF to source
-		int ret = av_buffersrc_add_frame(ctx->abuffer_ctx, NULL);
-		if (ret < 0) {
-			serprintf("atempo: warning: failed to flush source buffer: %s\n", av_err2str(ret));
-		}
-
-		// Drain remaining frames to FIFO
-		int flushed_samples = 0;
-		while (1) {
-			ret = av_buffersink_get_frame(ctx->abuffersink_ctx, ctx->out_frame);
-			if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-				break;
-			}
-			if (ret < 0) {
-				serprintf("atempo: warning: error draining frame: %s\n", av_err2str(ret));
-				break;
-			}
-
-			// Write to FIFO
-			if (av_audio_fifo_space(ctx->fifo) < ctx->out_frame->nb_samples) {
-				if (av_audio_fifo_realloc(ctx->fifo,
-					av_audio_fifo_size(ctx->fifo) + ctx->out_frame->nb_samples) < 0) {
-					serprintf("atempo: failed to realloc FIFO during flush\n");
-					av_frame_unref(ctx->out_frame);
-					break;
-				}
-			}
-
-			av_audio_fifo_write(ctx->fifo, (void **)ctx->out_frame->data, ctx->out_frame->nb_samples);
-			flushed_samples += ctx->out_frame->nb_samples;
-			av_frame_unref(ctx->out_frame);
-		}
-		DBGA serprintf("atempo: flushed %d samples. FIFO size after: %d\n", flushed_samples, av_audio_fifo_size(ctx->fifo));
-	}
-
-	// Free existing graph
-    if (ctx->filter_graph) {
-        avfilter_graph_free(&ctx->filter_graph);
-        ctx->abuffer_ctx = NULL;
-        ctx->aformat_in_ctx = NULL;
-        ctx->abuffersink_ctx = NULL;
-        ctx->aformat_out_ctx = NULL;
-    }
-    ctx->atempo_ctx = NULL;
-
-	// Do NOT reset FIFO here - we want to preserve buffered audio across speed changes!
+	// Runtime tempo changes use commands. Graph creation is only for a fresh
+	// epoch or format; never rebuild a live graph as error recovery.
+	if (ctx->filter_graph)
+		return AVERROR(EINVAL);
 
     // Clamp speed to supported range
     if (speed < SPEED_MIN) speed = SPEED_MIN;
@@ -582,6 +610,9 @@ static int rebuild_filter_graph(struct ctx *ctx, float speed)
 
 	ctx->current_speed = speed;
 	ctx->filter_initialized = 1;
+	ctx->eof = 0;
+	if (atempo_publish_speed(ctx, speed) < 0)
+		return -1;
 
 	DBGA serprintf("atempo: filter graph configured for speed %.3f (internal=flt output=%s)\n",
 		speed, sample_format_name(ctx->format));
@@ -606,6 +637,7 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 	ctx->channels = audio->channels;
 	ctx->sample_rate = audio->samplesPerSec;
 	ctx->current_speed = 1.0f;
+	atempo_omap_reset(ctx, 0);
 	ctx->delay_log_count = 0;
 	ctx->last_delay_ms = -1;
 	ctx->last_fifo_ms = -1;
@@ -717,6 +749,8 @@ static int atempo_reconfigure_format(struct ctx *ctx, int channels,
 	ctx->sample_rate = sample_rate;
 	ctx->format = format;
 	ctx->filter_initialized = 0;
+	ctx->commit_count = 0;
+	ctx->eof = 0;
 	ctx->current_speed = 1.0f;
 
 	AVChannelLayout ch_layout = {0};
@@ -748,13 +782,14 @@ static int atempo_reconfigure_format(struct ctx *ctx, int channels,
 	return 0;
 }
 
-static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
+static int atempo_filter_input(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 {
 	struct ctx *ctx = f->priv;
 
-	if (!ctx || !frame || !frame->data || frame->size <= 0) {
+	if (frame->size <= 0)
 		return 0;
-	}
+	if (!frame->data)
+		return -1;
 
 	// Get current speed from audio interface
 	float speed = audio_interface_is_audio_speed_enabled() ?
@@ -797,12 +832,8 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		} else {
 			DBGA serprintf("atempo: speed changed %.3f -> %.3f (fifo=%d)\n",
 				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
-			if (atempo_update_speed(ctx, speed) < 0) {
-				if (rebuild_filter_graph(ctx, speed) < 0) {
-					serprintf("atempo: failed to rebuild filter graph\n");
-					return -1;
-				}
-			}
+			if (atempo_update_speed(ctx, speed) < 0)
+				return -1;
 			ctx->last_speed_change_ms = atime();
 			ctx->delay_log_count = 0;
 		}
@@ -811,8 +842,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	int ret;
 	int bytes_per_sample = av_get_bytes_per_sample(ctx->format) * ctx->channels;
 	int fifo_before_push = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1;
-	int drained_frames = 0;
-	int drained_samples = 0;
+	int input_samples = frame->size / bytes_per_sample;
 
 	// Setup input frame
 	ctx->in_frame->nb_samples = frame->size / bytes_per_sample;
@@ -826,59 +856,15 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		return -1;
 	}
 
-	// Pull all available filtered frames into FIFO
-	while (1) {
-		ret = av_buffersink_get_frame(ctx->abuffersink_ctx, ctx->out_frame);
-		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-			break;
-		}
-		if (ret < 0) {
-			serprintf("atempo: error getting frame: %s\n", av_err2str(ret));
-			return -1;
-		}
-
-		// Write to FIFO
-		if (av_audio_fifo_space(ctx->fifo) < ctx->out_frame->nb_samples) {
-			if (av_audio_fifo_realloc(ctx->fifo,
-				av_audio_fifo_size(ctx->fifo) + ctx->out_frame->nb_samples) < 0) {
-				serprintf("atempo: failed to realloc FIFO\n");
-				av_frame_unref(ctx->out_frame);
-				return -1;
-			}
-		}
-
-		av_audio_fifo_write(ctx->fifo, (void **)ctx->out_frame->data, ctx->out_frame->nb_samples);
-		drained_frames++;
-		drained_samples += ctx->out_frame->nb_samples;
-		av_frame_unref(ctx->out_frame);
-	}
-
-	// Record this drain burst in the production output->media map.  Sample the
-	// media position (af ns_in - ring) once after the burst: af_atempo consumed
-	// the input for these output samples by now, so (media_now - prev) is the
-	// media this burst represents, keyed by the burst's cumulative output index.
-	if (drained_samples > 0 && ctx->atempo_ctx) {
-		int af_ring = -1;
-		int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
-		int64_t af_media_out = -1;
-		double af_tempo = 0.0;
-		atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
-			&af_ns_in, &af_ns_out, &af_tempo, &af_media_out);
-		// New FFmpeg builds expose the media position represented by the actual
-		// output frontier. Older builds leave the sentinel untouched, retaining
-		// the ns_in-ring approximation as a compatible fallback.
-		INT64 media_now = af_media_out >= 0
-			? (INT64)af_media_out
-			: (INT64)af_ns_in - (INT64)af_ring;
-		atempo_omap_push(ctx, drained_samples, media_now);
-	}
+	int drained_samples = atempo_collect_output(ctx);
+	if (drained_samples < 0)
+		return -1;
 
 	// Read the expected output duration for this input block. Runtime tempo
 	// transitions can leave a persistent surplus because af_atempo produces
 	// complete WSOLA fragments rather than exactly input/speed samples per call.
 	// Keep one target-sized burst cushion and retire older surplus gradually into
 	// AudioTrack, where normal backpressure and the presented-frame ledger pace it.
-	int input_samples = ctx->in_frame->nb_samples;
 	int available_samples = av_audio_fifo_size(ctx->fifo);
 	int target_samples = input_samples;
 
@@ -905,33 +891,8 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		samples_to_read = available_samples;
 	}
 
-    if (samples_to_read > 0) {
-        int bytes_needed = samples_to_read * bytes_per_sample;
-        if (ctx->output_buffer_size < bytes_needed) {
-            uint8_t *new_buffer = arealloc(ctx->output_buffer, bytes_needed);
-            if (!new_buffer) {
-                serprintf("atempo: failed to grow output buffer to %d bytes\n", bytes_needed);
-                frame->size = 0;
-                return -1;
-            }
-            ctx->output_buffer = new_buffer;
-            ctx->output_buffer_size = bytes_needed;
-        }
-
-        void *data_ptrs[1] = { ctx->output_buffer };
-        int read_samples = av_audio_fifo_read(ctx->fifo, data_ptrs, samples_to_read);
-        if (read_samples > 0) {
-            frame->data = ctx->output_buffer;
-            frame->size = read_samples * bytes_per_sample;
-            samples_to_read = read_samples;
-        } else {
-            frame->size = 0;
-            samples_to_read = 0;
-        }
-    } else {
-        // No output available yet (initial buffering)
-        frame->size = 0;
-    }
+	if (atempo_read_output(ctx, frame, samples_to_read) < 0)
+		return -1;
 
 	int fifo_after_read = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1;
 	ctx->last_input_samples = input_samples;
@@ -941,14 +902,13 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 		if (ctx->post_tempo_marker_pending) {
 			DBGA serprintf("atempo_ckpt_first_output: seq=%d speed=%.3f out_start=%llu out=%d fifo_after=%d rate=%d\n",
 				ctx->tempo_change_seq, speed,
-				(unsigned long long)ctx->total_output_samples,
+				(unsigned long long)(ctx->total_output_samples - samples_to_read),
 				samples_to_read, fifo_after_read, ctx->sample_rate);
 			ctx->post_tempo_marker_pending = 0;
 		}
-		ctx->total_output_samples += (UINT64)samples_to_read;
 	}
-	DBGA serprintf("atempo_flow: speed=%.3f in=%d target=%d surplus_drain=%d drained_frames=%d drained_samples=%d fifo_before=%d fifo_after_push=%d out=%d fifo_after_read=%d\n",
-		speed, input_samples, target_samples, surplus_drain, drained_frames, drained_samples,
+	DBGA serprintf("atempo_flow: speed=%.3f in=%d target=%d surplus_drain=%d drained_samples=%d fifo_before=%d fifo_after_push=%d out=%d fifo_after_read=%d\n",
+		speed, input_samples, target_samples, surplus_drain, drained_samples,
 		fifo_before_push, fifo_after_push, samples_to_read, fifo_after_read);
 	DBGA {
 		int af_ring = -1;
@@ -971,35 +931,62 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	return 0;
 }
 
+static int atempo_fail(AUDIO_FRAME *frame)
+{
+	frame->data = NULL;
+	frame->size = frame->fakeSize = 0;
+	frame->error = 1;
+	return -1;
+}
+
+static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
+{
+	if (!f->priv || !frame)
+		return frame ? atempo_fail(frame) : -1;
+	struct ctx *ctx = f->priv;
+	if (ctx->eof || atempo_filter_input(f, frame) < 0)
+		return atempo_fail(frame);
+	return 0;
+}
+
+static int _drain(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame, int end)
+{
+	memset(frame, 0, sizeof(*frame));
+	struct ctx *ctx = f->priv;
+	if (!ctx || !ctx->filter_initialized)
+		return 0;
+	if (end && !ctx->eof) {
+		if (av_buffersrc_add_frame(ctx->abuffer_ctx, NULL) < 0)
+			return atempo_fail(frame);
+		ctx->eof = 1;
+	}
+	if (atempo_collect_output(ctx) < 0 ||
+	    atempo_read_output(ctx, frame, MIN(av_audio_fifo_size(ctx->fifo),
+		MAX(1, ctx->sample_rate / 20))) < 0)
+		return atempo_fail(frame);
+	return 0;
+}
+
 static int _flush(STREAM_FILTER_AUDIO *f)
 {
 	struct ctx *ctx = f->priv;
-	DBGA serprintf("atempo: flush\n");
-
-	if (ctx && ctx->fifo) {
+	if (!ctx)
+		return 0;
+	// A seek discards old audio; an EOF drain delivers it. EOF cannot reset an
+	// abuffer graph for reuse, so destroy it and reopen lazily at the target speed.
+	avfilter_graph_free(&ctx->filter_graph);
+	ctx->abuffer_ctx = ctx->aformat_in_ctx = ctx->atempo_ctx = NULL;
+	ctx->aformat_out_ctx = ctx->abuffersink_ctx = NULL;
+	ctx->filter_initialized = 0;
+	ctx->eof = 0;
+	ctx->commit_count = 0;
+	av_frame_unref(ctx->out_frame);
+	if (ctx->fifo)
 		av_audio_fifo_reset(ctx->fifo);
-	}
-	if (ctx) {
-		ctx->total_output_samples = 0;
-		ctx->post_tempo_marker_pending = 0;
-		// Read and write cursors both restart at 0 for the new stream.
-		atempo_omap_reset(ctx, 0);
-	}
-
-	if (ctx && ctx->filter_graph && ctx->abuffer_ctx && ctx->abuffersink_ctx) {
-		// Flush filter graph
-		(void)av_buffersrc_add_frame(ctx->abuffer_ctx, NULL);
-
-		// Drain remaining frames
-		AVFrame *frame = av_frame_alloc();
-		if (frame) {
-			while (av_buffersink_get_frame(ctx->abuffersink_ctx, frame) >= 0) {
-				av_frame_unref(frame);
-			}
-			av_frame_free(&frame);
-		}
-	}
-
+	ctx->total_output_samples = 0;
+	ctx->post_tempo_marker_pending = 0;
+	atempo_omap_reset(ctx, 0);
+	atempo_reset_runtime_baseline(ctx, "flush");
 	return 0;
 }
 
@@ -1167,9 +1154,23 @@ STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new(void)
 	f->flush     = _flush;
 	f->set_param = _set_param;
 	f->delay     = _delay;
+	f->drain     = _drain;
 
 	DBGA serprintf("atempo: audio speed filter created\n");
 	return f;
+}
+
+int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f,
+	float *speed, UINT64 *boundary)
+{
+	struct ctx *ctx = f ? f->priv : NULL;
+	if (!ctx || !ctx->commit_count)
+		return 0;
+	*speed = ctx->commits[0].speed;
+	*boundary = ctx->commits[0].boundary;
+	if (--ctx->commit_count)
+		ctx->commits[0] = ctx->commits[1];
+	return 1;
 }
 
 int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate)
@@ -1257,9 +1258,9 @@ int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *f,
 		if (lo >= hi || e->nsamples <= 0) {
 			continue;
 		}
-		UINT64 overlap = hi - lo;
-		// Prorate this entry's media span by the overlapping output fraction.
-		span += ((INT64)overlap * e->media_span) / (INT64)e->nsamples;
+		// Difference of endpoints makes split/partial writes add up exactly.
+		span += ((INT64)(hi - e_start) * e->media_span) / e->nsamples -
+		        ((INT64)(lo - e_start) * e->media_span) / e->nsamples;
 	}
 	if (media_span_frames) {
 		*media_span_frames = span;
@@ -1272,6 +1273,9 @@ int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *f,
 
 #else
 // Stub implementation when FFmpeg is not available
+int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f,
+	float *speed, UINT64 *boundary) { return 0; }
+
 STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new(void)
 {
 	serprintf("atempo: filter not available (FFmpeg disabled)\n");

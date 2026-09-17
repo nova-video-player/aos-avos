@@ -1410,6 +1410,31 @@ int stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_ra
 	return r.heard_rst;
 }
 
+// Resolve both clocks and the commit boundary from one observation. Android
+// presentation evidence does not include unknown external receiver latency.
+int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate,
+	int *ts, int *rst, int *state)
+{
+	int source = 0, age = 0;
+	if( !s || !s->audio_ctx || !s->atempo_ledger_active || s->atempo_ledger_count <= 0 ||
+	    !audio_interface_get_presented_frames(s->audio_ctx, playhead, rate, &source, &age, 1) ||
+	    *rate <= 0 || age > 100 )
+		return 0;
+	if( source != AT_PRESENTED_FRAMES_SRC_TIMESTAMP ) {
+		if( !s->atempo_ledger_lat_valid )
+			return 0;
+		UINT64 latency = (UINT64)MAX(0, s->atempo_ledger_lat_frames);
+		*playhead = *playhead > latency ? *playhead - latency : 0;
+	}
+	ATEMPO_LEDGER_LOOKUP r = _stream_atempo_ledger_lookup(s, *playhead, *rate);
+	if( r.heard == STREAM_NO_PTS_VALUE || r.heard_rst == STREAM_NO_PTS_VALUE || r.state < 0 )
+		return 0;
+	*ts = r.heard;
+	*rst = r.heard_rst;
+	*state = r.state;
+	return 1;
+}
+
 // Caller holds mode2_heard_mutex. The static clock remains live as fallback;
 // trusted AudioTimestamp evidence replaces it only after proving a stable
 // submitted-minus-presented frontier. For AC3 recode, that frontier already
@@ -1797,7 +1822,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		{
 			UINT64 frames_fresh = 0;
 			int rate_fresh = 0, src_fresh = 0, age_fresh = 0;
-			if( audio_interface_get_presented_frames( s->audio_ctx, &frames_fresh, &rate_fresh, &src_fresh, &age_fresh, 1 )
+			if( audio_interface_get_presented_frames( s->audio_ctx, &frames_fresh, &rate_fresh, &src_fresh, &age_fresh, 2 )
 				&& frames_fresh >= ep_frames ) {
 				s->at_speed_epoch_frames_cached = frames_fresh;
 				s->at_speed_epoch_cache_wall_ms = wall_now;
@@ -1806,10 +1831,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 
 		UINT64 frames_now = s->at_speed_epoch_frames_cached;
 		if( ep_frames > 0 && ep_rate > 0 && frames_now >= ep_frames ) {
-			// frames_delta is in RST/media-sample domain; convert to TS via RST_TO_TS_DELTA.
+			// Use this checkpoint's confirmed rate, even while the global map changes.
 			UINT64 frames_delta = frames_now - ep_frames;
 			int delta_media_ms = (int)((frames_delta * 1000) / (UINT64)ep_rate);
-			int delta_ts = RST_TO_TS_DELTA( delta_media_ms, int );
+			int delta_ts = s->at_speed_epoch_speed > 0.0f
+				? (int)(delta_media_ms / s->at_speed_epoch_speed) : delta_media_ms;
 			int checkpoint_heard = s->at_speed_epoch_heard_ts + delta_ts;
 			DBG {
 				static int last_epoch_log_ms = 0;

@@ -739,6 +739,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 
 	float applied_speed = av_speed;
 	int defer_commit = 0;
+	int speed_apply_failed = 0;
 	if( using_atempo ) {
 		float clamped_speed = av_speed;
 		if( clamped_speed < 0.5f ) {
@@ -759,49 +760,11 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		// permanent A/V offset of queue_ms * delta_speed per step.  Defer the
 		// video-side commit until the playhead crosses the boundary where new-speed
 		// content begins (stream_atempo_commit_poll).
-		if( speed_changed && video_active && s->atempo_ledger_active ) {
-			UINT64 flt_out = 0;
-			int flt_fifo = 0, flt_rate = 0;
-			stream_filter_audio_atempo_get_ledger_stats( s->audio_filter_atempo,
-				&flt_out, &flt_fifo, &flt_rate );
-			// Diag "prev" is the speed in effect just before this step: the
-			// last queued checkpoint's target if a ramp is in flight, else the
-			// currently committed mapping speed.
-			float prev_for_diag = previous_speed;
-			if( s->atempo_commit_count > 0 ) {
-				int tail = ( s->atempo_commit_head + s->atempo_commit_count - 1 ) % STREAM_ATEMPO_COMMIT_MAX;
-				prev_for_diag = s->atempo_commit_q[tail].speed;
-			}
-			if( s->atempo_commit_count >= STREAM_ATEMPO_COMMIT_MAX ) {
-				// Full (pathological ramp); drop the oldest to make room.
-				s->atempo_commit_head = ( s->atempo_commit_head + 1 ) % STREAM_ATEMPO_COMMIT_MAX;
-				s->atempo_commit_count--;
-				serprintf( "atempo_commit_overflow: queue full, dropped oldest\n" );
-			}
-			int slot = ( s->atempo_commit_head + s->atempo_commit_count ) % STREAM_ATEMPO_COMMIT_MAX;
-			s->atempo_commit_q[slot].speed      = clamped_speed;
-			s->atempo_commit_q[slot].prev_speed = prev_for_diag;
-			s->atempo_commit_q[slot].boundary   = s->atempo_ledger_output_frames +
-				(UINT64)(flt_fifo > 0 ? flt_fifo : 0);
-			s->atempo_commit_q[slot].wall_ms    = atime();
-			s->atempo_commit_count++;
-			defer_commit = 1;
-			DBG serprintf( "atempo_commit_arm: prev=%.3f target=%.3f boundary=%llu out_cursor=%llu flt_fifo=%d audio=%d anchor_ts=%d qlen=%d\n",
-				prev_for_diag, clamped_speed,
-				(unsigned long long)s->atempo_commit_q[slot].boundary,
-				(unsigned long long)s->atempo_ledger_output_frames,
-				flt_fifo, s->audio_time, speed_anchor_ts, s->atempo_commit_count );
-		} else if( s->atempo_commit_count == 0 || speed_changed ) {
-			// Same-speed re-anchor calls must not touch the mapping while
-			// commits are pending (global speed already holds the pending
-			// target).  A genuine speed change that cannot be deferred (no
-			// ledger/video) supersedes the queue: drop it, apply immediately.
-			s->atempo_commit_count = 0;
-			s->atempo_commit_head  = 0;
+		// The audio thread publishes the boundary only after the filter accepts
+		// the command. It also accounts for PCM already returned by the wrapper.
+		defer_commit = s->audio && s->audio->valid;
+		if( !defer_commit )
 			timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, clamped_speed );
-			DBG serprintf( "stream:stream_set_av_speed using atempo filter WITH timeline mapping, anchor_rst=%d anchor_ts=%d, speed=%.3f\n",
-					   stream_current_time_rst, speed_anchor_ts, clamped_speed );
-		}
 		applied_speed = clamped_speed;
 	} else {
 		s->atempo_commit_count = 0;
@@ -813,7 +776,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 			if( !passthrough && !ac3_recoding && s->audio_ctx && s->audio_time >= 0 ) {
 				UINT64 ep_frames = 0;
 				int ep_rate = 0, ep_src = 0, ep_age = 0;
-				int ep_frames_valid = audio_interface_get_presented_frames( s->audio_ctx, &ep_frames, &ep_rate, &ep_src, &ep_age, 1 );
+				int ep_frames_valid = audio_interface_get_presented_frames( s->audio_ctx, &ep_frames, &ep_rate, &ep_src, &ep_age, 2 );
 				if( !ep_frames_valid ) {
 					s->at_speed_epoch_active = 0;
 					DBG serprintf( "at_speed_epoch_arm: skipped no_playhead audio=%d anchor_ts=%d speed=%.3f\n",
@@ -838,6 +801,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 				}
 			}
 			int rc = audio_interface_change_audio_speed( s->audio_ctx, av_speed );
+			speed_apply_failed = rc != 0;
 			applied_speed = audio_interface_get_audio_speed();
 			if( s->at_speed_epoch_active ) {
 				s->at_speed_epoch_speed = applied_speed;
@@ -917,6 +881,39 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		}
 	}
 
+	return speed_apply_failed;
+}
+
+// Audio-thread only: the wrapper has accepted the tempo command and its
+// output boundary has been translated into the sink's written-frame domain.
+int stream_atempo_commit_queue( STREAM *s, float speed, UINT64 boundary )
+{
+	if( s->atempo_commit_count &&
+	    s->atempo_commit_q[s->atempo_commit_head].boundary == STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER ) {
+		s->atempo_commit_count = 0;
+		s->atempo_commit_head = 0;
+	}
+	float previous = s->video_speed_den > 0 ?
+		(float)s->video_speed_num / s->video_speed_den : 1.0f;
+	if( s->atempo_commit_count ) {
+		int tail = (s->atempo_commit_head + s->atempo_commit_count - 1) % STREAM_ATEMPO_COMMIT_MAX;
+		previous = s->atempo_commit_q[tail].speed;
+		if( s->atempo_commit_q[tail].boundary == boundary ) {
+			s->atempo_commit_q[tail].speed = speed;
+			return 0;
+		}
+	}
+	if( s->atempo_commit_count >= STREAM_ATEMPO_COMMIT_MAX )
+		return -1;
+	int slot = (s->atempo_commit_head + s->atempo_commit_count) % STREAM_ATEMPO_COMMIT_MAX;
+	s->atempo_commit_q[slot].speed = speed;
+	s->atempo_commit_q[slot].prev_speed = previous;
+	s->atempo_commit_q[slot].boundary = boundary;
+	s->atempo_commit_q[slot].wall_ms = atime();
+	s->atempo_commit_count++;
+	s->atempo_ledger_dense_until_ms = atime() + 2000;
+	DBG serprintf("atempo_commit_arm: prev=%.3f target=%.3f boundary=%llu qlen=%d\n",
+		previous, speed, (unsigned long long)boundary, s->atempo_commit_count);
 	return 0;
 }
 
@@ -928,14 +925,14 @@ void stream_atempo_commit_poll( STREAM *s )
 	if( !s || s->atempo_commit_count <= 0 || s->paused || s->paused_internal )
 		return;
 	UINT64 playhead = 0;
-	int rate = 0, src = 0, age = 0;
-	int have_ph = ( s->audio_ctx && audio_interface_get_presented_frames( s->audio_ctx,
-			&playhead, &rate, &src, &age, 1 ) );
-
-	// Anchor for every checkpoint promoted in this poll is the heard clock now:
-	// once a boundary is crossed, that step's old-speed content has been played,
-	// so the video timeline catches up to the current audible position.
-	int anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
+	int rate = 0, ledger_state = -1;
+	int anchor_ts = STREAM_NO_PTS_VALUE, anchor_rst_ledger = STREAM_NO_PTS_VALUE;
+	// Boundary, TS and RST must describe the same presentation observation,
+	// including the calibrated latency when the source is the mixer playhead.
+	int have_ph = stream_atempo_presentation(s, &playhead, &rate,
+		&anchor_ts, &anchor_rst_ledger, &ledger_state);
+	if( !have_ph )
+		anchor_ts = stream_get_heard_audio_ts( s, s->audio_time );
 	if( anchor_ts < 0 )
 		anchor_ts = s->audio_time >= 0 ? s->audio_time : 0;
 	int anchor_rst = TS_TO_RST_TIME( anchor_ts, int );
@@ -958,11 +955,7 @@ void stream_atempo_commit_poll( STREAM *s )
 			// frame boundary is meaningless.  Apply only once the NEW ledger is active
 			// and the audible playhead resolves strictly inside a block (state==0), so
 			// the flip below anchors to the fresh ledger RST and not the stale map.
-			int ledger_state = 0;
-			int ledger_rst = have_ph
-				? stream_atempo_ledger_lookup_rst( s, playhead, rate, &ledger_state )
-				: STREAM_NO_PTS_VALUE;
-			crossed = ( ledger_rst != STREAM_NO_PTS_VALUE && ledger_rst >= 0 && ledger_state == 0 );
+			crossed = have_ph && ledger_state == 0;
 		} else {
 			crossed = have_ph && playhead >= cp->boundary;
 		}
@@ -993,21 +986,13 @@ void stream_atempo_commit_poll( STREAM *s )
 	// resolves strictly INSIDE a ledger block (state==0); stale (-1) or
 	// extrapolated (+1) lookups have a weaker media slope, so fall back to the
 	// projection there.  anchor_ts and the video-sink anchor stay unchanged.
-	int anchor_rst_use = anchor_rst;
-	{
-		int ledger_state = 0;
-		int anchor_rst_ledger = STREAM_NO_PTS_VALUE;
-		if( have_ph ) {
-			anchor_rst_ledger = stream_atempo_ledger_lookup_rst( s, playhead, rate, &ledger_state );
-		}
-		int flipped = ( anchor_rst_ledger != STREAM_NO_PTS_VALUE && anchor_rst_ledger >= 0 && ledger_state == 0 );
-		if( flipped ) {
-			anchor_rst_use = anchor_rst_ledger;
-		}
-		DBG serprintf( "atempo_rst_anchor: speed=%.3f anchor_ts=%d anchor_rst_proj=%d anchor_rst_ledger=%d state=%d flipped=%d playhead=%llu have_ph=%d\n",
-			applied_speed, anchor_ts, anchor_rst, anchor_rst_ledger, ledger_state,
-			flipped, (unsigned long long)playhead, have_ph );
-	}
+	int anchor_rst_use = have_ph && ledger_state == 0 && anchor_rst_ledger >= 0
+		? anchor_rst_ledger : anchor_rst;
+
+	DBG serprintf("atempo_rst_anchor: speed=%.3f anchor_ts=%d anchor_rst_proj=%d anchor_rst_ledger=%d state=%d flipped=%d playhead=%llu have_ph=%d\n",
+		applied_speed, anchor_ts, anchor_rst, anchor_rst_ledger, ledger_state,
+		have_ph && ledger_state == 0 && anchor_rst_ledger >= 0,
+		(unsigned long long)playhead, have_ph);
 
 	timeline_map_apply( (double)anchor_rst_use, (double)anchor_ts, applied_speed );
 

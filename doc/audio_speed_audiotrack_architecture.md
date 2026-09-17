@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a sink-side synchronization mechanism. In the AudioTrack PlaybackParams path, speed changes are applied seamlessly by retargeting the timeline mapping without a self-seek. (The atempo path may optionally use a frame-accurate seek; see the atempo architecture doc.)
+This document details the architecture for audio speed changes in the AVOS player. The implementation relies on a time-scaled (`ts`) internal clock, anchored conversions between the real-stream and time-scaled domains, and a sink-side synchronization mechanism. In the AudioTrack PlaybackParams path, speed changes are applied seamlessly by retargeting the timeline mapping without a self-seek.
 
 ### MediaCodec Audio Exclusion
 
@@ -55,7 +55,7 @@ Speed changes no longer flush the pipeline. Instead, the player maintains an anc
 - `rst_to_ts_delta` / `ts_to_rst_delta` rescale pure durations without touching the anchors.
 
 Whenever `stream_set_av_speed` succeeds (or the audio hardware reports a quantised ratio), the current playback position is captured and used as the new anchor so in-flight buffers keep their ordering.
-This AudioTrack path intentionally avoids seek-based realignment; the optional frame‑accurate seek is restricted to the atempo path when explicitly enabled.
+Both speed backends use seamless timeline updates without a self-seek on speed changes.
 
 ### AudioTrack PlaybackParams Speed-Epoch Clock
 
@@ -88,7 +88,7 @@ checkpoint at every speed change, including a return to 1.0x:
 ```text
 frames_delta = current_playback_head - at_speed_epoch_presented_frames
 delta_media_ms = frames_delta * 1000 / at_speed_epoch_rate
-heard_ts = at_speed_epoch_heard_ts + RST_TO_TS_DELTA(delta_media_ms)
+heard_ts = at_speed_epoch_heard_ts + delta_media_ms / at_speed_epoch_speed
 ```
 
 This is the same checkpoint idea used by players that derive the audible media
@@ -105,6 +105,23 @@ epoch heard-clock query. A stale 10ms cache was observed to reintroduce
 perceptible stair-step jitter during speed ramps. A future optimization may
 interpolate between less frequent playhead samples, but that should be a
 separate correctness-neutral change.
+
+The speed checkpoint explicitly requests a direct playhead query
+(`prefer_fresh = 2`) both when it is armed and when its clock is read. A cached
+AudioTimestamp extrapolated using the new speed cannot stand in for the old
+position at the transition. Other fresh presentation queries accept timestamps
+only up to 100ms old, then query the playhead directly.
+
+Successful rate changes invalidate obsolete timestamp extrapolation while
+preserving queued samples and the frame epoch. If `setPlaybackParams()` fails,
+AVOS still attempts hardware readback and keeps that rate; if readback also
+fails, it retains the previous confirmed rate. It does not claim a rollback to
+1.0x that the hardware never performed. The timeline and checkpoint use the
+applied rate.
+
+A non-flushing pause preserves the checkpoint. Seek, stop, or a backend restart
+that discards output clears it. Android playhead/timestamp observations do not
+measure unknown downstream soundbar or receiver latency.
 
 ### A/V Synchronization and Video Pacing
 

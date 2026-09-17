@@ -354,18 +354,23 @@ int audio_interface_get_passthrough(audio_ctx_t *ctx)
 
 void audio_interface_set_audio_speed(float speed)
 {
-	previous_audio_speed = audio_speed;
-	audio_speed = speed;
+	float previous = audio_interface_get_audio_speed();
+	__atomic_store(&previous_audio_speed, &previous, __ATOMIC_RELAXED);
+	__atomic_store(&audio_speed, &speed, __ATOMIC_RELAXED);
 }
 
 float audio_interface_get_audio_speed()
 {
-	return audio_speed;
+	float speed;
+	__atomic_load(&audio_speed, &speed, __ATOMIC_RELAXED);
+	return speed;
 }
 
 float audio_interface_get_previous_audio_speed()
 {
-	return previous_audio_speed;
+	float speed;
+	__atomic_load(&previous_audio_speed, &speed, __ATOMIC_RELAXED);
+	return speed;
 }
 
 void audio_interface_enable_audio_speed(int enable)

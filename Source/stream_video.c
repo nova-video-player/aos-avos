@@ -609,6 +609,9 @@ DBGS serprintf("stream_open_audio_filter: created [%s] (will open lazily on firs
 	// Open atempo audio speed control filter (unless disabled via preference)
 #ifdef CONFIG_FFMPEG_AUDIO
 	if (!stream_disable_atempo) {
+		s->audio_atempo_draining = 0;
+		s->audio_decoder_draining = 0;
+		s->audio_end = 0;
 		s->audio_filter_atempo = stream_filter_audio_atempo_new();
 		if( s->audio_filter_atempo ) {
 			if( s->audio_filter_atempo->open( s->audio_filter_atempo, s->audio ) ) {
@@ -956,6 +959,7 @@ static void stream_close_audio_filter( STREAM *s )
 {
 DBGS serprintf("stream_close_audio_filter\r\n");
 	s->audio_ac3_draining = 0;
+	s->audio_atempo_draining = 0;
 	// Close and delete JNI filter
 	if( s->audio_filter_jni ) {
 		if( s->audio_filter_jni->close ) {

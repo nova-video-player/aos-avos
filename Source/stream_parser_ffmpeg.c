@@ -159,6 +159,7 @@ typedef struct FF_PRIV
 	AVQueue		aq;
 	AVQueue		vq;
 	AVQueue		sq;
+	AVQueue		sub_cache; // bounded packet history for all internal subtitle tracks
 	
 	STREAM		*s;
 	UINT64		size;
@@ -971,10 +972,12 @@ DBGP serprintf("info\r\n");
 	LinkedList_init( &ff_p->aq.list );
 	LinkedList_init( &ff_p->vq.list );
 	LinkedList_init( &ff_p->sq.list );
+	LinkedList_init( &ff_p->sub_cache.list );
 
 	pthread_mutex_init( &ff_p->aq.mutex, NULL );
 	pthread_mutex_init( &ff_p->vq.mutex, NULL );
 	pthread_mutex_init( &ff_p->sq.mutex, NULL );
+	pthread_mutex_init( &ff_p->sub_cache.mutex, NULL );
 
 	// make lavf parser use this sync mode! 0 is for STREAM_SYNC_CDATA (PTS) and 1 for STREAM_SYNC_SAMPLES
 	//s->sync_mode = STREAM_SYNC_SAMPLES;
@@ -1029,6 +1032,12 @@ serprintf("FFMPEG: not open!\r\n" );
 		_flush_packets( &ff_p->vq, "VID" );
 		_flush_packets( &ff_p->aq, "AUD" );
 		_flush_packets( &ff_p->sq, "SUB" );
+		_flush_packets( &ff_p->sub_cache, "SUB_CACHE" );
+
+		pthread_mutex_destroy(&ff_p->aq.mutex);
+		pthread_mutex_destroy(&ff_p->vq.mutex);
+		pthread_mutex_destroy(&ff_p->sq.mutex);
+		pthread_mutex_destroy(&ff_p->sub_cache.mutex);
 
 		av_dict_free(&ff_p->fmt_opts);
 
@@ -1059,9 +1068,17 @@ static int _add_packet( AVQueue *q, AVPacket *packet )
 	pthread_mutex_lock( &q->mutex );
 
 	PacketNode *node = acalloc( 1, sizeof( PacketNode ) );
+	if (!node) {
+		pthread_mutex_unlock(&q->mutex);
+		return 1;
+	}
 	LinkedListNode_init( (LinkedListNode*)node);
 
-	av_packet_ref(&node->packet, packet);
+	if (av_packet_ref(&node->packet, packet) < 0) {
+		afree(node);
+		pthread_mutex_unlock(&q->mutex);
+		return 1;
+	}
 
 	LinkedList_append( &q->list, (LinkedListNode*) node);
 	
@@ -1135,6 +1152,99 @@ DBGP serprintf("flush_packets[%s] [%4d|%8d]->", tag, q->packets, q->mem_used );
 		_dispose_packet( &_packet );
 	}
 DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
+	return 0;
+}
+
+// Subtitle history must not fill the A/V queue budget or force a media seek.
+// Keep recent bitmap decoder state plus still-active text and demux lookahead.
+#define SUB_CACHE_MAX_BYTES (8 * 1024 * 1024)
+#define SUB_CACHE_MAX_PACKETS 2048
+#define SUB_CACHE_HISTORY_MS 60000
+
+static SUB_PROPERTIES *_subtitle_props_for_stream(STREAM *s, int stream)
+{
+	for (int i = 0; i < ff_p->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &ff_p->av.sub[i];
+		if (sub->valid && sub->stream == stream)
+			return sub;
+	}
+	return NULL;
+}
+
+static int64_t _subtitle_packet_time(STREAM *s, AVPacket *packet)
+{
+	int64_t pts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+	if (pts == AV_NOPTS_VALUE)
+		return AV_NOPTS_VALUE;
+	return av_rescale_q(pts, ff_p->fmt->streams[packet->stream_index]->time_base,
+		(AVRational){1, 1000}) - ff_p->start_time;
+}
+
+static int64_t _subtitle_switch_time(STREAM *s)
+{
+	int time = s->video_time >= 0 ? s->video_time : 0;
+	return (int64_t)TS_TO_RST_TIME(time, int64_t) - s->subtitle_offset;
+}
+
+static int _subtitle_packet_expired(STREAM *s, AVPacket *packet, int64_t now)
+{
+	int64_t start = _subtitle_packet_time(s, packet);
+	SUB_PROPERTIES *sub = _subtitle_props_for_stream(s, packet->stream_index);
+	if (start == AV_NOPTS_VALUE || !sub)
+		return 0;
+	int64_t duration = av_rescale_q(packet->duration,
+		ff_p->fmt->streams[packet->stream_index]->time_base, (AVRational){1, 1000});
+	// Bitmap display sets can depend on earlier palettes/objects. Text packets
+	// with an explicit end can be removed as soon as they expire.
+	int64_t retention = sub->gfx || duration <= 0 ? SUB_CACHE_HISTORY_MS : duration;
+	return start + retention <= now;
+}
+
+static void _cache_subtitle_packet(STREAM *s, AVPacket *packet)
+{
+	AVQueue *q = &ff_p->sub_cache;
+	int64_t now = _subtitle_switch_time(s);
+	// Only the parser thread mutates this cache. Track switching walks it with
+	// that thread idle, so removing entries here cannot race with replay.
+	for (LinkedListNode *it = q->list.first, *next; it; it = next) {
+		next = it->next;
+		PacketNode *node = (PacketNode *)it;
+		if (_subtitle_packet_expired(s, &node->packet, now)) {
+			LinkedList_remove(&q->list, it);
+			q->mem_used -= sizeof(*node) + node->packet.size;
+			q->packets--;
+			av_packet_unref(&node->packet);
+			afree(node);
+		}
+	}
+	if (packet->size > SUB_CACHE_MAX_BYTES - (int)sizeof(PacketNode))
+		return;
+	while (q->packets && (q->packets >= SUB_CACHE_MAX_PACKETS ||
+	       q->mem_used + packet->size + sizeof(PacketNode) > SUB_CACHE_MAX_BYTES)) {
+		AVPacket oldest;
+		if (_get_packet(q, &oldest))
+			av_packet_unref(&oldest);
+	}
+	if (!_subtitle_packet_expired(s, packet, now))
+		_add_packet(q, packet);
+}
+
+static int _reset_subtitle(STREAM *s)
+{
+	_flush_packets(&ff_p->sq, "SUB_SWITCH");
+	if (s->subtitle->ext)
+		return 0;
+	int64_t now = _subtitle_switch_time(s);
+	for (LinkedListNode *it = ff_p->sub_cache.list.first; it; it = it->next) {
+		AVPacket *packet = &((PacketNode *)it)->packet;
+		if (packet->stream_index == s->subtitle->stream &&
+		    !_subtitle_packet_expired(s, packet, now) && _add_packet(&ff_p->sq, packet)) {
+			_flush_packets(&ff_p->sq, "SUB_SWITCH_FAILED");
+			return 1;
+		}
+	}
+	DBGS serprintf("subtitle switch: stream=%d replay=%d packets at=%lldms\n",
+		s->subtitle->stream, ff_p->sq.packets, (long long)now);
 	return 0;
 }
 
@@ -1323,14 +1433,16 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 			if( timestamp )
 				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
 		}
-	} else if( s->subtitle->valid && stream == s->subtitle->stream ) {
+	} else if( _subtitle_props_for_stream(s, stream) ) {
 		_rt_sub_pkts++;
-DBGP2 serprintf("SUBTITLE   dts/pts %8lld/%8lld  ", GET_SUB_TS( packet.dts ), GET_SUB_TS( packet.pts ) );
-DBGP2 DumpLine( packet.data, 16, 16 );
-		// add subtitle packet
-		_add_packet( &ff_p->sq, &packet );
-		if( timestamp )
-			*timestamp = GET_SUB_TS( packet.pts );
+		_cache_subtitle_packet(s, &packet);
+		if (s->subtitle->valid && !s->subtitle->ext && stream == s->subtitle->stream) {
+			_add_packet(&ff_p->sq, &packet);
+			if (timestamp)
+				*timestamp = GET_SUB_TS(packet.pts);
+		} else if (timestamp) {
+			*timestamp = -1;
+		}
 	} else {
 		_rt_discard_pkts++;
 		// A packet that doesn't match any known stream index. Should be rare
@@ -1464,6 +1576,7 @@ serprintf("FFMPEG: seek error\r\n");
 	_flush_packets( &ff_p->vq, "VID" );
 	_flush_packets( &ff_p->aq, "AUD" );
 	_flush_packets( &ff_p->sq, "SUB" );
+	_flush_packets( &ff_p->sub_cache, "SUB_CACHE" );
 
 	ff_p->sleeping = 0;
 	
@@ -1762,10 +1875,14 @@ static int _get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_CDA
 	}
 
 	AVPacket _packet;
-	AVPacket *packet = _get_packet( &ff_p->sq, &_packet );
-	if( !packet ) {
-		return 1;
+	AVPacket *packet;
+	while ((packet = _get_packet(&ff_p->sq, &_packet))) {
+		if (!s->subtitle->ext && packet->stream_index == s->subtitle->stream)
+			break;
+		_dispose_packet(packet);
 	}
+	if (!packet)
+		return 1;
 
 	if( sub_buffer->size < packet->size + 128 ) {
 serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
@@ -1789,6 +1906,7 @@ DBGC32 serprintf("  S  siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->
 	
 	int duration_rst = GET_SUB_TS( packet->duration );
 	int duration_ts = RST_TO_TS_DELTA(duration_rst, int);
+	cdata->subtitle_duration = duration_ts;
 	if( s->subtitle->format == SUB_FORMAT_SSA ) {
 		cdata->size = msk_fixup_ssa( sub_buffer->data, sub_buffer->size, packet->data, packet->size, cdata->time, duration_ts );
 	} else if( s->subtitle->format == SUB_FORMAT_TEXT ) {
@@ -1949,6 +2067,7 @@ static STREAM_PARSER stream_parser_FFMPEG = {
 	_get_index,
 	NULL,		// start_next
 	_get_stats,
+	.reset_subtitle = _reset_subtitle,
 };
 
 #ifndef CONFIG_LIVE555_RTSP

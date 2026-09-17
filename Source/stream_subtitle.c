@@ -139,56 +139,68 @@ DBG serprintf("new int TXT: video %8d  start %8d  dur %8d  [%s]\r\n", s->video_t
 // *****************************************************************************
 static void _get_next_int_sub( STREAM *s, int time )
 {
-	if( !s->seek ) {
-		if( !s->sub_dec ) {
-			// try to get a sub decoder
-			s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
-
-			// open the decoder		
-			if( stream_open_sub_dec( s ) ) {
-				// no subs, disable it
-				stream_drop_subtitles( s );
-				return;
-			} 
-			
-			alloc_sub_frame( s );
-			
-			if( !s->subtitle_frame ) {
-serprintf("cannot allocate subtitle frame!\r\n");
-				stream_close_sub_dec( s );
-				// no subs, disable it
-				stream_drop_subtitles( s );
-				return;
-			}
-		}
-		if( !s->cdata_sub.valid ) {
-			if ( !s->parser->get_subtitle_cdata ) { 
-				return;
-			}
-			if( s->parser->get_subtitle_cdata( s, &s->sub_buffer, &s->cdata_sub ) ) {
-				// no subs, need to advance the sub last pos....
-				stream_buffer_fix_subs( s->buffer );
-				return;
-			}
-		}
-		
-		if( s->cdata_sub.valid ) {
-			if( time == -1 ) {
-				// no video yet...
-				return;
-			}
-			// if the sub has a time of -1 just let it pass...
-			if( s->cdata_sub.time == -1 || s->cdata_sub.time <= time ) {
-				VIDEO_FRAME *f = s->subtitle_frame;
-//DBG serprintf("SUB: size %5d  sub %8d  video %8d\r\n", s->cdata_sub.size, s->cdata_sub.time, s->video_time );
-				s->sub_dec->decode( s->sub_dec, s->sub_buffer.data, s->cdata_sub.size, s->cdata_sub.time, &f ); 
-				s->cdata_sub.valid = 0;
-				if( f ) {
-					_output_sub( s, f, s->cdata_sub.pos );
-				}
-			}
+	if( s->seek )
+		return;
+	if( !s->sub_dec ) {
+		s->sub_dec = stream_get_new_dec_sub(s->subtitle->format);
+		if( stream_open_sub_dec(s) ) {
+			stream_drop_subtitles(s);
+			return;
 		}
 	}
+	alloc_sub_frame(s);
+	if( !s->subtitle_frame ) {
+		stream_close_sub_dec(s);
+		stream_drop_subtitles(s);
+		return;
+	}
+	if( time == -1 )
+		return;
+
+	int replay = s->subtitle_replay;
+	VIDEO_FRAME last_bitmap;
+	int have_bitmap = 0;
+	uint64_t bitmap_pos = 0;
+	// After a switch, decode retained state through the current position before
+	// presenting bitmap output. Old display/clear sets must not flash on screen.
+	for( ;; ) {
+		if( !s->cdata_sub.valid ) {
+			if( !s->parser->get_subtitle_cdata ||
+			    s->parser->get_subtitle_cdata(s, &s->sub_buffer, &s->cdata_sub) ) {
+				stream_buffer_fix_subs(s->buffer);
+				break;
+			}
+		}
+		if( !s->cdata_sub.valid ||
+		    (s->cdata_sub.time != -1 && s->cdata_sub.time > time) )
+			break;
+		VIDEO_FRAME *f = s->subtitle_frame;
+		int ret = s->sub_dec->decode(s->sub_dec, s->sub_buffer.data,
+			s->cdata_sub.size, s->cdata_sub.time, &f);
+		s->cdata_sub.valid = 0;
+		if( !ret && f ) {
+			// Some text codecs carry duration only on the container packet.
+			if( !s->subtitle->gfx && f->duration <= 0 && s->cdata_sub.subtitle_duration > 0 )
+				f->duration = s->cdata_sub.subtitle_duration;
+			if( replay && s->subtitle->gfx ) {
+				last_bitmap = *f;
+				bitmap_pos = s->cdata_sub.pos;
+				have_bitmap = 1;
+			} else if( !replay || f->duration < 0 ||
+			           (int64_t)f->time + f->duration > time ) {
+				_output_sub(s, f, s->cdata_sub.pos);
+			}
+		}
+		if( !replay )
+			break;
+	}
+	if( replay && have_bitmap ) {
+		*s->subtitle_frame = last_bitmap;
+		if( last_bitmap.duration > 0 &&
+		    (int64_t)last_bitmap.time + last_bitmap.duration > time )
+			_output_sub(s, s->subtitle_frame, bitmap_pos);
+	}
+	s->subtitle_replay = 0;
 }
 
 // *****************************************************************************
@@ -273,11 +285,11 @@ void _sub_decode( STREAM *s )
 			s->message_cb( s, STREAM_SUB_PROPS_CHANGED );
 		}
 	}
-	if( s->subtitle->valid && !s->paused ) {
+	if( s->subtitle->valid && (!s->paused || s->subtitle_replay) ) {
 		int time = s->video_time;
 		if( time != -1 ) {
 			// apply correction
-			time -= s->subtitle_offset;
+			time -= RST_TO_TS_DELTA(s->subtitle_offset, int);
 			if( time < 0 )
 				time = 0;
 		}
@@ -381,6 +393,48 @@ DBGS serprintf("stream_check_subtitles, has new ext subtitles\r\n");
 	return 0;
 }
 
+// Supported parsers rebuild only the selected subtitle queue. Audio, video,
+// their renderer clocks and sink state continue untouched throughout the switch.
+static int _switch_internal_subtitle(STREAM *s, int sub_stream)
+{
+	if( thread_state_get(&s->sub_tstate) == THREAD_EXIT ||
+	    thread_state_get(&s->parser_tstate) == THREAD_EXIT )
+		return 1;
+	int sub_state = thread_state_set(&s->sub_tstate, THREAD_IDLE);
+	// Let an in-flight read finish: unlike a seek, this operation cannot repair
+	// demuxer/AVIO state left behind by interrupting the shared media input.
+	int parser_state = thread_state_set(&s->parser_tstate, THREAD_IDLE);
+
+	int previous = s->av.subs;
+	stream_close_sub_dec(s);
+	s->cdata_sub.valid = 0;
+	frame_free(s->subtitle_frame);
+	s->subtitle_frame = NULL;
+	s->av.subs = sub_stream;
+	s->subtitle = &s->av.sub[sub_stream];
+	s->sub_dec = stream_get_new_dec_sub(s->subtitle->format);
+	int failed = stream_open_sub_dec(s);
+	if( !failed )
+		failed = s->parser->reset_subtitle(s);
+	if( failed ) {
+		stream_close_sub_dec(s);
+		s->av.subs = previous;
+		s->subtitle = &s->av.sub[previous];
+		s->parser->reset_subtitle(s);
+	}
+	// Clear already queued/displayed app cues before sending any replay output.
+	if( s->message_cb )
+		s->message_cb(s, STREAM_SUBTITLE_CLEARED);
+	s->subtitle_replay = !s->subtitle->ext;
+	// Selection changes no track properties. A metadata notification here
+	// makes the app reapply its selection, recursively reopening this decoder.
+	if( parser_state == THREAD_RUNNING )
+		thread_state_set(&s->parser_tstate, parser_state);
+	if( sub_state == THREAD_RUNNING )
+		thread_state_set(&s->sub_tstate, sub_state);
+	return failed;
+}
+
 // *****************************************************************************
 //
 //	stream_set_subtitle_stream
@@ -400,7 +454,7 @@ serprintf("SsS: not sub!\r\n");
 		return 1;
 	}
 
-	if( sub_stream >= s->av.subs_max ) {
+	if( sub_stream < 0 || sub_stream >= s->av.subs_max || !s->av.sub[sub_stream].valid ) {
 serprintf("SsS: sub_stream > av.subs_max\n");	
 		return 1;
 	}
@@ -408,6 +462,9 @@ serprintf("SsS: sub_stream > av.subs_max\n");
 serprintf("SsS: sub_stream already set\n");	
 //		return 0;
 	}
+
+	if( !s->av.sub[sub_stream].ext && s->parser->reset_subtitle )
+		return _switch_internal_subtitle(s, sub_stream);
 
 	int was_paused = stream_pause( s );
 
@@ -431,7 +488,7 @@ serprintf("SsS: sub_stream already set\n");
 
 	stream_un_pause( s, was_paused );
 
-	// FIXME: there should be a better way without seek jumping
+	// Legacy parsers without a subtitle-only reset still need their seek path.
 	int current_time = stream_get_current_time( s, NULL );
 	if( current_time > 0 && thread_state_get( &s->parser_tstate ) != THREAD_EXIT && s->parser->seekable && s->parser->seekable( s ) ) {
 		// reseek to current time to get internal subtitle decoder to reinitialize

@@ -181,6 +181,14 @@ static void stream_msg_cb(STREAM *s, STREAM_MESSAGE message)
 	case STREAM_DECODER_CHANGED:
 		send_metadata(mp, video, 1);
 		break;
+	case STREAM_SUBTITLE_CLEARED: {
+		// Ordered before replay cues, including a bitmap-to-text transition.
+		avos_msg_t *msg = avos_msg_new_text_subtitle(0,
+			MAX(0, video->s->video_time), 0, "");
+		if (msg)
+			avos_mp_sendevent_data(mp, MEDIA_SUBTITLE, 0, 0, msg);
+		break;
+	}
 	case STREAM_SUBTITLE_CHANGED:
 		send_subtitle(mp, video);
 		break;
@@ -464,6 +472,13 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 		video->send_sub = 0;
 		*ret = 1;
 	} else {
+		// Metadata refreshes can reapply an already active internal track.
+		// Keep its decoder state; enabling after "none" still needs cue replay.
+		if (video->send_sub && track == video->s->av.subs &&
+		    video->s->subtitle->valid && !video->s->subtitle->ext) {
+			*ret = 1;
+			return AVOS_ERR_OK;
+		}
 		video->send_sub = 1;
 		*ret = stream_set_subtitle_stream(video->s, track) == 0 ? 1 : 0;
 	}

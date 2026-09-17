@@ -244,6 +244,7 @@ typedef struct STREAM_CDATA
 	int  		type;
 	int		frame;
 	int		time;
+	int		subtitle_duration; // container cue duration in TS ms; 0 if unknown
 	int		size;
 	int		key;
 	int		video_skip;
@@ -430,6 +431,9 @@ typedef struct stream_parser_str {
 	PARSER_GET_STATS	get_stats;
 	PARSER_GET_TIME		get_time;
 	PARSER_GET_TIME_FOR_POS	get_time_for_pos;
+	// Optional subtitle-only queue reset. Parser and subtitle threads are idle;
+	// s->subtitle already selects the new track. Must not seek or reset A/V.
+	int (*reset_subtitle)(struct STREAM *s);
 } STREAM_PARSER;
 
 //
@@ -497,6 +501,7 @@ typedef enum {
 	STREAM_SUB_PROPS_CHANGED,
 	STREAM_SUBTITLE_CHANGED,
 	STREAM_DECODER_CHANGED,
+	STREAM_SUBTITLE_CLEARED,
 } STREAM_MESSAGE;
 
 typedef enum {
@@ -835,6 +840,7 @@ typedef struct STREAM {
 	STREAM_CDATA	cdata_sub;
 	CLEVER_BUFFER	sub_buffer;
 	int		subtitle_changed;
+	int		subtitle_replay; // rebuild current cue from retained packets after switch
 	
 	int 		error_count;
 	int 		video_error;

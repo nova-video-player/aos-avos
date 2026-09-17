@@ -37,6 +37,7 @@
 typedef struct {
 	STREAM_DEC_SUB base;
 	AVCodecContext* avcontext;
+	uint8_t *bitmap; // decoder-owned bitmap, replaced only after successful allocation
 } my_dec_sub;
 
 static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
@@ -48,7 +49,6 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	*dec->subtitle = *sub;
 
 	dec->ctx = ctx;
-	dec->is_open = 1;
 
 	const AVCodec* myCodec;
 	if (sub->format == SUB_FORMAT_TEXT) {
@@ -79,14 +79,30 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 		return 1;
 	}
 
-	if (!myCodec) {
-		serprintf("codec_ffsub: codec not found\n");
-	}
-
+	if (!myCodec)
+		return 1;
 	self->avcontext = avcodec_alloc_context3(myCodec);
-	avcodec_open2(self->avcontext, myCodec, NULL);
-	DBGS serprintf("codec_ffsub: ffsub: Allocated avcontext %p\n", self->avcontext);
-
+	if (!self->avcontext)
+		return 1;
+	// Reopening a track must install that track's codec initialization data
+	// (notably mov_text configuration and DVD subtitle palettes).
+	const uint8_t *extra = sub->extraDataSize2 > 0 ? sub->extraData2 : sub->extraData;
+	int extra_size = sub->extraDataSize2 > 0 ? sub->extraDataSize2 : sub->extraDataSize;
+	if (extra && extra_size > 0) {
+		self->avcontext->extradata = av_mallocz((size_t)extra_size + AV_INPUT_BUFFER_PADDING_SIZE);
+		if (!self->avcontext->extradata) {
+			avcodec_free_context(&self->avcontext);
+			return 1;
+		}
+		memcpy(self->avcontext->extradata, extra, extra_size);
+		self->avcontext->extradata_size = extra_size;
+	}
+	self->avcontext->pkt_timebase = (AVRational){1, 1000};
+	if (avcodec_open2(self->avcontext, myCodec, NULL) < 0) {
+		avcodec_free_context(&self->avcontext);
+		return 1;
+	}
+	dec->is_open = 1;
 	return 0;
 }
 
@@ -101,6 +117,7 @@ static int _close( STREAM_DEC_SUB *dec )
 		avcodec_free_context(&self->avcontext);
 	}
 	
+	av_freep(&self->bitmap);
 	dec->is_open = 0;
  	return 0;
 }
@@ -116,6 +133,7 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	VIDEO_FRAME *frame = *pframe;
+	*pframe = NULL; // fragments and decode errors do not produce a display event
 	int max = frame->size - 1;
 
 	frame->time = time;
@@ -129,30 +147,30 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		return 1;
 	}
 
-	char *avdata = av_malloc(size);
-	if (!avdata) {
+	if (av_new_packet(avpkt, size) < 0) {
 		serprintf("codec_ffsub: Failed to allocate AVPacket data\n");
 		av_packet_free(&avpkt);
 		return 1;
 	}
 
-	memcpy(avdata, data, size);
-	av_packet_from_data(avpkt, avdata, size);
+	memcpy(avpkt->data, data, size);
 	DBGS serprintf("codec_ffsub: avpkt->pts=%d, avpkt->dts=%d overridden by time=%d\n", avpkt->pts, avpkt->dts, time);
 	avpkt->pts = time;
 	avpkt->dts = time;
 
 	int got_frame;
-	AVSubtitle sub;
+	AVSubtitle sub = {0};
 	int ret = avcodec_decode_subtitle2(self->avcontext, &sub, &got_frame, avpkt);
 	if (ret < 0) {
 		serprintf("codec_ffsub: error decoding subtitle\n");
+		avsubtitle_free(&sub);
 		av_packet_free(&avpkt);
 		return 1;
 	}
 
 	if (!got_frame) {
-		serprintf("codec_ffsub: no subtitle frame\n");
+		DBGS serprintf("codec_ffsub: no subtitle frame\n");
+		avsubtitle_free(&sub);
 		av_packet_free(&avpkt);
 		return 0;
 	}
@@ -174,6 +192,16 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	for (int i = 0; i < sub.num_rects; i++) {
 		AVSubtitleRect *rect = sub.rects[i];
 		if (rect->type == SUBTITLE_BITMAP) {
+			// A PGS display set without its cached object may decode to an
+			// empty rectangle. Reject it before replacing the previous bitmap;
+			// it is not the explicit zero-rectangle event that clears a cue.
+			if (rect->w <= 0 || rect->h <= 0 || !rect->data[0] ||
+			    !rect->data[1] || rect->linesize[0] < rect->w) {
+				DBGS serprintf("codec_ffsub: incomplete bitmap rectangle\n");
+				avsubtitle_free(&sub);
+				av_packet_free(&avpkt);
+				return 1;
+			}
 			has_bitmap = 1;
 			left = MIN(left, rect->x);
 			top = MIN(top, rect->y);
@@ -210,7 +238,9 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		bb_width = MAX(bb_width, 1);
 		bb_height = MAX(bb_height, 1);
 
-		int ret = av_image_alloc(frame->data, frame->linestep, bb_width, bb_height, AV_PIX_FMT_BGRA, 32);
+		uint8_t *bitmap_data[4] = {0};
+		int bitmap_linesize[4] = {0};
+		int ret = av_image_alloc(bitmap_data, bitmap_linesize, bb_width, bb_height, AV_PIX_FMT_BGRA, 32);
 		if (ret < 0) {
 			char error_buffer[AV_ERROR_MAX_STRING_SIZE] = {0};
 			av_strerror(ret, error_buffer, AV_ERROR_MAX_STRING_SIZE);
@@ -219,6 +249,11 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			av_packet_free(&avpkt);
 			return 1;
 		}
+		av_freep(&self->bitmap);
+		self->bitmap = bitmap_data[0];
+		memcpy(frame->data, bitmap_data, sizeof(frame->data));
+		memcpy(frame->linestep, bitmap_linesize, sizeof(frame->linestep));
+		memset(self->bitmap, 0, ret);
 	}
 
 	for (int i = 0; i < sub.num_rects; i++) {
@@ -230,8 +265,8 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 			*dst = 0;
 			DBGS serprintf("codec_ffsub: rect->text%s\n", rect->text);
 			// Note that external srt are handled directly by Android and not by codec_ffsub
-			frame->time = sub.pts + sub.start_display_time;
-			frame->duration = sub.end_display_time - sub.start_display_time;
+			frame->time = time + RST_TO_TS_DELTA(sub.start_display_time, int);
+			frame->duration = RST_TO_TS_DELTA((int64_t)sub.end_display_time - sub.start_display_time, int);
 			// revert to data parsing to get start and end time if decoder fails to provide start_display_time and end_display_time
 			if (sub.start_display_time == 0 && sub.end_display_time == 0) {
 				int start, end;
@@ -393,11 +428,11 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	if (has_bitmap) {
-		if (sub.pts > 0 && sub.start_display_time > 0) {
-			frame->time = sub.pts + sub.start_display_time;
+		if (sub.start_display_time > 0) {
+			frame->time = time + RST_TO_TS_DELTA(sub.start_display_time, int);
 		}
 		if (sub.num_rects != 0) {
-			frame->duration = sub.end_display_time - sub.start_display_time;
+			frame->duration = RST_TO_TS_DELTA((int64_t)sub.end_display_time - sub.start_display_time, int);
 			if( sub.start_display_time == 0 && sub.end_display_time == -1 ) {
 				// note that for PGS subtitles there is no start_display_time and end_display_time
 				// so we have to calculate the duration from the avpkt->duration but it is always 0
@@ -439,12 +474,16 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	avsubtitle_free(&sub);
 	av_packet_free(&avpkt);
 
+	*pframe = frame;
 	return 0;
 }
 
 
 static int _flush( STREAM_DEC_SUB *dec )
-{	
+{
+	my_dec_sub *self = (my_dec_sub *)dec;
+	if (self->avcontext)
+		avcodec_flush_buffers(self->avcontext);
 	return 0;
 } 
 

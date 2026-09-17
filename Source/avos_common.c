@@ -108,10 +108,9 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 	sub->bitmap.data_size = rgba_size;
 	DBG serprintf("avos_msg_new_bitmap_subtitle: img->width=%d, img->window.width=%d, img->height=%d img->window.height=%d, img->linestep[0]=%d\n", img->width, img->window.width, img->height, img->window.height, img->linestep[0]);
 	bgra32_to_argb888((uint8_t *)img->data[0], img->window.width, img->window.height, img->linestep[0], (int *)sub->data);
-	// sub->bitmap.data = sub->data;
 	sub->bitmap.data = sub->data;
-	av_freep(&img->data[0]);
-	//sub->bitmap.data = img->bgra_data[0]; // directly use the original bitmap data
+	// The message owns its copy. The source bitmap belongs to the subtitle
+	// decoder, which replaces it on the next decoded cue or frees it on close.
 	return msg;
 }
 

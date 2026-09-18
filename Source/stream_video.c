@@ -731,6 +731,7 @@ DBGS serprintf("audio[%d] set parser!\r\n", new);
 // *****************************************************************************
 static int stream_open_video_dec( STREAM *s, int *unsupported )
 {
+	s->video_decoder_drained = 0;
 DBGS serprintf("stream_open_video_dec\r\n");
 	if( s->flags & STREAM_NO_VIDEO_CODEC ) {
 		goto ErrorExit;
@@ -3491,7 +3492,16 @@ static void _video_decode( STREAM *s )
 			s->video_flush = 0;
 
 			// tell the decoder we want to flush it
-			s->video_dec->flush( s->video_dec );
+			if (s->video_dec->flush(s->video_dec)) {
+				stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+				s->vcodec.decoded = 0;
+				if (s->vcodec.decode_frame) {
+					s->vcodec.decode_frame->valid = 0;
+					s->vcodec.decode_frame->error = 1;
+				}
+				return;
+			}
+			s->video_decoder_drained = 0;
 
 			if ( s->video->flush_frames ) {
 DBGS serprintf("video_flush: %d\r\n", s->video->flush_frames );
@@ -3546,7 +3556,10 @@ serprintf("flush: no decode frame\r\n");
 		} else {		
 			VIDEO_FRAME *in_frame = s->vcodec.decode_frame;
 			int ret;
-			if( s->video_dec->decode2 ) {
+			if (!s->vcodec.data && s->video_dec->drain) {
+				ret = s->video_dec->drain(s->video_dec, &in_frame,
+					&s->vcodec.decode_frame, &s->video_decoder_drained);
+			} else if( s->video_dec->decode2 ) {
 				ret = s->video_dec->decode2( s->video_dec, s->vcodec.data, s->vcodec.data_size, &in_frame, &s->vcodec.decode_frame, &decoded, &time );
 				if( in_frame ) {
 //serprintf("use(%d)", in_frame->index);
@@ -3556,6 +3569,7 @@ serprintf("flush: no decode frame\r\n");
 				ret = s->video_dec->decode( s->video_dec, s->vcodec.data, s->vcodec.data_size, &s->vcodec.decode_frame, &decoded, &time );
 			}
 			if( ret ) {
+				if (!s->vcodec.data) stream_set_error(s, VE_VIDEO_CODEC_ERROR);
 				// error!
 serprintf("video_decode_error(%d)!\r\n", decoded);
 				// signal error in case the codec did not
@@ -3873,6 +3887,21 @@ static int _handle_video_codec_error( STREAM *s );
 //	_check_end
 //
 // *****************************************************************************
+static int _video_presentation_drained(STREAM *s)
+{
+	if (!s->video_end || s->cdata_now.valid || s->cdata_next.valid)
+		return 0;
+	if (s->video_dec && s->video_dec->drain && !s->video_decoder_drained)
+		return 0;
+	if (frame_q_count(&s->disp_q) || s->video_sink_count > 0)
+		return 0;
+	pthread_mutex_lock(&s->video_sink_mutex);
+	int done = !s->video_sink || !s->video_sink->drained ||
+		s->video_sink->drained(s->video_sink);
+	pthread_mutex_unlock(&s->video_sink_mutex);
+	return done;
+}
+
 static int _check_end( STREAM *s )
 {
 	int stop_time_ts = RST_TO_TS_TIME( s->stop_time, int ); // stop_time is external and set in rst
@@ -3911,7 +3940,7 @@ serprintf("error, stop!\r\n");
 	
 	if ( s->stream_end == 0 ) {
 		// check if both video and audio are at the end (if present)
-		int video_end = s->video_error || (s->video->valid ? (s->video_end && !s->cdata_now.valid && !s->cdata_next.valid) : 1);
+		int video_end = s->video_error || (s->video->valid ? _video_presentation_drained(s) : 1);
 		int audio_end = s->video_error || (s->audio->valid ?  s->audio_end : 1);
 		
 		if( video_end && audio_end ) {
@@ -4129,9 +4158,12 @@ DECODE_AGAIN:
 		return;
 	}
 
-	if( !s->cdata_now.valid ) {
-DBGV serprintf("!" );				
-		msec_sleep( 10 );
+	int draining = !s->cdata_now.valid && s->video_end &&
+		s->video_dec && s->video_dec->drain && !s->video_decoder_drained;
+	if (!s->cdata_now.valid && !draining) {
+		if (!stream_no_output && s->video_sink_count < stream_sink_video_max)
+			output_frames(s);
+		msec_sleep(10);
 		return;
 	}
 
@@ -4230,8 +4262,8 @@ cdata_time  = s->cdata_now.time;
 	s->cdata_now.frm_type = s->cdata_now.key ? I_VOP : P_VOP;
 
 	// is this a frame we can drop?
-	if( _droppable( s, s->cdata_now.frm_type )
-	    || (stream_key_frame_only && !s->cdata_now.key ) ) {
+	if( !draining && (_droppable( s, s->cdata_now.frm_type )
+	    || (stream_key_frame_only && !s->cdata_now.key )) ) {
 		
 		cbe_skip( s->cbe, s->cdata_now.size );
 		s->cdata_now.valid = 0;
@@ -4244,7 +4276,7 @@ cdata_time  = s->cdata_now.time;
 
 	//  Call the Decoder (non-blocking)    
 	//-----------------------------------   
-	s->decode_frame->time       = s->cdata_now.time;
+	s->decode_frame->time       = draining ? -1 : s->cdata_now.time;
 	s->decode_frame->epoch      = s->seek_epoch;
 	s->decode_frame->user_ID    = s->cdata_now.user_ID;
 	s->decode_frame->type       = s->cdata_now.frm_type;
@@ -4254,8 +4286,8 @@ cdata_time  = s->cdata_now.time;
 	s->cdata_now.audio_skip = 0;
 	s->cdata_now.video_skip = 0;
 
-	s->vcodec.data         = cbe_get_p( s->cbe );
-	s->vcodec.data_size    = s->cdata_now.size;
+	s->vcodec.data         = draining ? NULL : cbe_get_p( s->cbe );
+	s->vcodec.data_size    = draining ? 0 : s->cdata_now.size;
 	s->vcodec.decode_frame = s->decode_frame;
 
 	if( s->vcodec.data_size != -1 ) {
@@ -4345,13 +4377,13 @@ DBGCV1 serprintf("[%6d  d %6d/%7d %d|%8d|%c]", cdata_time, s->vcodec.decoded, s-
 		}	
 	}
 
-	cbe_skip( s->cbe, MIN( s->cdata_now.size, s->vcodec.decoded ) );
-	s->cdata_now.size -= s->vcodec.decoded;
-
-	if( s->cdata_now.size < 8 ) {
-		// we ate up all the data in this chunk, free it
-		cbe_skip( s->cbe, MAX( 0, s->cdata_now.size) );
-		s->cdata_now.valid = 0;
+	if (!draining) {
+		cbe_skip(s->cbe, MIN(s->cdata_now.size, s->vcodec.decoded));
+		s->cdata_now.size -= s->vcodec.decoded;
+		if (s->cdata_now.size < 8) {
+			cbe_skip(s->cbe, MAX(0, s->cdata_now.size));
+			s->cdata_now.valid = 0;
+		}
 	}
 
 	int output = 0;
@@ -4492,7 +4524,12 @@ static void _stream_player_async( STREAM *s )
 		s->video_flush = 0;
 
 		// tell the decoder we want to flush it
-		s->video_dec->flush( s->video_dec );
+		if (s->video_dec->flush(s->video_dec)) {
+			stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+			_check_end(s);
+			return;
+		}
+		s->video_decoder_drained = 0;
 	}
 
 	if( s->use_sink_frames ) {
@@ -4545,7 +4582,11 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 	
 	{
 		VIDEO_FRAME *out_frame = NULL;
-		s->video_dec->get_out( s->video_dec, &out_frame );
+		if (s->video_dec->get_out(s->video_dec, &out_frame)) {
+			stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+			_check_end(s);
+			return;
+		}
 		if( out_frame ) {
 			// is there a post mangler, then call it!
 			if( s->video_mangler ) {
@@ -4709,6 +4750,14 @@ serprintf("[%5d] siz %6d\n", s->fps_count, size );
 			}
 		}
 	}
+	if (!s->cdata_now.valid && !s->cdata_next.valid && s->video_end &&
+	    s->video_dec->drain && !s->video_decoder_drained) {
+		if (s->video_dec->drain(s->video_dec, NULL, NULL, &s->video_decoder_drained)) {
+			stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+			_check_end(s);
+		}
+	}
+
 }
 
 // *****************************************************************************
@@ -4777,6 +4826,7 @@ static void _seek_init( STREAM *s )
 	// session even though later seeks resume parsing normally. audio_end has its
 	// own reset on every seek via stream_audio_flush() - mirror that here.
 	s->video_end = 0;
+	s->video_decoder_drained = 0;
 
 	if ( s->video->needs_header ) {
 		s->video->header_sent = 0;

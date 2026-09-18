@@ -98,6 +98,11 @@ ssize_t sfdec_send_input(sfdec_t *sfdec, void *data, size_t size, int64_t time_u
 	return sfdec->itf->send_input(sfdec->priv, data, size, time_us, is_sync_frame, wait);
 }
 
+int sfdec_send_eos(sfdec_t *sfdec)
+{
+	return sfdec->itf->send_eos ? sfdec->itf->send_eos(sfdec->priv) : -1;
+}
+
 int sfdec_flush(sfdec_t *sfdec)
 {
 	return sfdec->itf->flush(sfdec->priv);

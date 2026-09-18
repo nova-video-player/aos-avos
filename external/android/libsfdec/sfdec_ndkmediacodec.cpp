@@ -54,6 +54,9 @@ struct sfdec_mediacodec
     sfdec_codec_t codec;
     int32_t width;
     int32_t height;
+    int32_t output_width, output_height;
+    int32_t output_crop_width, output_crop_height;
+    bool output_format_seen;
     void *extradata;
     size_t extradata_size;
     int rotation;
@@ -100,21 +103,40 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
 
 static int init_renderer(sfdec_priv_t *sfdec)
 {
-    media_status_t err;
-    int32_t width, height;
     AMediaFormat *format = AMediaCodec_getOutputFormat(sfdec->mCodec);
-
-    if (format != NULL) {
-        if (AMediaFormat_getInt32(format, "width", &width)) {
-            LOG("width NOT changed: %d -> %d", sfdec->width, width);
-            //sfdec->width = width;
-        }
-        if (AMediaFormat_getInt32(format, "height", &height)) {
-            LOG("height NOT changed: %d -> %d", sfdec->height, height);
-            //sfdec->height = height;
-        }
+    if (!format)
+        return -1;
+    int32_t width = 0, height = 0;
+    int valid = AMediaFormat_getInt32(format, "width", &width) &&
+        AMediaFormat_getInt32(format, "height", &height) &&
+        width > 0 && height > 0 && width <= 16384 && height <= 16384;
+    int32_t left = 0, top = 0, right = 0, bottom = 0;
+    int crop_valid = valid &&
+        AMediaFormat_getInt32(format, "crop-left", &left) &&
+        AMediaFormat_getInt32(format, "crop-top", &top) &&
+        AMediaFormat_getInt32(format, "crop-right", &right) &&
+        AMediaFormat_getInt32(format, "crop-bottom", &bottom) &&
+        left >= 0 && top >= 0 && right >= left && bottom >= top &&
+        right < width && bottom < height;
+    int crop_width = crop_valid ? right - left + 1 : width;
+    int crop_height = crop_valid ? bottom - top + 1 : height;
+    AMediaFormat_delete(format);
+    if (!valid)
+        return -1;
+    // Keep the initial container geometry: some vendors report padded or
+    // otherwise inaccurate startup dimensions. A subsequent actual format
+    // change must nevertheless propagate, using validated visible crop bounds.
+    if (sfdec->output_format_seen &&
+        (width != sfdec->output_width || height != sfdec->output_height ||
+         crop_width != sfdec->output_crop_width || crop_height != sfdec->output_crop_height)) {
+        sfdec->width = crop_width;
+        sfdec->height = crop_height;
     }
-
+    sfdec->output_width = width;
+    sfdec->output_height = height;
+    sfdec->output_crop_width = crop_width;
+    sfdec->output_crop_height = crop_height;
+    sfdec->output_format_seen = true;
     return 0;
 }
 
@@ -336,21 +358,33 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
     size_t bufsize = 0;
     uint8_t *buf = NULL;
 
-    if (sfdec->flush) {
-	sfdec->flush = 0;
-	if (sfdec->extradata && (sfdec->codec == SFDEC_VIDEO_AVC || sfdec->codec == SFDEC_VIDEO_HEVC || sfdec->codec == SFDEC_VIDEO_WMV || sfdec->codec == SFDEC_VIDEO_DOLBY_VISION) )
-            sfdec_send_input2(sfdec, sfdec->extradata, sfdec->extradata_size, 0, 0, 1, 2/* BUFFER_FLAG_CODECCONFIG (not exported)*/);
+    if (sfdec->flush && !(flag & 2)) {
+        if (sfdec->extradata && (sfdec->codec == SFDEC_VIDEO_AVC ||
+            sfdec->codec == SFDEC_VIDEO_HEVC || sfdec->codec == SFDEC_VIDEO_WMV ||
+            sfdec->codec == SFDEC_VIDEO_DOLBY_VISION)) {
+            ssize_t config = sfdec_send_input2(sfdec, sfdec->extradata,
+                sfdec->extradata_size, 0, 0, 0, 2 /* codec config */);
+            if (config <= 0)
+                return config;
+        }
+        sfdec->flush = 0;
     }
 
-    index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, wait ? -1ll : 0);
-    if (index < 0)
+    // Input calls must also be bounded so flush/close can quiesce the writer.
+    index = AMediaCodec_dequeueInputBuffer(sfdec->mCodec, wait ? 10000 : 0);
+    if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
         return 0;
+    if (index < 0)
+        return -1;
     buf = AMediaCodec_getInputBuffer(sfdec->mCodec, index, &bufsize);
-
-    if (size > bufsize)
-        size = bufsize;
-
-    memcpy(buf, data, size);
+    if ((size && (!data || !buf)) || size > bufsize) {
+        LOG("invalid input buffer or access unit too large: %zu > %zu", size, bufsize);
+        // Do not split an access unit into ordinary packets. Recovery will
+        // flush/close the codec, reclaiming this dequeued input slot.
+        return -1;
+    }
+    if (size)
+        memcpy(buf, data, size);
 
     DBG LOG("queueInputBuffer: index %zd size %zu time %lld flag %d\n",
             index, size, (long long)time_us, flag);
@@ -362,7 +396,12 @@ static ssize_t sfdec_send_input2(sfdec_priv_t *sfdec, void *data, size_t size, i
             flag);
     CHECK_STATUS(err);
 
-    return size;
+    return size ? (ssize_t)size : 1;
+}
+
+static int sfdec_send_eos(sfdec_priv_t *sfdec)
+{
+    return sfdec_send_input2(sfdec, NULL, 0, 0, 0, 0, 4 /* EOS */);
 }
 
 static int sfdec_flush(sfdec_priv_t *sfdec)
@@ -408,9 +447,17 @@ static int sfdec_read(sfdec_priv_t *sfdec, int64_t seek, sfdec_read_out_t *read_
 
         if (index >= 0) {
             err_count = 0;
+            if (info.flags & 4) {
+                read_out->flag |= SFDEC_READ_EOS;
+                if (info.size == 0) {
+                    return AMediaCodec_releaseOutputBuffer(sfdec->mCodec, index, false) == AMEDIA_OK ? 0 : -1;
+                }
+            }
             sfbuf_t *sfbuf = (sfbuf_t*) calloc(1, sizeof(sfbuf_t));
-            if (sfbuf == NULL)
+            if (sfbuf == NULL) {
+                AMediaCodec_releaseOutputBuffer(sfdec->mCodec, index, false);
                 return -1;
+            }
             sfbuf->index = index;
             sfbuf->released = false;
             sfbuf->timestamp_us = info.presentationTimeUs;
@@ -682,4 +729,5 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_resume,
     sfdec_seek_reset,
     sfdec_buf_discard,
+    sfdec_send_eos,
 };

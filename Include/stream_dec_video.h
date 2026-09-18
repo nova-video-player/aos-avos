@@ -41,6 +41,10 @@ typedef int (*DEC_VIDEO_DECODE2)( struct STREAM_DEC_VIDEO *dec, UCHAR *data, int
 typedef int (*DEC_VIDEO_DEC_IN) ( struct STREAM_DEC_VIDEO *dec, VIDEO_FRAME **data_frame, int *decoded, int *time );
 typedef int (*DEC_VIDEO_PUT_OUT)( struct STREAM_DEC_VIDEO *dec, VIDEO_FRAME **in_frame );
 typedef int (*DEC_VIDEO_GET_OUT)( struct STREAM_DEC_VIDEO *dec, VIDEO_FRAME **out_frame );
+/* Feed EOS once and return remaining output. done is true only after EOF.
+ * Async decoders keep output in get_out(); synchronous decoders use in/out. */
+typedef int (*DEC_VIDEO_DRAIN)(struct STREAM_DEC_VIDEO *dec, VIDEO_FRAME **in,
+    VIDEO_FRAME **out, int *done);
 typedef int (*DEC_VIDEO_GET_RC) ( struct STREAM_DEC_VIDEO *dec, struct STREAM_RC *rc );
 typedef int (*DEC_VIDEO_RENDER) ( struct STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, VIDEO_FRAME *src );
 typedef int (*DEC_VIDEO_NEED_REALLOC) ( struct STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, int *num_frames );
@@ -61,6 +65,7 @@ typedef struct STREAM_DEC_VIDEO {
 	DEC_VIDEO_GET_OUT get_out;
 	DEC_VIDEO_SEEK    seek;
 	DEC_VIDEO_FLUSH   flush;
+	DEC_VIDEO_DRAIN   drain;
 	DEC_VIDEO_GET_RC  get_rc;
 	DEC_VIDEO_RENDER  render;
 	DEC_VIDEO_NEED_REALLOC need_realloc;

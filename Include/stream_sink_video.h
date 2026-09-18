@@ -59,6 +59,7 @@ typedef struct STREAM_SINK_VIDEO {
 	SINK_VIDEO_GET     get;
 	SINK_VIDEO_FLUSH   flush;
 	SINK_VIDEO_END     end;
+	SINK_VIDEO_END     drained; // nonzero once all scheduled presentation is complete
 	SINK_VIDEO_SYNC    syncable;
 	SINK_VIDEO_DELAY   delay;
 	SINK_VIDEO_GETFRAME get_frame;

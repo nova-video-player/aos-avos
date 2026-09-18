@@ -44,6 +44,7 @@ static inline int avimage2pixfmt(int avimage)
 	}
 }
 
+int codec_frame_can_hold(const VIDEO_FRAME *frame, int width, int height);
 int color_conversion_supported(int colorspace, int pixfmt);
 void codec_convert_pixel_format( int pixfmt, unsigned char *src_data[], int src_linesize[], int width, int height, VIDEO_FRAME *frame );
 

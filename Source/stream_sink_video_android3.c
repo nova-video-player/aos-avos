@@ -65,6 +65,8 @@ typedef struct priv {
 	int		height;
 	int 		padded_width;
 	int 		padded_height;
+	int hal_format;
+	int presentation_end_ms;
 	int		ofs_x;
 	int		ofs_y;
 	int		interlaced;
@@ -138,6 +140,9 @@ static VIDEO_FRAME *blit_frame_get(priv_t *p, void *handle)
 
 static int update_frame_pointers(VIDEO_FRAME * frame, int colorspace, android_buffer_t android_buffer)
 {
+	frame->width = android_buffer.width;
+	frame->height = android_buffer.height;
+	frame->colorspace = colorspace;
 	frame->handle[0]  = android_buffer.handle;
 #ifdef CONFIG_OMX_IOMX
 	frame->android_handle = android_buffer.handle;
@@ -158,7 +163,7 @@ static int update_frame_pointers(VIDEO_FRAME * frame, int colorspace, android_bu
 			case AV_IMAGE_RGBX_32:
 				frame->data[0]      = android_buffer.data;
 				frame->linestep[0]  = android_buffer.stride;
-				frame->data_size[0] = android_buffer.stride * android_buffer.height;
+				frame->data_size[0] = android_buffer.stride * 4 * android_buffer.height;
 				break;
 			case AV_IMAGE_NV12:
 				frame->data[0]      = android_buffer.data;
@@ -196,6 +201,7 @@ static VIDEO_FRAME *dequeue_blit_frame( priv_t *p )
 	frame = blit_frame_get(p, handle);
 	if (!frame) {
 		LOG("WARNING: unknown handle %08X after dequeue, shouldn't happen", handle);
+		android_buffer_cancel(p->as, handle);
 		return NULL;
 	}
 	if (android_buffer.data != NULL) {
@@ -210,14 +216,34 @@ static VIDEO_FRAME *dequeue_blit_frame( priv_t *p )
 	return frame;
 }
 
-static void render_or_drop( VIDEO_FRAME *src, VIDEO_FRAME *dst )
+static int render_or_drop( VIDEO_FRAME *src, VIDEO_FRAME *dst )
 {		
 	if( src->dec ) {
 		STREAM_DEC_VIDEO *dec = (STREAM_DEC_VIDEO*)src->dec;
 	 	if( dec->render ) {
-			dec->render( dec, dst, src );
+			return dec->render( dec, dst, src );
 		}
 	}
+	return dst != NULL;
+}
+
+/* Resize at the frame boundary, after older queued frames were presented. */
+static int configure_frame_geometry(priv_t *p, VIDEO_FRAME *frame)
+{
+	if (frame->width <= 0 || frame->height <= 0 ||
+	    frame->width > VIDEO_MAX_WIDTH || frame->height > VIDEO_MAX_HEIGHT)
+		return -1;
+	int width = align(frame->width, 16);
+	int height = pad_height(frame->height);
+	if (width == p->padded_width && height == p->padded_height)
+		return 0;
+	int count = 1, min_undequeued = 0;
+	if (android_buffer_setup(p->as, width, height, BUFFER_TYPE_SW,
+	    p->hal_format, 0, &count, &min_undequeued) || count != 1)
+		return -1;
+	p->padded_width = width;
+	p->padded_height = height;
+	return 0;
 }
 
 static void *venc_thread(void *ctx)
@@ -297,18 +323,28 @@ DBGSI serprintf(" ok");
 			frame_q_put(&p->get_q, frame);
 		} else {
 DBGSI serprintf("<BLIT %8d >", frame->time);
-			// get frame from Android
-			VIDEO_FRAME *blit_frame = dequeue_blit_frame( p );
-
-			// render
- 			render_or_drop( frame, blit_frame );
-
-			// and queue the frame back to Android
-			if (android_buffer_queue(p->as, blit_frame->handle[0]) != 0) {
-				LOG("WARNING: frame(%d): android_buffer_queue failed", blit_frame->index);
-				goto endloop;
+			VIDEO_FRAME *blit_frame = NULL;
+			if (!configure_frame_geometry(p, frame))
+				blit_frame = dequeue_blit_frame(p);
+			if (!blit_frame) {
+				render_or_drop(frame, NULL);
+				frame->blit_time = -1;
+				if (s) stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+			} else if (render_or_drop(frame, blit_frame)) {
+				android_buffer_cancel(p->as, blit_frame->handle[0]);
+				p->blit_frames_state[blit_frame->index] = FRAME_STATE_QUEUED;
+				frame->blit_time = -1;
+				if (s) stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+			} else if (android_buffer_queue(p->as, blit_frame->handle[0])) {
+				LOG("frame(%d): android_buffer_queue failed", blit_frame->index);
+				android_buffer_cancel(p->as, blit_frame->handle[0]);
+				p->blit_frames_state[blit_frame->index] = FRAME_STATE_QUEUED;
+				frame->blit_time = -1;
+				if (s) stream_set_error(s, VE_VIDEO_CODEC_ERROR);
+			} else {
+				p->blit_frames_state[blit_frame->index] = FRAME_STATE_QUEUED;
+				p->presentation_end_ms = atime() + MAX(0, frame->blit_time - _get_time(p)) + MAX(0, frame->duration);
 			}
-			p->blit_frames_state[frame->index] = FRAME_STATE_QUEUED;
 
 			frame_q_put(&p->get_q, frame);
 		}
@@ -449,16 +485,24 @@ DBGS serprintf("stream_sink_video_android: open  num_frames %d  cpu_type %d\n", 
 
 	LOG("hal_format: 0x%X, buffer_type: %d hw_usage: 0x%X, size: %dx%d", hal_format, buffer_type, rc->hw_usage, p->padded_width, p->padded_height);
 
-	p->num_blit_frames = 1;
+	p->hal_format = hal_format;
+	p->num_blit_frames = 0;
 	p->num_frames = num_frames;
 	
+	int blit_count = 1;
 	int min_undequeued = 0;
-	if (android_buffer_setup(p->as, p->padded_width, p->padded_height, buffer_type, hal_format, rc->hw_usage, &p->num_blit_frames, &min_undequeued) != 0) {
+	if (android_buffer_setup(p->as, p->padded_width, p->padded_height, buffer_type, hal_format, rc->hw_usage, &blit_count, &min_undequeued) != 0) {
 		LOG("android_buffer_setup failed");
 		android_buffer_close(p->as);
-		p->num_blit_frames = 0;
 		goto err;
 	}
+	// This sink owns one blit slot; never publish an unchecked negotiated count.
+	if (blit_count != 1) {
+		LOG("android_buffer_setup returned unsupported blit count: %d", blit_count);
+		android_buffer_close(p->as);
+		goto err;
+	}
+	p->num_blit_frames = blit_count;
 
 	if (p->num_frames > STREAM_MAX_FRAMES)
 		p->num_frames = STREAM_MAX_FRAMES;
@@ -499,7 +543,10 @@ LOG("WARNING: frame(%d): android_buffer_queue failed", p->blit_frames[0]->index)
 	}
 
 	p->venc_run = 1;
-	pthread_create(&p->venc_thread_handle, 0, venc_thread, (void*)sink);
+	if (pthread_create(&p->venc_thread_handle, 0, venc_thread, (void*)sink)) {
+		p->venc_run = 0;
+		goto err;
+	}
 
 	return sink->flush(sink);
 err:
@@ -589,18 +636,19 @@ static int sink_put(STREAM_SINK_VIDEO *sink, VIDEO_FRAME *frame)
 
 //	setcrop(p, frame->ofs_x, frame->ofs_y, frame->width, frame->height);
 
+	pthread_mutex_lock(&p->venc_mutex);
 	if( do_fake == 2 ) {
 		frame_q_put(&p->get_q, frame);
 	} else {
-		pthread_mutex_lock(&p->venc_mutex);
 		frame_q_put(&p->venc_q, frame);
 		pthread_cond_signal(&p->venc_cond);
-		pthread_mutex_unlock(&p->venc_mutex);
 	}
+	int time = _get_time(p);
+	pthread_mutex_unlock(&p->venc_mutex);
 
 	DBGSI2 LOG("frame %2d/%8d  handle %08X", frame->index, frame->time, frame->handle[0]);
 
-	return _get_time(p);
+	return time;
 }
 
 static int sink_get(STREAM_SINK_VIDEO *sink, VIDEO_FRAME **pframe)
@@ -612,7 +660,9 @@ static int sink_get(STREAM_SINK_VIDEO *sink, VIDEO_FRAME **pframe)
 		return 1;
 	}
 	
+	pthread_mutex_lock(&p->venc_mutex);
 	VIDEO_FRAME *frame = frame_q_get(&p->get_q);
+	pthread_mutex_unlock(&p->venc_mutex);
 
 	*pframe = frame;
 	if( frame ) {
@@ -634,6 +684,7 @@ static int sink_flush_and_enqueue(STREAM_SINK_VIDEO *sink)
 	frame_q_flush(&p->venc_q);
 
 	p->venc_flushing = 1;
+	p->presentation_end_ms = 0;
 	pthread_cond_signal(&p->venc_cond);
 
 	while (p->frame_out != NULL)
@@ -662,6 +713,16 @@ static int sink_flush_and_enqueue(STREAM_SINK_VIDEO *sink)
 static int sink_end(STREAM_SINK_VIDEO *sink)
 {
 	return 0;
+}
+
+static int sink_drained(STREAM_SINK_VIDEO *sink)
+{
+	priv_t *p = sink->priv;
+	pthread_mutex_lock(&p->venc_mutex);
+	int done = !p->frame_out && !frame_q_count(&p->venc_q) &&
+		atime() >= p->presentation_end_ms;
+	pthread_mutex_unlock(&p->venc_mutex);
+	return done;
 }
 
 static int sink_syncable(STREAM_SINK_VIDEO *sink)
@@ -730,6 +791,7 @@ STREAM_SINK_VIDEO *stream_sink_video_android3_new(void *surface_handle)
 	sink->get	= sink_get;
 	sink->flush	= sink_flush_and_enqueue;
 	sink->end	= sink_end;
+	sink->drained = sink_drained;
 	sink->syncable	= sink_syncable;
 	sink->delay	= sink_delay;
 	sink->get_frame = sink_get_frame;

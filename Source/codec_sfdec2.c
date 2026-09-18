@@ -114,6 +114,9 @@ typedef struct priv {
 	int pts_input_seen;
 	int pts_input_last;
 	int pts_repair_logged;
+	int input_eos;
+	int output_eos;
+	INT64 presentation_end_ns;
 
 	struct XDM_ctx XDM_ctx;
 
@@ -523,6 +526,17 @@ static int videosink_end(STREAM_SINK_VIDEO *sink)
 	return 0;
 }
 
+static int videosink_drained(STREAM_SINK_VIDEO *sink)
+{
+	priv_t *p = sink->priv;
+	pthread_mutex_lock(&p->locked.mtx);
+	int done = !frame_q_count(&p->locked.venc_q) &&
+		!has_state_l(p, THREAD_STATE_RENDERING) &&
+		_get_monotonic_ns() >= p->presentation_end_ns;
+	pthread_mutex_unlock(&p->locked.mtx);
+	return done;
+}
+
 static int videosink_syncable(STREAM_SINK_VIDEO *sink)
 {
 	return 1;
@@ -788,6 +802,7 @@ static STREAM_SINK_VIDEO *videosink_new(priv_t *p)
 	sink->get	= videosink_get;
 	sink->flush	= videosink_flush_and_enqueue;
 	sink->end	= videosink_end;
+	sink->drained = videosink_drained;
 	sink->syncable	= videosink_syncable;
 	sink->get_frame = videosink_get_frame;
 	sink->get_time	= videosink_get_time;
@@ -818,14 +833,16 @@ static int videodec_get_error(priv_t *p)
 	return error;
 }
 
-static void frame_release(sfdec_t *sfdec, VIDEO_FRAME *f)
+static int frame_release(sfdec_t *sfdec, VIDEO_FRAME *f)
 {
 	if (f->android_handle) {
 DBGCV3 CLOG("release f(%d) %p ->", f->index, f->android_handle);
-		sfdec_buf_release(sfdec, (sfbuf_t *)f->android_handle);
+		int ret = sfdec_buf_release(sfdec, (sfbuf_t *)f->android_handle);
 		f->android_handle = NULL;
 DBGCV3 CLOG("release <-");
+		return ret;
 	}
+	return 0;
 }
 
 static void frame_discard_after_flush(sfdec_t *sfdec, VIDEO_FRAME *f)
@@ -1045,8 +1062,9 @@ static void *videosink_thread(void *ctx)
 				// timeout path releases it outside the queue lock.
 				add_state_l(p, THREAD_STATE_RENDERING);
 				pthread_mutex_unlock(&p->locked.mtx);
-				sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+				int release_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 				pthread_mutex_lock(&p->locked.mtx);
+				if (release_error) p->locked.error = 1;
 				goto endloop;
 			}
 
@@ -1353,6 +1371,8 @@ static void *videosink_thread(void *ctx)
 		}
 
 		int do_render = 1;
+		int render_error = 0;
+		int presented = 0;
 		if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
 			do_render = 0;
 		}
@@ -1366,7 +1386,7 @@ static void *videosink_thread(void *ctx)
 
 			if (lateness_ns > k_late_drop_threshold_ns) {
 				// Drop/release buffer immediately without rendering to catch up
-				sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 				p->dropped++;
 				DBGSI serprintf("android_sync: late frame drop f_time=%d lateness=%lldms dropped=%d\n",
 					f->time, lateness_ns / 1000000LL, p->dropped);
@@ -1374,17 +1394,25 @@ static void *videosink_thread(void *ctx)
 				DBGCV3 CLOG("render ->");
 				int start = time_update_time();
 				// Timed rendering (asap=0) using render_ts_ns computed under the lock
-				sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 0, render_ts_ns);
+				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 0, render_ts_ns);
+				presented = !render_error;
 				int took = time_update_time() - start;
 				p->dropped = 0;
 				DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );
 				DBGCV3 CLOG("render <-");
 			}
 		} else {
-			sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+			render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 		}
 
 		pthread_mutex_lock(&p->locked.mtx);
+		if (render_error) {
+			p->locked.error = 1;
+			pthread_cond_broadcast(&p->locked.cond);
+		}
+		if (presented)
+			p->presentation_end_ns = MAX(p->presentation_end_ns,
+				render_ts_ns + (INT64)MAX(f->duration, 0) * NSEC_PER_MSEC);
 	endloop:
 		if (audio_lease) stream_audio_read_release(s);
 		if (f) {
@@ -1436,7 +1464,7 @@ static void *videodec_thread(void *ctx)
 		// lets the close path fall through here with f==NULL, be caught by the
 		// "!f" check below, and unwind via the outer run-checked loop.
 		while (p->locked.run && !p->locked.error &&
-		       (has_state_l(p, THREAD_STATE_FLUSHING) || !(f = frame_q_get(&p->locked.dec_q)))) {
+		       (has_state_l(p, THREAD_STATE_FLUSHING) || p->output_eos || !(f = frame_q_get(&p->locked.dec_q)))) {
 			rm_state_l(p, THREAD_STATE_READING);
 			pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
 		}
@@ -1449,7 +1477,13 @@ DBGCV CLOG("stop thread");
 
 		pthread_mutex_unlock(&p->locked.mtx);
 
-		frame_release(p->sfdec, f);
+		if (frame_release(p->sfdec, f)) {
+			pthread_mutex_lock(&p->locked.mtx);
+			p->locked.error = 1;
+			frame_q_put_head(&p->locked.dec_q, f);
+			pthread_cond_broadcast(&p->locked.cond);
+			continue;
+		}
 
 DBGCV3 CLOG("sfdec_read, ->");
 		static int last;
@@ -1485,6 +1519,12 @@ DBGCV3 CLOG("sfdec_read <- sfbuf: %p, time_ms: %8d", sfbuf, time);
 DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.height, read_out.size.interlaced);
 		}
 
+		// queueInputBuffer may return after this output becomes available.
+		// Wait for the accepted-input metadata before consuming its timestamp.
+		while (has_state_l(p, THREAD_STATE_WRITING))
+			pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
+		if ((read_out.flag & SFDEC_READ_EOS) && !has_state_l(p, THREAD_STATE_FLUSHING))
+			p->output_eos = 1;
 		if (!sfbuf || has_state_l(p, THREAD_STATE_FLUSHING)) {
 			if( sfbuf ) {
 				sfdec_buf_discard(p->sfdec, sfbuf);
@@ -1746,6 +1786,8 @@ retry_decoder_open:
 	p->pts_input_seen = 0;
 	p->pts_input_last = INT_MIN;
 	p->pts_repair_logged = 0;
+	p->input_eos = p->output_eos = 0;
+	p->presentation_end_ns = 0;
 	if( p->repair_decode_order_pts ) {
 		CLOG("decode-order PTS repair armed: depth=%d", p->pts_reorder_depth);
 	}
@@ -1946,7 +1988,11 @@ CLOG("error!");
 
 	ret = sfdec_send_input(p->sfdec, d->data[0], d->size, (int64_t)d->time * 1000, d->type == I_VOP ? 1 : 0, 0);
 	pthread_mutex_lock(&p->locked.mtx);
-	if( ret > 0 ) {
+	if (ret < 0 || (ret > 0 && ret != d->size)) {
+		p->locked.error = 1;
+		pthread_cond_broadcast(&p->locked.cond);
+	}
+	if( ret == d->size && ret > 0 ) {
 DBGCV CLOG("%c %8d: %d/%d", frame_type(d->type), d->time, ret, d->size);
 		XDM_id_put( &p->XDM_ctx,  d->time, d->type, d->user_ID );
 		if( p->repair_decode_order_pts ) {
@@ -1966,7 +2012,7 @@ DBGCV CLOG("%c %8d: %d/%d", frame_type(d->type), d->time, ret, d->size);
 		*pdecoded = ret > 0 ? ret : 0;
 	}
 //CLOG("<- decoded: %d", ret);
-	return 0;
+	return ret < 0 || (ret > 0 && ret != d->size) ? 1 : 0;
 }
 
 static int videodec_put_out(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **pin_frame)
@@ -2002,6 +2048,27 @@ static int videodec_get_out(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **pout_frame)
 	if (*pout_frame)
 		(*pout_frame)->valid = 1;
 	return 0;
+}
+
+static int videodec_drain(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **in,
+	VIDEO_FRAME **out, int *done)
+{
+	priv_t *p = dec->priv;
+	pthread_mutex_lock(&p->locked.mtx);
+	if (!p->input_eos && !p->locked.error && p->locked.run &&
+	    !has_state_l(p, THREAD_STATE_FLUSHING)) {
+		add_state_l(p, THREAD_STATE_WRITING);
+		pthread_mutex_unlock(&p->locked.mtx);
+		int ret = sfdec_send_eos(p->sfdec);
+		pthread_mutex_lock(&p->locked.mtx);
+		if (ret < 0) p->locked.error = 1;
+		else if (ret > 0) p->input_eos = 1;
+		rm_state_l(p, THREAD_STATE_WRITING);
+	}
+	*done = p->output_eos && !frame_q_count(&p->locked.out_q);
+	int ret = p->locked.error;
+	pthread_mutex_unlock(&p->locked.mtx);
+	return ret;
 }
 
 static int videodec_flush(STREAM_DEC_VIDEO *dec)
@@ -2046,6 +2113,9 @@ DBGCV	CLOG();
 	p->pts_input_last = INT_MIN;
 	p->pts_repair_logged = 0;
 	int codec_flushed = sfdec_flush(p->sfdec) == 0;
+	if (!codec_flushed) p->locked.error = 1;
+	p->input_eos = p->output_eos = 0;
+	p->presentation_end_ns = 0;
 	sfdec_seek_reset( p->sfdec );
 DBGCV CLOG("MediaCodec seek reset");
 
@@ -2061,7 +2131,7 @@ DBGCV CLOG("MediaCodec seek reset");
 
 	pthread_mutex_unlock(&p->locked.mtx);
 
-	return 0;
+	return codec_flushed ? 0 : 1;
 }
 
 static int videodec_get_rc(STREAM_DEC_VIDEO *dec, STREAM_RC *rc)
@@ -2135,6 +2205,7 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	dec->put_out	= videodec_put_out;
 	dec->get_out	= videodec_get_out;
 	dec->flush	= videodec_flush;
+	dec->drain = videodec_drain;
 	dec->get_rc	= videodec_get_rc;
 	dec->get_sink	= videodec_get_sink;
 	dec->async	= 1;

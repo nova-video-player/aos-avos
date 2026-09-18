@@ -735,6 +735,7 @@ typedef struct STREAM {
 	int		audio_ac3_draining;
 	int		audio_atempo_draining;
 	int		video_parse_end;	// parser has parsed complete file
+	int             video_decoder_drained;
 	int		video_end;		// video is at the end of file
 	int		stream_end;		// stream is at it's end
 	

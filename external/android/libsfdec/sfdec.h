@@ -101,6 +101,8 @@ void		sfdec_delete(sfdec_t *sfdec);
 int		sfdec_start(sfdec_t *);
 int		sfdec_stop(sfdec_t *);
 ssize_t		sfdec_send_input(sfdec_t *sfdec, void *data, size_t size, int64_t time_us, int is_sync_frame, int wait);
+/* Nonblocking EOS submission: 1 accepted, 0 retry, -1 failure. */
+int		sfdec_send_eos(sfdec_t *sfdec);
 int		sfdec_flush(sfdec_t *sfdec);
 int		sfdec_stop_input(sfdec_t *sfdec);
 int		sfdec_read(sfdec_t *sfdec, int64_t seek, sfdec_read_out_t *read_out);

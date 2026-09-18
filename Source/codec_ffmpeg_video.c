@@ -172,6 +172,8 @@ typedef struct PRIV {
 	AVPacket	*avpkt;
 	void		*mt_ctx;
 	int		reorder_pts;
+	int eos_sent;
+	int drained;
 	pthread_mutex_t mutex;
 } PRIV;
 
@@ -192,7 +194,8 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 	dec->video = &dec->_video;
 	memcpy( dec->video, video, sizeof( VIDEO_PROPERTIES ) );
 	
-	int need_flush    = -1;
+	// avcodec_flush_buffers resets delayed pictures; never replay the first AU.
+	int need_flush    = 0;
 	int need_reorder  = 0;
 	int no_extra      = 0;
 	int codec_id;
@@ -206,6 +209,7 @@ DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
 	}
 
 	p->reorder_pts = video->reorder_pts;
+	p->eos_sent = p->drained = 0;
 
 	if(p->reorder_pts && pts_force_reorder) {
 		STREAM *s = dec->ctx;
@@ -542,12 +546,13 @@ static int ffmpeg_video_codec_decode2( STREAM_DEC_VIDEO *dec, UCHAR *data, int s
 	AVCodecContext *vctx = p->vctx;
 	AVFrame	*vframe = p->vframe;
 
-	int slice_offset[256];
-	int force_decoded = 0;
+	int draining = !data && size == 0;
 	int decoded = 0;
 	VIDEO_FRAME *avos_frame = *pin_frame;
 
 	*pin_frame  = NULL;
+	*pout_frame = avos_frame;
+	if (_decoded) *_decoded = 0;
 	
 DBGCV2 serprintf("\r\nFFM: %2d  siz %6d/%c  tim %8d  ", avos_frame->index, size, frame_type(avos_frame->type), avos_frame->time);
 	if( _time )
@@ -555,7 +560,7 @@ DBGCV2 serprintf("\r\nFFM: %2d  siz %6d/%c  tim %8d  ", avos_frame->index, size,
 	
 	avos_frame->valid = 0;
 	
-	switch( dec->video->format ) {
+	if (!draining) switch( dec->video->format ) {
 	case VIDEO_FORMAT_MPEG: {
 		int fake_size = _fake_dsp_mpeg2( data, size );
 		if( fake_size > 0 )
@@ -566,7 +571,7 @@ DBGCV2 if( seq ) serprintf("seq %3d  ", seq );
 		break;
 	}
 	case VIDEO_FORMAT_MPG4: {
-		MPG4_fix_vol_header( data, 20 );
+		if (size >= 20) MPG4_fix_vol_header( data, 20 );
 		int vol = MPG4_get_VOL_len( data, size );
 DBGCV2 if( vol ) serprintf("vol %3d  ", vol );
 		break;
@@ -590,67 +595,53 @@ serprintf("\r\n");
 Dump( data, size );
 } else DBGCV4 {
 serprintf("\r\n");
-Dump( data, 64 );
+if (data) Dump( data, MIN(size, 64) );
 }
 	int total = time_update_time();
 	// decode the frame
 	int got_picture = 0;
 
-	av_packet_unref( p->avpkt );
+	av_packet_unref(p->avpkt);
 	p->avpkt->data = data;
 	p->avpkt->size = size;
-	if (p->reorder_pts) {
-		vframe->opaque = (void*)(intptr_t)avos_frame->time;
-		p->avpkt->pts = avos_frame->time;
-	} else {
-		vframe->opaque = (void*)(intptr_t)avos_frame->user_ID;
-		p->avpkt->pts = avos_frame->user_ID;
-	}
-DBGCV2 serprintf("<"); 
+	p->avpkt->pts = p->reorder_pts ? avos_frame->time : avos_frame->user_ID;
+DBGCV2 serprintf("<");
 	int start = time_update_time();
 	int ret = 0;
-	if( !_ff_fake ) {
-        ret = avcodec_send_packet(vctx, p->avpkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-             //try again later -- ignore error silently
-             ret = 0;
-        }
-        else if (ret < 0) {
-            serprintf("FFM: avcodec_send_packet failed\r\n");
-        }
-        else
-            decoded += size;
-
-        ret = avcodec_receive_frame(vctx, vframe);
-        if (ret == AVERROR(EAGAIN) ) {
-             //try again later -- ignore error silently
-             ret = 0;
-        }
-        else if (ret < 0) {
-            serprintf("FFM: avcodec_receive_frame error\r\n");
-        }
-        else
-            got_picture = 1;
-		AVFrame *temp_frame = av_frame_alloc();
-		while( ret >= 0 ) {
-			// drain the decoder, should not be necessary
-			int ret_rx_post = avcodec_receive_frame(vctx, temp_frame);
-			if( ret_rx_post == 0 ) {
-				serprintf( "%s: got an unexpected additional video frame (%s)\n", __FUNCTION__, av_err2str( ret_rx_post ) );
-			} else {
-				break;
+	if (!_ff_fake) {
+		// Return buffered output before accepting another packet. An output
+		// burst consumes no bytes from the caller's still-pending access unit.
+		ret = avcodec_receive_frame(vctx, vframe);
+		if (ret == AVERROR(EAGAIN)) {
+			if (!draining || !p->eos_sent) {
+				ret = avcodec_send_packet(vctx, draining ? NULL : p->avpkt);
+				if (ret == 0) {
+					if (draining) p->eos_sent = 1;
+					else decoded = size;
+					ret = avcodec_receive_frame(vctx, vframe);
+				}
 			}
 		}
-		av_frame_free( &temp_frame );
+		if (ret == 0) got_picture = 1;
+		else if (ret == AVERROR_EOF && draining) {
+			p->drained = 1;
+			ret = 0;
+		} else if (ret == AVERROR(EAGAIN)) {
+			ret = 0;
+		}
+
 	} else {
-		got_picture = 1;
+		got_picture = !draining;
+		if (draining) p->drained = 1;
+		else decoded = size;
 		vframe->opaque = (void*)(intptr_t)(p->reorder_pts ? avos_frame->time : avos_frame->user_ID);
-		vctx->width  = dec->video->width;
-		vctx->height = dec->video->height;
+		vframe->width  = dec->video->width;
+		vframe->height = dec->video->height;
 		vframe->flags &= ~AV_FRAME_FLAG_INTERLACED;
 	}
 	start = time_update_time() - start;
 DBGCV2 serprintf("> tim %3d  ", start); 
+	if (_decoded) *_decoded = decoded;
 	if( ret < 0 ) {
 serprintf("FFM: ERR\r\n");
 DBGCV2 Dump( data, MIN( size, 32 ) );
@@ -679,7 +670,7 @@ DBGCV2 serprintf("[");
 			avos_frame->deinterlace = 0;
 			if (avos_frame->interlaced != VIDEO_PROGRESSIVE && _ff_deinterlace) {
 				int deinterlacing_limit = (avos_frame->interlaced == VIDEO_INTERLACED_ONE_FIELD) ? _ff_deinterlacing_max_height / 2 : _ff_deinterlacing_max_height;
-				if (avos_frame->height <= deinterlacing_limit) {
+				if (vframe->height <= deinterlacing_limit) {
 					avos_frame->deinterlace = 1;
 				} else {
 					avos_frame->deinterlace = 0;
@@ -690,13 +681,25 @@ DBGCV2 serprintf("[");
 				// keep the frame:
 				av_frame_free((AVFrame**)&avos_frame->priv);
 				avos_frame->priv = (void*)av_frame_clone(vframe);
+				if (!avos_frame->priv) {
+					avos_frame->dec = NULL;
+					avos_frame->error = 1;
+					*pout_frame = avos_frame;
+					return -1;
+				}
 			} else {
 				avos_frame->dec = NULL;
 				avos_frame->color_space = vframe->colorspace;
+				if (!codec_frame_can_hold(avos_frame, vframe->width, vframe->height)) {
+					avos_frame->error = 1;
+					*pout_frame = avos_frame;
+					stream_set_error(dec->ctx, VE_VIDEO_CODEC_ERROR);
+					return -1;
+				}
 				if( p->mt_ctx ) {
-					codec_convert_mt( p->mt_ctx, map_pixfmt( vctx->pix_fmt ), vframe->data, vframe->linesize, vctx->width, vctx->height, avos_frame );
+					codec_convert_mt( p->mt_ctx, map_pixfmt( vframe->format ), vframe->data, vframe->linesize, vframe->width, vframe->height, avos_frame );
 				} else {
-					codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), vframe->data, vframe->linesize, vctx->width, vctx->height, avos_frame);
+					codec_convert_pixel_format( map_pixfmt( vframe->format ), vframe->data, vframe->linesize, vframe->width, vframe->height, avos_frame);
 				}
 			}
 			start = time_update_time() - start;
@@ -716,8 +719,8 @@ DBGCV2 serprintf("[   -   ]");
 		avos_frame->top_field_first = !!(vframe->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
 		avos_frame->pts             = vframe->pts;
 
-		avos_frame->width           = vctx->width;
-		avos_frame->height          = vctx->height;
+		avos_frame->width           = vframe->width;
+		avos_frame->height          = vframe->height;
 		if (p->reorder_pts) {
 			if (vframe->opaque != NULL)
 				avos_frame->time = (int64_t)(intptr_t)vframe->opaque;
@@ -735,8 +738,6 @@ DBGCV2 serprintf("[   -   ]");
 	
 	if( _decoded )
 		*_decoded = decoded;
-	if( force_decoded )
-		*_decoded = force_decoded;
 
 	*pout_frame = avos_frame;
 		
@@ -761,16 +762,16 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 		return 1;
 	}
 	
-	AVCodecContext *vctx = p->vctx;
 	AVFrame	*avframe = (AVFrame*)src->priv;
 	
 	DBGCV3 serprintf("ffrender %2d %08X %08X %08X\n", src->index, avframe->data, avframe->data[0], dst ? dst->data[0] : 0 );
-	if( dst ) {
+	int failed = dst && !codec_frame_can_hold(dst, avframe->width, avframe->height);
+	if( dst && !failed ) {
 		dst->color_space = avframe->colorspace;
 		if( p->mt_ctx ) {
-			codec_convert_mt( p->mt_ctx, map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
+			codec_convert_mt( p->mt_ctx, map_pixfmt( avframe->format ), avframe->data, avframe->linesize, avframe->width, avframe->height, dst);
 		} else {
-			codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), avframe->data, avframe->linesize, vctx->width, vctx->height, dst);
+			codec_convert_pixel_format( map_pixfmt( avframe->format ), avframe->data, avframe->linesize, avframe->width, avframe->height, dst);
 		}
 	}
 	
@@ -779,7 +780,17 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	
 	pthread_mutex_unlock( &p->mutex );
 
-	return 0;
+	return failed;
+}
+
+static int ffmpeg_video_codec_drain(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **in,
+	VIDEO_FRAME **out, int *done)
+{
+	PRIV *p = dec->priv;
+	int decoded, took;
+	int ret = ffmpeg_video_codec_decode2(dec, NULL, 0, in, out, &decoded, &took);
+	*done = p->drained;
+	return ret;
 }
 
 static int ffmpeg_video_codec_flush( STREAM_DEC_VIDEO *dec  )
@@ -787,6 +798,7 @@ static int ffmpeg_video_codec_flush( STREAM_DEC_VIDEO *dec  )
 	PRIV *p = (PRIV*)dec->priv;
 	if( p->vctx )
 		avcodec_flush_buffers( p->vctx );
+	p->eos_sent = p->drained = 0;
 	return 0;
 }
 
@@ -851,6 +863,7 @@ static STREAM_DEC_VIDEO *_new( void )
 	dec->decode  = NULL;
 	dec->decode2 = ffmpeg_video_codec_decode2;
 	dec->flush   = ffmpeg_video_codec_flush;
+	dec->drain   = ffmpeg_video_codec_drain;
 	dec->get_rc  = ffmpeg_video_codec_get_rc;
 	dec->render  = ffmpeg_video_codec_render;
 	

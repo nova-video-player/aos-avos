@@ -1207,13 +1207,44 @@ static int has_valid_destination_layout(const VIDEO_FRAME *frame)
 	}
 }
 
+/* Check allocated plane extents, not mutable display dimensions. */
+int codec_frame_can_hold(const VIDEO_FRAME *frame, int width, int height)
+{
+	if (!frame || width <= 0 || height <= 0 || width > INT_MAX / 4 || height > INT_MAX / 4)
+		return 0;
+	int stride_scale = 1;
+	int rows[3] = { height, 0, 0 };
+	int bytes[3] = { width, 0, 0 };
+	switch (frame->colorspace) {
+	case AV_IMAGE_BGRA_32:
+	case AV_IMAGE_RGBX_32: bytes[0] = width * 4; stride_scale = 4; break;
+	case AV_IMAGE_YUV_422: bytes[0] = width * 2; break;
+	case AV_IMAGE_NV12:
+		rows[1] = (height + 1) / 2;
+		bytes[1] = ((width + 1) / 2) * 2;
+		break;
+	case AV_IMAGE_YV12:
+		rows[1] = rows[2] = (height + 1) / 2;
+		bytes[1] = bytes[2] = (width + 1) / 2;
+		break;
+	default: return 0;
+	}
+	for (int i = 0; i < 3; i++) {
+		INT64 stride = (INT64)frame->linestep[i] * (i == 0 ? stride_scale : 1);
+		if (rows[i] && (!frame->data[i] || stride < bytes[i] ||
+		    (INT64)(rows[i] - 1) * stride + bytes[i] > frame->data_size[i]))
+			return 0;
+	}
+	return 1;
+}
+
 static void _convert( int pixfmt, unsigned char *src_data[], int src_linesize[], int width, int height, int start, int total_height, VIDEO_FRAME *frame)
 {
 	if (width <= 0 || height <= 0 || start < 0 || total_height <= 0 || start + height > total_height)
 		return;
 	if (!has_valid_source_layout(pixfmt, src_data, src_linesize))
 		return;
-	if (!has_valid_destination_layout(frame))
+	if (!has_valid_destination_layout(frame) || !codec_frame_can_hold(frame, width, total_height))
 		return;
 
 	// Resolve YUV->RGB coefficients from the frame's color space

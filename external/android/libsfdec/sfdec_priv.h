@@ -63,6 +63,7 @@ typedef struct sfdec_itf {
 	sfdec_resume_t resume;
 	sfdec_seek_reset_t seek_reset;
 	sfdec_buf_discard_t buf_discard;
+	int (*send_eos)(sfdec_priv_t *sfdec);
 } sfdec_itf_t;
 
 struct sfdec {

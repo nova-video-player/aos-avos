@@ -100,3 +100,26 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   flush ownership contract. NDK output dequeue uses a bounded wait, so seek and
   close can wait for all three operations to finish before calling
   `MediaCodec.flush()`. This avoids interrupting an in-flight vendor codec call.
+
+## Decoder output, recovery, and completion
+
+- MediaCodec input is submitted as a complete access unit. An input buffer that
+  cannot hold it triggers decoder recovery; the remainder is never submitted as
+  an unrelated frame with duplicate timestamp bookkeeping. Input and codec-config
+  dequeue waits are bounded, and codec-config submission remains pending until
+  accepted. Output timestamp lookup waits for accepted-input bookkeeping.
+- Submission, output release, and flush failures propagate to decoder recovery.
+  A failed flush cannot establish a new seek generation on the old decoder.
+- Natural EOF is separate from flush. FFmpeg returns all buffered frames before
+  accepting more input and drains with a single null packet. MediaCodec submits
+  input EOS once, processes any final frame carrying EOS, and waits for output
+  EOS. Empty EOS buffers do not become video frames. Seek clears drain state.
+- Playback completion waits for decoder output, queued presentation, and the
+  final scheduled frame deadline/duration. Platform display completion is not
+  measured directly; the timed sink uses its scheduled monotonic deadline.
+- Software conversion uses the retained AVFrame's geometry and pixel format,
+  with checks against destination plane capacities. The public-window software
+  sink changes buffer geometry at frame boundaries, after older queued frames.
+- MediaCodec retains the existing initial-container-geometry workaround for
+  inaccurate vendor startup metadata. Subsequent changes in reported dimensions
+  or crop propagate validated visible dimensions, including rotation.

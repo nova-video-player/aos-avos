@@ -21,6 +21,7 @@
 
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <string.h>
 #include <sys/types.h>
 
@@ -246,6 +247,34 @@ DBG2 serprintf("SET %s  %08X  %d -> %d  end\r\n", state->tag, state, old, new );
 //	thread_state_ack
 //
 // *****************************************************************************
+// Withdraw an unacknowledged idle request under the same lock used by ack.
+// This bounds control operations that must not interrupt the worker's I/O.
+int thread_state_try_idle(THREAD_STATE *state, int timeout_ms, int *old_state)
+{
+	if (timeout_ms < 0 || !old_state) return 1;
+	struct timespec deadline;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += timeout_ms / 1000;
+	deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+	pthread_mutex_lock(&state->_mutex);
+	int old = state->_get;
+	if (old == THREAD_EXIT || state->_set == THREAD_EXIT) { pthread_mutex_unlock(&state->_mutex); return 1; }
+	state->_set = THREAD_IDLE;
+	int ret = 0;
+	while (state->_get != THREAD_IDLE && state->_set == THREAD_IDLE && !ret)
+		ret = pthread_cond_timedwait(&state->_cond, &state->_mutex, &deadline);
+	if (state->_get != THREAD_IDLE || state->_set != THREAD_IDLE) {
+		if (state->_set == THREAD_IDLE) state->_set = old;
+		pthread_cond_broadcast(&state->_cond);
+		pthread_mutex_unlock(&state->_mutex);
+		return 1;
+	}
+	*old_state = old;
+	pthread_mutex_unlock(&state->_mutex);
+	return 0;
+}
+
 void thread_state_ack( THREAD_STATE *state )
 {
 DBG2 serprintf("ack %s  %08X  s %d  lock\r\n", state->tag, state, state->_set );

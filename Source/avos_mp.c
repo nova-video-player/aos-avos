@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "stream_fd.h"
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -1052,6 +1053,7 @@ static int avos_mp_setdatasource(avos_mp_t *mp, const char *path, const char **k
 		MPLOG("EXTRA_NAME: %s", extra_name);
 	if (stream_url_cpy_url_name_headers(&mp->src, path, extra_name, keys, values))
 		return AVOS_ERR_CRITICAL;
+	if (mp->fd >= 0) { close(mp->fd); mp->fd = -1; }
 	get_url_type(&mp->src, &mp->type, &mp->etype);
 	MPLOGV("file type: %d|%s  %d|%s", mp->type, mp->type == TYPE_VID ? "VIDEO" : mp->type == TYPE_AUD ? "AUDIO" : "UNKNOWN", mp->etype, av_get_etype_name( mp->etype) );
 	if (mp->type == TYPE_NONE || mp->type == TYPE_UNKNOWN) {
@@ -1072,44 +1074,20 @@ static int avos_mp_setdatasource_fd(avos_mp_t *mp, int fd, int64_t offset, int64
 	pthread_mutex_lock(&mp->async.mtx);
 	int unavailable = mp->media || mp->async.open_pending || mp->async.destroying;
 	pthread_mutex_unlock(&mp->async.mtx);
-	if (unavailable) {
-		close(fd);
-		return AVOS_ERR_CRITICAL;
-	}
-
-	struct stat sb;
-	MPLOG("%d:%ld:%ld", fd, offset, length);
-
-	if (fstat(fd, &sb) != 0) {
-		MPLOG("can't start fd");
-		goto err;
-	}
-	if (offset >= sb.st_size) {
-		MPLOG("offset error");
-		goto err;
-	}
-	if (length == 0)
-		length = sb.st_size;
-	if (offset + length > sb.st_size)
-		length = sb.st_size - offset;
-
-	mp->fd = dup(fd);
-
+	if (unavailable) return AVOS_ERR_CRITICAL;
+	int owned_fd = stream_fd_duplicate(fd, offset, &length);
+	if (owned_fd < 0) return AVOS_ERR;
 	char fd_url[128];
-	snprintf(fd_url, sizeof(fd_url), "fd://%d:%"PRId64":%"PRId64, mp->fd, offset, length);
-	if (stream_url_cpy_url(&mp->src, fd_url))
-		goto err;
-	get_url_type(&mp->src, &mp->type, &mp->etype);
-
-	MPLOGV("file type: %s", mp->type == TYPE_VID ? "video" : mp->type == TYPE_AUD ? "audio" : "unknown");
-
-	close(fd);
-	if (mp->type == TYPE_NONE || mp->type == TYPE_UNKNOWN)
-		avos_mp_sendevent(mp, MEDIA_ERROR, MEDIA_ERROR_VE_FILE_ERROR, 0);
+	snprintf(fd_url, sizeof(fd_url), "fd://%d:%"PRId64":%"PRId64, owned_fd, offset, length);
+	if (stream_url_cpy_url(&mp->src, fd_url)) {
+		close(owned_fd);
+		return AVOS_ERR;
+	}
+	if (mp->fd >= 0) close(mp->fd);
+	mp->fd = owned_fd;
+	mp->type = TYPE_VID;
+	mp->etype = ETYPE_MKV; // select FFmpeg, which probes the descriptor's contents
 	return AVOS_ERR_OK;
-err:
-	close(fd);
-	return AVOS_ERR;
 }
 
 static int avos_mp_setsurface(avos_mp_t *mp, void *handle)

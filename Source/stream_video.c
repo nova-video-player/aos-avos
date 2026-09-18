@@ -5073,6 +5073,15 @@ serprintf("stream_seek pos err!\n");
 	}
 DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 
+	if (err) {
+		// A failed seek provides no valid anchor and may have changed demux
+		// state already. Do not reset playback clocks to sc's default zero.
+		if (!stream_abort(s)) stream_set_error(s, VE_FILE_ERROR);
+		s->seek = 0;
+		_seek_un_pause(s, was_paused);
+		return err;
+	}
+
 	_video_init( s, sc.time );
 
 	stream_audio_flush( s );
@@ -5090,15 +5099,6 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 			DBG serprintf("mode2_frontier_skip: cause=no_audio_epoch seek_epoch=%d old_time=%d audio=%d sink_ref=%d\n",
 				s->seek_epoch, old_time, old_audio_time, old_sink_ref_time);
 		}
-	}
-	if( err ) {
-		stream_sync_init( s, sc.time );
-		// Preserve audio delay fallback across seek re-init (broken timing devices).
-		s->last_good_delay_ms = last_good_delay_ms;
-		s->last_good_delay_valid = last_good_delay_valid;
-		// un_pause the stream
-		_seek_un_pause( s, was_paused );
-		return err;	
 	}
 
 	if( s->audio->valid ) {

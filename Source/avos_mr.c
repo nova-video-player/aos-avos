@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "stream_fd.h"
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -105,38 +106,23 @@ static int avos_mr_setdatasource(avos_mr_t *mr, const char *path, const char **k
 	MRLOGV("%s", path);
 	if (stream_url_cpy_url_name_headers(&mr->src, path, NULL, keys, values))
 		return AVOS_ERR;
+	if (mr->fd >= 0) { close(mr->fd); mr->fd = -1; }
 	return avos_mr_setdatasource_common(mr);
 }
 
 static int avos_mr_setdatasource_fd(avos_mr_t *mr, int fd, int64_t offset, int64_t length)
 {
-	struct stat sb;
-	MRLOG("%d:%ld:%ld", fd, offset, length);
-
-	if (fstat(fd, &sb) != 0) {
-		MRLOG("can't start fd");
-		goto err;
-	}
-	if (offset >= sb.st_size) {
-		MRLOG("offset error");
-		goto err;
-	}
-	if (length == 0)
-		length = sb.st_size;
-	if (offset + length > sb.st_size)
-		length = sb.st_size - offset;
-
-	mr->fd = dup(fd);
-
+	int owned_fd = stream_fd_duplicate(fd, offset, &length);
+	if (owned_fd < 0) return AVOS_ERR;
 	char fd_url[128];
-	snprintf(fd_url, sizeof(fd_url), "fd://%d:%"PRId64":%"PRId64, mr->fd, offset, length);
-	if (stream_url_cpy_url(&mr->src, fd_url))
-		goto err;
-	close(fd);
+	snprintf(fd_url, sizeof(fd_url), "fd://%d:%"PRId64":%"PRId64, owned_fd, offset, length);
+	if (stream_url_cpy_url(&mr->src, fd_url)) {
+		close(owned_fd);
+		return AVOS_ERR;
+	}
+	if (mr->fd >= 0) close(mr->fd);
+	mr->fd = owned_fd;
 	return avos_mr_setdatasource_common(mr);
-err:
-	close(fd);
-	return AVOS_ERR;
 }
 
 static int avos_mr_fillmetadata(avos_mr_t *mr)

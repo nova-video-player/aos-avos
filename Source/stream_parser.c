@@ -895,42 +895,30 @@ int stream_parser_get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STRE
 // 	stream_parser_send_video_extra
 //
 // ***************************************************************************
-void stream_parser_send_video_extra( VIDEO_PROPERTIES *video, CBE *cbe, int *size )
+// NULL cbe measures the exact prefix without marking it as sent.
+int stream_parser_send_video_extra(VIDEO_PROPERTIES *video, CBE *cbe, int *size)
 {
-#ifdef CONFIG_H264
-	if( video->format == VIDEO_FORMAT_H264 ) {
-		// do not send extradata inline
-		return;
-	}
-#endif
-#ifdef CONFIG_HEVC
-	if( video->format == VIDEO_FORMAT_HEVC || video->format == VIDEO_FORMAT_WMV3 || video->format == VIDEO_FORMAT_DOLBY_VISION ) {
-		// do not send extradata inline
-		return;
-	}
-#endif
-	if( video->format == VIDEO_FORMAT_AV1 ) {
-		// do not send extradata inline
-		return;
-	}
-
-	if( video->extraDataSize && !video->extra_sent ) {
-DBGCV serprintf("add extra: %d\r\n", video->extraDataSize );
-Dump( video->extraData, video->extraDataSize );
-		if (video->format == VIDEO_FORMAT_VC1) {
-			int extraDataSize = 0;
-			unsigned char * extraData = NULL;
-			extraData = WMV_get_rcv_header(video, &extraDataSize);
-			cbe_write( cbe, extraData, extraDataSize);
-                        *size += extraDataSize;
-			if (extraData)
-				free(extraData);
-		} else {
-			cbe_write( cbe, video->extraData, video->extraDataSize);
-			*size += video->extraDataSize;
+	if (video->format == VIDEO_FORMAT_H264 || video->format == VIDEO_FORMAT_HEVC ||
+	    video->format == VIDEO_FORMAT_DOLBY_VISION || video->format == VIDEO_FORMAT_WMV3 ||
+	    video->format == VIDEO_FORMAT_AV1 || video->extra_sent || !video->extraDataSize)
+		return 0;
+	if (video->extraDataSize < 0 || video->extraDataSize > sizeof(video->extraData)) return 1;
+	const UCHAR *data = video->extraData;
+	int bytes = video->extraDataSize;
+	if (video->format == VIDEO_FORMAT_VC1) {
+		// Match WMV_get_rcv_header's VC1 sequence-header selection without allocation.
+		for (int i = 0; i < bytes - 16; ++i) {
+			if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 && data[i + 3] == 0x0F) {
+				data += i;
+				bytes -= i;
+				break;
+			}
 		}
-		video->extra_sent = 1;
 	}
+	if (*size < 0 || *size > INT_MAX - bytes || (cbe && cbe_write(cbe, data, bytes) < 0)) return 1;
+	*size += bytes;
+	if (cbe) video->extra_sent = 1;
+	return 0;
 }
 
 // ***********************************************************

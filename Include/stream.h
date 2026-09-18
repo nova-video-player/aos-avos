@@ -1346,7 +1346,7 @@ int 	stream_parser_get_subtitle_chunk( STREAM *s, STREAM_CHUNK *c );
 void 	stream_parser_clear_audio_chunks   ( STREAM *s );
 void 	stream_parser_clear_video_chunks   ( STREAM *s );
 void 	stream_parser_clear_subtitle_chunks( STREAM *s );
-void    stream_parser_send_video_extra( VIDEO_PROPERTIES *video, CBE *cbe, int *size );
+int     stream_parser_send_video_extra( VIDEO_PROPERTIES *video, CBE *cbe, int *size );
 
 STREAM_CHUNK *stream_parser_peek_n_audio_chunk(STREAM *s, int n, UCHAR **data );
 

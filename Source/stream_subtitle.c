@@ -422,10 +422,14 @@ static int _switch_internal_subtitle(STREAM *s, int sub_stream)
 	if( thread_state_get(&s->sub_tstate) == THREAD_EXIT ||
 	    thread_state_get(&s->parser_tstate) == THREAD_EXIT )
 		return 1;
+	// A subtitle-only operation cannot repair an interrupted demuxer. Leave
+	// selection unchanged if its in-flight read cannot finish promptly.
+	int parser_state;
+	if (thread_state_try_idle(&s->parser_tstate, 500, &parser_state)) {
+		serprintf("subtitle switch: input busy, keeping current track\n");
+		return 1;
+	}
 	int sub_state = thread_state_set(&s->sub_tstate, THREAD_IDLE);
-	// Let an in-flight read finish: unlike a seek, this operation cannot repair
-	// demuxer/AVIO state left behind by interrupting the shared media input.
-	int parser_state = thread_state_set(&s->parser_tstate, THREAD_IDLE);
 
 	int previous = s->av.subs;
 	stream_close_sub_dec(s);

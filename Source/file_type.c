@@ -597,6 +597,15 @@ DBG serprintf("get_file_type: drop %s\r\n", c );
 		}
 	}
 	
+	// fd:// is Nova's bounded descriptor adapter; FFmpeg probes its contents.
+	if (!strncmp(name, "fd://", 5)) {
+		if (_type) *_type = TYPE_VID;
+		if (_etype) *_etype = ETYPE_MKV;
+		if (_mime) *_mime = "";
+		afree(name);
+		return 0;
+	}
+
 	int must_probe = 0;
 	if( !get_file_type_from_ext( get_extension( name ), _type, _etype, _mime, &must_probe ) ) {
 		if( !probe || !must_probe ) {

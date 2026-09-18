@@ -32,6 +32,7 @@
 #include "android_codec.h"
 #include "util.h"
 #include "dts.h"
+#include "stream_fd.h"
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
@@ -130,6 +131,8 @@ static void ffmpeg_set_http_options( AVDictionary **options, const STREAM_URL *s
 			}
 		}
 	}
+	// Bound stalled socket operations; stop/seek cancellation still interrupts sooner.
+	av_dict_set(options, "rw_timeout", "30000000", 0);
 	av_dict_set( options, "user_agent", user_agent, 0 );
 	if( referer )
 		av_dict_set( options, "referer", referer, 0 );
@@ -151,9 +154,17 @@ typedef struct AVQueue {
 	int 		packets;
 } AVQueue;
 
-typedef struct FF_PRIV 
+typedef struct FD_INPUT {
+	int fd;
+	int64_t start, length, pos;
+	AVIOInterruptCB interrupt;
+} FD_INPUT;
+
+typedef struct FF_PRIV
 {
 	AVFormatContext *fmt;
+	AVIOContext *fd_io;
+	FD_INPUT *fd_input;
         AVDictionary    *fmt_opts;
 	
 	AVQueue		aq;
@@ -163,6 +174,7 @@ typedef struct FF_PRIV
 	
 	STREAM		*s;
 	UINT64		size;
+	int size_known;
 	int		duration;
 	int		start_time;
 	
@@ -182,6 +194,9 @@ typedef struct FF_PRIV
 
 	int 		packet_count;
 	
+	int read_failed;
+	int drop_video_until_key;
+	int seeking;
 	int 		need_key;
 	int 		last_audio_time;
 
@@ -192,6 +207,75 @@ typedef struct FF_PRIV
 	
 } FF_PRIV;
 
+
+// Custom AVIO keeps descriptor offsets relative to the supplied slice and
+// pread leaves the Java owner's shared file position untouched.
+static int fd_input_read(void *opaque, uint8_t *data, int size)
+{
+	FD_INPUT *in = opaque;
+	if (size <= 0) return AVERROR(EINVAL);
+	for (;;) {
+		if (in->interrupt.callback && in->interrupt.callback(in->interrupt.opaque)) return AVERROR_EXIT;
+		if (in->pos >= in->length) return AVERROR_EOF;
+		int bytes = (int)MIN((int64_t)size, in->length - in->pos);
+		ssize_t ret = pread64(in->fd, data, bytes, in->start + in->pos);
+		if (ret < 0 && errno == EINTR) continue;
+		if (ret < 0) return AVERROR(errno);
+		if (!ret) return AVERROR(EIO); // file truncated before the promised slice end
+		in->pos += ret;
+		return ret;
+	}
+}
+
+static int64_t fd_input_seek(void *opaque, int64_t offset, int whence)
+{
+	FD_INPUT *in = opaque;
+	if (whence == AVSEEK_SIZE) return in->length;
+	whence &= ~AVSEEK_FORCE;
+	int64_t base;
+	if (whence == SEEK_SET) base = 0;
+	else if (whence == SEEK_CUR) base = in->pos;
+	else if (whence == SEEK_END) base = in->length;
+	else return AVERROR(EINVAL);
+	if (offset < -base || offset > in->length - base) return AVERROR(EINVAL);
+	in->pos = base + offset;
+	return in->pos;
+}
+
+static void ffmpeg_close_fd_input(FF_PRIV *priv)
+{
+	if (priv->fd_io) {
+		av_freep(&priv->fd_io->buffer);
+		avio_context_free(&priv->fd_io);
+	}
+	if (priv->fd_input) {
+		close(priv->fd_input->fd);
+		afree(priv->fd_input);
+		priv->fd_input = NULL;
+	}
+}
+
+static int ffmpeg_open_input(FF_PRIV *priv, const char *url, AVDictionary **options)
+{
+	if (strncmp(url, "fd://", 5)) return avformat_open_input(&priv->fmt, url, NULL, options);
+	int fd;
+	int64_t offset, length;
+	if (stream_fd_parse_url(url, &fd, &offset, &length)) return AVERROR(EINVAL);
+	fd = stream_fd_duplicate(fd, offset, &length);
+	if (fd < 0) return AVERROR(errno);
+	priv->fd_input = acalloc(1, sizeof(*priv->fd_input));
+	if (!priv->fd_input) { close(fd); return AVERROR(ENOMEM); }
+	*priv->fd_input = (FD_INPUT){.fd = fd, .start = offset, .length = length,
+		.interrupt = priv->fmt->interrupt_callback};
+	unsigned char *buffer = av_malloc(32768);
+	if (!buffer) return AVERROR(ENOMEM);
+	priv->fd_io = avio_alloc_context(buffer, 32768, 0, priv->fd_input,
+		fd_input_read, NULL, fd_input_seek);
+	if (!priv->fd_io) { av_free(buffer); return AVERROR(ENOMEM); }
+	priv->fmt->pb = priv->fd_io;
+	priv->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+	return avformat_open_input(&priv->fmt, NULL, NULL, options);
+}
 
 static int ff_force_seek = 1;
 
@@ -342,7 +426,9 @@ static int _parse_format( int etype, FF_PRIV *priv )
 DBGP serprintf("format   [%s]\r\n", fmt->iformat->name );
 
 	if( fmt->pb ) {
-		priv->size = avio_size(fmt->pb);
+		int64_t size = avio_size(fmt->pb);
+		priv->size_known = size >= 0;
+		priv->size = size >= 0 ? (uint64_t)size : 0;
 DBGP serprintf("size     %lld\r\n", priv->size );
 	}
 	if( fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
@@ -858,7 +944,7 @@ DBGS serprintf("FFMPEG: open: %s, buffer_size: %d\r\n", s->src.url, buffer_size)
 	
 	stream_parser_clear_chunks( s );
 
-		ff_p->buffer_size = buffer_size;
+	ff_p->buffer_size = MIN(MAX(buffer_size, 1024 * 1024), INT_MAX / 2);
 
 	av_log_set_callback(av_log_cb);
 	if( log_debug ) {
@@ -871,6 +957,7 @@ serprintf("FFMPEG: cannot init network");
     	}
 	
 	ff_p->fmt = avformat_alloc_context();
+	if (!ff_p->fmt) goto ErrorExit4;
 
 	// set max_delay here, we need that for proper RTSP, all other demuxers ignore it ...
 	ff_p->fmt->max_delay = max_delay;
@@ -921,7 +1008,7 @@ DBGP serprintf("max_delay: %d\n", ff_p->fmt->max_delay);
 	ffmpeg_set_http_options(&ff_p->fmt_opts, &s->src);
 DBGP serprintf("FFMPEG: opening url [%s]\r\n", s->src.url);
 
-	if( avformat_open_input(&ff_p->fmt, s->src.url, NULL, &ff_p->fmt_opts ) != 0) {
+	if( ffmpeg_open_input(ff_p, s->src.url, &ff_p->fmt_opts) != 0) {
 serprintf("FFMPEG: cannot open file [%s]\r\n", s->src.url);
 		goto ErrorExit4;
 	}
@@ -998,6 +1085,8 @@ DBGP serprintf("info\r\n");
 
 ErrorExit4:
 ErrorExit3:
+	if (ff_p->fmt) avformat_close_input(&ff_p->fmt);
+	ffmpeg_close_fd_input(ff_p);
 	av_dict_free(&ff_p->fmt_opts);
 	avformat_network_deinit();
 
@@ -1028,6 +1117,8 @@ serprintf("FFMPEG: not open!\r\n" );
 			avformat_close_input(&ff_p->fmt);
 		}
 
+
+		ffmpeg_close_fd_input(ff_p);
 
 		_flush_packets( &ff_p->vq, "VID" );
 		_flush_packets( &ff_p->aq, "AUD" );
@@ -1063,9 +1154,37 @@ static void _dispose_packet( AVPacket *packet )
 //	_add_packet
 //
 // ************************************************************
+#define FF_QUEUE_MAX_PACKETS 8192
+
+static int64_t packet_cost(const AVPacket *packet)
+{
+	if (packet->size < 0) return INT64_MAX;
+	int64_t cost = sizeof(PacketNode) + (int64_t)packet->size;
+	if (cost > INT_MAX) return INT64_MAX;
+	for (int i = 0; i < packet->side_data_elems; ++i) {
+		if (packet->side_data[i].size > INT_MAX - cost) return INT64_MAX;
+		cost += packet->side_data[i].size + sizeof(AVPacketSideData);
+		if (cost > INT_MAX) return INT64_MAX;
+	}
+	return cost;
+}
+
+static int queue_bytes(AVQueue *q)
+{
+	pthread_mutex_lock(&q->mutex);
+	int bytes = q->mem_used;
+	pthread_mutex_unlock(&q->mutex);
+	return bytes;
+}
+
 static int _add_packet( AVQueue *q, AVPacket *packet )
 {
 	pthread_mutex_lock( &q->mutex );
+	int64_t cost = packet_cost(packet);
+	if (cost > INT_MAX - q->mem_used || q->packets >= FF_QUEUE_MAX_PACKETS) {
+		pthread_mutex_unlock(&q->mutex);
+		return 1;
+	}
 
 	PacketNode *node = acalloc( 1, sizeof( PacketNode ) );
 	if (!node) {
@@ -1082,7 +1201,7 @@ static int _add_packet( AVQueue *q, AVPacket *packet )
 
 	LinkedList_append( &q->list, (LinkedListNode*) node);
 	
-	q->mem_used += sizeof( PacketNode ) + node->packet.size;
+	q->mem_used += cost;
 	q->packets  ++;
 	pthread_mutex_unlock( &q->mutex );
 	return 0;
@@ -1107,7 +1226,7 @@ static AVPacket *_get_packet( AVQueue *q, AVPacket *packet )
 	*packet = node->packet;
 	afree( node );
 	
-	q->mem_used -= sizeof( PacketNode ) + packet->size;
+	q->mem_used -= packet_cost(packet);
 	q->packets  --;
 	
 	pthread_mutex_unlock( &q->mutex );
@@ -1218,7 +1337,7 @@ static void _remove_cached_subtitle(AVQueue *q, LinkedListNode *it)
 {
 	PacketNode *node = (PacketNode *)it;
 	LinkedList_remove(&q->list, it);
-	q->mem_used -= sizeof(*node) + node->packet.size;
+	q->mem_used -= packet_cost(&node->packet);
 	q->packets--;
 	av_packet_unref(&node->packet);
 	afree(node);
@@ -1272,12 +1391,12 @@ static void _cache_subtitle_packet(STREAM *s, AVPacket *packet)
 				_remove_cached_subtitle(q, it);
 		}
 	}
-	if (packet->size > SUB_CACHE_MAX_BYTES - (int)sizeof(PacketNode)) {
+	if (packet_cost(packet) > SUB_CACHE_MAX_BYTES) {
 		_drop_cached_subtitle_stream(q, packet->stream_index);
 		return;
 	}
 	while (q->packets && (q->packets >= SUB_CACHE_MAX_PACKETS ||
-	       q->mem_used + packet->size + sizeof(PacketNode) > SUB_CACHE_MAX_BYTES)) {
+	       q->mem_used + packet_cost(packet) > SUB_CACHE_MAX_BYTES)) {
 		PacketNode *oldest = (PacketNode *)q->list.first;
 		SUB_PROPERTIES *sub = _subtitle_props_for_stream(s, oldest->packet.stream_index);
 		if (sub && sub->format == SUB_FORMAT_PGS) {
@@ -1375,9 +1494,46 @@ static int _get_subtitle_time( STREAM *s, AVPacket *packet )
 //	_parse_once
 //
 // ************************************************************
+enum { FF_PARSE_ERROR = -1, FF_PARSE_PROGRESS = 0, FF_PARSE_END = 1, FF_PARSE_WAIT = 2 };
+
+static int parser_read_error(STREAM *s, int error)
+{
+	if (!ff_p->read_failed) serprintf("FFMPEG: input/queue failure: %s\n", av_err2str(error));
+	ff_p->read_failed = 1;
+	stream_set_error(s, VE_FILE_ERROR);
+	return FF_PARSE_ERROR;
+}
+
+// Reserve bounded headroom for the audio packet that ends starvation. Never
+// retain unlimited keyframes/subtitles while scanning a long audio gap.
+static int enqueue_media_packet(STREAM *s, AVQueue *q, AVPacket *packet, int audio_starved)
+{
+	int64_t budget = MAX(ff_p->buffer_size, 1024 * 1024);
+	int64_t cost = packet_cost(packet);
+	int64_t used = (int64_t)queue_bytes(&ff_p->aq) + queue_bytes(&ff_p->vq) + queue_bytes(&ff_p->sq);
+	if (cost > budget) return parser_read_error(s, AVERROR(ENOMEM));
+	if (q == &ff_p->vq) {
+		if (audio_starved && (used + cost > budget || q->packets >= FF_QUEUE_MAX_PACKETS - 1)) {
+			ff_p->drop_video_until_key = 1;
+			return 0;
+		}
+		if (ff_p->drop_video_until_key) {
+			if (!(packet->flags & AV_PKT_FLAG_KEY)) return 0;
+			ff_p->drop_video_until_key = 0;
+		}
+	}
+	// One admitted packet may cross the normal budget. Beyond that, fail
+	// explicitly instead of silently losing audio or allocating without limit.
+	if (used + cost > budget * 2 || _add_packet(q, packet))
+		return parser_read_error(s, AVERROR(ENOMEM));
+	return 0;
+}
+
 static int _parse_once( STREAM *s, int *timestamp)
 {
 	AVFormatContext *fmt = ff_p->fmt;
+	if (ff_p->read_failed || stream_abort(s)) return FF_PARSE_ERROR;
+	if (s->audio_parse_end && s->video_parse_end) return FF_PARSE_END;
 	
 	if( ff_p->sleeping ) {
 		// we are sleeping, decide whether to wake up
@@ -1386,49 +1542,50 @@ static int _parse_once( STREAM *s, int *timestamp)
 DBGP serprintf("FFMPEG: wake\r\n");
 			ff_p->sleeping = 0;
 		} else {
-			return 0;
+			return FF_PARSE_WAIT;
 		}
 	}
 
-	int mem_used = ff_p->aq.mem_used + ff_p->vq.mem_used + ff_p->sq.mem_used;
+	int64_t mem_used = (int64_t)queue_bytes(&ff_p->aq) + queue_bytes(&ff_p->vq) + queue_bytes(&ff_p->sq);
 
 	// If the audio queue is empty while the audio stream is still valid and
 	// not yet at EOF, video packets have been monopolizing the shared buffer
 	// and starving audio. Keep demuxing past the normal buffer_size cap in
 	// that case instead of deadlocking with audio starved forever - memory
-	// stays bounded because starved video packets are discarded rather than
-	// queued below (see the video routing branch), not by capping how far
-	// we search.
+	// is bounded by enqueue_media_packet(), including retained keyframes and
+	// the selected subtitle queue.
 	int audio_starved = s->audio->valid && ff_p->aq.packets == 0 && !s->audio_parse_end;
 
-	if( mem_used > ff_p->buffer_size && !audio_starved ) {
+	if( mem_used > ff_p->buffer_size && !audio_starved && !ff_p->seeking ) {
 DBGP2 serprintf("FFMPEG full %d %d %d %d\r\n", ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, ff_p->buffer_size);
 		if( s->time_parsed > stream_drive_wake_sleep && !(ff_p->flags & STREAM_PARSER_FILE_NONLOCAL) ) {
 			// time to sleep
 DBGP serprintf("FFMPEG: sleep\r\n");
 			ff_p->sleeping = 1;
 		}
-		return 0;
+		return FF_PARSE_WAIT;
 	}
 
 	// Read the next packet, skipping all packets that aren't for this stream
 	AVPacket packet = { 0 };
 	// Read new packet
-	if (av_read_frame( fmt, &packet) < 0) {
-		// A seek first asks the parser thread to become idle. Interrupt a
-		// potentially blocking FFmpeg read so the thread can acknowledge that
-		// state transition. This is not EOF: the async seek will reposition the
-		// same format context before allowing parsing to run again.
-		if (s->parser_interrupt) {
-			DBG serprintf("FFMPEG: read interrupted for parser state change\n");
-			return 0;
+	int result = av_read_frame(fmt, &packet);
+	if (result < 0) {
+		av_packet_unref(&packet);
+		if (s->parser_interrupt || stream_abort(s)) return FF_PARSE_WAIT;
+		// Some demuxers translate an AVIO failure to EOF; retain its cause.
+		if (result == AVERROR_EOF && fmt->pb && fmt->pb->error < 0 && fmt->pb->error != AVERROR_EOF)
+			result = fmt->pb->error;
+		if (result == AVERROR(EAGAIN) || result == AVERROR(EINTR)) {
+			if (fmt->pb && (fmt->pb->error == AVERROR(EAGAIN) || fmt->pb->error == AVERROR(EINTR))) {
+				fmt->pb->error = 0;
+				fmt->pb->eof_reached = 0;
+			}
+			return FF_PARSE_WAIT;
 		}
-		if( !s->video_parse_end ) {
-DBGP serprintf("FFMPEG: end\r\n");
-			s->video_parse_end = 1;
-			s->audio_parse_end = 1;
-		}
-		return 1;
+		if (result != AVERROR_EOF) return parser_read_error(s, result);
+		s->video_parse_end = s->audio_parse_end = 1;
+		return FF_PARSE_END;
 	}
 
 	int stream = packet.stream_index;
@@ -1465,8 +1622,8 @@ DBGP {
 		if( ff_p->aq.packets == 0 && mem_used > ff_p->buffer_size ) {
 			// This packet arrived while searching past buffer_size for audio
 			// (see audio_starved above / the video routing branch below).
-DBGP		serprintf("AUDIO_SEARCH_HIT: overflow=%d bytes vq=%d/%d\n",
-				mem_used - ff_p->buffer_size, ff_p->vq.packets, ff_p->vq.mem_used);
+DBGP		serprintf("AUDIO_SEARCH_HIT: overflow=%lld bytes vq=%d/%d\n",
+				(long long)(mem_used - ff_p->buffer_size), ff_p->vq.packets, ff_p->vq.mem_used);
 		}
 		DBG serprintf("FFMPEG:AUDIO pkt st=%d pts=%lld dts=%lld pos=%lld size=%d seek=%d\n",
 			stream,
@@ -1478,7 +1635,16 @@ DBGP		serprintf("AUDIO_SEARCH_HIT: overflow=%d bytes vq=%d/%d\n",
 DBGP2 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X\r\n", GET_AUDIO_TS( packet.dts ), GET_AUDIO_TS( packet.pts ), packet.data[0], packet.data[1],packet.data[2],packet.data[3] );
 DBGC1 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X  %d\r\n", GET_AUDIO_TS( packet.dts ), GET_AUDIO_TS( packet.pts ), packet.data[0], packet.data[1],packet.data[2],packet.data[3], packet.size );
 		// add audio packet
-		_add_packet( &ff_p->aq, &packet );
+		if (ff_p->seeking) {
+			// Consumers are idle until a video keyframe is found. Keep a bounded
+			// rolling audio preroll instead of filling the budget and stalling.
+			while (ff_p->aq.packets && (queue_bytes(&ff_p->aq) + packet_cost(&packet) > ff_p->buffer_size / 2 ||
+			       ff_p->aq.packets >= FF_QUEUE_MAX_PACKETS - 1)) {
+				AVPacket old;
+				if (_get_packet(&ff_p->aq, &old)) av_packet_unref(&old);
+			}
+		}
+		if (enqueue_media_packet(s, &ff_p->aq, &packet, audio_starved)) goto QueueError;
 		if( timestamp )
 			*timestamp = GET_AUDIO_TS( packet.pts );
 	} else if( s->video->valid && stream == s->video->stream ) {
@@ -1487,25 +1653,14 @@ DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
 DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
-		if( audio_starved && ff_p->vq.mem_used > ff_p->buffer_size && !( packet.flags & AV_PKT_FLAG_KEY ) ) {
-			// Audio is starved and video already fills the buffer on its own:
-			// keep demuxing to search for the next audio packet, but stop
-			// queuing further non-key video so memory doesn't grow unbounded
-			// while we search - no matter how far the search has to go.
-			// Keyframes are still queued so playback can resync cleanly once
-			// audio is found.
-			_rt_video_search_pkts++;
-		} else {
-			// add video packet
-			_add_packet( &ff_p->vq, &packet );
-			if( timestamp )
-				*timestamp = use_pts ? GET_VIDEO_TS( packet.pts ) : GET_VIDEO_TS( packet.dts );
-		}
+		if (enqueue_media_packet(s, &ff_p->vq, &packet, audio_starved)) goto QueueError;
+		if (timestamp) *timestamp = use_pts ? GET_VIDEO_TS(packet.pts) : GET_VIDEO_TS(packet.dts);
+
 	} else if( _subtitle_props_for_stream(s, stream) ) {
 		_rt_sub_pkts++;
 		_cache_subtitle_packet(s, &packet);
 		if (s->subtitle->valid && !s->subtitle->ext && stream == s->subtitle->stream) {
-			_add_packet(&ff_p->sq, &packet);
+			if (enqueue_media_packet(s, &ff_p->sq, &packet, audio_starved)) goto QueueError;
 			if (timestamp)
 				*timestamp = GET_SUB_TS(packet.pts);
 		} else if (timestamp) {
@@ -1531,7 +1686,10 @@ DBGP2 serprintf("\r\n");
 	// discard packet
 	av_packet_unref(&packet);
 
-	return 0;
+	return FF_PARSE_PROGRESS;
+QueueError:
+	av_packet_unref(&packet);
+	return FF_PARSE_ERROR;
 }
 
 // ************************************************************
@@ -1568,17 +1726,13 @@ static int _pauseable( STREAM *s )
 //	_seekable
 //
 // ************************************************************
-static int _seekable( STREAM *s )
+static int _seekable(STREAM *s)
 {
-	if( s->etype == ETYPE_RTSP ) {
-		return 0;
-	}
-	
-	if( s->size == (UINT64)0xFFFFFFFFFFFFFFFull ) {
-		return 0;
-	}
-
-	return 1;
+	if (s->etype == ETYPE_RTSP) return 0;
+	AVFormatContext *fmt = ff_p->fmt;
+	if (fmt->pb) return !!(fmt->pb->seekable & AVIO_SEEKABLE_NORMAL);
+	// Demuxers such as HLS own their I/O and provide timestamp seeks.
+	return fmt->duration != AV_NOPTS_VALUE && fmt->duration > 0;
 }
 
 // ************************************************************
@@ -1600,7 +1754,8 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 	INT64 new_pos;
 	if( time == -1 ) {
 		// seek to pos
-		new_pos = s->size * pos / STREAM_POS_MAX;
+		if (!ff_p->size_known || pos < 0 || pos > STREAM_POS_MAX) return 1;
+		new_pos = av_rescale(s->size, pos, STREAM_POS_MAX);
 		av_flags |= AVSEEK_FLAG_BYTE;
 		
 		if( new_pos > s->size ) {
@@ -1618,7 +1773,7 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 	} else {
 		// TODO: start_time is ts: bug mixing time domains
-		new_pos = (INT64)( time + ff_p->start_time ) * AV_TIME_BASE / 1000;
+		new_pos = ((INT64)time + ff_p->start_time) * AV_TIME_BASE / 1000;
 		DBGP serprintf( "FFMPEG: new time: %lld\r\n", new_pos );
 	}
 
@@ -1640,6 +1795,8 @@ serprintf("FFMPEG: seek error\r\n");
 	
 	s->audio_parse_end = 0;
 	s->video_parse_end = 0;
+	ff_p->read_failed = 0;
+	ff_p->drop_video_until_key = 0;
 
 	_flush_packets( &ff_p->vq, "VID" );
 	_flush_packets( &ff_p->aq, "AUD" );
@@ -1657,12 +1814,27 @@ serprintf("FFMPEG: seek error\r\n");
 		ignore_first = 1;
 	}
 
-	int retry = 500;
-	while( retry -- ) {
-		_parse_once( s, NULL );
+	int found = 0;
+	int deadline = atime();
+	ff_p->seeking = 1;
+	while ((unsigned)(atime() - deadline) < 5000) {
+		if (stream_abort(s) || s->parser_interrupt) break;
+		int parsed = _parse_once(s, NULL);
+		if (parsed == FF_PARSE_ERROR) break;
+		if (!s->video->valid) {
+			AVPacket audio;
+			if (_peek_packet(&ff_p->aq, &audio, 0)) {
+				sc->time = _get_audio_time(s, &audio);
+				if (sc->time < 0) sc->time = RST_TO_TS_TIME(MAX(time, 0), int);
+				found = 1;
+				break;
+			}
+		}
+		if (parsed == FF_PARSE_WAIT) msec_sleep(5);
 		
 		AVPacket _packet;
 		AVPacket *packet = _peek_packet( &ff_p->vq, &_packet, 0 );
+		if (!packet && parsed == FF_PARSE_END) break;
 		if( packet ) {
 			int ts = _get_video_time( s, packet ); // returns ts
 			DBG2 serprintf( "stream_parser_ffmpeg:_seek time %d, pos %d, rt=%d -> ts=%d\n", time, pos, (int)( audio_interface_get_audio_speed() * ts ), ts );
@@ -1673,6 +1845,7 @@ DBGP serprintf("ignore! %d\n", ts);
 					ignore_first--;
 				} else if( ts != -1 ) {
 					sc->time = ts; // stream chunk is ts
+					found = 1;
 					break;
 				}
 			} else {
@@ -1681,6 +1854,12 @@ DBGP serprintf("nokey!  %d\n", ts);
 			packet = _get_packet( &ff_p->vq, &_packet );
 			_dispose_packet( packet );			
 		}
+	}
+	ff_p->seeking = 0;
+	if (!found) {
+		serprintf("FFMPEG: seek did not find a usable starting packet\n");
+		if (!stream_abort(s)) parser_read_error(s, AVERROR_INVALIDDATA);
+		return 1;
 	}
 DBGP serprintf("FFMPEG: seek to time %8d  pos %5d  dir %d -> %d/%lld  (took %d)\r\n", time, pos, dir, sc->time, sc->pos, atime() - start ); 
 	if( s->audio->valid ) {
@@ -1739,11 +1918,13 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 
 	if( packet->size < 0 || packet->size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE ) {
 		_dispose_packet(packet);
+		parser_read_error(s, AVERROR_INVALIDDATA);
 		return 1;
 	}
 	if( audio_buffer->size < packet->size + AV_INPUT_BUFFER_PADDING_SIZE ) {
 		if ( realloc_clever_buffer( audio_buffer, packet->size + AV_INPUT_BUFFER_PADDING_SIZE ) ) {
-			_dispose_packet( packet );			
+			_dispose_packet(packet);
+			parser_read_error(s, AVERROR(ENOMEM));
 			return 1;
 		}
 	}
@@ -1810,10 +1991,26 @@ static int _get_video_cdata( STREAM *s, CBE *cbe, STREAM_CDATA *cdata )
 	}
 	
 	AVPacket _packet;
-	AVPacket *packet = _get_packet( &ff_p->vq, &_packet );
+	AVPacket *packet = _peek_packet( &ff_p->vq, &_packet, 0 );
 	if( !packet ) {
 		return 1;
 	}
+	// Leave the queued packet untouched if the previous access unit still
+	// occupies the destination. Include prefix and Annex B expansion in the check.
+	int required = 0;
+	if (!s->video->no_extra && stream_parser_send_video_extra(s->video, NULL, &required))
+		goto InvalidPacket;
+	if (s->video->avcc || s->video->hvcc) {
+		if (cbe_write_nal_units(NULL, packet->data, packet->size, s->video->nal_unit_size, &required))
+			goto InvalidPacket;
+	} else {
+		if (packet->size < 0 || packet->size > INT_MAX - required) goto InvalidPacket;
+		required += packet->size;
+	}
+	if (required >= cbe_get_size(cbe)) goto InvalidPacket;
+	if (required >= cbe_get_free(cbe)) return 1;
+	packet = _get_packet(&ff_p->vq, &_packet);
+	if (!packet) return 1;
 	memset( cdata, 0, sizeof( STREAM_CDATA ) );
 	
 	if( ff_p->need_key ) {
@@ -1868,6 +2065,10 @@ ErrorExit:
 	_dispose_packet( packet );
 
 	return 0;
+InvalidPacket:
+	serprintf("FFMPEG: invalid/oversized video access unit (%d bytes)\n", packet->size);
+	stream_set_error(s, VE_FILE_ERROR);
+	return 1;
 }
 
 static int msk_fixup_ssa( char *dst, int max, const char *src, int src_size, int time, int duration )
@@ -1957,10 +2158,16 @@ static int _get_subtitle_cdata( STREAM *s, CLEVER_BUFFER *sub_buffer, STREAM_CDA
 	if (!packet)
 		return 1;
 
+	if (packet->size < 0 || packet->size > INT_MAX - 128) {
+		_dispose_packet(packet);
+		parser_read_error(s, AVERROR_INVALIDDATA);
+		return 1;
+	}
 	if( sub_buffer->size < packet->size + 128 ) {
 serprintf("realloc %d -> %d \r\n", sub_buffer->size, packet->size );
 		if ( realloc_clever_buffer( sub_buffer, packet->size + 128 ) ) {
-			_dispose_packet( packet );			
+			_dispose_packet(packet);
+			parser_read_error(s, AVERROR(ENOMEM));
 			return 1;
 		}
 	}
@@ -2178,6 +2385,7 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 
 	// Open video file
 	priv->fmt = avformat_alloc_context();
+	if (!priv->fmt) { afree(priv); return 1; }
 
 	// For metadata-only retrieval: use minimal probing to speed up file scanning
 	AVDictionary *fmt_opts = NULL;
@@ -2186,7 +2394,7 @@ DBGP serprintf("ReadFFMPEGInfo: ");
 	ffmpeg_set_http_options(&fmt_opts, src);
 
 	serprintf("FFMPEG: metadata opening url [%s]\r\n", full_path);
-	if( avformat_open_input(&priv->fmt, full_path, NULL, &fmt_opts ) != 0) {
+	if( ffmpeg_open_input(priv, full_path, &fmt_opts) != 0) {
 serprintf("FFMPEG: cannot open file [%s]\r\n", full_path);
 		av_dict_free(&fmt_opts);
 		err = 1;
@@ -2237,6 +2445,7 @@ ErrorExit:
 		// Close the video file
 		avformat_close_input(&priv->fmt);
 	}
+	ffmpeg_close_fd_input(priv);
 	afree( priv );
 
 	return err;

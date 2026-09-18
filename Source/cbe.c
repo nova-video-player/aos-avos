@@ -22,6 +22,7 @@
 #include "stream_alloc.h"
 
 #include <string.h>
+#include <limits.h>
 
 // *********************************************************************
 // create, destroy
@@ -30,7 +31,8 @@ CBE *cbe_new( int size, int overlap, int dma )
 {
 	CBE *cbe;
 	
-	if( !size || !overlap || !(cbe = amalloc( sizeof( CBE ) ) ) ) {
+	if( size <= 1 || overlap < 0 || size > INT_MAX - overlap ||
+	    !(cbe = amalloc( sizeof( CBE ) ) ) ) {
 		return NULL;
 	}
 	
@@ -175,6 +177,10 @@ static int _cbe_copy( CBE *cbe, unsigned int *write, const unsigned char *buffer
 
 int cbe_write( CBE *cbe, const unsigned char *buffer, int count )
 {
+	// Keep one byte free so read == write always means empty.
+	if (!cbe || count < 0 || (count && !buffer) || count >= cbe_get_free(cbe))
+		return -1;
+	if (!count) return 0;
 	return _cbe_copy( cbe, (unsigned int *)&cbe->write, buffer, count );
 }
 
@@ -210,3 +216,40 @@ int cbe_patch( CBE *cbe, unsigned char *patch_p, int size )
 	return 0;	
 }
 
+
+// Validate the complete access unit before changing the circular buffer. A NULL
+// destination performs the same validation and computes the Annex B size.
+int cbe_write_nal_units(CBE *cbe, const unsigned char *data, int size,
+                       int length_size, int *out_size)
+{
+	if ((!data && size) || size < 0 || length_size < 1 || length_size > 4 ||
+	    !out_size || *out_size < 0) return 1;
+	int pos = 0, total = 0;
+	while (pos < size) {
+		if (size - pos < length_size) return 1;
+		unsigned int len = 0;
+		for (int i = 0; i < length_size; ++i) len = (len << 8) | data[pos++];
+		if (len > (unsigned int)(size - pos)) return 1;
+		if (len) {
+			if (total > INT_MAX - 4 || len > (unsigned int)(INT_MAX - total - 4)) return 1;
+			total += 4 + len;
+		}
+		pos += len;
+	}
+	if (*out_size > INT_MAX - total || (cbe && total >= cbe_get_free(cbe))) return 1;
+	if (cbe) {
+		static const unsigned char start_code[] = {0, 0, 0, 1};
+		pos = 0;
+		while (pos < size) {
+			unsigned int len = 0;
+			for (int i = 0; i < length_size; ++i) len = (len << 8) | data[pos++];
+			if (len) {
+				cbe_write(cbe, start_code, sizeof(start_code));
+				cbe_write(cbe, data + pos, len);
+			}
+			pos += len;
+		}
+	}
+	*out_size += total;
+	return 0;
+}

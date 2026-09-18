@@ -56,6 +56,8 @@ void cbe_skip_all( CBE *cbe );
 // *********************************************************************
 int cbe_write( CBE *cbe, const unsigned char *buffer, int count );
 unsigned char *cbe_get_patch_p( CBE *cbe, int size, unsigned char **overlap_p, int *overlap_size );
+int cbe_write_nal_units(CBE *cbe, const unsigned char *data, int size,
+                       int length_size, int *out_size);
 int cbe_patch( CBE *cbe, unsigned char *patch_p, int size );
 
 #endif

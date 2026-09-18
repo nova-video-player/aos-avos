@@ -240,31 +240,7 @@ static void _end_NAL( CBE *cbe, int *out_size ) {}
 
 int HEVC_parse_NAL( UCHAR *d, int size, CBE *cbe, int *out_size, int nal_unit_size )
 {
-DBGP4 serprintf("HEVC_parse_NAL: %d\r\n", size);
-	int need_end = 0;
-	while( size > 0 ) {
-		int nal_size = *d++;
-		int i;
-		for( i = 1; i < nal_unit_size; i ++ ) {
-			nal_size = (nal_size << 8) | *d++;
-		}
-		size -= nal_unit_size;
-		// be robust!
-		nal_size = MAX( 0, MIN( nal_size, size ));
-DBGP4 serprintf("\tsize %5d  nal_size %d\r\n", size, nal_size );
-		if( nal_size > 0 ) {
-			cbe_write( cbe, sync_word, 4 );
-			cbe_write( cbe, d, nal_size );
-			*out_size += 4 + nal_size;
-			need_end = 1;
-
-			d += nal_size;
-		}
-		size -= nal_size;
-	}
-	if( need_end ) {
-		_end_NAL( cbe, out_size );
-	}
-	return 0;
+	return cbe_write_nal_units(cbe, d, size, nal_unit_size, out_size);
 }
+
 #endif

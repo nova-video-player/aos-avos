@@ -82,6 +82,7 @@ static inline void thread_state_init( THREAD_STATE *state, int init, const char 
 }
 
 int thread_state_set( THREAD_STATE *state, int new );
+int thread_state_try_idle(THREAD_STATE *state, int timeout_ms, int *old_state);
 void thread_state_ack( THREAD_STATE *state );
 void thread_state_ask_pause( THREAD_STATE *state );
 

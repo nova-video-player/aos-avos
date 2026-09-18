@@ -155,6 +155,21 @@ DBG serprintf("lang count %d\r\n", new_title->lan_count );
 	return new_title;
 }
 
+static uni_sub *subtitle_convert_file(subt_orig *title, int clean_tags)
+{
+	uni_sub *sub = title->format->parse(title, clean_tags);
+	if (!sub) return NULL;
+	sub->format = title->format;
+	sub->source_path = astrdup(title->org_name ? title->org_name : title->filename);
+	if (!sub->source_path || !sub->first || !sub->last) {
+		if (sub->format->close) sub->format->close(sub);
+		subtitle_clean_error(sub);
+		afree(sub);
+		return NULL;
+	}
+	return sub;
+}
+
 converted_subs *subtitle_get_converted( subtitle_files *sub_files, int clean_tags )
 {
 	//count number of subtitles (files & languages)
@@ -193,7 +208,7 @@ DBG serprintf( "subtitles: cannot alloc sub_array\n" );
 		}
 		if( !title->title_langs ) {
 			// no languages defined. Use ending of file
-			sub_array->converted[count] = title->format->parse( title, clean_tags );
+			sub_array->converted[count] = subtitle_convert_file(title, clean_tags);
 			if( sub_array->converted[count] == 0 ) {
 				sub_array->cnt--;
 				title = title->next;
@@ -228,7 +243,7 @@ DBG serprintf("ext [%s]  lang [%s] -> [%s]\n", title->ext, title->lang, sub_arra
 				}
 				title->language_name = astrdup( title->title_langs[i]->name );
 				title->default_language = astrdup(title->title_langs[i]->id);
-				sub_array->converted[count + i] = title->format->parse( title, clean_tags );
+				sub_array->converted[count + i] = subtitle_convert_file(title, clean_tags);
 				afree(title->default_language);
 				title->default_language = 0;
 				afree(title->language_name);
@@ -341,6 +356,7 @@ void subtitle_clean_error(uni_sub *subs)
 	if(!subs){
 		return;
 	}
+	afree(subs->source_path);
 	if(subs->first){
 		sub_line* tmp = subs->first;
 		sub_line* line = tmp;
@@ -387,7 +403,7 @@ static int convert_to_utf8( char **filename, int *delete )
 	unsigned short bom = 0;
 	fread( &bom, 2, 1, file );
 	if( bom != BOM_LE && bom != BOM_BE ) {
-		unsigned char msb;
+		unsigned char msb = 0;
 		fread( &msb, 1, 1, file );
 		if( bom == (BOM_UTF8 & 0xFFFF) && msb == (BOM_UTF8 >> 16) ) {
 DBG serprintf("sub: UTF-8 by BOM!\n");
@@ -418,9 +434,12 @@ DBG serprintf("sub: UTF-16!\n");
 
 #ifdef CONFIG_ANDROID
 	char template[256];
-	snprintf(template, 255, "/data/data/%s/files/sub", device_config_get_android_pkg_name());
-	tmp_fd = open(template, O_CREAT|O_RDWR, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP);
-	chmod(template, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP);
+	if (snprintf(template, sizeof(template), "/data/data/%s/files/subXXXXXX",
+	    device_config_get_android_pkg_name()) >= sizeof(template)) {
+		ret = 0;
+		goto end;
+	}
+	tmp_fd = mkstemp(template);
 #else
 	char template[] = TMP_FILE;
 	
@@ -437,12 +456,14 @@ DBG serprintf("sub: tmpfile: %s\n", template );
 	tmp_file = fdopen(tmp_fd, "w+");
 	if (!tmp_file) {
 		serprintf("failed to open temporary file for writing (%s:%i)\n", __FILE__, __LINE__);
+		unlink(template);
 		ret = 0;
 		goto end;
 	}
+	tmp_fd = -1; // fdopen owns the descriptor from here
 
 	unsigned short utf16[BUF_MAX];
-	unsigned char  utf8[BUF_MAX * 3];
+	unsigned char  utf8[BUF_MAX * 3 + 1];
 	while( 1 ) {
 		int utf16_len = fread( utf16, 2, BUF_MAX, file );
 		if( !utf16_len ) {
@@ -453,11 +474,26 @@ DBG serprintf("sub: tmpfile: %s\n", template );
 		}
 		int utf8_len  = unicode_utf16_to_utf8( utf8, utf16, utf16_len );
 //serprintf("in %3d out %3d  %s\n", utf16_len, utf8_len, utf8 );	
-		fwrite( utf8, 1, utf8_len, tmp_file );
+		if (utf8_len < 0 || fwrite(utf8, 1, utf8_len, tmp_file) != (size_t)utf8_len) {
+			unlink(template);
+			ret = 0;
+			goto end;
+		}
 	}
 	
-	afree( *filename );
-	*filename = astrdup( template );
+	if (ferror(file) || fflush(tmp_file)) {
+		unlink(template);
+		ret = 0;
+		goto end;
+	}
+	char *converted = astrdup(template);
+	if (!converted) {
+		unlink(template);
+		ret = 0;
+		goto end;
+	}
+	afree(*filename);
+	*filename = converted;
 	*delete   = 1;
 	ret = 1;
 end:
@@ -648,6 +684,8 @@ static void free_subs( subt_orig * fd )
 		return;
 	subt_orig *tmp = 0;
 	while ( fd ) {
+		// Discovery-only probes also own their temporary UTF-16 conversions.
+		if (fd->delete && fd->filename) file_remove(fd->filename);
 		afree( fd->filename );
 		afree( fd->org_name );
 		if ( fd->title_langs )
@@ -699,6 +737,7 @@ void subtitle_free_converted( converted_subs *subs )
 		}
 		free_subline( subs->converted[i]->first );
 		afree(subs->converted[i]->identifier);
+		afree(subs->converted[i]->source_path);
 		afree( subs->converted[i] );
 	}
 	afree( subs->converted );

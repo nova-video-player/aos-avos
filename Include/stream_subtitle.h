@@ -22,6 +22,7 @@
 int  stream_sub_ext_has_new( STREAM *s );
 int  stream_sub_ext_check( STREAM *s );
 void stream_sub_ext_close( STREAM *s );
+void stream_sub_ext_reset(STREAM *s);
 int  stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **frame, int time );
 
 //int stream_get_num_subtitle( STREAM *s );

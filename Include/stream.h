@@ -858,6 +858,7 @@ typedef struct STREAM {
 	CLEVER_BUFFER	sub_buffer;
 	int		subtitle_changed;
 	int		subtitle_replay; // rebuild current cue from retained packets after switch
+	int subtitle_pending;
 	
 	int 		error_count;
 	int 		video_error;

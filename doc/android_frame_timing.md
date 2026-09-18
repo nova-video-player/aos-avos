@@ -123,3 +123,27 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
 - MediaCodec retains the existing initial-container-geometry workaround for
   inaccurate vendor startup metadata. Subsequent changes in reported dimensions
   or crop propagate validated visible dimensions, including rotation.
+
+## Subtitle timing and decoder state
+
+- Subtitle packet timestamps enter decoding in the stream TS domain. FFmpeg's
+  `AVSubtitle.pts` identifies the composition start; relative display offsets and
+  durations are converted from milliseconds into TS units. DVD display offsets
+  survive decoding, and a future display event retains its decoder-owned bitmap
+  until due. Replayed cues expose only their remaining duration.
+- A successful seek resets external cue lookup in both directions. PGS seeks
+  recreate the decoder because the bundled decoder has no flush callback;
+  palettes, objects, and partial compositions cannot cross the seek boundary.
+- Seamless PGS track switching replays from a retained acquisition/epoch PCS.
+  Palette/object dependencies do not expire merely because they are older than
+  sixty seconds. Future demux lookahead preserves the currently visible epoch.
+  The cache remains bounded at 8 MiB/2048 packets; eviction invalidates the whole
+  affected track's history, so incomplete history is not replayed. Recovery then
+  waits for fresh decoder state rather than seeking audio/video.
+- Bitmap coordinates use the subtitle decoder's canvas, including external IDX
+  dimensions and palette metadata. PGS stays visible until a subsequent
+  composition or clear instead of an arbitrary hundred-second timeout.
+- The Android subtitle scheduler must preserve pause state when installing a
+  replayed cue and freeze its remaining duration until playback resumes. This is
+  a Java-side requirement in `SubtitleManager`, separate from native duration
+  clipping and decoder recovery.

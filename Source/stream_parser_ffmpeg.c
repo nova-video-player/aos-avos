@@ -1156,7 +1156,7 @@ DBGP serprintf("[%4d|%8d]\r\n", q->packets, q->mem_used );
 }
 
 // Subtitle history must not fill the A/V queue budget or force a media seek.
-// Keep recent bitmap decoder state plus still-active text and demux lookahead.
+// Keep PGS recovery epochs, recent DVD data, active text and demux lookahead.
 #define SUB_CACHE_MAX_BYTES (8 * 1024 * 1024)
 #define SUB_CACHE_MAX_PACKETS 2048
 #define SUB_CACHE_HISTORY_MS 60000
@@ -1186,56 +1186,124 @@ static int64_t _subtitle_switch_time(STREAM *s)
 	return (int64_t)TS_TO_RST_TIME(time, int64_t) - s->subtitle_offset;
 }
 
+// A PGS acquisition/epoch PCS invalidates all preceding object/palette state.
+// Segment headers must be complete before inspecting the composition state.
+static int _pgs_recovery_packet(const AVPacket *packet)
+{
+	int pos = 0;
+	while (packet->size - pos >= 3) {
+		const uint8_t *seg = packet->data + pos;
+		int len = (seg[1] << 8) | seg[2];
+		if (len > packet->size - pos - 3) return 0;
+		if (seg[0] == 0x16 && len >= 11 && (seg[10] & 0xc0)) return 1;
+		pos += 3 + len;
+	}
+	return 0;
+}
+
 static int _subtitle_packet_expired(STREAM *s, AVPacket *packet, int64_t now)
 {
 	int64_t start = _subtitle_packet_time(s, packet);
 	SUB_PROPERTIES *sub = _subtitle_props_for_stream(s, packet->stream_index);
-	if (start == AV_NOPTS_VALUE || !sub)
-		return 0;
+	if (start == AV_NOPTS_VALUE || !sub || sub->format == SUB_FORMAT_PGS)
+		return 0; // PGS state expires at a recovery point, never by age alone.
 	int64_t duration = av_rescale_q(packet->duration,
 		ff_p->fmt->streams[packet->stream_index]->time_base, (AVRational){1, 1000});
-	// Bitmap display sets can depend on earlier palettes/objects. Text packets
-	// with an explicit end can be removed as soon as they expire.
-	int64_t retention = sub->gfx || duration <= 0 ? SUB_CACHE_HISTORY_MS : duration;
+	int64_t retention = sub->gfx ? MAX(duration, SUB_CACHE_HISTORY_MS) :
+		(duration > 0 ? duration : SUB_CACHE_HISTORY_MS);
 	return start + retention <= now;
+}
+
+static void _remove_cached_subtitle(AVQueue *q, LinkedListNode *it)
+{
+	PacketNode *node = (PacketNode *)it;
+	LinkedList_remove(&q->list, it);
+	q->mem_used -= sizeof(*node) + node->packet.size;
+	q->packets--;
+	av_packet_unref(&node->packet);
+	afree(node);
+}
+
+static void _drop_cached_subtitle_stream(AVQueue *q, int stream)
+{
+	for (LinkedListNode *it = q->list.first, *next; it; it = next) {
+		next = it->next;
+		if (((PacketNode *)it)->packet.stream_index == stream)
+			_remove_cached_subtitle(q, it);
+	}
+}
+
+static LinkedListNode *_subtitle_recovery_point(STREAM *s, int stream, int64_t now)
+{
+	LinkedListNode *recovery = NULL;
+	for (LinkedListNode *it = ff_p->sub_cache.list.first; it; it = it->next) {
+		AVPacket *packet = &((PacketNode *)it)->packet;
+		if (packet->stream_index != stream || !_pgs_recovery_packet(packet)) continue;
+		int64_t time = _subtitle_packet_time(s, packet);
+		// Keep the last acquisition before the visible position, plus future
+		// demux lookahead. A future epoch must not evict the current one.
+		if (time != AV_NOPTS_VALUE && time > now) {
+			if (!recovery) recovery = it;
+			break;
+		}
+		recovery = it;
+	}
+	return recovery;
 }
 
 static void _cache_subtitle_packet(STREAM *s, AVPacket *packet)
 {
 	AVQueue *q = &ff_p->sub_cache;
 	int64_t now = _subtitle_switch_time(s);
-	// Only the parser thread mutates this cache. Track switching walks it with
-	// that thread idle, so removing entries here cannot race with replay.
+	// Only the parser thread mutates this cache; switching idles that thread.
 	for (LinkedListNode *it = q->list.first, *next; it; it = next) {
 		next = it->next;
-		PacketNode *node = (PacketNode *)it;
-		if (_subtitle_packet_expired(s, &node->packet, now)) {
-			LinkedList_remove(&q->list, it);
-			q->mem_used -= sizeof(*node) + node->packet.size;
-			q->packets--;
-			av_packet_unref(&node->packet);
-			afree(node);
+		if (_subtitle_packet_expired(s, &((PacketNode *)it)->packet, now))
+			_remove_cached_subtitle(q, it);
+	}
+	for (int i = 0; i < ff_p->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &ff_p->av.sub[i];
+		if (sub->format != SUB_FORMAT_PGS) continue;
+		LinkedListNode *recovery = _subtitle_recovery_point(s, sub->stream, now);
+		if (!recovery) continue;
+		for (LinkedListNode *it = q->list.first, *next; it != recovery; it = next) {
+			next = it->next;
+			if (((PacketNode *)it)->packet.stream_index == sub->stream)
+				_remove_cached_subtitle(q, it);
 		}
 	}
-	if (packet->size > SUB_CACHE_MAX_BYTES - (int)sizeof(PacketNode))
+	if (packet->size > SUB_CACHE_MAX_BYTES - (int)sizeof(PacketNode)) {
+		_drop_cached_subtitle_stream(q, packet->stream_index);
 		return;
+	}
 	while (q->packets && (q->packets >= SUB_CACHE_MAX_PACKETS ||
 	       q->mem_used + packet->size + sizeof(PacketNode) > SUB_CACHE_MAX_BYTES)) {
-		AVPacket oldest;
-		if (_get_packet(q, &oldest))
-			av_packet_unref(&oldest);
+		PacketNode *oldest = (PacketNode *)q->list.first;
+		SUB_PROPERTIES *sub = _subtitle_props_for_stream(s, oldest->packet.stream_index);
+		if (sub && sub->format == SUB_FORMAT_PGS) {
+			// Resource limits remain bounded. Drop the whole affected history;
+			// replay must wait for a new acquisition, never use a partial epoch.
+			_drop_cached_subtitle_stream(q, oldest->packet.stream_index);
+		} else {
+			_remove_cached_subtitle(q, &oldest->s);
+		}
 	}
-	if (!_subtitle_packet_expired(s, packet, now))
-		_add_packet(q, packet);
+	if (!_subtitle_packet_expired(s, packet, now) && _add_packet(q, packet))
+		_drop_cached_subtitle_stream(q, packet->stream_index);
 }
 
 static int _reset_subtitle(STREAM *s)
 {
 	_flush_packets(&ff_p->sq, "SUB_SWITCH");
-	if (s->subtitle->ext)
-		return 0;
+	if (s->subtitle->ext) return 0;
 	int64_t now = _subtitle_switch_time(s);
-	for (LinkedListNode *it = ff_p->sub_cache.list.first; it; it = it->next) {
+	LinkedListNode *start = ff_p->sub_cache.list.first;
+	if (s->subtitle->format == SUB_FORMAT_PGS) {
+		start = _subtitle_recovery_point(s, s->subtitle->stream, now);
+		if (!start)
+			DBGS serprintf("subtitle switch: PGS history incomplete, waiting for fresh decoder state\n");
+	}
+	for (LinkedListNode *it = start; it; it = it->next) {
 		AVPacket *packet = &((PacketNode *)it)->packet;
 		if (packet->stream_index == s->subtitle->stream &&
 		    !_subtitle_packet_expired(s, packet, now) && _add_packet(&ff_p->sq, packet)) {

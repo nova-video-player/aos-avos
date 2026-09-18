@@ -28,6 +28,7 @@
 #include <ctype.h>		// for isspace
 #include <unistd.h>
 #include <string.h>
+#include <limits.h>
 
 #define DBGS if(Debug[DBG_STREAM])
 #define DBG  if(Debug[DBG_SUB])
@@ -79,7 +80,9 @@ static int scale_time( STREAM *s, int time )
 	int ratio_d = s->subtitle_ratio_d;
 
 	if( ratio_n && ratio_d ) {
-		return time * (UINT64)ratio_n / (UINT64)ratio_d;
+		if (time == INT_MAX) return INT_MAX; // unknown last DVD cue end
+		UINT64 scaled = time * (UINT64)ratio_n / (UINT64)ratio_d;
+		return scaled > INT_MAX ? INT_MAX : (int)scaled;
 	} 
 
 	return time;
@@ -125,7 +128,7 @@ int stream_sub_ext_has_new( STREAM *s )
 		struct subt_orig_t *files = subtitle_files->files;
 		struct subt_orig_t *new_files = new_subtitle_files->files;
 		while (files && new_files) {
-			if ( strcmp(files->filename, new_files->filename) ) {
+			if ( strcmp(files->org_name, new_files->org_name) ) {
 				ret = 1;
 				goto end;
 			}
@@ -187,12 +190,8 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 
 	// add them to the sub props:
 	int i;
-	struct subt_orig_t *sub_files = p->files->files;
 	for( i = 0; i < p->subs->cnt; i++ ) {
 		if( !p->subs->converted[i] ) {
-			if( sub_files ) {
-				sub_files = sub_files->next;
-			}
 			continue;
 		}
 
@@ -200,26 +199,33 @@ DBGS serprintf("stream_sub_ext_check: [%s]\r\n", s->sub_url[0] ? s->sub_url[0] :
 			break;
 				
 		SUB_PROPERTIES *sub = s->av.sub + s->av.subs_max;
+		memset(sub, 0, sizeof(*sub));
 	
 		sub->format         = p->subs->converted[i]->vobsub ? SUB_FORMAT_DVD_GFX : SUB_FORMAT_EXT;
 		sub->gfx            = p->subs->converted[i]->vobsub ? 1 : 0;
 		sub->ext            = 1;
 		sub->stream         = i;
 		sub->valid          = 1;
-		if(p->subs->converted[i]->has_palette) {
-DBGS serprintf("has palette!\n");
-			sub->extraDataSize = sizeof( p->subs->converted[i]->palette );
-			memcpy( sub->extraData, p->subs->converted[i]->palette, sub->extraDataSize ); 
+		if (sub->gfx) {
+			uni_sub *source = p->subs->converted[i];
+			char *extra = (char *)sub->extraData;
+			int len = 0;
+			if (source->canvas_width > 0 && source->canvas_height > 0)
+				len = snprintf(extra, sizeof(sub->extraData), "size: %dx%d\n",
+					source->canvas_width, source->canvas_height);
+			if (source->has_palette) {
+				len += snprintf(extra + len, sizeof(sub->extraData) - len, "palette: ");
+				for (int c = 0; c < 16; ++c)
+					len += snprintf(extra + len, sizeof(sub->extraData) - len,
+						"%06x%s", source->palette[c] & 0xffffff, c == 15 ? "\n" : ", ");
+			}
+			sub->extraDataSize = len;
 		}
 		s->av.subs_max ++;
 			
 		strnZcpy( sub->name, p->subs->converted[i]->identifier, AV_NAME_LEN );
-		if (sub_files) {
-			if (sub_files->filename) {
-				strnZcpy( sub->path, sub_files->filename, MAX_NAME_LEN );
-			}
-			sub_files = sub_files->next;
-		}
+		if (p->subs->converted[i]->source_path)
+			strnZcpy(sub->path, p->subs->converted[i]->source_path, MAX_NAME_LEN);
 	}
 
 	p->stream = -1;
@@ -259,6 +265,16 @@ DBGS serprintf("stream_sub_ext_close\r\n" );
 	}
 }
 
+// Called with the subtitle worker idle on every successful seek.
+void stream_sub_ext_reset(STREAM *s)
+{
+	SUB_PRIV *p = s->subtitle_priv;
+	if (p) {
+		p->sub = p->out = NULL;
+		p->sub_time = -1;
+	}
+}
+
 // *************************
 //
 // stream_sub_ext_get_subtitle_data
@@ -268,6 +284,12 @@ int stream_sub_ext_get_subtitle_data( STREAM *s, VIDEO_FRAME **pframe, int time 
 {
 	int rst_time = TS_TO_RST_TIME(time, int);
 	SUB_PRIV *p = s->subtitle_priv;
+	if (!p || !p->subs || s->subtitle->stream < 0 ||
+	    s->subtitle->stream >= p->subs->cnt ||
+	    !p->subs->converted[s->subtitle->stream] ||
+	    !p->subs->converted[s->subtitle->stream]->first ||
+	    !p->subs->converted[s->subtitle->stream]->last)
+		return 1;
 	if( s->subtitle->stream != p->stream ) {
 		p->stream = s->subtitle->stream;
 		p->sub = NULL;
@@ -334,8 +356,14 @@ DBG2 serprintf("sub: out  [%8d] %8d -> %8d TOP[%s] BOT[%s]\r\n", time, start, en
 		VIDEO_FRAME *frame = *pframe;
 		if( s->subtitle->gfx ) {
 			frame->valid = frame->size;
-			subtitle_get_gfx( p->subs->converted[p->stream], p->out->pos, frame->data[0], &frame->valid );
+			if (subtitle_get_gfx(p->subs->converted[p->stream], p->out->pos,
+			    frame->data[0], &frame->valid)) {
+				frame->valid = 0;
+				p->sub = p->sub->next;
+				return 1;
+			}
 		} else {
+			if (!frame->data[0] || frame->size <= 0) return 1;
 			int   max = frame->size - 1;
 			char *src = p->out->top;
 			char *dst = frame->data[0];
@@ -343,18 +371,17 @@ DBG2 serprintf("sub: out  [%8d] %8d -> %8d TOP[%s] BOT[%s]\r\n", time, start, en
 			if( !src ) {
 				src = "";
 			}
-			while( *src && max-- ) {
+			while( *src && max > 0 ) {
+				max--;
 				*dst++ = *src++;
 			}
 			if( p->out->bottom && max > 2 ) {
 				*dst++ = '\\';
 				*dst++ = 'n';
-				// check if p->out->bottom is not NULL
-				if( !p->out->bottom ) {
-					p->out->bottom = "";
-				}
+				max -= 2;
 				char *src = p->out->bottom;
-				while( *src && max-- ) {
+				while( *src && max > 0 ) {
+					max--;
 					*dst++ = *src++;
 				}
 			}

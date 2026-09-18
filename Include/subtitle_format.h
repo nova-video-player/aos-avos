@@ -87,6 +87,7 @@ typedef struct uni_sub_t
 {
 	int frame_multiplier;
 	int vobsub;
+	int canvas_width, canvas_height;
 	int vobsub_fd;
 	unsigned char *vobsub_data;
 	int vobsub_size;
@@ -95,6 +96,7 @@ typedef struct uni_sub_t
 	uint32_t palette[16];
 	struct SUBTITLE_FORMAT *format;
         char *identifier;
+	char *source_path; // original path, independent of UTF-16 temporary files
 	sub_line *first;
 	sub_line *last;
 } uni_sub;

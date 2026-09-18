@@ -23,6 +23,7 @@
 #include "util.h"
 
 #include <string.h>
+#include <limits.h>
 
 #define DBGS if(Debug[DBG_STREAM])
 #define DBG  if(Debug[DBG_SUB])
@@ -60,6 +61,7 @@ serprintf("no sub_dec found!\r\n");
 // *****************************************************************************
 void stream_close_sub_dec( STREAM *s )
 {
+	s->subtitle_pending = 0;
 	if( s->sub_dec) {
 		s->sub_dec->close( s->sub_dec );
 		s->sub_dec->destroy( s->sub_dec );
@@ -118,8 +120,25 @@ DBG serprintf("[diff %4d]  ", f->time - t );
 		}
 	}
 	
+	int64_t now = MAX(0, (int64_t)s->video_time - RST_TO_TS_DELTA(s->subtitle_offset, int64_t));
+	if (f->time > now) {
+		// DVD start-display offsets can be later than the packet timestamp.
+		// Keep the decoder-owned frame until due before decoding another cue.
+		s->subtitle_pending = 1;
+		return;
+	}
+	s->subtitle_pending = 0;
+	if (f->duration > 0 && f->time >= 0) {
+		int64_t end = (int64_t)f->time + f->duration;
+		if (end <= now) return;
+		// Replayed/current external cues carry only their remaining duration.
+		f->time = (int)MIN(now, INT_MAX);
+		f->duration = (int)MIN(end - now, INT_MAX);
+	}
+
 	// we need to adjust the time the users sees for the delay:
-	f->time += RST_TO_TS_DELTA(s->subtitle_offset, int);
+	int64_t delayed = (int64_t)f->time + RST_TO_TS_DELTA(s->subtitle_offset, int64_t);
+	f->time = (int)MAX(0, MIN(delayed, INT_MAX));
 	
 	if( s->subtitle->gfx ) {
 DBG serprintf("sub int GFX: video %8d  start %8d  dur %8d  [%dx%d]\r\n", s->video_time, f->time, f->duration, f->window.width, f->window.height );
@@ -191,7 +210,7 @@ static void _get_next_int_sub( STREAM *s, int time )
 				_output_sub(s, f, s->cdata_sub.pos);
 			}
 		}
-		if( !replay )
+		if( !replay || s->subtitle_pending )
 			break;
 	}
 	if( replay && have_bitmap ) {
@@ -239,7 +258,7 @@ serprintf("cannot allocate subtitle frame!\r\n");
 		}
 
 		if( s->sub_dec ) {
-			VIDEO_FRAME f_;
+			VIDEO_FRAME f_ = {0};
 			VIDEO_FRAME *f = &f_;
 			UCHAR data[SUBTITLE_CHUNK];
 			f->data[0] = data;
@@ -252,9 +271,8 @@ serprintf("cannot allocate subtitle frame!\r\n");
 DBG serprintf("got gfx data: %8d %8d  size %d\r\n", f->time, f->duration, f->valid );
 				VIDEO_FRAME *f2 = s->subtitle_frame;
 				
-				s->sub_dec->decode( s->sub_dec, f->data[0], f->valid, f->time, &f2 ); 
-				if( f2 ) {
-					f2->time = f->time;
+				int ret = s->sub_dec->decode(s->sub_dec, f->data[0], f->valid, f->time, &f2);
+				if (!ret && f2) {
 					_output_sub( s, f2, 0 );
 				}
 			}
@@ -292,6 +310,10 @@ void _sub_decode( STREAM *s )
 			time -= RST_TO_TS_DELTA(s->subtitle_offset, int);
 			if( time < 0 )
 				time = 0;
+		}
+		if (s->subtitle_pending) {
+			_output_sub(s, s->subtitle_frame, 0);
+			return;
 		}
 		if( s->subtitle->ext ) {
 			_get_next_ext_sub( s, time );

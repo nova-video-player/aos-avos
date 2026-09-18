@@ -23,6 +23,8 @@
 
 #include <ctype.h>
 #include <string.h>
+#include <strings.h>
+#include <limits.h>
 
 #define DBG if(Debug[DBG_SUB])
 
@@ -40,13 +42,11 @@
  * *********************/
 #define USED_ID 4
 #define SKIP_SPACE(x) while(isspace(*x)){x++;}
-#define Xfgets(str,len,fd)\
-	while(fgets(str,len,fd)){\
-		if(feof(fd)){str = 0;break;}\
-		if(*str == '\r' ||*str == '\n' || *str=='\0'){\
-			continue;\
-		}\
-		break;}
+#define Xfgets(str,len,fd) do { \
+	do { str = fgets(str, len, fd); } \
+	while (str && (*str == '\r' || *str == '\n' || !*str)); \
+} while (0);
+
 
 char *subtitle_get_next_line( char *start, int len, FILE *fd );
 
@@ -80,38 +80,34 @@ DBG serprintf( "SSA: not SSA\n" );
 
 }
 
-static int* ssa_pick_relevant(char* line){
-	char *start,*end;
-	int index = 0;
-	int element = 0;
-	int i;
-
-	ssa_clean_line(line,'\n');
-	start = strchr(line,':');
-	if(!start){
-		return 0;
-	}
-	start++;
-	SKIP_SPACE(line);
-	end = strchr(start,',');
-	int* used = acalloc(USED_ID,sizeof(int));
-	while(start && end){
-		for(i = 0; i < USED_ID-1;++i){
-			if(!strncmp(start,rel_str[i],end-start)){
-				used[index++] = element;
+static int *ssa_pick_relevant(char *line)
+{
+	if (!line) return NULL;
+	char *start = strchr(line, ':');
+	if (!start) return NULL;
+	int *used = amalloc(USED_ID * sizeof(*used));
+	if (!used) return NULL;
+	for (int i = 0; i < USED_ID; ++i) used[i] = -1;
+	int column = 0;
+	for (++start; *start; ++column) {
+		while (isspace((unsigned char)*start)) ++start;
+		char *end = strchr(start, ',');
+		char *next = end ? end + 1 : start + strlen(start);
+		if (!end) end = next;
+		while (end > start && isspace((unsigned char)end[-1])) --end;
+		for (int i = 0; i < USED_ID - 1; ++i) {
+			if ((size_t)(end - start) == strlen(rel_str[i]) &&
+			    !strncmp(start, rel_str[i], end - start)) {
+				if (used[i] >= 0) { afree(used); return NULL; }
+				used[i] = column;
 			}
 		}
-		start = end+1;
-		end = strchr(start,',');
-		if(!end){
-			end = strchr(start,'\n');
-
-		}
-		if(start > end){
-			break;
-		}
-		SKIP_SPACE(start);
-		element++;
+		start = next;
+	}
+	// The line reader consumes these fields in Start, End, Text order.
+	if (used[0] < 0 || used[1] <= used[0] || used[2] <= used[1]) {
+		afree(used);
+		return NULL;
 	}
 	return used;
 }
@@ -150,67 +146,36 @@ static void ssa_handle_text(sub_line *sb, char *line, int utf8)
 	return;
 }
 
-static int calc_time(char* line)
+static int calc_time(char *line)
 {
-	int hh,mm,ss,ms;
-	if(sscanf(line,"%u:%u:%u.%u",&hh,&mm,&ss,&ms) != 4){
-		return -1;
-	}
-	return (HH_TO_MS(hh)+MM_TO_MS(mm)+SS_TO_MS(ss)+ms*10);
+	unsigned hh, mm, ss, cs;
+	if (sscanf(line, "%u:%u:%u.%u", &hh, &mm, &ss, &cs) != 4 ||
+	    mm >= 60 || ss >= 60 || cs >= 100) return -1;
+	int64_t time = ((int64_t)hh * 3600 + mm * 60 + ss) * 1000 + cs * 10;
+	return time <= INT_MAX ? (int)time : -1;
 }
 
-static sub_line* ssa_handle_line(char* line, int *nm, int utf8)
+static sub_line *ssa_handle_line(char *line, int *fields, int utf8)
 {
-	char *start,*end;
-	sub_line* newline = acalloc(1,sizeof(sub_line));
-	int index = 0;
-	int element = 0;
-	start = line;
-	end = strchr(start,',');
-
-	while(start && end){
-		if(element == nm[index]){
-			//should more elements be read from lines
-			//add 'em here
-			switch(index){
-			case 0:{
-				newline->start = calc_time(start);
-				break;
-			}
-			case 1:{
-				newline->end = calc_time(start);
-				break;
-			}
-			case 2:{
-				ssa_handle_text(newline, start, utf8);
-				break;
-			}
-			}
-			index++;
-			if(index >= USED_ID){
-				break;
-			}
-		}
-		element++;
-		start = end+1;
-		SKIP_SPACE(start);
-		end = strchr(start,',');
-		if(!end){
-			end = strchr(start,'\n');
-		}
+	while (isspace((unsigned char)*line)) ++line;
+	if (strncasecmp(line, "Dialogue:", 9)) return NULL;
+	char *text = line + 9;
+	int start = -1, end = -1;
+	for (int field = 0; field < fields[2]; ++field) {
+		char *comma = strchr(text, ',');
+		if (!comma) return NULL;
+		*comma = 0;
+		if (field == fields[0]) start = calc_time(text);
+		if (field == fields[1]) end = calc_time(text);
+		text = comma + 1;
 	}
-	if(newline->start == 0 &&
-	   newline->end == 0){ //reading did not succeed
-		if(newline->top){
-			afree(newline->top);
-		}
-		if(newline->bottom){
-			afree(newline->bottom);
-		}
-		afree(newline);
-		return 0;
-	}
-	return newline;
+	if (start < 0 || end <= start) return NULL;
+	sub_line *cue = acalloc(1, sizeof(*cue));
+	if (!cue) return NULL;
+	cue->start = start;
+	cue->end = end;
+	ssa_handle_text(cue, text, utf8);
+	return cue;
 }
 
 static uni_sub *parse_SSA( subt_orig *spex, int clean_tags )
@@ -231,7 +196,7 @@ static uni_sub *parse_SSA( subt_orig *spex, int clean_tags )
 	//go to begin on events
 	while(line){
 		line = subtitle_get_next_line(line, LINE_LEN,fd);
-		if(strstrNC(line,"[Events]")){
+		if(line && strstrNC(line,"[Events]")){
 			memset(line,0,LINE_LEN);
 			Xfgets(line, LINE_LEN,fd)			
 
@@ -248,9 +213,6 @@ static uni_sub *parse_SSA( subt_orig *spex, int clean_tags )
 
 	line = subtitle_get_next_line(_line, LINE_LEN,fd);
 	while(line){
-		if(feof(fd)){
-			break;
-		}
 		sub_line *new_line = ssa_handle_line(line,relevant, spex->utf8);
 		if(new_line == 0){
 			Xfgets(line, LINE_LEN,fd)

@@ -24,6 +24,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <limits.h>
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_VOBSUB
@@ -160,11 +161,11 @@ DBG serprintf("start %d  end %d  text %d\r\n", priv->start, priv->end, priv->tex
 
 static int get_time(char *line)
 {
-	int hh, mm, ss, ms;
-	if(sscanf(line,"%u:%u:%u.%u", &hh, &mm, &ss, &ms) != 4){
-		return -1;
-	}
-	return (HH_TO_MS(hh) + MM_TO_MS(mm) + SS_TO_MS(ss) + ms * 10);
+	unsigned hh, mm, ss, cs;
+	if (sscanf(line, "%u:%u:%u.%u", &hh, &mm, &ss, &cs) != 4 ||
+	    mm >= 60 || ss >= 60 || cs >= 100) return -1;
+	int64_t time = ((int64_t)hh * 3600 + mm * 60 + ss) * 1000 + cs * 10;
+	return time <= INT_MAX ? (int)time : -1;
 }
 
 static void SSA_clean_text( char *text )
@@ -209,9 +210,12 @@ static int SSA_parse_dialogue( char *line, int size, SSA_PRIV *priv, VIDEO_FRAME
 DBG2 serprintf("word: %d [%s]\r\n", count, word );		
 		if( count == priv->start ) {
 			frame->time = get_time( word );
+			if (frame->time < 0) return 1;
 DBGS serprintf("start: %s  %d  ", word, frame->time );
 		} else if( count == priv->end ) {
-			frame->duration = get_time( word ) - frame->time;
+			int end = get_time(word);
+			if (frame->time < 0 || end <= frame->time) return 1;
+			frame->duration = end - frame->time;
 DBGS serprintf("end:   %s  %d  ", word, frame->duration  );
 		} 
 		count++;
@@ -222,20 +226,25 @@ DBGS serprintf("text:  %s\r\n", word );
 		strnZcpy( frame->data[0], word, frame->size - 1 );
 		//SSA_clean_text( frame->data[0] );
 DBGS serprintf("clean: %s\r\n", frame->data[0] );
-	}	
-	return 0;
+		return 0;
+	}
+	return 1;
 }
 
 
 static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 {
 DBGS serprintf("sub_dec_open_SSA\r\n");
-	// try to parse the header
-	if( sub->extraData2 && sub->extraDataSize2 ) {
-DBG Dump( sub->extraData2, MIN(1024, sub->extraDataSize2) );
-		if( SSA_parse_header( sub->extraData2, (SSA_PRIV*)dec->priv ) ) {
-			return 1;
-		}
+	SSA_PRIV *priv = dec->priv;
+	*priv = (SSA_PRIV){.start = 1, .end = 2, .text = 9};
+	if (sub->extraData2 && sub->extraDataSize2 > 0) {
+		char *header = amalloc((size_t)sub->extraDataSize2 + 1);
+		if (!header) return 1;
+		memcpy(header, sub->extraData2, sub->extraDataSize2);
+		header[sub->extraDataSize2] = 0;
+		int failed = SSA_parse_header(header, priv);
+		afree(header);
+		if (failed) return 1;
 	}  
 	
 	// copy the props locally
@@ -264,7 +273,19 @@ static int _decode( STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_
 {
 DBG serprintf("SSA_decode: size %5d  time %d  [%s]\r\n", size, time, data );	
 DBG2 Dump( data, size );
-	SSA_parse_dialogue( data, size, (SSA_PRIV*)dec->priv, *pframe );
+	VIDEO_FRAME *frame = *pframe;
+	*pframe = NULL;
+	if (!data || size <= 0 || !frame || !frame->data[0] || frame->size < 1) return 1;
+	char *line = amalloc((size_t)size + 1);
+	if (!line) return 1;
+	memcpy(line, data, size);
+	line[size] = 0;
+	frame->time = -1;
+	frame->duration = -1;
+	int ret = SSA_parse_dialogue(line, size, dec->priv, frame);
+	afree(line);
+	if (ret || frame->time < 0 || frame->duration <= 0) return 1;
+	*pframe = frame;
 	return 0;
 }
 

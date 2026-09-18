@@ -24,6 +24,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <limits.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -134,6 +135,8 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	VIDEO_FRAME *frame = *pframe;
 	*pframe = NULL; // fragments and decode errors do not produce a display event
+	if (!self->avcontext || !frame || size < 0 || (size && !data))
+		return 1;
 	int max = frame->size - 1;
 
 	frame->time = time;
@@ -155,8 +158,22 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 
 	memcpy(avpkt->data, data, size);
 	DBGS serprintf("codec_ffsub: avpkt->pts=%d, avpkt->dts=%d overridden by time=%d\n", avpkt->pts, avpkt->dts, time);
-	avpkt->pts = time;
-	avpkt->dts = time;
+	avpkt->pts = time >= 0 ? time : AV_NOPTS_VALUE;
+	avpkt->dts = avpkt->pts;
+	// Only plain TEXT packets receive Nova's private start:end prefix.
+	// Strip it before FFmpeg creates an ASS rectangle; caption text itself
+	// (e.g. "12:34 lunch" in mov_text/WebVTT) is never timing metadata.
+	int private_start = -1, private_duration = -1;
+	if (dec->_subtitle.format == SUB_FORMAT_TEXT) {
+		int start, end, prefix = 0;
+		if (sscanf((char *)avpkt->data, "%d:%d,%n", &start, &end, &prefix) == 2 &&
+		    prefix > 0 && prefix <= avpkt->size && start >= 0 && end >= start) {
+			private_start = start;
+			private_duration = end - start;
+			avpkt->data += prefix;
+			avpkt->size -= prefix;
+		}
+	}
 
 	int got_frame;
 	AVSubtitle sub = {0};
@@ -181,6 +198,25 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 					sub.end_display_time,
 					sub.num_rects,
 					sub.pts);
+
+	// PGS can finish a display set in a later packet; its composition PTS is
+	// authoritative. Packet timestamps are already in the stream TS domain.
+	int64_t base = sub.pts != AV_NOPTS_VALUE ?
+		av_rescale_q(sub.pts, AV_TIME_BASE_Q, (AVRational){1, 1000}) : time;
+	int64_t start_time = base + RST_TO_TS_DELTA(sub.start_display_time, int64_t);
+	if (start_time < -1 || start_time > INT_MAX) {
+		avsubtitle_free(&sub);
+		av_packet_free(&avpkt);
+		return 1;
+	}
+	frame->time = private_start >= 0 ? private_start : (int)start_time;
+	frame->duration = private_duration;
+	if (private_start < 0 && sub.end_display_time != UINT32_MAX &&
+	    sub.end_display_time >= sub.start_display_time) {
+		int64_t duration = RST_TO_TS_DELTA(
+			(int64_t)sub.end_display_time - sub.start_display_time, int64_t);
+		frame->duration = duration <= INT_MAX ? (int)duration : -1;
+	}
 
 	// Calculate the bounding box for all rectangles
 	int left = frame->width, top = frame->height, right = 0, bottom = 0;
@@ -216,7 +252,6 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		has_bitmap = 1;
 		// create small empty bitmap
 		left = 0; top = 0; right = 1, bottom = 1;
-		frame->time = time;
 		frame->duration = 0; // cannot be -1 to get timed subtitle in java world but signal that this is a special end subtitle to SubtitleManager
 	}
 
@@ -260,75 +295,27 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		AVSubtitleRect *rect = sub.rects[i];
 		DBGS serprintf("codec_ffsub: text is %s ass is %s type is %d\n", rect->text, rect->ass, rect->type);
 		DBGS serprintf("codec_ffsub: unprocessed sub start %d, end %d, pts %d, duration %d, time %d\n", sub.start_display_time, sub.end_display_time, sub.pts, sub.end_display_time - sub.start_display_time, sub.pts + sub.start_display_time);
-		if (rect->text != NULL) {
-			char *dst = frame->data[0];
-			*dst = 0;
-			DBGS serprintf("codec_ffsub: rect->text%s\n", rect->text);
-			// Note that external srt are handled directly by Android and not by codec_ffsub
-			frame->time = time + RST_TO_TS_DELTA(sub.start_display_time, int);
-			frame->duration = RST_TO_TS_DELTA((int64_t)sub.end_display_time - sub.start_display_time, int);
-			// revert to data parsing to get start and end time if decoder fails to provide start_display_time and end_display_time
-			if (sub.start_display_time == 0 && sub.end_display_time == 0) {
-				int start, end;
-				if(sscanf( data, "%d:%d,", &start, &end ) == 2) {
-					frame->time = start;
-					frame->duration = end - start;
+		if (rect->text || rect->ass) {
+			if (!frame->data[0] || max < 1) {
+				avsubtitle_free(&sub);
+				av_packet_free(&avpkt);
+				return 1;
+			}
+			const char *text = rect->text;
+			if (!text) {
+				text = rect->ass;
+				int commas = !strncmp(text, "Dialogue:", 9) ? 9 : 8;
+				for (int j = 0; j < commas && text; ++j) {
+					text = strchr(text, ',');
+					if (text) ++text;
 				}
 			}
-			strnZcpy(dst, rect->text, max - 1);
-		} else if (rect->ass != NULL) {
-			char *dst = frame->data[0];
-			*dst = 0;
-			// note that AV_CODEC_ID_TEXT codec outputs ass rect
-			DBGS serprintf("codec_ffsub: rect->ass=%s\n", rect->ass);
-			int start, end;
-			char *pos = rect->ass;
-			// surprisingly start and end are zero out of the ffmpeg decoder: try to infer it from ass txt and if it fails  parse the data
-			// typical format for ffmpeg 7.1 is rect->ass="1,0,Default,,0,0,0,,4704:7998,- Kids?\N- Phil, would you get them?"
-			// skip to 9th comma to extract start and end times
-			// typical format for ffmpeg 4.4 is
-			// rect->ass="Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,1217:2956,Ronflement léger"
-			// but can be without timestamp information
-			// rect->ass="Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,{\fs20}{\1c&HFFFFFF&}{\1a&H00&}there usually aren't\Na lot of taxis in this area,"
-			int skipCommas; // number of commas to skip
-			if (strncmp(pos, "Dialogue:", 9) == 0) { // match
-				// ffmpeg 4.4 decoding format
-				skipCommas = 9;
-			} else {
-				// ffmpeg 7.1 decoding format
-				skipCommas = 8;
-			}
-			for (int i = 0; i < skipCommas && pos != NULL; i++) {
-				pos = strchr(pos, ',');
-				if (pos) pos++;
-			}
-			int found_timing = 0;
-			if (pos != NULL && sscanf(pos, "%d:%d,", &start, &end) == 2) {
-				frame->time = start;
-				frame->duration = end - start;
-				found_timing = 1;
-			} else {
-				// parsing error get back to text data parsing
-				if (sub.start_display_time == 0 && sub.end_display_time == 0) {
-					if(sscanf( data, "%d:%d,", &start, &end ) == 2) {
-						frame->time = start;
-						frame->duration = end - start;
-					}
-				}
-			}
-			// Continue skipping to the 9th comma to reach the text content only if timing information has been found
-			// otherwise need to not skip an additional comma
-			if (pos != NULL && found_timing) {
-				pos = strchr(pos, ',');
-				if (pos) pos++;
-			}
-			// Extract text zone and convert \N to \n
-			if (pos != NULL) {
-				strnZcpy(dst, pos, max - 1);
-				while ((pos = strstr(dst, "\\N")) != NULL) {
-					pos[0] = ' ';
-					pos[1] = '\n';
-				}
+			strnZcpy((char *)frame->data[0], text ? text : "", max);
+			char *pos = (char *)frame->data[0];
+			while ((pos = strstr(pos, "\\N"))) {
+				pos[0] = ' ';
+				pos[1] = '\n';
+				pos += 2;
 			}
 		} else if (rect->type == SUBTITLE_BITMAP) {
 			// Check if the bitmap rect is not empty and contains non-black pixels
@@ -428,43 +415,22 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	}
 
 	if (has_bitmap) {
-		if (sub.start_display_time > 0) {
-			frame->time = time + RST_TO_TS_DELTA(sub.start_display_time, int);
-		}
-		if (sub.num_rects != 0) {
-			frame->duration = RST_TO_TS_DELTA((int64_t)sub.end_display_time - sub.start_display_time, int);
-			if( sub.start_display_time == 0 && sub.end_display_time == -1 ) {
-				// note that for PGS subtitles there is no start_display_time and end_display_time
-				// so we have to calculate the duration from the avpkt->duration but it is always 0
-				if( avpkt->duration > 0 ) {
-					frame->duration = avpkt->duration;
-				} else {
-					// Note: must fix a duration for PGS subtitles, real duration inferred from next 0 rect subtitle in the android domain
-					frame->duration = 100000;
-				}
-			}
+		if (sub.num_rects && sub.end_display_time == UINT32_MAX) {
+			// PGS ends with the next composition/clear, not a fixed timeout.
+			// Keep the timed-message contract without overflowing Java's end time.
+			frame->duration = INT_MAX - MAX(0, frame->time);
 		}
 		frame->window.x = left;
 		frame->window.y = top;
 		frame->window.width = bb_width;
 		frame->window.height = bb_height;
-		// Set frame resolution based on subtitle format if PGS or VobSub
-		if (self->base._subtitle.format == SUB_FORMAT_PGS) {
-			frame->width = MAX(1920, right); // safer but breaks AR
-			frame->height = MAX(1080, bottom); // safer but breaks AR
-		} else if (self->base._subtitle.format == SUB_FORMAT_DVD_GFX) {
-			int base_width = 720;
-			int base_height = 576;
-			STREAM *stream = (STREAM *)self->base.ctx;
-			if (stream && stream->video) {
-				if (stream->video->width > 0)
-					base_width = stream->video->width;
-				if (stream->video->height > 0)
-					base_height = stream->video->height;
-			}
-			frame->width = MAX(base_width, right);
-			frame->height = MAX(base_height, bottom);
-		}
+		// Coordinates belong to the subtitle canvas, not the video surface.
+		int canvas_width = self->avcontext->width;
+		int canvas_height = self->avcontext->height;
+		if (canvas_width <= 0) canvas_width = dec->_subtitle.format == SUB_FORMAT_PGS ? 1920 : 720;
+		if (canvas_height <= 0) canvas_height = dec->_subtitle.format == SUB_FORMAT_PGS ? 1080 : 576;
+		frame->width = MAX(canvas_width, right);
+		frame->height = MAX(canvas_height, bottom);
 		frame->colorspace = AV_IMAGE_BGRA_32;  // Set the colorspace to BGRA
 		DBGS serprintf("codec_ffsub: decoded sub width=%d, height=%d, size=%d, window=%d,%d,%d,%d\n", frame->width, frame->height, frame->size, frame->window.x, frame->window.y, frame->window.width, frame->window.height);
 	}
@@ -482,8 +448,15 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 static int _flush( STREAM_DEC_SUB *dec )
 {
 	my_dec_sub *self = (my_dec_sub *)dec;
-	if (self->avcontext)
-		avcodec_flush_buffers(self->avcontext);
+	if (dec->_subtitle.format == SUB_FORMAT_PGS) {
+		// This FFmpeg PGS decoder has no flush callback. Reopen to discard
+		// palettes, objects and incomplete compositions from the old timeline.
+		SUB_PROPERTIES sub = dec->_subtitle;
+		void *ctx = dec->ctx;
+		_close(dec);
+		return _open(dec, &sub, ctx);
+	}
+	if (self->avcontext) avcodec_flush_buffers(self->avcontext);
 	return 0;
 } 
 

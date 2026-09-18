@@ -4967,10 +4967,11 @@ DBGS serprintf("stream_seek_loop from %d to frame %d  time %d\r\n", s->video_tim
 
 		_free_all_frames( s );
 	}
-	if( s->sub_dec) {
-		s->sub_dec->flush( s->sub_dec );
-		s->cdata_sub.valid = 0;
-	}
+	if (s->sub_dec && s->sub_dec->flush(s->sub_dec))
+		stream_close_sub_dec(s); // retry opening on the subtitle worker
+	s->cdata_sub.valid = 0;
+	s->subtitle_pending = 0;
+	stream_sub_ext_reset(s);
 	_stream_resync( s );
 	
 	// init the AV sync machinery to have a clean start of the video

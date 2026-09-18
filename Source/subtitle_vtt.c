@@ -257,6 +257,7 @@ static uni_sub *parse_VTT( subt_orig *spex, int clean_tags )
         }
         }
         
+        if (!line) break; // a trailing NOTE block may have consumed EOF
         memset(line,0,LINE_LEN);
         line = subtitle_get_next_line( line, LINE_LEN, fd );
     }

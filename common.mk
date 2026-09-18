@@ -117,7 +117,7 @@ CSRC_AVOS_CORE = \
 	browse.c ac_av.c object.c\
 	sysfs_ll.c \
 	thumb_storage.c thumb_stream.c \
-	pixel_utils.c pixel_utils_neon.c \
+	pixel_utils.c \
 	device_config.c
 
 CSRC_AVOS_CORE += mainloop.c dataevent.c \
@@ -188,7 +188,7 @@ endif
 XASRC = 
 
 ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
-XASRC += neon_yuv.S neon_rgb.S neon_memcpy.S neon_memset.S
+XASRC += neon_memcpy.S neon_memset.S
 endif
 
 SUBMAKEFILES = $(addprefix $(LOCAL_PATH)/, codecs.mk main.mk sound.mk fb.mk)

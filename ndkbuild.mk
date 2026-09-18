@@ -29,13 +29,6 @@ include $(AVOS_DIR)/common.mk
 INCLUDES +=  $(ANDROID_DIR)/obj/include/
 
 
-### libyuv ###
-include $(CLEAR_VARS)
-LOCAL_MODULE    := libyuv
-LOCAL_SRC_FILES := $(LIBYUV_DIR)/obj/local/$(TARGET_ARCH_ABI)/libyuv_static.a
-LOCAL_EXPORT_C_INCLUDES := $(LIBYUV_DIR)/include
-include $(PREBUILT_STATIC_LIBRARY)
-
 ### libavos ###
 
 include $(CLEAR_VARS)
@@ -62,7 +55,7 @@ LOCAL_LDLIBS := -L$(TARGET_OUT) -lz \
 	-llog
 
 LOCAL_STATIC_LIBRARIES := $(sort $(addsuffix $(AVOS_LIBS_SUFFIX), $(AVOS_STATIC_LIBS))) \
-	cpufeatures libyuv
+	cpufeatures
 
 LOCAL_MODULE := libavos$(AVOS_LIBS_SUFFIX)
 

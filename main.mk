@@ -31,8 +31,3 @@ endif
 ifeq ($(TTY),ANDROID)
 CSRC += log_android.c
 endif
-
-ifeq ($(LIBYUV),ON)
-LIBYUV_DIR := $(AVOS_DIR)/../libyuv
-DEFINES += -DCONFIG_LIBYUV
-endif

@@ -23,7 +23,6 @@
 
 #include <string.h>
 
-#ifndef CONFIG_NEON
 // ************************************
 //
 //	_arm_copy_aligned_rect_rgba32_rotated
@@ -241,4 +240,3 @@ SurfaceTool surface_tool = {
 	.copy_aligned_rect_rgba32         = _arm_copy_aligned_rect_rgba32,
 	.copy_yuv_image_rotated           = _arm_copy_yuv_image_rotated,
 };
-#endif

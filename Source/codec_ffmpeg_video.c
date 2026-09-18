@@ -381,9 +381,7 @@ DBGS serprintf("FFMPEG: drop extra\r\n");
 		break;
 	}
 	
-	if( _ff_render_count ) {
-		p->mt_ctx = codec_convert_mt_init( _ff_render_count );
-	}
+	p->mt_ctx = codec_convert_mt_init( _ff_render_count );
 	
 	return 0;
 	
@@ -432,6 +430,7 @@ serprintf("ffvd not open!\r\n");
 
 	if( p->mt_ctx ) {
 		codec_convert_mt_exit( p->mt_ctx );
+		p->mt_ctx = NULL;
 	}
 
 	STREAM *s = dec->ctx;
@@ -519,26 +518,6 @@ static void _mark( UCHAR *data, int width, int height, int linestep )
 	}	
 }
 */
-
-static int map_pixfmt( int pix_fmt )
-{
-	switch( pix_fmt ) {
-	case AV_PIX_FMT_NV12:
-		return PIXFMT_NV12;
-	case AV_PIX_FMT_YUYV422:
-	case AV_PIX_FMT_YUVJ422P:
-		return PIXFMT_YUV422P;
-	case AV_PIX_FMT_YUV420P10LE:
-		return PIXFMT_YUV420P10LE;
-	case AV_PIX_FMT_YUV444P:
-		return PIXFMT_YUV444P;
-	case AV_PIX_FMT_P010:   // resolves to native-endian P010
-	case AV_PIX_FMT_P010BE: // explicit big-endian variant
-		return PIXFMT_P010;
-	default:
-		return PIXFMT_YUV420P;
-	}
-}
 
 static int ffmpeg_video_codec_decode2( STREAM_DEC_VIDEO *dec, UCHAR *data, int size, VIDEO_FRAME **pin_frame, VIDEO_FRAME **pout_frame, int *_decoded, int *_time )
 {
@@ -690,16 +669,18 @@ DBGCV2 serprintf("[");
 			} else {
 				avos_frame->dec = NULL;
 				avos_frame->color_space = vframe->colorspace;
+				avos_frame->color_range = vframe->color_range;
 				if (!codec_frame_can_hold(avos_frame, vframe->width, vframe->height)) {
 					avos_frame->error = 1;
 					*pout_frame = avos_frame;
 					stream_set_error(dec->ctx, VE_VIDEO_CODEC_ERROR);
 					return -1;
 				}
-				if( p->mt_ctx ) {
-					codec_convert_mt( p->mt_ctx, map_pixfmt( vframe->format ), vframe->data, vframe->linesize, vframe->width, vframe->height, avos_frame );
-				} else {
-					codec_convert_pixel_format( map_pixfmt( vframe->format ), vframe->data, vframe->linesize, vframe->width, vframe->height, avos_frame);
+				if (codec_convert_mt(p->mt_ctx, vframe->format, vframe->data, vframe->linesize,
+				                     vframe->width, vframe->height, avos_frame) < 0) {
+					avos_frame->error = 1;
+					stream_set_error(dec->ctx, VE_VIDEO_CODEC_ERROR);
+					return -1;
 				}
 			}
 			start = time_update_time() - start;
@@ -768,11 +749,9 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	int failed = dst && !codec_frame_can_hold(dst, avframe->width, avframe->height);
 	if( dst && !failed ) {
 		dst->color_space = avframe->colorspace;
-		if( p->mt_ctx ) {
-			codec_convert_mt( p->mt_ctx, map_pixfmt( avframe->format ), avframe->data, avframe->linesize, avframe->width, avframe->height, dst);
-		} else {
-			codec_convert_pixel_format( map_pixfmt( avframe->format ), avframe->data, avframe->linesize, avframe->width, avframe->height, dst);
-		}
+		dst->color_range = avframe->color_range;
+		failed = codec_convert_mt(p->mt_ctx, avframe->format, avframe->data, avframe->linesize,
+		                          avframe->width, avframe->height, dst) < 0;
 	}
 	
 	av_frame_free((AVFrame**)&src->priv);

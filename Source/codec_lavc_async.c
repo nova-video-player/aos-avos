@@ -84,6 +84,7 @@ typedef struct PRIV {
 	const AVCodec 	*vcodec;
 	AVFrame		*vframe;
 	AVPacket	*avpkt;
+	void		*convert_ctx;
 	
 	VIDEO_FRAME	*in_frame;
 	VIDEO_FRAME	*out_frame;
@@ -181,6 +182,7 @@ DBGS serprintf("name %s  type %d  id %d \r\n", vcodec->name, vcodec->type, vcode
 		goto ErrorExit;
 	}
 	
+	p->convert_ctx = codec_convert_mt_init(1);
 	dec->is_open = 1;
 
 	if( _need_flush )
@@ -228,6 +230,9 @@ serprintf("ffvd not open!\r\n");
  
 	PRIV *p = (PRIV*)dec->priv;
 
+	codec_convert_mt_exit(p->convert_ctx);
+	p->convert_ctx = NULL;
+
 	// Free the YUV frame
 	av_frame_free( &p->vframe );
 
@@ -244,19 +249,6 @@ serprintf("ffvd not open!\r\n");
 	dec->is_open = 0;
 
 	return 0;
-}
-
-static int map_pixfmt( int pix_fmt )
-{
-	switch( pix_fmt ) {
-	case AV_PIX_FMT_NV12:
-		return PIXFMT_NV12;
-	case AV_PIX_FMT_YUYV422:
-	case AV_PIX_FMT_YUVJ422P:
-		return PIXFMT_YUV422P;
-	default:
-		return PIXFMT_YUV420P;
-	}
 }
 
 static int _decode( STREAM_DEC_VIDEO *dec, UCHAR *data, int size, VIDEO_FRAME **pin_frame, VIDEO_FRAME **pout_frame, int *_decoded, int *_time )
@@ -372,7 +364,13 @@ DBGCV3 serprintf("[line %4d %3d %3d  px %d -> %d]",
 			// render it into the buffer
 DBGCV2 serprintf("[");
 			int start = time_update_time();
-			codec_convert_pixel_format( map_pixfmt( vctx->pix_fmt ), vframe->data, vframe->linesize, vctx->width, vctx->height, avos_frame);
+			avos_frame->color_space = vframe->colorspace;
+			avos_frame->color_range = vframe->color_range;
+			if (codec_convert_mt(p->convert_ctx, vframe->format, vframe->data, vframe->linesize,
+			                               vframe->width, vframe->height, avos_frame) < 0) {
+				avos_frame->error = 1;
+				return -1;
+			}
 			start = time_update_time() - start;
 DBGCV2 serprintf("yuv %3d]", start); 
 		}

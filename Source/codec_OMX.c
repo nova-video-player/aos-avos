@@ -1567,8 +1567,16 @@ static int video_get_out(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **pout_frame)
 			shadow->linestep[0] = def->format.video.nStride;
 			shadow->data_size[0] = shadow->linestep[0] * shadow->height;
 			shadow->colorspace  = dec->video->colorspace;
+			shadow->color_space = dec->video->color_space;
+			shadow->color_range = dec->video->color_range;
 
 			switch (shadow->colorspace) {
+			case AV_IMAGE_YUV_422: /* OMX_COLOR_FormatYUV422Planar */
+				shadow->linestep[1] = shadow->linestep[2] = (shadow->linestep[0] + 1) / 2;
+				shadow->data_size[1] = shadow->data_size[2] = shadow->linestep[1] * shadow->height;
+				shadow->data[1] = shadow->data[0] + shadow->data_size[0];
+				shadow->data[2] = shadow->data[1] + shadow->data_size[1];
+				break;
 			case AV_IMAGE_NV12:
 				shadow->linestep[1]  = def->format.video.nStride;
 				shadow->data_size[1] = shadow->linestep[1] * shadow->height / 2;
@@ -1578,8 +1586,9 @@ static int video_get_out(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **pout_frame)
 			default:
 				shadow->linestep[1]  = shadow->linestep[2]  = def->format.video.nStride / 2;
 				shadow->data_size[1] = shadow->data_size[2] = shadow->linestep[1] * shadow->height / 2;
-				shadow->data[1]      = shadow->data[0] + shadow->data_size[0];
-				shadow->data[2]      = shadow->data[1] + shadow->data_size[1];
+				/* OMX planar 420 is Y/U/V; expose AVOS YV12 as Y/V/U. */
+				shadow->data[2]      = shadow->data[0] + shadow->data_size[0];
+				shadow->data[1]      = shadow->data[2] + shadow->data_size[2];
 				break;
 			}
 		}

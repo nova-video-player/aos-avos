@@ -836,6 +836,7 @@ typedef struct vfr_str {
 	int 		decode_time;
 
 	int		color_space;	// AVCOL_SPC_* for SW YUV->RGB conversion
+	int		color_range;	// AVCOL_RANGE_*; unspecified defaults to limited for YUV
 
 	void		(*destroy)(struct vfr_str *f);
 

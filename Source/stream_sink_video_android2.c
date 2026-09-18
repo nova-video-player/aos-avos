@@ -256,7 +256,7 @@ static int update_frame_pointers(VIDEO_FRAME * frame, int colorspace, android_bu
 			case AV_IMAGE_RGBX_32:
 				frame->data[0]      = android_buffer.data;
 				frame->linestep[0]  = android_buffer.stride;
-				frame->data_size[0] = android_buffer.stride * android_buffer.height;
+				frame->data_size[0] = android_buffer.stride * android_buffer.height * 4;
 				break;
 			case AV_IMAGE_NV12:
 				frame->data[0]      = android_buffer.data;
@@ -346,21 +346,28 @@ static void *copy_thread(void *ctx)
 		venc_frame->ofs_x     = user_frame->ofs_x;
 		venc_frame->ofs_y     = user_frame->ofs_y;
 		venc_frame->deinterlace = user_frame->deinterlace;
+		venc_frame->error = 0;
 
 		if( user_frame->priv && do_copy ) {
 			VIDEO_FRAME *shadow = user_frame->priv;
 			int width = venc_frame->width + venc_frame->ofs_x;
 			int height = venc_frame->height + venc_frame->ofs_y;
 			
-			if( !p->work_num ) {
-				codec_convert_pixel_format( avimage2pixfmt(shadow->colorspace), shadow->data, shadow->linestep, width, height, venc_frame );
-			} else {
-				codec_convert_mt( p->mt_ctx, avimage2pixfmt(shadow->colorspace), shadow->data, shadow->linestep, width, height, venc_frame );
-			}
+			venc_frame->color_space = shadow->color_space;
+			venc_frame->color_range = shadow->color_range;
+			/* OMX uses AV_IMAGE_YUV_422 for planar 422 shadow buffers. */
+			int pixfmt = shadow->colorspace == AV_IMAGE_YUV_422 ?
+				AV_PIX_FMT_YUV422P : avimage2pixfmt(shadow->colorspace);
+			if (codec_convert_mt(p->mt_ctx, pixfmt, shadow->data,
+			                     shadow->linestep, width, height, venc_frame) < 0)
+				stream_set_error(sink->ctx, VE_VIDEO_CODEC_ERROR);
 		}
 
 		pthread_mutex_lock(&p->venc_mutex);
-		frame_q_put(&p->venc_q, venc_frame);
+		if (venc_frame->error)
+			frame_q_put(&p->get_q, venc_frame);
+		else
+			frame_q_put(&p->venc_q, venc_frame);
 		pthread_cond_signal(&p->venc_cond);
 		pthread_mutex_unlock(&p->venc_mutex);
 		
@@ -632,11 +639,9 @@ DBGS serprintf("stream_sink_video_android: open  num_frames %d  cpu_type %d\n", 
 		pthread_cond_init(&p->copy_cond, NULL);
 		pthread_mutex_init(&p->user_mutex, NULL);
 
-		pthread_create(&p->copy_thread_handle, 0, copy_thread, (void*)sink);
 		p->work_num = work_num;
-		if( p->work_num ) {
-			p->mt_ctx = codec_convert_mt_init( p->work_num );
-		}
+		p->mt_ctx = codec_convert_mt_init(p->work_num);
+		pthread_create(&p->copy_thread_handle, 0, copy_thread, (void*)sink);
 	}
 
 	return sink->flush(sink);

@@ -1669,8 +1669,12 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 		return 1;
 	}
 
-	if( audio_buffer->size < packet->size ) {
-		if ( realloc_clever_buffer( audio_buffer, packet->size ) ) {
+	if( packet->size < 0 || packet->size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE ) {
+		_dispose_packet(packet);
+		return 1;
+	}
+	if( audio_buffer->size < packet->size + AV_INPUT_BUFFER_PADDING_SIZE ) {
+		if ( realloc_clever_buffer( audio_buffer, packet->size + AV_INPUT_BUFFER_PADDING_SIZE ) ) {
 			_dispose_packet( packet );			
 			return 1;
 		}
@@ -1696,6 +1700,7 @@ static int _get_audio_cdata( STREAM *s, CLEVER_BUFFER *audio_buffer, STREAM_CDAT
 	
 DBGC2  serprintf(" A   siz %6d  pos %8lld   tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->time, ff_p->aq.packets, ff_p->aq.mem_used );
 	memcpy( audio_buffer->data, packet->data, packet->size );
+	memset( audio_buffer->data + packet->size, 0, AV_INPUT_BUFFER_PADDING_SIZE );
 	
 	cdata->valid = CHUNK_VALID;
 

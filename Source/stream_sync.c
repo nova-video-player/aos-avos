@@ -345,6 +345,19 @@ static void _stream_pcm_reanchor_reset( STREAM *s )
 }
 
 
+void stream_sync_pcm_output_reset( STREAM *s )
+{
+	if( !s )
+		return;
+	_stream_pcm_delay_memory_reset( s, 0 );
+	_stream_pcm_reanchor_reset( s );
+	// The new track starts at frame zero, at the submitted media frontier.
+	// Sample counts from the previous rate/track cannot be reused.
+	s->audio_ref_time = s->audio_time;
+	s->audio_samples = 0;
+	s->audio_time_remainder_us = 0;
+}
+
 static stream_delay_source_t _classify_audio_delay_source(const char *tag, int delay_valid)
 {
 	if( !tag || !tag[0] ) {

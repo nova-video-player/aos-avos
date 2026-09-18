@@ -2121,9 +2121,9 @@ ERR			LOG("audiotrack_write: recovery disabled, dropping write");
 		// Sleep briefly to avoid tight loop during recovery and give AudioFlinger time to stabilize
 		msec_sleep(100);
 		// Recreate the AudioTrack by passing current values
-		audiotrack_set_passthrough(at, at->passthrough);
-		// Return -1 to signal fatal write failure to upper layer
-		// This prevents the infinite loop in stream_audio.c where size -= 0 never decreases
+		if (audiotrack_set_passthrough(at, at->passthrough) == 0 && !at->passthrough)
+			return AUDIO_WRITE_RESTARTED;
+		// Compressed transactions have their own whole-unit recovery path.
 		return -1;
 	} else if (ret < 0) {
 ERR		LOG("audiotrack_write: ERROR code %d returned from Java write()", ret);

@@ -721,6 +721,9 @@ static int atempo_reconfigure_format(struct ctx *ctx, int channels,
 	if (!ctx || channels <= 0 || sample_rate <= 0 || format == AV_SAMPLE_FMT_NONE) {
 		return -1;
 	}
+	// The caller must deliver old-format output before replacing its graph.
+	if (ctx->filter_initialized && (!ctx->eof || av_audio_fifo_size(ctx->fifo) > 0))
+		return -1;
 
 	DBGA serprintf("atempo: reconfigure format %dch/%dHz/%s -> %dch/%dHz/%s\n",
 		ctx->channels, ctx->sample_rate, sample_format_name(ctx->format),
@@ -939,12 +942,26 @@ static int atempo_fail(AUDIO_FRAME *frame)
 	return -1;
 }
 
+int stream_filter_audio_atempo_needs_format_drain(STREAM_FILTER_AUDIO *f, const AUDIO_FRAME *frame)
+{
+	struct ctx *ctx = f ? f->priv : NULL;
+	return ctx && ctx->filter_initialized && frame && frame->size > 0 &&
+		(frame->channels != ctx->channels || frame->samplesPerSec != ctx->sample_rate ||
+		 get_sample_format_from_bits(frame->bits) != ctx->format) &&
+		(!ctx->eof || av_audio_fifo_size(ctx->fifo) > 0);
+}
+
 static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 {
 	if (!f->priv || !frame)
 		return frame ? atempo_fail(frame) : -1;
 	struct ctx *ctx = f->priv;
-	if (ctx->eof || atempo_filter_input(f, frame) < 0)
+	// A drained graph may be replaced for a new format; ordinary input after
+	// EOF still requires a flush before the same format can be used again.
+	if ((ctx->eof && frame->channels == ctx->channels &&
+	     frame->samplesPerSec == ctx->sample_rate &&
+	     get_sample_format_from_bits(frame->bits) == ctx->format) ||
+	    atempo_filter_input(f, frame) < 0)
 		return atempo_fail(frame);
 	return 0;
 }
@@ -1273,6 +1290,9 @@ int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *f,
 
 #else
 // Stub implementation when FFmpeg is not available
+int stream_filter_audio_atempo_needs_format_drain(STREAM_FILTER_AUDIO *f,
+	const AUDIO_FRAME *frame) { return 0; }
+
 int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f,
 	float *speed, UINT64 *boundary) { return 0; }
 

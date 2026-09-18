@@ -64,6 +64,7 @@ typedef struct PRIV {
 	int parser_codec_id;
 	int parser_drained;
 	int64_t parser_last_input_time;
+	UCHAR parser_input[16384 + AV_INPUT_BUFFER_PADDING_SIZE];
 	UCHAR *access_unit_buffer;
 	size_t access_unit_capacity;
 	int access_unit_size;
@@ -190,8 +191,14 @@ static int mediacodec_audio_parse_input( PRIV *p, UCHAR *data, int size,
 	if( input_time != STREAM_NO_PTS_VALUE ) {
 		p->parser_last_input_time = input_time;
 	}
+	// Callers may pass a suffix with no accessible padding. Own a bounded,
+	// zero-padded copy even when the demuxer already pads complete packets.
+	size = MIN(size, 16384);
+	if( size > 0 )
+		memcpy(p->parser_input, data, size);
+	memset(p->parser_input + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 	int parsed = av_parser_parse2( p->aparser, p->avctx,
-		&output, &output_size, data, size,
+		&output, &output_size, size ? p->parser_input : NULL, size,
 		parser_time, parser_time, 0 );
 	if( parsed < 0 || parsed > size ) {
 		return 1;

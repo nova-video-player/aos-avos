@@ -22,9 +22,10 @@
 #include "astdlib.h"
 #include "mp3.h"
 #include "get.h"
-#include "downmix.h"
 #include "device_config.h"
 #include <stdint.h>
+#include <limits.h>
+#include <math.h>
 #include <libavutil/channel_layout.h>
 #include <stdbool.h>
 
@@ -35,6 +36,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libswresample/swresample.h>
+#include <libavutil/opt.h>
 
 #define DBGS 	if(Debug[DBG_STREAM])
 
@@ -79,9 +81,6 @@ static void update_audio_channel_mask( AUDIO_PROPERTIES *audio, const AVChannelL
 		audio->channelMask = (int)mask;
 }
 
-// Channel map built in convert_to_stereo()
-static int channel_map[8] = { CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED, CH_UNMAPPED };
-
 /*
  * AVCodecContext owns extradata and frees it from avcodec_free_context().
  * Stream properties do not transfer ownership, so copy their payload instead
@@ -108,7 +107,6 @@ typedef struct PRIV {
 	AVCodecContext 	*actx;
 	const AVCodec 	*acodec;
 	AVCodecParserContext *aparser;
-	AVChannelLayout last_channel_layout;
 	SwrContext      *swr_ctx;
 	AVChannelLayout  swr_in_layout;
 	AVChannelLayout  swr_out_layout;
@@ -116,28 +114,16 @@ typedef struct PRIV {
 	int             swr_in_rate;
 	AVFrame         *aframe;
 	AVPacket        *avpkt;
-	SHORT		*asamples;
 	SHORT		*bsamples;
+	int             bsamples_capacity;
 	int 		open;
-	int 		play;
-	int 		ignore;
-	int 		parse_first;
 	int		request_channels;
 
-	unsigned char 	inbuf[16384];
-	int 		inbuf_size;
-	int 		inbuf_residual;
+	unsigned char 	inbuf[16384 + AV_INPUT_BUFFER_PADDING_SIZE];
+	int draining;
+	int parser_drained;
+	int eos_sent;
 } PRIV;
-
-static inline int clamp( int v )
-{
-        if( v > 32767 ) {
-                return 32767;
-        } else if ( v < -32768 ) {
-                return -32768;
-        }
-        return v;
-}
 
 static int ffmpeg_audio_codec_new( AUDIO_PROPERTIES *audio )
 {
@@ -160,7 +146,7 @@ DBGS serprintf( "stream_dec_audio_delete_FFMPEG\r\n");
 		return 1;
 	}
 	afree( p );
-	p = NULL;	
+	audio->priv = NULL;
 	return 0;
 }
 
@@ -312,8 +298,9 @@ serprintf("cannot open codec\r\n");
 		goto ErrorExit2;
 	}
 
-	avpkt->data = data;
-	avpkt->size = size;
+	if (!data || size <= 0 || av_new_packet(avpkt, size) < 0)
+		goto ErrorExit2;
+	memcpy(avpkt->data, data, size);
 
 	av_frame_unref(aframe);
 	int ret = avcodec_send_packet(actx, avpkt);
@@ -365,7 +352,6 @@ ErrorExit:
 	return 1;
 }
 
-#define MAX_AUDIO_FRAME_SIZE 192000
 
 static int ffmpeg_audio_codec_open( AUDIO_PROPERTIES *audio )
 {
@@ -376,8 +362,6 @@ DBGS serprintf( "stream_dec_audio_open_FFMPEG: ");
 		return 1;
 	memset( p, 0, sizeof( PRIV ) );
 
-	// Initialize channel layout
-	av_channel_layout_default(&p->last_channel_layout, 0);
 
 	int need_parser = 0;
 
@@ -388,23 +372,18 @@ DBGS serprintf( "stream_dec_audio_open_FFMPEG: ");
 	case WAVE_FORMAT_MPEGLAYER3:
 	case WAVE_FORMAT_MPEG:
 		need_parser = 1;		
-		p->inbuf_size = 2048;
 		break;
 	case WAVE_FORMAT_AAC_LATM:
 		need_parser = 1;		
-		p->inbuf_size = 8192;
 		break;
 	case WAVE_FORMAT_AC3:
 		need_parser = 1;		
-		p->inbuf_size = 3840;
 		break;
 	case WAVE_FORMAT_FLAC:
 		need_parser = 1;		
-		p->inbuf_size = 8192; 	// FLAC avg block size
 		break;
 	case WAVE_FORMAT_DTS:
 		need_parser = 1;
-		p->inbuf_size = sizeof( p->inbuf );
 		break;
 	}
 	
@@ -457,23 +436,6 @@ serprintf("cannot open parser for %04X\r\n", p->actx->codec_id );
 	
 DBGS serprintf("name %s  type %d  id %d \r\n", p->acodec->name, p->acodec->type, p->acodec->id);
 
-	if (!p->request_channels) {
-DBGS serprintf("codec_ffmpeg_audio: request_channels is 0, checking sample_fmt=%d\r\n", p->actx->sample_fmt);
-		switch( p->actx->sample_fmt ) {
-		case AV_SAMPLE_FMT_FLT:
-		case AV_SAMPLE_FMT_DBL:
-		case AV_SAMPLE_FMT_FLTP:
-		case AV_SAMPLE_FMT_DBLP:
-			p->request_channels = p->actx->ch_layout.nb_channels;
-DBGS serprintf("codec_ffmpeg_audio: float format detected, setting request_channels=%d\r\n", p->request_channels);
-			break;
-		default:
-DBGS serprintf("codec_ffmpeg_audio: non-float format, keeping request_channels=0\r\n");
-			break;
-		}
-	} else {
-DBGS serprintf("codec_ffmpeg_audio: request_channels=%d (not zero, skipping sample_fmt check)\r\n", p->request_channels);
-	}
 	audio->sourceSamples = audio->samplesPerSec;
 	audio->sourceChannels = audio->channels;
 	audio->sourceBitsPerSample = audio->bitsPerSample;
@@ -503,13 +465,8 @@ serprintf("downmix to stereo S16\r\n");
 		goto ErrorExit;
 	}
 	
-	p->asamples = (SHORT*)amalloc(    MAX_AUDIO_FRAME_SIZE);
-	p->bsamples = (SHORT*)amalloc(2 * MAX_AUDIO_FRAME_SIZE);
 
 	p->open   = 1;
-	p->play   = 0;
-	p->ignore = 0;
-	p->inbuf_residual = 0;
 	
 	return 0;
 
@@ -567,645 +524,339 @@ serprintf("ffad not open!\r\n");
 		av_packet_free(&p->avpkt);
 	}
 
-	if( p->asamples ) {
-		afree( p->asamples );
-	}
 	if( p->bsamples ) {
 		afree( p->bsamples );
 	}
 
-	// Clean up channel layout
-	av_channel_layout_uninit(&p->last_channel_layout);
 
 	p->open = 0;
 
 	return 0;
 }
 
-static unsigned short chk16( UCHAR *data, int size ) 
+// These decoded E-AC3/TrueHD speakers have no redistribution rules in swr's
+// automatic matrix. Keep Nova's historical destinations, including CUSTOM
+// SIDE_SURROUND channel IDs, without relabeling or overwriting sample planes.
+static enum AVChannel downmix_channel(enum AVChannel ch)
 {
-	unsigned short chk = 0; int i; for(i = 0; i < size; i++ ) { chk += *(data++); } return chk;
+	switch (ch) {
+	case AV_CHAN_WIDE_LEFT: return AV_CHAN_FRONT_LEFT;
+	case AV_CHAN_WIDE_RIGHT: return AV_CHAN_FRONT_RIGHT;
+	case AV_CHAN_SURROUND_DIRECT_LEFT:
+	case AV_CHAN_SIDE_SURROUND_LEFT: return AV_CHAN_SIDE_LEFT;
+	case AV_CHAN_SURROUND_DIRECT_RIGHT:
+	case AV_CHAN_SIDE_SURROUND_RIGHT: return AV_CHAN_SIDE_RIGHT;
+	case AV_CHAN_LOW_FREQUENCY_2: return AV_CHAN_LOW_FREQUENCY;
+	default: return ch;
+	}
 }
 
-static int convert_to_stereo( PRIV *p, AVFrame *frame, UCHAR **pcm_data, int *out_channels, int *out_bits)
+static int set_downmix_matrix(SwrContext *swr, const AVChannelLayout *input,
+    const AVChannelLayout *output)
 {
-	int bps     = av_get_bytes_per_sample(p->actx->sample_fmt) * 8;
-	int samples = frame->nb_samples;
-	UCHAR *data = frame->data[0];
-	bool channels_set = false;
-
-	// Rebuild channel_map on layout change
-	if (av_channel_layout_compare(&p->actx->ch_layout, &p->last_channel_layout) != 0) {
-			av_channel_layout_copy(&p->last_channel_layout, &p->actx->ch_layout);
-			for (int i = 0; i < p->actx->ch_layout.nb_channels; i++) {
-					enum AVChannel ch = av_channel_layout_channel_from_index(&p->actx->ch_layout, i);
-					switch (ch) {
-							case AV_CHAN_FRONT_LEFT:           channel_map[i] = CH_FL;  
-								channels_set = true;	
-								break;
-							case AV_CHAN_FRONT_RIGHT:          channel_map[i] = CH_FR; 
-								channels_set = true;		
-								break;
-							case AV_CHAN_FRONT_CENTER:         channel_map[i] = CH_CTR; break;
-							case AV_CHAN_LOW_FREQUENCY:        channel_map[i] = CH_SUB; break;
-							case AV_CHAN_BACK_LEFT:            channel_map[i] = CH_BL;  break;
-							case AV_CHAN_BACK_RIGHT:           channel_map[i] = CH_BR;  break;
-							case AV_CHAN_SIDE_LEFT:            channel_map[i] = CH_SL;  break;
-							case AV_CHAN_SIDE_RIGHT:           channel_map[i] = CH_SR;  break;
-							case AV_CHAN_SIDE_SURROUND_LEFT:   channel_map[i] = CH_SL;  break;
-							case AV_CHAN_SIDE_SURROUND_RIGHT:  channel_map[i] = CH_SR;  break;
-							case AV_CHAN_BACK_CENTER:          channel_map[i] = CH_CTR; break;
-							case AV_CHAN_LOW_FREQUENCY_2:      channel_map[i] = CH_SUB; break;
-							case AV_CHAN_FRONT_LEFT_OF_CENTER: channel_map[i] = CH_FL;  break;
-							case AV_CHAN_FRONT_RIGHT_OF_CENTER:channel_map[i] = CH_FR;  break;
-							case AV_CHAN_WIDE_LEFT:            channel_map[i] = CH_FL;  break;
-							case AV_CHAN_WIDE_RIGHT:           channel_map[i] = CH_FR;  break;
-							case AV_CHAN_SURROUND_DIRECT_LEFT: channel_map[i] = CH_SL;  break;
-							case AV_CHAN_SURROUND_DIRECT_RIGHT:channel_map[i] = CH_SR;  break;
-							default:                           channel_map[i] = CH_UNMAPPED; break;
-					}
-			}
-	}
-
-	//Fallback for if no channels found...
-	if (!channels_set) {
-		channel_map[0] = CH_FL;
-		channel_map[1] = CH_FR;
-		channel_map[2] = CH_CTR;
-		channel_map[3] = CH_SUB;
-		channel_map[4] = CH_BL;
-		channel_map[5] = CH_BR;
-		channel_map[6] = CH_SL;
-		channel_map[7] = CH_SR;
-	}
-
-	// convert all to stereo S16!
-	// fixme: use the actx->channel_layout to crate a correct channel_map
-	switch( p->actx->sample_fmt ) {	
-	case AV_SAMPLE_FMT_FLT:
-	case AV_SAMPLE_FMT_DBL:
-		downmix_float( p->bsamples, data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
-		*pcm_data = (UCHAR*)p->bsamples;
-		break;
-		
-	case AV_SAMPLE_FMT_U8:
-	case AV_SAMPLE_FMT_S32:
-#ifdef IS_FFMPEG
-	case AV_SAMPLE_FMT_S64:
-#endif
-		downmix( p->bsamples, data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
-		*pcm_data = (UCHAR*)p->bsamples;
-		break;
-		
-	case AV_SAMPLE_FMT_S16:
-		if( p->actx->ch_layout.nb_channels == 2 ) {
-			memcpy( p->bsamples, data, samples * 2 * 2);
-		} else {
-			downmix( p->bsamples, data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
+	// swr_build_matrix2 uses a 64x64 work area, even for smaller layouts.
+	double *base = av_calloc(64 * 64, sizeof(*base));
+	double matrix[8 * 64] = {0};
+	AVChannelLayout canonical = {0};
+	uint64_t mask = 0;
+	int ret = AVERROR(ENOMEM);
+	if (!base)
+		return ret;
+	for (int i = 0; i < input->nb_channels; i++) {
+		enum AVChannel ch = downmix_channel(av_channel_layout_channel_from_index(input, i));
+		if (ch < 0 || ch >= 64) {
+			ret = AVERROR(EINVAL);
+			goto done;
 		}
-		*pcm_data = (UCHAR*)p->bsamples;
-		break;
-
-	case AV_SAMPLE_FMT_U8P:
-	case AV_SAMPLE_FMT_S16P:
-	case AV_SAMPLE_FMT_S32P:
-#ifdef IS_FFMPEG
-	case AV_SAMPLE_FMT_S64P:
-#endif
-		downmix_planar( p->bsamples, frame->data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
-		*pcm_data = (UCHAR*)p->bsamples;
-		break;
-	
-	
-	case AV_SAMPLE_FMT_FLTP:
-	case AV_SAMPLE_FMT_DBLP:
-		downmix_float_planar( p->bsamples, frame->data, samples, p->actx->ch_layout.nb_channels, bps, channel_map );
-		*pcm_data = (UCHAR*)p->bsamples;
-		break;
-
-	case AV_SAMPLE_FMT_NONE:
-	case AV_SAMPLE_FMT_NB:
-		return 0;
+		mask |= UINT64_C(1) << ch;
 	}
-	*out_channels = 2;
+	ret = av_channel_layout_from_mask(&canonical, mask);
+	if (ret < 0)
+		goto done;
+	// Build unnormalized coefficients, then expand each canonical column back
+	// to every original source plane. Duplicate destinations must all contribute.
+	ret = swr_build_matrix2(&canonical, output, M_SQRT1_2, M_SQRT1_2,
+		0.5, INT_MAX, 1.0, base, 64, AV_MATRIX_ENCODING_NONE, NULL);
+	if (ret < 0)
+		goto done;
+	for (int i = 0; i < input->nb_channels; i++) {
+		enum AVChannel ch = downmix_channel(av_channel_layout_channel_from_index(input, i));
+		int col = av_channel_layout_index_from_channel(&canonical, ch);
+		for (int o = 0; o < output->nb_channels; o++)
+			matrix[o * 64 + i] = base[o * 64 + col];
+		if (output->nb_channels == 2) {
+			// Preserve the actual coefficients from downmix.c, not just similarly
+			// named swr options: its automatic LFE/BC scaling and normalization
+			// differ. Mono is duplicated at unity; stereo mixes clip at S16 output.
+			double left = 0, right = 0;
+			switch (ch) {
+			case AV_CHAN_FRONT_LEFT:
+			case AV_CHAN_FRONT_LEFT_OF_CENTER: left = 1.0; break;
+			case AV_CHAN_FRONT_RIGHT:
+			case AV_CHAN_FRONT_RIGHT_OF_CENTER: right = 1.0; break;
+			case AV_CHAN_FRONT_CENTER:
+			case AV_CHAN_BACK_CENTER: left = right = 0.7; break;
+			case AV_CHAN_LOW_FREQUENCY: left = right = 0.5; break;
+			case AV_CHAN_BACK_LEFT:
+			case AV_CHAN_SIDE_LEFT: left = 0.7; break;
+			case AV_CHAN_BACK_RIGHT:
+			case AV_CHAN_SIDE_RIGHT: right = 0.7; break;
+			default: left = matrix[i]; right = matrix[64 + i]; break;
+			}
+			if (input->nb_channels == 1)
+				left = right = 1.0;
+			matrix[i] = left;
+			matrix[64 + i] = right;
+		}
+	}
+	if (output->nb_channels != 2) {
+		// Retain swr's multichannel headroom policy, including the 6.1 -> 5.1
+		// path. Normalize after expansion so aliased speakers count in the sum.
+		double peak = 1.0;
+		for (int o = 0; o < output->nb_channels; o++) {
+			double sum = 0;
+			for (int i = 0; i < input->nb_channels; i++)
+				sum += fabs(matrix[o * 64 + i]);
+			if (sum > peak) peak = sum;
+		}
+		for (int o = 0; o < output->nb_channels; o++)
+			for (int i = 0; i < input->nb_channels; i++)
+				matrix[o * 64 + i] /= peak;
+	}
+	ret = swr_set_matrix(swr, matrix, 64);
+done:
+	av_channel_layout_uninit(&canonical);
+	av_free(base);
+	return ret;
+}
+
+// Match the physical PCM ordering used by AudioTrack's channel-count masks.
+// libswresample handles integer/float, packed/planar and channel rematrixing.
+static int convert(PRIV *p, AVFrame *frame, UCHAR **out_data,
+    int *out_channels, int *out_bits)
+{
+	AVChannelLayout input = {0}, output = {0};
+	int channels = p->request_channels > 0 ? p->request_channels : frame->ch_layout.nb_channels;
+	if (channels <= 0 || channels > 8 || frame->ch_layout.nb_channels <= 0 ||
+	    frame->ch_layout.nb_channels >= 64 || frame->nb_samples <= 0 || frame->sample_rate <= 0 ||
+	    !frame->extended_data || !av_get_bytes_per_sample(frame->format))
+		return -1;
+	int planes = av_sample_fmt_is_planar(frame->format) ? frame->ch_layout.nb_channels : 1;
+	for (int i = 0; i < planes; i++)
+		if (!frame->extended_data[i])
+			return -1;
+	if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC)
+		av_channel_layout_default(&input, frame->ch_layout.nb_channels);
+	else if (av_channel_layout_copy(&input, &frame->ch_layout) < 0)
+		return -1;
+	if (channels == 5)
+		av_channel_layout_from_mask(&output, AV_CH_LAYOUT_QUAD | AV_CH_LOW_FREQUENCY);
+	else if (channels == 7)
+		av_channel_layout_from_mask(&output, AV_CH_LAYOUT_6POINT1_BACK);
+	else
+		av_channel_layout_default(&output, channels);
+
+	int failed = 1;
+	if (!p->swr_ctx || p->swr_in_rate != frame->sample_rate ||
+	    p->swr_in_fmt != frame->format ||
+	    av_channel_layout_compare(&p->swr_in_layout, &input) ||
+	    av_channel_layout_compare(&p->swr_out_layout, &output)) {
+		swr_free(&p->swr_ctx);
+		av_channel_layout_uninit(&p->swr_in_layout);
+		av_channel_layout_uninit(&p->swr_out_layout);
+		if (av_channel_layout_copy(&p->swr_in_layout, &input) < 0 ||
+		    av_channel_layout_copy(&p->swr_out_layout, &output) < 0 ||
+		    swr_alloc_set_opts2(&p->swr_ctx, &output, AV_SAMPLE_FMT_S16,
+			frame->sample_rate, &input, frame->format, frame->sample_rate, 0, NULL) < 0)
+			goto done;
+		if (set_downmix_matrix(p->swr_ctx, &input, &output) < 0 || swr_init(p->swr_ctx) < 0) {
+			swr_free(&p->swr_ctx);
+			goto done;
+		}
+		p->swr_in_rate = frame->sample_rate;
+		p->swr_in_fmt = frame->format;
+	}
+	int capacity = swr_get_out_samples(p->swr_ctx, frame->nb_samples);
+	if (capacity < 0)
+		goto done;
+	int bytes = av_samples_get_buffer_size(NULL, channels, capacity, AV_SAMPLE_FMT_S16, 1);
+	if (bytes < 0)
+		goto done;
+	if (bytes > p->bsamples_capacity) {
+		SHORT *buffer = arealloc(p->bsamples, bytes);
+		if (!buffer)
+			goto done;
+		p->bsamples = buffer;
+		p->bsamples_capacity = bytes;
+	}
+	uint8_t *dest = (uint8_t *)p->bsamples;
+	int samples = swr_convert(p->swr_ctx, &dest, capacity,
+		(const uint8_t **)frame->extended_data, frame->nb_samples);
+	if (samples < 0)
+		goto done;
+	*out_data = dest;
+	*out_channels = channels;
 	*out_bits = 16;
-	return samples * 2 * 2;
+	failed = 0;
+done:
+	av_channel_layout_uninit(&input);
+	av_channel_layout_uninit(&output);
+	return failed ? -1 : samples * channels * 2;
 }
 
-static inline int16_t convert_to_S16(uint8_t *src, int bits, int shift, int fmt) {
-	int16_t res = 0;
-	int32_t resi = 0;
-	switch( fmt ) {
-		case AV_SAMPLE_FMT_FLT:
-		case AV_SAMPLE_FMT_FLTP:
-			res = clamp(lrintf( *(float*)src * (1 << 15)));
-			break;
-		case AV_SAMPLE_FMT_DBL:
-		case AV_SAMPLE_FMT_DBLP:
-			res = clamp(lrintf( *(double*)src * (1 << 15)));
-			break;
-		case AV_SAMPLE_FMT_U8:
-		case AV_SAMPLE_FMT_U8P:
-			res = get8(src);
-			break;
-		case AV_SAMPLE_FMT_S16:
-		case AV_SAMPLE_FMT_S16P:
-			res = getS16LE(src);
-			break;
-		case AV_SAMPLE_FMT_S32:
-		case AV_SAMPLE_FMT_S32P:
-			if( bits == 16 )
-				resi = getS16LE( src );
-			else if ( bits == 24 )
-				resi = getS24LE( src );
-			else if ( bits == 32 )
-				resi = getS32LE(src);
-			res = clamp( resi >> shift );
-			break;
-	}
-	return res;
-}
-
-static int convert( PRIV *p, AVFrame *frame, UCHAR **out_data, int *out_channels, int *out_bits)
+static int ffmpeg_audio_output(AUDIO_PROPERTIES *audio, AUDIO_FRAME *frame)
 {
-	int out_size = 0;
-
-	if (p->request_channels == 2) {
-		out_size = convert_to_stereo(p, frame, out_data, out_channels, out_bits);
-	} else {
-		int bytes_per_samples = av_get_bytes_per_sample(p->actx->sample_fmt);
-		int bits  = bytes_per_samples * 8;
-		int shift = (bits == 32) ? 16 : (bits == 24 ) ? 8 : 0;
-		uint8_t *dest = (uint8_t*) p->bsamples;
-
-		// Use libswresample for proper 6.1 -> 5.1 downmix when requested.
-		if (p->request_channels == 6 && p->actx->ch_layout.nb_channels == 7) {
-			int need_init = 0;
-			if (!p->swr_ctx) {
-				need_init = 1;
-			} else if (p->swr_in_rate != p->actx->sample_rate ||
-			           p->swr_in_fmt != p->actx->sample_fmt ||
-			           av_channel_layout_compare(&p->swr_in_layout, &p->actx->ch_layout) != 0) {
-				swr_free(&p->swr_ctx);
-				av_channel_layout_uninit(&p->swr_in_layout);
-				av_channel_layout_uninit(&p->swr_out_layout);
-				need_init = 1;
-			}
-
-			if (need_init) {
-				av_channel_layout_uninit(&p->swr_in_layout);
-				av_channel_layout_uninit(&p->swr_out_layout);
-				av_channel_layout_copy(&p->swr_in_layout, &p->actx->ch_layout);
-				av_channel_layout_from_mask(&p->swr_out_layout, AV_CH_LAYOUT_5POINT1);
-				p->swr_in_fmt = p->actx->sample_fmt;
-				p->swr_in_rate = p->actx->sample_rate;
-				if (swr_alloc_set_opts2(&p->swr_ctx,
-						&p->swr_out_layout, AV_SAMPLE_FMT_S16, p->actx->sample_rate,
-						&p->swr_in_layout, p->actx->sample_fmt, p->actx->sample_rate,
-						0, NULL) < 0) {
-DBGS					serprintf("codec_ffmpeg_audio: swr_alloc_set_opts2 failed\n");
-					p->swr_ctx = NULL;
-				} else if (swr_init(p->swr_ctx) < 0) {
-DBGS					serprintf("codec_ffmpeg_audio: swr_init failed\n");
-					swr_free(&p->swr_ctx);
-				} else {
-					static int swr_logged = 0;
-					if (!swr_logged) {
-DBGS						serprintf("codec_ffmpeg_audio: using libswresample for 6.1->5.1 downmix\n");
-						swr_logged = 1;
-					}
-				}
-			}
-
-			if (p->swr_ctx) {
-				int out_buf_bytes = av_samples_get_buffer_size(NULL, 6, frame->nb_samples,
-					AV_SAMPLE_FMT_S16, 1);
-				if (out_buf_bytes > 0 && out_buf_bytes <= (2 * MAX_AUDIO_FRAME_SIZE)) {
-					int out_samples = swr_convert(p->swr_ctx, &dest, frame->nb_samples,
-						(const uint8_t**)frame->extended_data, frame->nb_samples);
-					if (out_samples > 0) {
-						out_size = out_samples * 2 * 6;
-						*out_channels = 6;
-						*out_bits = 16;
-						*out_data = (UCHAR*)p->bsamples;
-						return out_size;
-					}
-				} else {
-DBGS					serprintf("codec_ffmpeg_audio: swr output buffer too large (%d)\n", out_buf_bytes);
-				}
-			}
-		}
-
-		if( p->actx->ch_layout.nb_channels < p->request_channels ) {
-serprintf("upmix %d -> %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
-			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
-				int i, j;
-serprintf("planar %d / %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
-				for (i = 0; i < frame->nb_samples; ++i) {
-					for (j = 0; j < p->actx->ch_layout.nb_channels; ++j) {
-						uint8_t *src = frame->data[j] + i * bytes_per_samples;
-						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
-						memcpy(dest, &res, 2);
-						dest += 2;
-					}
-					for (j = 0; j < (p->request_channels - p->actx->ch_layout.nb_channels); ++j) {
-						memset(dest, 0, 2);
-						dest += 2;
-					}
-				}
-			} else {
-				int i, j;
-				uint8_t *src = frame->data[0];
-				for (i = 0; i < frame->nb_samples; i++) {
-					for( j = 0; j < p->actx->ch_layout.nb_channels; j++) {
-						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
-						memcpy(dest, &res, 2);
-						dest += 2;
-						src += bytes_per_samples;
-					}
-					for (j = 0; j < (p->request_channels - p->actx->ch_layout.nb_channels); j++) {
-						memset(dest, 0, 2);
-						dest += 2;
-					}
-				}
-			}
-			*out_channels = p->request_channels;
-		} else {
-			if (av_sample_fmt_is_planar(p->actx->sample_fmt)) {
-				int i, j;
-//serprintf("planar %d / %d\n", p->actx->ch_layout.nb_channels, p->request_channels);
-				for (i = 0; i < frame->nb_samples; ++i) {
-					for (j = 0; j < p->actx->ch_layout.nb_channels; ++j) {
-						uint8_t *src = frame->data[j] + i * bytes_per_samples;
-						int16_t res = convert_to_S16(src, bits, shift, p->actx->sample_fmt);
-						memcpy(dest, &res, 2);
-						dest += 2;
-					}
-				}
-			} else {
-				int i;
-				for (i = 0; i < frame->nb_samples *  p->actx->ch_layout.nb_channels; ++i) {
-					int16_t res = convert_to_S16(frame->data[0] + i * bytes_per_samples, bits, shift, p->actx->sample_fmt);
-					memcpy(dest, &res, 2);
-					dest += 2;
-				}
-			}
-			*out_channels = p->actx->ch_layout.nb_channels;
-		}
-
-		out_size  = frame->nb_samples * 2 * *out_channels;
-		*out_bits = 16; //we force output to 16 bits
-		*out_data = (UCHAR*)p->bsamples;
-	}
-	return out_size;
-}
-
-static int ffmpeg_audio_codec_decode_raw( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *avos_frame, int *_decoded, int *_time )
-{
-	PRIV *p = (PRIV*)audio->priv;
-	int decoded = 0;
-	UCHAR *pcm_data = (UCHAR*)p->asamples;
-	
-	// error until told otherwise
-	if( _decoded )
-		*_decoded = 0;
-	if( _time )
-		*_time = 0;
-
-	memset( avos_frame, 0, sizeof( AUDIO_FRAME ) );
-	avos_frame->error = 1;
-	
- 	if( audio->format == WAVE_FORMAT_AAC && data ) {
-		// the TI decoder on the HW needs an ADIF or ADTS header, remove it here for the SIM!
-		if( size >= 17 && !strncmp( data, "ADIF", 4 ) ) {
-serprintf("adif");
-			data    += 17;
-			size    -= 17;
-			decoded += 17;
-		}
-	}
-DBGCA2 serprintf("ffad siz %6d  ", size );
-DBGCA2 serprintf("CHK %04X ", chk16( data, size) );
-DBGCA2 if( data ) serprintf("[%02X %02X %02X %02X]  ", data[0], data[1], data[2], data[3] );
-
-DBGCA4 {
-serprintf("\r\n");
-Dump( data, 64 );
-} else DBGCA5 {
-serprintf("\r\n");
-Dump( data, size );
-}
-		av_packet_unref( p->avpkt );
-		p->avpkt->data = data;
-		p->avpkt->size = size;
-
-		int t1 = time_update_time();
+	PRIV *p = audio->priv;
+	int bytes = convert(p, p->aframe, &frame->data, &frame->channels, &frame->bits);
+	if (bytes < 0) {
+		frame->error = STREAM_ERROR_FATAL;
 		av_frame_unref(p->aframe);
-		int ret_send = avcodec_send_packet(p->actx, p->avpkt);
-		if (ret_send < 0) {
-			if (ret_send != AVERROR(EAGAIN)) {
-serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
-			}
+		return 1;
+	}
+	frame->size = bytes;
+	frame->samplesPerSec = p->aframe->sample_rate;
+	update_audio_channel_mask(audio, &p->swr_out_layout);
+	av_frame_unref(p->aframe);
+	return 0;
+}
+
+// Input is owned until send_packet accepts it. Receive every available frame
+// before accepting more input; one compressed packet can produce many frames.
+static int ffmpeg_audio_codec_decode(AUDIO_PROPERTIES *audio, UCHAR *data, int size,
+    AUDIO_FRAME *frame, int *decoded, int *elapsed)
+{
+	PRIV *p = audio->priv;
+	int start = time_update_time();
+	if (sleep_arm > 0)
+		msec_sleep(sleep_arm);
+	int input_time = frame->time;
+	*decoded = 0;
+	*elapsed = 0;
+	memset(frame, 0, sizeof(*frame));
+	frame->format = WAVE_FORMAT_PCM;
+	frame->bits = 16;
+	frame->channels = audio->channels;
+	frame->samplesPerSec = audio->samplesPerSec;
+	if (!p || !p->open || size < 0 || (size && !data)) {
+		frame->error = STREAM_ERROR_FATAL;
+		return 1;
+	}
+
+	for (;;) {
+		int ret = avcodec_receive_frame(p->actx, p->aframe);
+		if (ret >= 0) {
+			*elapsed = time_update_time() - start;
+			return ffmpeg_audio_output(audio, frame);
 		}
-		int ret_rx = avcodec_receive_frame(p->actx, p->aframe);
-		if (ret_rx < 0 && ret_rx != AVERROR(EAGAIN) && ret_rx != AVERROR_EOF) {
-serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUNCTION__, av_err2str(ret_rx));
+		if (ret == AVERROR_EOF)
+			return STREAM_DEC_AUDIO_DRAINED;
+		if (ret != AVERROR(EAGAIN)) {
+			serprintf("ffmpeg audio receive failed: %s\n", av_err2str(ret));
+			frame->error = 1;
+			return 1;
 		}
 
-		if( sleep_arm ) {
-			msec_sleep( sleep_arm );
-		}
-		int t2 = time_update_time();
-
-		if ( ret_send >= 0 ) {
-			decoded += size;
-		} else if( size && ret_send < 0 ) {
-serprintf("FFMPEG_AUDIO_DEC ERROR!\r\n");
-msec_sleep( 10 );
-			decoded     = size;
-		}
-
-		int channels = 0;
-		int bits     = 0;
-		int audio_bytes = 0;
-		int frame_available = (ret_rx >= 0);
-
-		if( frame_available ) {
-			audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
-			uint64_t frame_mask = ff_channel_layout_get_mask( &p->aframe->ch_layout );
-			if( frame_mask ) {
-				audio->channelMask = (int)frame_mask;
-			}
-		}
-		int t3 = time_update_time();
-
-		char layout_desc[256];
-		av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
-DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %X  tim %3d/%3d\r\n",
-					  decoded, frame_available ? p->aframe->nb_samples : 0, audio_bytes, p->actx->sample_rate, p->actx->ch_layout.nb_channels, layout_desc,
-					  p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
-
-		avos_frame->data          = frame_available ? pcm_data : NULL;
-		avos_frame->size          = audio_bytes;
-		avos_frame->bits          = bits;
-		avos_frame->channels      = frame_available ? channels : audio->channels;
-		avos_frame->samplesPerSec = p->actx->sample_rate ? p->actx->sample_rate : audio->samplesPerSec;
-		avos_frame->format        = WAVE_FORMAT_PCM;
-		avos_frame->error         = frame_available ? 0 : (ret_rx == AVERROR(EAGAIN) ? 0 : 1);
-
-		if( frame_available ) {
-			AVFrame *temp_frame = av_frame_alloc();
-			while ( ret_send >= 0) {
-				// drain the decoder, should not be necessary
-				int ret_rx_post = avcodec_receive_frame(p->actx, temp_frame);
-				if (ret_rx_post == 0) {
-serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
-				} else {
-					break;
+		if (!p->avpkt->size) {
+			UCHAR *packet_data = data;
+			int packet_size = size;
+			if (p->aparser && (!p->draining || !p->parser_drained)) {
+				// Parsers may read SIMD padding past their logical input. Copy a
+				// bounded portion and zero its tail, including on short chunks.
+				int input_size = p->draining ? 0 : MIN(size, 16384);
+				if (input_size)
+					memcpy(p->inbuf, data, input_size);
+				memset(p->inbuf + input_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+				int used = av_parser_parse2(p->aparser, p->actx,
+					&packet_data, &packet_size,
+					input_size ? p->inbuf : NULL, input_size,
+					AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+				if (used < 0 || used > input_size ||
+				    (input_size && !used && !packet_size)) {
+					frame->error = STREAM_ERROR_FATAL;
+					return 1;
 				}
+				*decoded = used;
+				if (p->draining && !packet_size)
+					p->parser_drained = 1;
+			} else if (p->draining) {
+				packet_size = 0;
+			} else {
+				*decoded = size;
 			}
-			av_frame_free(&temp_frame);
+			if (packet_size > 0) {
+				if (av_new_packet(p->avpkt, packet_size) < 0) {
+					frame->error = STREAM_ERROR_FATAL;
+					return 1;
+				}
+				memcpy(p->avpkt->data, packet_data, packet_size);
+				p->avpkt->pts = input_time == STREAM_NO_PTS_VALUE ? AV_NOPTS_VALUE : input_time;
+			} else if (!p->draining) {
+				return 0;
+			}
 		}
 
-	if( p->ignore > 0 ) {
-DBGCA2 serprintf("FFMPEG IGNORE!\r\n");
-		memset( avos_frame->data, 0, avos_frame->size	);
-		p->ignore --;
-	}
-	p->play = 1;
-	
-	if( decoded < 0 )
-		decoded = 0;
-		
-	if( _decoded )
-		*_decoded = decoded;
-	
-	if( _time )
-		*_time = t3 - t1;
-	return 0;
-}
-
-static int fill_buffer( PRIV *p, UCHAR **data, int *size, int *decoded ) 
-{
-	int free = p->inbuf_size - p->inbuf_residual;
-	int copy = MIN( free, *size );
-
-	if (copy > 0) {
-		memcpy(p->inbuf + p->inbuf_residual, *data, copy);
-		p->inbuf_residual += copy;
-		*size             -= copy;
-		*data             += copy;
-	}
-
-	// report what we took from the stream 
-	if ( decoded) {
-		*decoded += copy;
-	}
-DBGCA2 serprintf("cpy %4d  buf %4d  ", copy, p->inbuf_residual ); 
-DBGCA2 serprintf("[%02X %02X %02X %02X]  ", p->inbuf[0], p->inbuf[1], p->inbuf[2], p->inbuf[3] );
-	return copy;
-}
-
-static void consume_buffer( PRIV *p, int consumed ) 
-{
-	// move fresh data to the front of the buffer and adjust fill level 
-	p->inbuf_residual -= consumed;
-	memmove(p->inbuf, p->inbuf + consumed, p->inbuf_residual);
-}
-
-static int ffmpeg_audio_codec_decode_parsed( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *avos_frame, int *_decoded, int *_time )
-{
-	PRIV *p = (PRIV*)audio->priv;
-	UCHAR *pcm_data = (UCHAR*)p->asamples;
-	
-	// error until told otherwise
-	if( _decoded )
-		*_decoded = 0;
-	if( _time )
-		*_time = 0;
-
-	memset( avos_frame, 0, sizeof( AUDIO_FRAME ) );
-	avos_frame->error = 1;
-	
-DBGCA2 serprintf("ffad siz %6d  ", size );
-DBGCA3 serprintf("CHK %04X ", chk16( data, size) );
-DBGCA3 if( data ) serprintf("[%02X %02X %02X %02X]  ", data[0], data[1], data[2], data[3] );
-
-	// refill the buffer if necessary
-	fill_buffer( p, &data, &size, _decoded );
-
-	if ( p->inbuf_residual < p->inbuf_size ) {
-		if( !audio->end ) {
-DBGCA2 serprintf("more!\r\n");
-			avos_frame->error = 0;
-			return 0;
-		}
-	}
-	
-DBGCA4 {
-serprintf("\r\n");
-Dump( p->inbuf, 64 );
-} else DBGCA5 {
-serprintf("\r\n");
-Dump( p->inbuf, p->inbuf_residual );
-}
-
-	unsigned char *out = NULL;
-	int out_size;
-	int parsed = av_parser_parse2( 	p->aparser, p->actx, 
-					&out, &out_size, 
-					p->inbuf, p->inbuf_residual,
-					AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0 );
-DBGCA2 printf("acp con %5d/%5d  out %5d  ", parsed, p->inbuf_residual, out_size );				
-
-	if( !out || !out_size ) {
-DBGCA2 serprintf("\n");
-		consume_buffer( p, parsed );
-		avos_frame->error = 0;
-		return 0;
-	}
-DBGCA3 if( out ) {
-serprintf("CHK %04X ", chk16( out, out_size) );
-serprintf("[%02X %02X %02X %02X]  ", out[0], out[1], out[2], out[3] );
-}
-	switch( audio->format ) {
-	case WAVE_FORMAT_MPEGLAYER3:
-	case WAVE_FORMAT_MPEG:
-		if( MP3_check_header( out[0], out[1], NULL, NULL, NULL ) ) {
-			// ignore data that does not start with header
-			consume_buffer( p, parsed );
-DBGCA2 serprintf("drop %5d\n", parsed ); 
-			if( p->parse_first ) {
-				avos_frame->error = 0;
-				p->parse_first = 0;
+		if (p->avpkt->size) {
+			int ret = avcodec_send_packet(p->actx, p->avpkt);
+			if (ret == AVERROR(EAGAIN))
+				return 0; // retain the access unit for the next receive/send cycle
+			av_packet_unref(p->avpkt);
+			if (ret < 0) {
+				serprintf("ffmpeg audio send failed: %s\n", av_err2str(ret));
+				frame->error = 1;
+				return 1;
+			}
+			// This call has already accepted its input. Do not parse or queue
+			// it again if the decoder needs another packet before producing PCM.
+			ret = avcodec_receive_frame(p->actx, p->aframe);
+			if (ret >= 0) {
+				*elapsed = time_update_time() - start;
+				return ffmpeg_audio_output(audio, frame);
+			}
+			if (ret != AVERROR(EAGAIN)) {
+				frame->error = 1;
+				return 1;
 			}
 			return 0;
 		}
-		break;
-	}
-
-	av_packet_unref( p->avpkt );
-	p->avpkt->data = out;
-	p->avpkt->size = out_size;
-
-	int t1 = time_update_time();
-	int ret_send = avcodec_send_packet(p->actx, p->avpkt);
-    if (ret_send < 0) {
-serprintf("%s: failed sending packet for decoding (%s)\n", __FUNCTION__, av_err2str(ret_send));
-    }
-	int ret_rx = avcodec_receive_frame(p->actx, p->aframe);
-	if( sleep_arm ) {
-		msec_sleep( sleep_arm );
-	}
-	int t2 = time_update_time();
-	
-    int bytes = p->avpkt->size;
-	if ( ret_rx < 0 ) {
-serprintf("%s: failed receiving an audio frame from audio decoder (%s)\n", __FUNCTION__, av_err2str(ret_rx));
-        bytes = 0;
-//		audio_bytes = 0;
-	}
-	
-	consume_buffer( p, parsed );
-		
-	if( p->inbuf_residual && bytes <= 0 && !p->aframe->nb_samples ) {
-serprintf("FFMPEG_AUDIO_DEC ERROR!\r\n");
-msec_sleep( 10 );
-		bytes = p->inbuf_residual;	
-	}
-
-	int channels, bits;
-	int audio_bytes = convert( p, p->aframe, &pcm_data, &channels, &bits);
-	int t3 = time_update_time();
-
-	char layout_desc[256];
-	av_channel_layout_describe(&p->actx->ch_layout, layout_desc, sizeof(layout_desc));
-DBGCA2 serprintf("dec %6d  sam %6d  byt %6d  sr %5d  ch %d|%s  bits %d/%d  fmt %X  tim %3d/%3d\r\n",
-				  bytes, p->aframe->nb_samples, audio_bytes, p->actx->sample_rate, p->actx->ch_layout.nb_channels, layout_desc,
-				  p->actx->bits_per_raw_sample, av_get_bytes_per_sample(p->actx->sample_fmt) * 8, p->actx->sample_fmt, t2 - t1, t3 - t2 );
-
-	avos_frame->data          = pcm_data;
-	avos_frame->size          = audio_bytes;
-	avos_frame->bits          = bits;
-	avos_frame->channels      = channels;
-	avos_frame->samplesPerSec = p->actx->sample_rate ? p->actx->sample_rate : audio->samplesPerSec;
-	avos_frame->format        = WAVE_FORMAT_PCM;
-	avos_frame->error         = 0;
-
-	AVFrame *temp_frame = av_frame_alloc();
-	while ( ret_send >= 0) {
-		// drain the decoder, should not be necessary
-		int ret_rx_post = avcodec_receive_frame(p->actx, temp_frame);
-		if (ret_rx_post == 0) {
-serprintf("%s: got an unexpected additional audio frame (%s)\n", __FUNCTION__, av_err2str(ret_rx_post));
-		} else {
-			break;
+		if (!p->draining || p->eos_sent) {
+			frame->error = STREAM_ERROR_FATAL;
+			return 1;
 		}
+		ret = avcodec_send_packet(p->actx, NULL);
+		if (ret == AVERROR(EAGAIN))
+			return 0;
+		if (ret < 0 && ret != AVERROR_EOF) {
+			frame->error = STREAM_ERROR_FATAL;
+			return 1;
+		}
+		p->eos_sent = 1;
 	}
-	av_frame_free(&temp_frame);
+}
 
-	p->play = 1;
-	
-	if( _time )
-		*_time = t3 - t1;
+static int ffmpeg_audio_codec_drain(AUDIO_PROPERTIES *audio)
+{
+	PRIV *p = audio->priv;
+	if (!p || !p->open)
+		return 1;
+	p->draining = 1;
 	return 0;
 }
 
-static int ffmpeg_audio_codec_decode( AUDIO_PROPERTIES *audio, UCHAR *data, int size, AUDIO_FRAME *avos_frame, int *_decoded, int *_time )
+static int ffmpeg_audio_codec_flush(AUDIO_PROPERTIES *audio)
 {
-	PRIV *p = (PRIV*)audio->priv;
-	if ( p->aparser ) {
-		return ffmpeg_audio_codec_decode_parsed( audio, data, size, avos_frame, _decoded, _time );		
-	} else {
-		return ffmpeg_audio_codec_decode_raw( audio, data, size, avos_frame, _decoded, _time );		
-	}
-}
-
-static int ffmpeg_audio_codec_flush( AUDIO_PROPERTIES *audio  )
-{
-	PRIV *p = (PRIV*)audio->priv;
-	int ret;
-
-	// enter draining mode by sending a NULL packet
-	ret = avcodec_send_packet(p->actx, NULL);
-	if (ret < 0) {
-serprintf("Error sending NULL packet for flushing: %s\n", av_err2str(ret));
-	}
-
-	AVFrame *temp_frame = av_frame_alloc();
-	if( !temp_frame ) {
-		serprintf( "%s: failed to allocate memory for temporary audio frame\n", __FUNCTION__ );
-		return 0; // Handle memory allocation failure appropriately
-	}
-	// receive all remaining frames
-	while (ret >= 0) {
-		ret = avcodec_receive_frame(p->actx, p->aframe);
-		if (ret == AVERROR_EOF) {
-			// end of stream, stop draining
-			break;
-		} else if (ret < 0) {
-serprintf("Error receiving frame during flushing: %s\n", av_err2str(ret));
-			break;
-		}
-	}
-	av_frame_free( &temp_frame );
-
-	DBGCA serprintf( "ffad flush\r\n" );
-	
-	avcodec_flush_buffers( p->actx );
-	p->inbuf_residual = 0;
-
-	if( p->aparser ) {
-		// close and reinit the parser to flush it
-		av_parser_close( p->aparser );
+	PRIV *p = audio->priv;
+	avcodec_flush_buffers(p->actx);
+	av_packet_unref(p->avpkt);
+	av_frame_unref(p->aframe);
+	p->draining = p->parser_drained = p->eos_sent = 0;
+	if (p->swr_ctx)
+		swr_free(&p->swr_ctx);
+	if (p->aparser) {
+		av_parser_close(p->aparser);
 		p->aparser = av_parser_init(p->actx->codec_id);
-		p->parse_first = 1;
+		if (!p->aparser)
+			return 1;
 	}
-	
-	if( p->play ) {
-	 	p->ignore = 1;
-	}
-
 	return 0;
 }
 
@@ -1234,6 +885,7 @@ static STREAM_DEC_AUDIO stream_dec_audio_ffmpeg =
 	.open    = ffmpeg_audio_codec_open,
 	.close   = ffmpeg_audio_codec_close,
 	.decode  = ffmpeg_audio_codec_decode,
+	.drain   = ffmpeg_audio_codec_drain,
 	.flush   = ffmpeg_audio_codec_flush,
 	.delay   = ffmpeg_audio_codec_delay,
 	.get_rc  = ffmpeg_audio_codec_get_rc,
@@ -1339,23 +991,5 @@ DECLARE_DEBUG_PARAM       ( "ffasa", sleep_arm );
 #endif
 
 #endif // CONFIG_STREAM
-
-#ifdef DEBUG_MSG
-static void ff_cm( int argc, char **argv )
-{
-	int map[6] = { 0 };
-	if( argc > 1 ) { 
-		map[0] = atoi( argv[1] );
-		if( argc > 2 ) map[1] = atoi( argv[2] );
-		if( argc > 3 ) map[2] = atoi( argv[3] );
-		if( argc > 4 ) map[3] = atoi( argv[4] );
-		if( argc > 5 ) map[4] = atoi( argv[5] );
-		if( argc > 6 ) map[5] = atoi( argv[6] );
-		memcpy(channel_map, map, sizeof(channel_map));
-	}
-	serprintf("new channel map: %d  %d  %d  %d  %d  %d\r\n", channel_map[0], channel_map[1], channel_map[2], channel_map[3], channel_map[4], channel_map[5] );
-}
-DECLARE_DEBUG_COMMAND( "ffcm", ff_cm );
-#endif
 
 #endif

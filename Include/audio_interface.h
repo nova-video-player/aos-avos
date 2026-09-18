@@ -22,6 +22,9 @@
 
 // No bytes accepted because playback was interrupted; retain and retry output.
 #define AUDIO_WRITE_RETRY (-EAGAIN)
+// Output was recreated; no bytes from this write were accepted. Reset the
+// stream's presentation epoch before retrying the same PCM.
+#define AUDIO_WRITE_RESTARTED (-ESTALE)
 
 #define AUDIO_VOLUME_MAX 100
 #define AUDIO_VOLUME_MIN 0

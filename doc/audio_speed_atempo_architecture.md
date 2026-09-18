@@ -578,8 +578,19 @@ state and any pending output.
 At decoder EOF, any unfinished pre-filter PCM batch is fed through atempo before
 the graph receives EOF. The wrapper then drains WSOLA output and its FIFO in
 bounded PCM blocks through the normal filters, writer, ledger, and clock
-accounting. The sink receives `end()` only after those blocks are exhausted.
+accounting. PCM completion also waits for submitted sink output before reporting
+`end()`, using presentation counters when available and a bounded delay-based
+wait otherwise.
 Drained output is not filtered through atempo a second time.
+
+PCM format changes follow the same drain ordering without ending playback. The
+incoming decoded frame is retained while the previous pre-filter batch, atempo
+graph, and FIFO finish. Only then can the wrapper replace its graph. The sink
+waits for previously submitted PCM before changing geometry. Recreating an
+AudioTrack resets stream-side PlaybackParams checkpoints, delay history, and
+atempo ledger boundaries together; a recovered PCM write retries its unwritten
+suffix against that new epoch. Pending commits collapse to the latest deferred
+target, as on other output resets.
 
 Graph creation, runtime commands, FIFO operations, input submission, and output
 collection propagate failures. Failed frames are cleared and playback reports

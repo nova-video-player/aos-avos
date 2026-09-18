@@ -39,6 +39,7 @@ int  stream_sync_mode2_dynamic_active( STREAM *s );
 int  stream_sync_av_delay( STREAM *s );
 int  stream_get_atempo_delay( STREAM *s );
 void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active );
+void stream_sync_pcm_output_reset( STREAM *s );
 int  stream_sync_pcm_reanchor_update( STREAM *s, int passthrough_active );
 int  stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding );
 int  stream_sync_audio( STREAM *s, int audio_time );

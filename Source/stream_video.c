@@ -960,6 +960,9 @@ static void stream_close_audio_filter( STREAM *s )
 DBGS serprintf("stream_close_audio_filter\r\n");
 	s->audio_ac3_draining = 0;
 	s->audio_atempo_draining = 0;
+	s->audio_pcm_draining = 0;
+	s->pcm_pending_frame.size = 0;
+	s->pcm_accum_size = 0;
 	// Close and delete JNI filter
 	if( s->audio_filter_jni ) {
 		if( s->audio_filter_jni->close ) {
@@ -1542,40 +1545,6 @@ ErrorExit:
 	cdata->video_skip = 1;
 	
 	return err;
-}
-
-// *****************************************************************************
-//
-//	stream_audio_samplerate_changed
-//
-// *****************************************************************************
-void stream_audio_samplerate_changed( STREAM *s )
-{
-serprintf("stream_audio_samplerate_changed!\r\n");
-	if( !s->audio_sink ) {
-		stream_audio_sink_failed( s, "sample-rate change without an audio sink" );
-		return;
-	}
-	// Reset sample counter to prevent sync drift from samples accumulated at old rate
-	s->audio_ref_time = -1;
-	s->audio_samples  = 0;
-	s->audio_time_remainder_us = 0;
-	s->av_delay_history_count = 0;
-
-	// stop audio sink
-	if( s->audio_sink) {
-		s->audio_sink->flush( s );
-		s->audio_sink->stop( s );
-	}
-
-	// Initialize sink properties from source (includes PCM forcing when needed)
-	stream_audio_copy_sink_from_source( s );
-
-	if( s->audio_sink->start( s ) ) {
-		// The caller still owns a frame from this decoder. Leave its storage
-		// intact until normal teardown and prevent the caller from writing it.
-		stream_audio_sink_failed( s, "sample-rate change sink restart" );
-	}
 }
 
 // *****************************************************************************
@@ -5517,6 +5486,10 @@ serprintf("SAS: audio_stream already set\n");
 		passthrough_mode = spdif_is_passthrough_on();
 #endif
 		if( passthrough_mode == 0 ) {
+			// Refreshing the same track and switching a non-seekable source do
+			// not run the parser's seek reset. This sink is about to be emptied
+			// and recreated, so its old PCM frame-domain timing is invalid.
+			stream_sync_pcm_output_reset( s );
 			s->audio_sink->flush( s );
 		}
 		s->audio_sink->stop( s );

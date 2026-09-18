@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #ifdef CONFIG_ANDROID
 #endif
@@ -47,7 +48,6 @@
 AV_PROPERTIES *stream_force_audio_props = NULL;
 
 void stream_audio_props_changed( STREAM *s, STREAM_CDATA *cdata );
-void stream_audio_samplerate_changed( STREAM *s );
 
 static int zero_time = 200;
 static int stream_audio_chunk = 4096;
@@ -659,6 +659,8 @@ void stream_audio_flush( STREAM *s )
 	s->audio_decoder_draining = 0;
 	s->audio_ac3_draining = 0;
 	s->audio_atempo_draining = 0;
+	s->audio_pcm_draining = 0;
+	s->pcm_pending_frame.size = 0;
 	s->audio_time_remainder_us = 0;
 	s->pcm_accum_size = 0;
 	// Discard any stale frontier seed; the paths that empty the sink buffer
@@ -839,15 +841,56 @@ static int _pcm_accum_target_bytes(const AUDIO_FRAME *frame, int target_ms)
 	return target;
 }
 
-static void _pcm_accum_flush_to_sink(STREAM *s)
+// Transfer a pre-filter batch to the ordinary filter/write path.
+static void _pcm_accum_take(STREAM *s, AUDIO_FRAME *frame)
 {
-	if( !s || s->pcm_accum_size <= 0 ) {
-		return;
-	}
-	// Pre-filter accumulator cannot be written directly to sink: it would bypass
-	// atempo/compress/JNI filters. Drop tail on teardown/flush boundaries.
-	DBG serprintf("stream_audio: pcm_accum drop on end size=%d\n", s->pcm_accum_size);
+	memset(frame, 0, sizeof(*frame));
+	frame->data = s->pcm_accum_data;
+	frame->size = s->pcm_accum_size;
+	frame->format = s->pcm_accum_format;
+	frame->channels = s->pcm_accum_channels;
+	frame->bits = s->pcm_accum_bits;
+	frame->samplesPerSec = s->pcm_accum_rate;
 	s->pcm_accum_size = 0;
+}
+
+static int _pcm_retain_frame(STREAM *s, const AUDIO_FRAME *frame)
+{
+	if (frame->size <= 0)
+		return 0;
+	if (s->pcm_pending_capacity < frame->size) {
+		unsigned char *data = arealloc(s->pcm_pending_data, frame->size);
+		if (!data) {
+			stream_audio_sink_failed(s, "PCM pending frame allocation failed");
+			return -1;
+		}
+		s->pcm_pending_data = data;
+		s->pcm_pending_capacity = frame->size;
+	}
+	memmove(s->pcm_pending_data, frame->data, frame->size);
+	s->pcm_pending_frame = *frame;
+	s->pcm_pending_frame.data = s->pcm_pending_data;
+	return 0;
+}
+
+static int _stream_audio_wait_pcm_output(STREAM *s);
+
+static int _stream_audio_drain_pcm(STREAM *s, AUDIO_FRAME *frame)
+{
+	if (s->pcm_accum_size > 0) {
+		_pcm_accum_take(s, frame);
+		return 1;
+	}
+	if( _stream_audio_wait_pcm_output(s) < 0 )
+		return -1;
+	s->audio_decoder_draining = 0;
+	s->audio_pcm_draining = 0;
+	s->audio_end = 1;
+	s->video_hold_for_resume_audio = 0;
+	s->video_hold_for_delay = 0;
+	if (s->audio_sink)
+		s->audio_sink->end(s);
+	return 0;
 }
 
 extern int DEBUG_delay;
@@ -1055,6 +1098,12 @@ static int _wait( STREAM *s, int wait )
 			// active, append a zero-span hold block so the playhead can cross
 			// the inserted silence without advancing heard media time.
 			int size_written = s->audio_sink->write( s, &frame );
+			if( size_written == AUDIO_WRITE_RESTARTED ) {
+				stream_sync_pcm_output_reset(s);
+				if( audio_interface_start(s->audio_ctx) )
+					stream_audio_sink_failed(s, "PCM silence recovery failed");
+				return 0; // The recreated track discarded all earlier silence.
+			}
 			if( size_written > 0 && audio_interface_is_using_atempo() &&
 			    s->audio->bytesPerFrame > 0 && s->audio->samplesPerSec > 0 ) {
 				_stream_atempo_ledger_append_hold( s,
@@ -1099,7 +1148,11 @@ DBGA serprintf("-Z-");
 	frame.data = zero;
 	frame.size = bytes;
 	frame.format = WAVE_FORMAT_PCM;
-	s->audio_sink->write( s, &frame );
+	if( s->audio_sink->write( s, &frame ) == AUDIO_WRITE_RESTARTED ) {
+		stream_sync_pcm_output_reset(s);
+		if( audio_interface_start(s->audio_ctx) )
+			stream_audio_sink_failed(s, "PCM preload recovery failed");
+	}
 	afree(zero);
 }
 
@@ -1112,8 +1165,7 @@ static void _stream_audio_apply_preload( STREAM *s )
 	s->audio_preload = 0;
 	int passthrough = s->audio_sink->get_passthrough( s );
 	if( s->audio_sink->syncable( s ) && !passthrough ) {
-		s->at_speed_epoch_active = 0;
-		_stream_atempo_ledger_reset( s );
+		stream_sync_pcm_output_reset( s );
 		s->audio_sink->flush( s );
 		s->manual_audio_delay_applied_ms = 0;
 		s->manual_audio_hold_pending_ms = 0;
@@ -1163,6 +1215,48 @@ static int _stream_audio_wait_for_resume( STREAM *s )
 	return s->video_error != VE_NO_ERROR;
 }
 
+// Finish submitted PCM before replacing its geometry or ending playback.
+// Prefer the presentation counter, with a bounded delay-based wait on
+// backends that do not expose it. Paused wall time does not consume the wait.
+static int _stream_audio_wait_pcm_output(STREAM *s)
+{
+	if( !s->audio_ctx || !s->audio_sink_open )
+		return 0;
+	uint64_t written = 0, presented = 0;
+	int rate = 0, presented_rate = 0, source = 0, age = 0;
+	int have_written = audio_interface_get_written_frames(s->audio_ctx, &written, &rate);
+	if( have_written && written == 0 )
+		return 0;
+	int have_frames = have_written && rate > 0 && audio_interface_get_presented_frames(s->audio_ctx, &presented,
+			&presented_rate, &source, &age, 1) && presented_rate == rate;
+	double speed = audio_interface_is_using_atempo() ? 1.0 : audio_interface_get_audio_speed();
+	if( speed <= 0 ) speed = 1.0;
+	int delay = MAX(0, audio_interface_get_delay(s->audio_ctx));
+	if( have_frames ) {
+		if( presented >= written )
+			return 0;
+		delay = MAX(delay, (int)((written - presented) * 1000.0 / rate / speed) + 1);
+	}
+	int elapsed = 0;
+	while( elapsed < delay + 2000 ) {
+		if( _stream_audio_wait_for_resume(s) )
+			return -1;
+		if( have_frames ) {
+			if( audio_interface_get_presented_frames(s->audio_ctx, &presented,
+				&presented_rate, &source, &age, 1) && presented_rate == rate &&
+			    presented >= written )
+				return 0;
+		} else if( elapsed >= delay ) {
+			return 0;
+		}
+		int start = atime();
+		msec_sleep(10);
+		elapsed += MAX(0, atime() - start);
+	}
+	stream_audio_sink_failed(s, "PCM output stalled while draining old format");
+	return -1;
+}
+
 // ************************************************************
 //
 //	_audio_decode
@@ -1200,13 +1294,7 @@ static int _stream_audio_drain_atempo(STREAM *s, AUDIO_FRAME *frame, int *output
 {
 	*output_ready = 0;
 	if( s->pcm_accum_size > 0 ) {
-		frame->data = s->pcm_accum_data;
-		frame->size = s->pcm_accum_size;
-		frame->format = s->pcm_accum_format;
-		frame->channels = s->pcm_accum_channels;
-		frame->bits = s->pcm_accum_bits;
-		frame->samplesPerSec = s->pcm_accum_rate;
-		s->pcm_accum_size = 0;
+		_pcm_accum_take(s, frame);
 		return 1;
 	}
 	if( !s->audio_filter_atempo || !s->audio_filter_atempo->drain ||
@@ -1217,9 +1305,13 @@ static int _stream_audio_drain_atempo(STREAM *s, AUDIO_FRAME *frame, int *output
 	*output_ready = 1;
 	if( frame->size > 0 )
 		return 1;
+	if( _stream_audio_wait_pcm_output(s) < 0 )
+		return -1;
 	s->audio_atempo_draining = 0;
 	s->audio_decoder_draining = 0;
 	s->audio_end = 1;
+	s->video_hold_for_resume_audio = 0;
+	s->video_hold_for_delay = 0;
 	if( s->audio_sink )
 		s->audio_sink->end(s);
 	return 0;
@@ -1249,13 +1341,24 @@ static void _audio_decode( STREAM *s )
 		AUDIO_FRAME audio_frame = { 0 };
 		int ac3_output_ready = 0;
 		int atempo_output_ready = 0;
+		int pcm_output_ready = 0;
 decode_next_chunk:
 		memset(&audio_frame, 0, sizeof(audio_frame));
 		ac3_output_ready = 0;
 		atempo_output_ready = 0;
-		if( _stream_audio_uses_atempo(s) && s->audio_end )
+		pcm_output_ready = 0;
+		if( s->audio_end )
 			return;
-		if( s->audio_atempo_draining &&
+		if( s->pcm_pending_frame.size > 0 ) {
+			audio_frame = s->pcm_pending_frame;
+			s->pcm_pending_frame.size = 0;
+			pcm_output_ready = 1;
+		} else if( s->audio_pcm_draining ) {
+			if( _stream_audio_drain_pcm(s, &audio_frame) <= 0 )
+				return;
+			pcm_output_ready = 1;
+		}
+		if( !pcm_output_ready && s->audio_atempo_draining &&
 		    _stream_audio_drain_atempo(s, &audio_frame, &atempo_output_ready) <= 0 )
 			return;
 		if (libavos_get_ac3_recoding_enabled()) {
@@ -1269,7 +1372,7 @@ decode_next_chunk:
 		{
 		int starve_start_ms = atime();
 		int starve_last_log_ms = starve_start_ms;
-		while( !ac3_output_ready && !s->audio_atempo_draining && s->audio_buffer_size <= 0 && !_abort( s ) ){
+		while( !pcm_output_ready && !ac3_output_ready && !s->audio_atempo_draining && s->audio_buffer_size <= 0 && !_abort( s ) ){
 
 			STREAM_CDATA cdata = { 0 };
 
@@ -1316,21 +1419,11 @@ serprintf("audio drain\r\n");
 								return;
 							break;
 						}
-serprintf("audio end\r\n");
-						s->audio_end = 1;
-						if( s->audio->format == WAVE_FORMAT_MPEGLAYER3 || s->audio->format == WAVE_FORMAT_AAC ) {
-serprintf("audio flush\r\n");
-							// append dummy chunk to make decoders happy and make them output all frames
-							s->audio_buffer = s->audio_now.data;
-							s->audio_buffer_size = s->audio->format == WAVE_FORMAT_MPEGLAYER3 ? 2048 : 6144;
-							memset( s->audio_buffer, 0, s->audio_buffer_size );
-						} else {
-							if( s->audio_sink ) {
-								_pcm_accum_flush_to_sink( s );
-								// end, signal to the sink that we are finished
-								s->audio_sink->end( s );
-							}
-						}
+						s->audio_pcm_draining = 1;
+						if( _stream_audio_drain_pcm(s, &audio_frame) <= 0 )
+							return;
+						pcm_output_ready = 1;
+						break;
 					}
 				}
 				if ( out_of_audio == 0 ) {
@@ -1624,7 +1717,7 @@ DBGS serprintf("~");
 
 		// For AC3 recoding, always decode ALL formats (including AC3) to PCM to enable filters
 		// This provides consistent audio boost/night mode support for all source formats
-		if( s->audio_atempo_draining ) {
+		if( pcm_output_ready || s->audio_atempo_draining ) {
 			// The EOF helper above supplied pending PCM or already-filtered output.
 		} else if (!ac3_output_ready && s->audio_ac3_draining) {
 			ac3_output_ready = _stream_audio_drain_ac3(s, &audio_frame);
@@ -1648,35 +1741,10 @@ DBGS serprintf("~");
 					if( _stream_audio_drain_atempo(s, &audio_frame, &atempo_output_ready) <= 0 )
 						return;
 				} else {
-					s->audio_decoder_draining = 0;
-					s->audio_end = 1;
-serprintf("audio drain complete\r\n");
-					if( s->audio_sink ) {
-						_pcm_accum_flush_to_sink( s );
-						s->audio_sink->end( s );
-					}
-					return;
-				}
-			}
-		
-			// did the sample rate change?
-			if( !ac3_output_ready && !atempo_output_ready && !audio_frame.error && audio_frame.size && audio_frame.samplesPerSec && audio_frame.samplesPerSec != s->audio->samplesPerSec ) {
-serprintf("sample_rate changed! %d\r\n", audio_frame.samplesPerSec);
-				s->audio->sourceSamples = s->audio->samplesPerSec;
-				s->audio->samplesPerSec = audio_frame.samplesPerSec;
-				if( s->audio->channels && s->audio->bitsPerSample ) {
-					s->audio->bytesPerFrame = s->audio->channels * s->audio->bitsPerSample / 8;
-				}
-				if( s->audio->bytesPerFrame == 0 ) {
-					int floor_channels = s->audio->channels ? s->audio->channels : 2;
-					s->audio->bytesPerFrame = floor_channels * 2; // assume 16-bit PCM
-				}
-				if( s->audio->samplesPerSec && s->audio->bytesPerFrame ) {
-					s->audio->bytesPerSec = s->audio->samplesPerSec * s->audio->bytesPerFrame;
-				}
-				stream_audio_samplerate_changed( s );
-				if( s->video_error || !s->audio->valid ) {
-					return;
+					s->audio_pcm_draining = 1;
+					if( _stream_audio_drain_pcm(s, &audio_frame) <= 0 )
+						return;
+					pcm_output_ready = 1;
 				}
 			}
 		
@@ -1743,7 +1811,6 @@ serprintf(" ae! ");
 	int original_bits = 0;
 	int frame_channels = 0;
 	int use_atempo = 0;
-	int using_pcm_accum = 0;
 	int dbg_atempo_in = 0, dbg_atempo_out = 0, dbg_atempo_fifo = 0;
 
 		// Reset resume_write diagnostic counter before atempo runs so the
@@ -1781,7 +1848,7 @@ serprintf(" ae! ");
 			s->pcm_accum_channels == audio_frame.channels &&
 			s->pcm_accum_bits == audio_frame.bits &&
 			s->pcm_accum_rate == audio_frame.samplesPerSec;
-		int pcm_eligible = (!s->audio_atempo_draining &&
+		int pcm_eligible = (!s->audio_atempo_draining && !s->audio_pcm_draining && !atempo_output_ready &&
 			(atempo_accum_enabled || normal_speed_accum_enabled || finish_pending_pcm) &&
 			!passthrough_active &&
 			!ac3_recoding &&
@@ -1792,18 +1859,15 @@ serprintf(" ae! ");
 			audio_frame.bits > 0 &&
 			audio_frame.samplesPerSec > 0);
 
-		if( pcm_eligible ) {
-			if( s->pcm_accum_size > 0 &&
-				(s->pcm_accum_format   != audio_frame.format ||
-				 s->pcm_accum_channels != audio_frame.channels ||
-				 s->pcm_accum_bits     != audio_frame.bits ||
-				 s->pcm_accum_rate     != audio_frame.samplesPerSec) ) {
-				DBG serprintf("stream_audio: pcm_accum reset on format change (%04X/%dch/%db/%dHz -> %04X/%dch/%db/%dHz)\n",
-					s->pcm_accum_format, s->pcm_accum_channels, s->pcm_accum_bits, s->pcm_accum_rate,
-					audio_frame.format, audio_frame.channels, audio_frame.bits, audio_frame.samplesPerSec);
-				s->pcm_accum_size = 0;
-			}
+		if( s->pcm_accum_size > 0 && audio_frame.size > 0 &&
+		    !audio_frame.error && !finish_pending_pcm ) {
+			if( _pcm_retain_frame(s, &audio_frame) < 0 )
+				return;
+			_pcm_accum_take(s, &audio_frame);
+			pcm_eligible = 0;
+		}
 
+		if( pcm_eligible ) {
 			if( s->pcm_accum_size == 0 ) {
 				s->pcm_accum_format = audio_frame.format;
 				s->pcm_accum_channels = audio_frame.channels;
@@ -1811,8 +1875,12 @@ serprintf(" ae! ");
 				s->pcm_accum_rate = audio_frame.samplesPerSec;
 			}
 
+			if( audio_frame.size > INT_MAX - s->pcm_accum_size ) {
+				stream_audio_sink_failed(s, "PCM accumulation size overflow");
+				return;
+			}
 			if( s->pcm_accum_capacity < s->pcm_accum_size + audio_frame.size ) {
-				int new_cap = MAX( s->pcm_accum_capacity * 2, s->pcm_accum_size + audio_frame.size );
+				int new_cap = s->pcm_accum_size + audio_frame.size;
 				unsigned char *new_buf = arealloc( s->pcm_accum_data, new_cap );
 				if( !new_buf ) {
 					stream_audio_sink_failed(s, "PCM accumulation allocation failed");
@@ -1843,21 +1911,24 @@ serprintf(" ae! ");
 				audio_frame.channels = s->pcm_accum_channels;
 				audio_frame.bits = s->pcm_accum_bits;
 				audio_frame.samplesPerSec = s->pcm_accum_rate;
-				using_pcm_accum = 1;
+				// Ownership passes to this call, even if atempo buffers it all.
+				s->pcm_accum_size = 0;
 			}
-		} else if( s->pcm_accum_size > 0 ) {
-			// Non-eligible frame arrived while PCM was accumulated.
-			// Flush the pending PCM through the normal filter/sink path
-			// instead of dropping it, which would cause silent playback.
-			DBG serprintf("stream_audio: pcm_accum flush pending=%d (next format=%04X passthrough_active=%d ac3_recoding=%d)\n",
-				s->pcm_accum_size, audio_frame.format, passthrough_active, ac3_recoding);
-			audio_frame.data = s->pcm_accum_data;
-			audio_frame.size = s->pcm_accum_size;
-			audio_frame.format = s->pcm_accum_format;
-			audio_frame.channels = s->pcm_accum_channels;
-			audio_frame.bits = s->pcm_accum_bits;
-			audio_frame.samplesPerSec = s->pcm_accum_rate;
-			using_pcm_accum = 1;
+		}
+
+		// Finish the old atempo graph and FIFO before admitting new geometry.
+		// The decoded frame is owned until that drain has reached the writer.
+		if( atempo_filter_enabled && !atempo_output_ready &&
+		    stream_filter_audio_atempo_needs_format_drain(s->audio_filter_atempo, &audio_frame) ) {
+			if( _pcm_retain_frame(s, &audio_frame) < 0 )
+				return;
+			if( s->audio_filter_atempo->drain(s->audio_filter_atempo, &audio_frame, 1) < 0 ) {
+				stream_audio_sink_failed(s, "atempo format drain failed");
+				return;
+			}
+			if( !audio_frame.size )
+				goto decode_next_chunk;
+			atempo_output_ready = 1;
 		}
 
 		if( s->audio_sink ) {
@@ -2061,6 +2132,9 @@ serprintf(" ae! ");
 				}
 
 				if( audio_frame.size > 0 && need_reconfigure ) {
+					if( !passthrough_active && !is_ac3_recoding &&
+					    _stream_audio_wait_pcm_output(s) < 0 )
+						return;
 					// Capture epoch ownership before stop/close/reset operations. Initial
 					// passthrough setup has no established submitted/audio anchor and must
 					// use the latency-compensated raw Mode 2 seed.
@@ -2121,11 +2195,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						if( s->audio_sink_open ) {
 							int passthrough_mode = stream_audio_requested_passthrough_for_format( s->audio->format );
 							if( passthrough_mode == 0 ) {
-								s->at_speed_epoch_active = 0;
-								_stream_atempo_ledger_reset( s );
-								s->manual_audio_delay_target_ms = (s->av_delay < 0) ? -s->av_delay : 0;
-								s->manual_audio_delay_applied_ms = 0;
-								s->manual_audio_hold_pending_ms = 0;
+								stream_sync_pcm_output_reset( s );
 								s->audio_sink->flush( s );
 							}
 							s->audio_sink->stop( s );
@@ -2330,6 +2400,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					}
 				}
 				int loop_write_count = 0;
+				int pcm_recovery_count = 0;
 				while( size > 0 ) {
 					if( _abort( s ) ) {
 						return;
@@ -2579,6 +2650,17 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						_stream_atempo_ledger_finalize(
 							s, ledger_reserved_frames, written_frames, sample_rate, wrapper_start );
 					}
+					if( !compressed_unit && size_written == AUDIO_WRITE_RESTARTED ) {
+						stream_sync_pcm_output_reset( s );
+						if( _stream_audio_wait_for_resume(s) )
+							return;
+						if( pcm_recovery_count++ || audio_interface_start(s->audio_ctx) ) {
+							stream_audio_sink_failed(s, "PCM output recovery failed");
+							return;
+						}
+						// Retry only the unwritten suffix; it has not advanced the clock.
+						continue;
+					}
 					if( !compressed_unit && size_written == AUDIO_WRITE_RETRY ) {
 						stream_audio_prepare_resume( s );
 						stream_yield_RT();
@@ -2691,6 +2773,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						return;
 					}
 					if( size_written <= 0 ) {
+						if( !compressed_unit ) {
+							stream_audio_sink_failed(s, "PCM output write failed");
+							return;
+						}
 						DBG serprintf("stream_audio: write failed (%d), dropping remainder\n", size_written);
 						if( s->video_hold_for_resume_audio ) {
 							DBG serprintf("stream_audio: releasing video hold on write failure (pt=%d recode=%d)\n",
@@ -2988,10 +3074,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					audio_frame.data += size_written;
 				}
 
-				if( using_pcm_accum ) {
-					s->pcm_accum_size = 0;
-				}
-
 				if( s->audio_sink->syncable( s ) && s->audio_sink->can_write( s, size ) ) {
 					if( !_abort( s ) ) {
 						s->audio_yield = 0;
@@ -3001,7 +3083,6 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 			
 			} else if( s->audio_end ) {
 				// end, signal to the sink that we are finished
-				_pcm_accum_flush_to_sink( s );
 				s->audio_sink->end( s );
 			} else if( audio_frame.error == STREAM_ERROR_FATAL ) {
 				// fatal error, we need to stop
@@ -3108,6 +3189,10 @@ skip_format_change:
 	}
 	s->pcm_accum_capacity = 0;
 	s->pcm_accum_size = 0;
+	afree(s->pcm_pending_data);
+	s->pcm_pending_data = NULL;
+	s->pcm_pending_capacity = 0;
+	s->pcm_pending_frame.size = 0;
 DBGS serprintf("PID[%5d] stream_audio_thread::Exiting\r\n", getpid() );	
  	return NULL;
 }

@@ -615,6 +615,11 @@ typedef struct STREAM {
 	int		pcm_accum_channels;
 	int		pcm_accum_bits;
 	int		pcm_accum_rate;
+	// Decoded input retained while the old PCM format/filter finishes draining.
+	unsigned char	*pcm_pending_data;
+	int		pcm_pending_capacity;
+	AUDIO_FRAME	pcm_pending_frame;
+	int		audio_pcm_draining;
 
 	int 		audio_time;
 	int 		audio_ref_time;
@@ -1065,6 +1070,7 @@ void	stream_set_audio_downmix( int downmix );
 void	stream_disable_atempo_filter( int disable );
 int	stream_filter_audio_atempo_get_ledger_stats( STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate );
 int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f, float *speed, UINT64 *boundary);
+int stream_filter_audio_atempo_needs_format_drain(STREAM_FILTER_AUDIO *f, const AUDIO_FRAME *frame);
 int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate );
 int	stream_filter_audio_atempo_lookup_output_media( STREAM_FILTER_AUDIO *f, UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate );
 int	stream_check_subtitles( STREAM *s );

@@ -121,6 +121,7 @@ int avos_mp_video_destroy(avos_mp_video_t **video);
 int avos_mp_audio_destroy(avos_mp_audio_t **audio);
 
 int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, int etype, void *surface_handle, int starttime);
+int avos_mp_video_report_open_error(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_audio_open(avos_mp_t *mp, avos_mp_audio_t *audio, STREAM_URL *src, int etype);
 int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video);
 int avos_mp_audio_close(avos_mp_t *mp, avos_mp_audio_t *audio);
@@ -698,9 +699,19 @@ static void *async_thread(void *ctx)
 				pthread_mutex_lock(&mp->async.mtx);
 				mp->async.open_result = ret;
 				mp->async.open_pending = 0;
-				if (!mp->async.closing && command.arg)
-					avos_mp_sendevent(mp, ret == AVOS_ERR_OK ?
-					    MEDIA_PREPARED : MEDIA_ERROR, 0, 0);
+				if (!mp->async.closing) {
+					if (ret == AVOS_ERR_OK) {
+						if (command.arg)
+							avos_mp_sendevent(mp, MEDIA_PREPARED, 0, 0);
+					} else {
+						// Preserve detailed errors for both prepare APIs, without
+						// following them with a generic error or a prepared event.
+						int handled = mp->type == TYPE_VID && mp->media &&
+						    avos_mp_video_report_open_error(mp, mp->media);
+						if (!handled && command.arg)
+							avos_mp_sendevent(mp, MEDIA_ERROR, 0, 0);
+					}
+				}
 				pthread_cond_broadcast(&mp->async.cond);
 				pthread_mutex_unlock(&mp->async.mtx);
 				break;

@@ -243,7 +243,6 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 {
 	int _flags = STREAM_PAUSED;
 	VIDEO_PROPERTIES *vp;
-	int from_list = 0; // XXX
 	const char *subtitle_path = device_config_get_subtitlepath();
 	int decoder = device_config_get_decoder();
 
@@ -344,12 +343,21 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 
 	return AVOS_ERR_OK;
 stream_err:
-	// if from_list: silently fail
-	if (!from_list && video->s && video->s->video_error != VE_NO_ERROR && video->s->video_error != VE_USER_ABORT) {
+	// The command worker reports failure after checking for cancellation.
+	return AVOS_ERR;
+}
+
+// Return true when the stream error is handled, including silent user aborts.
+// Called by the open completion path while close/cancellation is excluded.
+int avos_mp_video_report_open_error(avos_mp_t *mp, avos_mp_video_t *video)
+{
+	if (!video->s || video->s->video_error == VE_NO_ERROR)
+		return 0;
+	if (video->s->video_error != VE_USER_ABORT) {
 		send_metadata(mp, video, 0);
 		send_stream_error(mp, video);
 	}
-	return AVOS_ERR_OK;
+	return 1;
 }
 
 int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)

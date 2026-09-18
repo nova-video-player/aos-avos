@@ -101,7 +101,9 @@ typedef struct priv {
 	void *surface_handle;
 
 	pthread_t dec_thread;
+	int dec_thread_started;
 	pthread_t sink_thread;
+	int sink_thread_started;
 
 	VIDEO_FRAME *frames[SFDEC_MAX_FRAMES];
 	int num_frames;
@@ -708,9 +710,9 @@ DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
 // Zero the scheduler anchors so the next put_time() call sees no_sched_anchor=1
 // and is forced to reanchor even if the heard timestamp hasn't changed.
 // Used by the post-seek converge path when the normal put_time() would be a no-op.
-void sfdec2_refresh_sched_anchor( STREAM *s )
+void sfdec2_refresh_sched_anchor_locked( STREAM *s )
 {
-	if( !s || !s->video_sink || !s->video_sink->priv )
+	if( !s || !s->video_sink || !s->video_sink->is_open || !s->video_sink->priv )
 		return;
 	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
 		return;
@@ -726,7 +728,7 @@ void sfdec2_refresh_sched_anchor( STREAM *s )
 	pthread_mutex_unlock(&p->locked.mtx);
 }
 
-void sfdec2_request_pcm_startup_correction( STREAM *s )
+static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
 {
 	if( !s || !s->video_sink || !s->video_sink->priv )
 		return;
@@ -859,6 +861,7 @@ static void *videosink_thread(void *ctx)
 		INT64 render_ts_ns = 0;
 		int consumed = 0;
 		int stale_epoch_drop = 0;
+		int audio_lease = 0;
 		while (p->locked.run && !p->locked.error && !has_state_l(p, THREAD_STATE_FLUSHING)) {
 			// Peek at the frame at the head of the queue without consuming it
 			f = frame_q_peek(&p->locked.venc_q);
@@ -884,6 +887,18 @@ static void *videosink_thread(void *ctx)
 					f->time, f->epoch, s->seek_epoch);
 				break;
 			}
+
+			if (s && !stream_audio_read_acquire(s)) {
+				// Audio replacement needs our scheduler too. Retry without
+				// consuming the frame or blocking it with the private lock.
+				struct timespec retry;
+				clock_gettime(CLOCK_MONOTONIC, &retry);
+				timespec_add_ms(&retry, 2);
+				pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &retry);
+				continue;
+			}
+			audio_lease = s != NULL;
+			unsigned int audio_generation = s ? s->audio_lifecycle_generation : 0;
 
 			if( s && s->audio_ctx ) {
 				int delta_ms = audio_interface_get_and_clear_latency_delta( s->audio_ctx );
@@ -975,6 +990,10 @@ static void *videosink_thread(void *ctx)
 					p->hold_audio_applied_ms = 0;
 					DBGSI serprintf("android_sync: hold video for passthrough start (%d ms)\n", hold_ms);
 				}
+				if (audio_lease) {
+					stream_audio_read_release(s);
+					audio_lease = 0;
+				}
 				while (p->locked.run && !has_state_l(p, THREAD_STATE_FLUSHING) &&
 				       s->audio_time < 0 && atime() < p->hold_audio_until_ms) {
 					struct timespec ts_wait;
@@ -1000,6 +1019,14 @@ static void *videosink_thread(void *ctx)
 				} else {
 					// Timeout reached: keep video blocked until audio becomes available.
 					hold_passthrough = 1;
+				}
+				if (s && !stream_audio_read_acquire(s))
+					continue;
+				audio_lease = s != NULL;
+				if (s && audio_generation != s->audio_lifecycle_generation) {
+					stream_audio_read_release(s);
+					audio_lease = 0;
+					continue; // Re-read format/clock state after replacement.
 				}
 				// Audio time may have become valid while we were waiting.
 				have_audio_time = (s && s->audio_time >= 0);
@@ -1293,6 +1320,10 @@ static void *videosink_thread(void *ctx)
 				clock_gettime(CLOCK_MONOTONIC, &ts_wait);
 				timespec_add_ms(&ts_wait, wait_ms);
 
+				if (audio_lease) {
+					stream_audio_read_release(s);
+					audio_lease = 0;
+				}
 				pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &ts_wait);
 				continue;
 			}
@@ -1307,6 +1338,10 @@ static void *videosink_thread(void *ctx)
 			render_ts_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
 				p->render_offset_ns + av_delay_ns;
 			break;
+		}
+		if (audio_lease) {
+			stream_audio_read_release(s);
+			audio_lease = 0;
 		}
 		if (!consumed) {
 			f = NULL;
@@ -1351,6 +1386,7 @@ static void *videosink_thread(void *ctx)
 
 		pthread_mutex_lock(&p->locked.mtx);
 	endloop:
+		if (audio_lease) stream_audio_read_release(s);
 		if (f) {
 			frame_q_put(&p->locked.get_q, f);
 		}
@@ -1500,6 +1536,8 @@ DBGCV CLOG("\t\t\tout %8d/%8d  tim %3d  wait %3d", time, f->time, took, wait );
 	CLOG("terminated");
 	return NULL;
 }
+
+static int videodec_close(STREAM_DEC_VIDEO *dec);
 
 static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx, int *pneed_flush, int *pneed_reorder)
 {
@@ -1791,8 +1829,16 @@ retry_decoder_open:
 
 	dec->is_open = 1;
 
-	pthread_create(&p->dec_thread, 0, videodec_thread, p);
-	pthread_create(&p->sink_thread, 0, videosink_thread, p);
+	if (pthread_create(&p->dec_thread, 0, videodec_thread, p)) {
+		videodec_close(dec);
+		return 1;
+	}
+	p->dec_thread_started = 1;
+	if (pthread_create(&p->sink_thread, 0, videosink_thread, p)) {
+		videodec_close(dec);
+		return 1;
+	}
+	p->sink_thread_started = 1;
 
 	if( pneed_flush )
 		*pneed_flush = 1;
@@ -1835,8 +1881,9 @@ DBGCV CLOG("stop thread");
 
 		int codec_flushed = sfdec_flush(p->sfdec) == 0;
 
-		pthread_join(p->dec_thread, NULL);
-		pthread_join(p->sink_thread, NULL);
+		if (p->dec_thread_started) pthread_join(p->dec_thread, NULL);
+		if (p->sink_thread_started) pthread_join(p->sink_thread, NULL);
+		p->dec_thread_started = p->sink_thread_started = 0;
 
 DBGCV CLOG("stop thread done");
 
@@ -2102,7 +2149,7 @@ static STREAM_DEC_VIDEO *new_dec(void)
 	return dec;
 }
 
-void sfdec2_reset_sync_state_on_seek( STREAM *s )
+static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 {
 	if( !s || !s->video_sink || !s->video_sink->priv )
 		return;
@@ -2158,7 +2205,7 @@ void sfdec2_reset_sync_state_on_seek( STREAM *s )
 	pthread_mutex_unlock( &p->locked.mtx );
 }
 
-void sfdec2_android_sync_on_pause( STREAM *s, int paused )
+static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 {
 	if( !s || !s->video_sink || !s->video_sink->priv )
 		return;
@@ -2353,5 +2400,43 @@ serprintf("register OMX for VIDEO_FORMAT_AV1\r\n");
 
 DECLARE_DEBUG_COMMAND_VOID( "regsfcc", _reg_sfc );
 #endif
+
+/* The private scheduler mutex cannot protect the lifetime of the sink itself.
+ * All external entry points first exclude sink close/delete. */
+void sfdec2_refresh_sched_anchor(STREAM *s)
+{
+	if (!s) return;
+	pthread_mutex_lock(&s->video_sink_mutex);
+	if (s->video_sink && s->video_sink->is_open)
+		sfdec2_refresh_sched_anchor_locked(s);
+	pthread_mutex_unlock(&s->video_sink_mutex);
+}
+
+void sfdec2_request_pcm_startup_correction(STREAM *s)
+{
+	if (!s) return;
+	pthread_mutex_lock(&s->video_sink_mutex);
+	if (s->video_sink && s->video_sink->is_open)
+		sfdec2_request_pcm_startup_correction_locked(s);
+	pthread_mutex_unlock(&s->video_sink_mutex);
+}
+
+void sfdec2_reset_sync_state_on_seek(STREAM *s)
+{
+	if (!s) return;
+	pthread_mutex_lock(&s->video_sink_mutex);
+	if (s->video_sink && s->video_sink->is_open)
+		sfdec2_reset_sync_state_on_seek_locked(s);
+	pthread_mutex_unlock(&s->video_sink_mutex);
+}
+
+void sfdec2_android_sync_on_pause(STREAM *s, int paused)
+{
+	if (!s) return;
+	pthread_mutex_lock(&s->video_sink_mutex);
+	if (s->video_sink && s->video_sink->is_open)
+		sfdec2_android_sync_on_pause_locked(s, paused);
+	pthread_mutex_unlock(&s->video_sink_mutex);
+}
 
 #endif

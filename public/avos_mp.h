@@ -64,6 +64,10 @@ typedef struct avos_mp_handle_t {
 	int (*setavspeed)	(avos_mp_t *mp, float speed);
 	// audio specific
 	int (*setnextrack)	(avos_mp_t *mp, const char *path);
+	// Borrowed API-call references. Unpublish the handle before destroy();
+	// destroy interrupts pending work, then waits for retained callers.
+	int (*retain)(avos_mp_t *mp);
+	void (*release)(avos_mp_t *mp);
 } avos_mp_handle_t;
 
 const avos_mp_handle_t *avos_mp_get_handle();

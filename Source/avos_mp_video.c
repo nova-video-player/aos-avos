@@ -216,7 +216,7 @@ static int stream_abort_handler(void *ctx)
 {
 	avos_mp_t *mp = (avos_mp_t *)stream_get_user_ctx((STREAM *) ctx);
 	avos_mp_video_t *video = avos_mp_getvideo(mp);
-	return video->abort;
+	return !video || __atomic_load_n(&video->abort, __ATOMIC_ACQUIRE);
 }
 
 static void stream_progress_handler(STREAM *s, int total, int progress)
@@ -250,7 +250,6 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	video->send_sub = 1;
 	if (!(video->s = stream_new())) {
 		MPLOG("error: stream_new");
-		afree(video);
 		return AVOS_ERR;
 	}
 	stream_set_user_ctx(video->s, mp);
@@ -368,7 +367,7 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 
 int avos_mp_video_abort(avos_mp_t *mp, avos_mp_video_t *video)
 {
-	video->abort = 1;
+	__atomic_store_n(&video->abort, 1, __ATOMIC_RELEASE);
 	return AVOS_ERR_OK;
 }
 

@@ -1576,6 +1576,7 @@ serprintf("stream_disable_atempo_filter: %d (0=use atempo, 1=use AudioTrack Play
 void stream_audio_props_changed( STREAM *s, STREAM_CDATA *cdata )
 {
 	AV_PROPERTIES *changed = cdata->changed;
+	stream_audio_reconfigure_begin( s );
 
 serprintf("audio props changed!\r\n");
 	//copy the video props
@@ -1650,6 +1651,7 @@ for( i = 0; i < s->av.as_max; i++ ) {
 	}
 
 ErrorExit:
+	stream_audio_reconfigure_end( s );
 	cdata->changed = NULL;
 	// force resync!
 	cdata->audio_skip = 1;
@@ -2417,6 +2419,22 @@ ErrorExit:
 //	stream_start
 //
 // *****************************************************************************
+static int _stream_start_thread(THREAD_STATE *state, pthread_t *handle,
+	int *started, void *(*run)(void *), STREAM *s, int priority, const char *tag)
+{
+	thread_state_init(state, THREAD_IDLE, tag);
+	if (thread_create(handle, run, s, priority, (char *)tag)) {
+		serprintf("cannot create stream thread %s\n", tag);
+		state->_get = state->_set = THREAD_EXIT;
+		pthread_cond_destroy(&state->_cond);
+		pthread_mutex_destroy(&state->_mutex);
+		stream_set_error(s, VE_ERROR);
+		return 1;
+	}
+	*started = 1;
+	return 0;
+}
+
 int stream_start(STREAM *s) 
 {
 serprintf("\r\nstream_start %s\r\n", s->src.url );	
@@ -2521,29 +2539,38 @@ serprintf("could not open drm_ctx!r\n");
 	stream_pause( s );
 
 	// lock and start the engine thread
-	thread_state_init( &s->engine_tstate, THREAD_IDLE, "eng" );
-	thread_create( &s->engine_thread_handle, _player_thread, (void*)s, stream_prio_engine, "video player engine");
+	if( _stream_start_thread( &s->engine_tstate, &s->engine_thread_handle,
+		&s->engine_thread_started, _player_thread, s, stream_prio_engine, "eng" ) )
+		goto ErrorExit;
 	
 	// lock and start the parser thread
-	thread_state_init( &s->parser_tstate, THREAD_IDLE, "par" );
-	thread_create( &s->parser_thread_handle, _parser_thread, (void*)s, stream_prio_parser, "video player parser" );
+	if( _stream_start_thread( &s->parser_tstate, &s->parser_thread_handle,
+		&s->parser_thread_started, _parser_thread, s, stream_prio_parser, "par" ) )
+		goto ErrorExit;
 	
 	// lock and start the subtitle_thread
-	thread_state_init( &s->sub_tstate, THREAD_IDLE, "sub" );
-	thread_create( &s->sub_thread_handle, stream_sub_dec_thread, (void*)s, stream_prio_sub, "video player subtitle" );
+	if( _stream_start_thread( &s->sub_tstate, &s->sub_thread_handle,
+		&s->sub_thread_started, stream_sub_dec_thread, s, stream_prio_sub, "sub" ) )
+		goto ErrorExit;
 	
 	if( s->audio->valid ) {
 		// lock and start the audio_thread
-		thread_state_init( &s->audio_tstate, THREAD_IDLE, "aud" );
-		thread_create( &s->audio_thread_handle, stream_audio_dec_thread, (void*)s, stream_prio_audio, "video player audio" );
+		if( _stream_start_thread( &s->audio_tstate, &s->audio_thread_handle,
+			&s->audio_thread_started, stream_audio_dec_thread, s, stream_prio_audio, "aud" ) )
+			goto ErrorExit;
 	}
 	
 	// lock and start the video_thread
-	pthread_cond_init(&s->codec_code, 0);
-	pthread_cond_init(&s->video_done, 0);
 	pthread_mutex_lock( &s->codec_mutex );
 	s->codec_run = 1;
-	thread_create( &s->codec_thread_handle, _decode_thread, (void*)s, stream_prio_video, "video player decoder");
+	if( thread_create( &s->codec_thread_handle, _decode_thread, (void*)s,
+		stream_prio_video, "video player decoder" ) ) {
+		s->codec_run = 0;
+		pthread_mutex_unlock( &s->codec_mutex );
+		stream_set_error( s, VE_ERROR );
+		goto ErrorExit;
+	}
+	s->codec_thread_started = 1;
 	
 	// allow the video playing
 DBGV serprintf("GO_VID\r\n");				
@@ -2761,6 +2788,9 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 	pthread_mutex_destroy( &s->video_sink_mutex );
 	pthread_mutex_destroy( &s->anchor_mutex );
 	pthread_mutex_destroy( &s->mode2_heard_mutex );
+	pthread_cond_destroy( &s->audio_lifecycle_cond );
+	pthread_mutex_destroy( &s->audio_lifecycle_mutex );
+	pthread_mutex_destroy( &s->drm_lock );
 	
 	return 0;
 }
@@ -4799,6 +4829,7 @@ static void _seek_un_pause( STREAM *s, int was_paused )
 // *****************************************************************************
 static int _stream_wait_for_idle( STREAM *s, int timeout )
 {
+	if( !s->engine_thread_started ) return 0;
 	timeout += atime(); 
 
 	while( 1 ) { 
@@ -5474,6 +5505,8 @@ serprintf("SAS: audio_stream already set\n");
 	thread_state_set( &s->engine_tstate, THREAD_IDLE );
 	thread_state_set( &s->sub_tstate,    THREAD_IDLE );
 	
+	stream_audio_reconfigure_begin( s );
+
 	// close old audio decoder
 	stream_close_audio_filter( s );
 	s->pcm_accum_size = 0;
@@ -5566,7 +5599,8 @@ serprintf("cannot reopen audio sink after passthrough stop!\n");
 		}
 	}
 
-ErrorExit:	
+ErrorExit:
+	stream_audio_reconfigure_end( s );
 	// run threads again
 	thread_state_set( &s->audio_tstate,  THREAD_RUNNING );
 	thread_state_set( &s->engine_tstate, THREAD_RUNNING );
@@ -5723,10 +5757,11 @@ int stream_get_current_audio_stream( STREAM *s )
 // *****************************************************************************
 int stream_get_audio_session_id( STREAM *s )
 {
-	if ( !s || !s->audio_sink )
+	if ( !s || !s->open || !s->audio_sink || !stream_audio_read_acquire(s) )
 		return 0;
-	
-	return s->audio_sink->get_session_id( s );
+	int session_id = s->audio_sink->get_session_id( s );
+	stream_audio_read_release(s);
+	return session_id;
 }
 
 // *****************************************************************************

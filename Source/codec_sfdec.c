@@ -74,7 +74,9 @@ typedef struct priv {
 	sfdec_t *sfdec;
 
 	pthread_t dec_thread;
+	int dec_thread_started;
 	pthread_t sink_thread;
+	int sink_thread_started;
 
 	VIDEO_FRAME *frames[SFDEC_MAX_FRAMES];
 	int num_frames;
@@ -599,6 +601,8 @@ DBGCV CLOG("\t\t\tout %8d  tim %3d  wait %3d", f->time, took, wait );
 	return NULL;
 }
 
+static int videodec_close(STREAM_DEC_VIDEO *dec);
+
 static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx, int *pneed_flush, int *pneed_reorder)
 {
 	priv_t *p = (priv_t *) dec->priv;
@@ -757,8 +761,16 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 
 	dec->is_open = 1;
 
-	pthread_create(&p->dec_thread, 0, videodec_thread, p);
-	pthread_create(&p->sink_thread, 0, videosink_thread, p);
+	if (pthread_create(&p->dec_thread, 0, videodec_thread, p)) {
+		videodec_close(dec);
+		return 1;
+	}
+	p->dec_thread_started = 1;
+	if (pthread_create(&p->sink_thread, 0, videosink_thread, p)) {
+		videodec_close(dec);
+		return 1;
+	}
+	p->sink_thread_started = 1;
 
 	if( pneed_flush )
 		*pneed_flush = 1;
@@ -794,8 +806,9 @@ DBGCV CLOG("stop thread");
 		pthread_cond_broadcast(&p->locked.cond);
 		pthread_mutex_unlock(&p->locked.mtx);
 
-		pthread_join(p->dec_thread, NULL);
-		pthread_join(p->sink_thread, NULL);
+		if (p->dec_thread_started) pthread_join(p->dec_thread, NULL);
+		if (p->sink_thread_started) pthread_join(p->sink_thread, NULL);
+		p->dec_thread_started = p->sink_thread_started = 0;
 
 DBGCV CLOG("stop thread done");
 

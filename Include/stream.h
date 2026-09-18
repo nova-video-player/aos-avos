@@ -687,23 +687,28 @@ typedef struct STREAM {
 	THREAD_STATE	control_tstate;
 	
 	pthread_t 	parser_thread_handle;
+	int		parser_thread_started;
 	THREAD_STATE	parser_tstate;
 	volatile int	parser_interrupt;
 	
 	pthread_t 	sub_thread_handle;
+	int		sub_thread_started;
 	THREAD_STATE	sub_tstate;
 
 	pthread_t 	engine_thread_handle;
+	int		engine_thread_started;
 	THREAD_STATE	engine_tstate;
 	int		engine_yield;
 	
 	pthread_t 	audio_thread_handle;
+	int		audio_thread_started;
 	THREAD_STATE	audio_tstate;
 	int		audio_yield;
 	
 	VCODEC_CTRL	vcodec;
 
 	pthread_t 	codec_thread_handle;
+	int		codec_thread_started;
 	pthread_mutex_t codec_mutex;
 	int		codec_run;
 	pthread_cond_t	codec_code;
@@ -779,6 +784,12 @@ typedef struct STREAM {
 
 	STREAM_SINK_AUDIO *audio_sink;
 	int		audio_sink_open;
+	// Renderer leases exclude replacement of the audio decoder/filter/sink.
+	pthread_mutex_t audio_lifecycle_mutex;
+	pthread_cond_t audio_lifecycle_cond;
+	int audio_reconfiguring;
+	unsigned int audio_lifecycle_generation;
+	int audio_readers;
 	pthread_mutex_t audio_sink_mutex;	// orders compressed transactions with AudioTrack pause/play
 	int audio_pause_requested;	// atomic: lets a writer yield to the pause barrier
 	int		audio_session_id;
@@ -1087,6 +1098,10 @@ int	stream_get_pcm_startup_seed_delay_ms( STREAM *s );
 AUDIO_PROPERTIES *stream_audio_get_sink_props( STREAM *s );
 void    stream_audio_copy_sink_from_source( STREAM *s );
 void    stream_audio_sink_failed( STREAM *s, const char *reason );
+int     stream_audio_read_acquire(STREAM *s);
+void    stream_audio_read_release(STREAM *s);
+void    stream_audio_reconfigure_begin(STREAM *s);
+void    stream_audio_reconfigure_end(STREAM *s);
 void    stream_audio_reset_ac3_passthrough_state(void);
 void    stream_audio_wait_for_passthrough_idle(STREAM *s, const char *reason);
 int	stream_pause    ( STREAM *s );
@@ -1095,11 +1110,14 @@ void	stream_un_pause ( STREAM *s, int was_paused );
 void    sfdec2_reset_sync_state_on_seek( STREAM *s );
 void    sfdec2_android_sync_on_pause( STREAM *s, int paused );
 void    sfdec2_refresh_sched_anchor( STREAM *s );
+// Caller holds video_sink_mutex.
+void    sfdec2_refresh_sched_anchor_locked( STREAM *s );
 void    sfdec2_request_pcm_startup_correction( STREAM *s );
 #else
 static inline void sfdec2_reset_sync_state_on_seek( STREAM *s ) {}
 static inline void sfdec2_android_sync_on_pause( STREAM *s, int paused ) {}
 static inline void sfdec2_refresh_sched_anchor( STREAM *s ) {}
+static inline void sfdec2_refresh_sched_anchor_locked( STREAM *s ) {}
 static inline void sfdec2_request_pcm_startup_correction( STREAM *s ) {}
 #endif
 int	stream_is_paused( STREAM *s );

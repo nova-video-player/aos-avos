@@ -131,7 +131,7 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 		return 0;
 	}
 	if( refresh_sink )
-		sfdec2_refresh_sched_anchor( s );
+		sfdec2_refresh_sched_anchor_locked( s );
 	/*
 	 * The audio decoder thread publishes this anchor while decoder recovery or
 	 * resize can close the renderer on another thread.  Keep the method call

@@ -274,8 +274,12 @@ DBGS serprintf("stream_init\r\n" );
 	pthread_mutex_init( &s->drm_lock, NULL );
 
 	pthread_mutex_init( &s->codec_mutex,       NULL );
+	pthread_cond_init( &s->codec_code, NULL );
+	pthread_cond_init( &s->video_done, NULL );
 	pthread_mutex_init( &s->video_done_mutex,  NULL );
 	pthread_mutex_init( &s->audio_sink_mutex,  NULL );
+	pthread_mutex_init( &s->audio_lifecycle_mutex, NULL );
+	pthread_cond_init( &s->audio_lifecycle_cond, NULL );
 	// Serializes video-sink calls from the audio thread with sink teardown.
 	pthread_mutex_init( &s->video_sink_mutex,  NULL );
 	pthread_mutex_init( &s->anchor_mutex,      NULL );
@@ -283,6 +287,46 @@ DBGS serprintf("stream_init\r\n" );
 	
 	ref_count ++;
 	return 0;
+}
+
+/* A renderer must never wait for audio replacement while owning its scheduler
+ * lock: replacement can itself reset that scheduler. Failed acquisition means
+ * retry the frame after dropping the scheduler lock. */
+int stream_audio_read_acquire(STREAM *s)
+{
+	pthread_mutex_lock(&s->audio_lifecycle_mutex);
+	int ready = !s->audio_reconfiguring;
+	if (ready) s->audio_readers++;
+	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
+	return ready;
+}
+
+void stream_audio_read_release(STREAM *s)
+{
+	pthread_mutex_lock(&s->audio_lifecycle_mutex);
+	if (--s->audio_readers == 0)
+		pthread_cond_broadcast(&s->audio_lifecycle_cond);
+	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
+}
+
+void stream_audio_reconfigure_begin(STREAM *s)
+{
+	pthread_mutex_lock(&s->audio_lifecycle_mutex);
+	while (s->audio_reconfiguring)
+		pthread_cond_wait(&s->audio_lifecycle_cond, &s->audio_lifecycle_mutex);
+	s->audio_reconfiguring = 1;
+	while (s->audio_readers)
+		pthread_cond_wait(&s->audio_lifecycle_cond, &s->audio_lifecycle_mutex);
+	s->audio_lifecycle_generation++;
+	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
+}
+
+void stream_audio_reconfigure_end(STREAM *s)
+{
+	pthread_mutex_lock(&s->audio_lifecycle_mutex);
+	s->audio_reconfiguring = 0;
+	pthread_cond_broadcast(&s->audio_lifecycle_cond);
+	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
 }
 
 // ************************************************************
@@ -302,31 +346,43 @@ serprintf("s not open!\r\n");
 	}
 	
 DBGS serprintf("waiting for threads to join\r\n");
-	if( thread_state_get( &s->engine_tstate ) != THREAD_EXIT ) {
+	if( s->engine_thread_started ) {
 		thread_state_set( &s->engine_tstate, THREAD_EXIT );
 		apthread_join( s->engine_thread_handle, NULL );
+		s->engine_thread_started = 0;
+		pthread_cond_destroy( &s->engine_tstate._cond );
+		pthread_mutex_destroy( &s->engine_tstate._mutex );
 DBGS serprintf("player_thread joined\r\n");
 	}
 	
-	if( thread_state_get( &s->parser_tstate ) != THREAD_EXIT ) {
+	if( s->parser_thread_started ) {
 		thread_state_set( &s->parser_tstate, THREAD_EXIT );
 		apthread_join( s->parser_thread_handle, NULL );
+		s->parser_thread_started = 0;
+		pthread_cond_destroy( &s->parser_tstate._cond );
+		pthread_mutex_destroy( &s->parser_tstate._mutex );
 DBGS serprintf("parser_thread joined\r\n");
 	}
 	
-	if( thread_state_get( &s->audio_tstate ) != THREAD_EXIT ) {
+	if( s->audio_thread_started ) {
 		thread_state_set( &s->audio_tstate, THREAD_EXIT );
 		apthread_join( s->audio_thread_handle, NULL );
+		s->audio_thread_started = 0;
+		pthread_cond_destroy( &s->audio_tstate._cond );
+		pthread_mutex_destroy( &s->audio_tstate._mutex );
 DBGS serprintf("audio_thread joined\r\n");
 	}
 
-	if( thread_state_get( &s->sub_tstate ) != THREAD_EXIT ) {
+	if( s->sub_thread_started ) {
 		thread_state_set( &s->sub_tstate, THREAD_EXIT );
 		apthread_join( s->sub_thread_handle, NULL );
+		s->sub_thread_started = 0;
+		pthread_cond_destroy( &s->sub_tstate._cond );
+		pthread_mutex_destroy( &s->sub_tstate._mutex );
 DBGS serprintf("sub_thread joined\r\n");
 	}
 
-	if ( s->codec_run ) {
+	if ( s->codec_thread_started ) {
 		s->codec_run = 0;
 	
 		pthread_mutex_lock( &s->codec_mutex );
@@ -334,9 +390,12 @@ DBGS serprintf("sub_thread joined\r\n");
 		pthread_mutex_unlock( &s->codec_mutex );
 	
 		apthread_join( s->codec_thread_handle, NULL );
+		s->codec_thread_started = 0;
 DBGS serprintf("codec_thread joined\r\n");
 	}
 	
+	pthread_cond_destroy( &s->codec_code );
+	pthread_cond_destroy( &s->video_done );
 	pthread_mutex_destroy( &s->codec_mutex  );
 	pthread_mutex_destroy( &s->video_done_mutex );
 	pthread_mutex_destroy( &s->audio_sink_mutex );

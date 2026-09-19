@@ -17,6 +17,9 @@
 #include "stream_fd.h"
 #include <stdio.h>
 #include <inttypes.h>
+#include <libavutil/time.h>
+#include <libswscale/swscale.h>
+#include <limits.h>
 
 #include "avos_common.h"
 #include "avos_common_priv.h"
@@ -39,6 +42,8 @@
 #define MRLOGV DBG MRLOG
 
 struct avos_mr {
+	int cancelled;
+	int64_t deadline_us;
 	int fd;
 	STREAM_URL src;
 	int type;
@@ -53,6 +58,23 @@ struct avos_mr {
 	metadata_buffer_t *metadata_buffer;
 };
 
+static void avos_mr_cancel(avos_mr_t *mr)
+{
+	__atomic_store_n(&mr->cancelled, 1, __ATOMIC_RELEASE);
+}
+
+static int avos_mr_aborted(void *opaque)
+{
+	avos_mr_t *mr = opaque;
+	return __atomic_load_n(&mr->cancelled, __ATOMIC_ACQUIRE) ||
+		av_gettime_relative() >= mr->deadline_us;
+}
+
+static void avos_mr_begin(avos_mr_t *mr)
+{
+	mr->deadline_us = av_gettime_relative() + 30000000;
+}
+
 static avos_mr_t *avos_mr_create()
 {
 	avos_mr_t *mr = acalloc(1, sizeof(avos_mr_t));
@@ -60,6 +82,7 @@ static avos_mr_t *avos_mr_create()
 		return NULL;
 	mr->fd = -1;
 	mr->metadata_buffer = avos_metadata_create();
+	if (!mr->metadata_buffer) { afree(mr); return NULL; }
 	MRLOGV();
 	return mr;
 }
@@ -83,13 +106,10 @@ static int avos_mr_destroy(avos_mr_t *mr)
 
 static int avos_mr_setdatasource_common(avos_mr_t *mr)
 {
-	if (mr->info_valid) {
-		if (mr->apic.buffer)
-			free(mr->apic.buffer);
-		memset(&mr->info, 0, sizeof(FILE_INFO));
-		memset(&mr->apic, 0, sizeof(APIC));
-		mr->info_valid = 0;
-	}
+	free(mr->apic.buffer);
+	memset(&mr->info, 0, sizeof(FILE_INFO));
+	memset(&mr->apic, 0, sizeof(APIC));
+	mr->info_valid = 0;
 	if (mr->thumb_stream) {
 		thumb_stream_destroy(mr->thumb_stream);
 		mr->thumb_stream = NULL;
@@ -292,16 +312,25 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 		}
 	}
 
+	avos_metadata_write_end(buffer);
+	return AVOS_ERR_OK;
 quit:
-	return avos_metadata_write_end(buffer);
+	avos_metadata_write_begin(buffer); // never publish a partially serialized result
+	return AVOS_ERR;
 }
 
 static int avos_mr_retrieve(avos_mr_t *mr)
 {
 	if (!mr->info_valid) {
-		if (get_url_info(&mr->src, mr->type, mr->etype, &mr->info, &mr->apic, NULL))
+		avos_mr_begin(mr);
+		if (get_url_info_with_abort(&mr->src, mr->type, mr->etype, &mr->info,
+			&mr->apic, avos_mr_aborted, mr) || avos_mr_aborted(mr) ||
+			avos_mr_fillmetadata(mr) != AVOS_ERR_OK) {
+			free(mr->apic.buffer);
+			memset(&mr->apic, 0, sizeof(mr->apic));
+			mr->apic.buffer_size = APIC_MAX_SIZE;
 			return AVOS_ERR;
-		avos_mr_fillmetadata(mr);
+		}
 		mr->info_valid = 1;
 	}
 	return AVOS_ERR_OK;
@@ -315,7 +344,7 @@ static int avos_mr_getmetadata(avos_mr_t *mr, metadata_buffer_t **buffer)
 	if (avos_mr_retrieve(mr) != AVOS_ERR_OK)
 		return AVOS_ERR;
 	*buffer = avos_metadata_dup(mr->metadata_buffer);
-	return AVOS_ERR_OK;
+	return *buffer ? AVOS_ERR_OK : AVOS_ERR;
 }
 
 static const char* avos_mr_extractmetadata(avos_mr_t *mr, uint32_t id)
@@ -333,64 +362,67 @@ static const char* avos_mr_extractmetadata(avos_mr_t *mr, uint32_t id)
 
 static int avos_mr_getframe(avos_mr_t *mr, int time_ms, avos_bgra_bitmap_t **pbitmap)
 {
-#define DEBUG_THUMB_TIME
-#ifdef DEBUG_THUMB_TIME
-#include <sys/time.h>
-	struct timeval start, end, diff;
-	gettimeofday(&start, NULL);
-#endif
-
-	avos_bgra_bitmap_t *bitmap;
-	int rotation;
-	IMAGE *img;
-
-	MRLOGV("%d", time_ms);
-
-	if (!pbitmap)
-		return AVOS_ERR;
-
-	if (!mr->thumb_stream)
-		mr->thumb_stream = thumb_stream_create();
-	if (!mr->thumb_stream) {
-		*pbitmap = NULL;
-		return AVOS_ERR_OK;
+	if (!pbitmap || time_ms < -1) return AVOS_ERR;
+	*pbitmap = NULL;
+	avos_mr_begin(mr);
+	int ret = AVOS_ERR_OK;
+	int rotation = 0;
+	struct SwsContext *sws = NULL;
+	avos_bgra_bitmap_t *bitmap = NULL;
+	mr->thumb_stream = thumb_stream_create();
+	if (!mr->thumb_stream) return AVOS_ERR;
+	IMAGE *img = thumb_stream_get_frame(mr->thumb_stream, &mr->src, mr->etype,
+		time_ms, AV_IMAGE_BGRA_32, &rotation, avos_mr_aborted, mr);
+	if (!img || avos_mr_aborted(mr)) goto out;
+	if (!img->data[0] || img->width <= 0 || img->height <= 0 ||
+	    img->width > VIDEO_MAX_WIDTH || img->height > VIDEO_MAX_HEIGHT ||
+	    img->linestep[0] < img->width || img->linestep[0] > INT_MAX / 4 ||
+	    (int64_t)(img->height - 1) * img->linestep[0] * 4 + (int64_t)img->width * 4 > img->size) {
+		ret = AVOS_ERR;
+		goto out;
 	}
-	img = thumb_stream_get_frame(mr->thumb_stream, &mr->src, mr->etype, time_ms, AV_IMAGE_BGRA_32, &rotation);
-	if (!img) {
-		*pbitmap = NULL;
-		return AVOS_ERR_OK;
-	}
-#ifdef DEBUG_THUMB_TIME
-	gettimeofday(&end, NULL);
-	timersub(&end, &start, &diff);
-	MRLOGV("thumbnail time: %d ms\n", diff.tv_sec * 1000 + (diff.tv_usec / 1000));
-#endif
-
-	bitmap = (avos_bgra_bitmap_t *)calloc(1, sizeof(avos_bgra_bitmap_t));
-	if (!bitmap) {
-		*pbitmap = NULL;
-		return AVOS_ERR;
-	}
-
-	bitmap->width = img->width;
-	bitmap->height = img->height;
-	bitmap->linestep = img->linestep[0];
+	int width = 512;
+	int height = (int64_t)img->height * width / img->width;
+	if (height < 1 || height > 4096) goto out;
+	size_t bytes = (size_t)width * height * 4;
+	bitmap = calloc(1, sizeof(*bitmap) + bytes);
+	if (!bitmap) { ret = AVOS_ERR; goto out; }
+	bitmap->width = width;
+	bitmap->height = height;
+	bitmap->linestep = width;
 	bitmap->rotation = rotation;
-	bitmap->data_size = img->size;
-	bitmap->data = img->data[0];
-
-	*pbitmap = bitmap;
-	return AVOS_ERR_OK;
+	bitmap->data_size = bytes;
+	bitmap->data = (uint8_t *)(bitmap + 1);
+	sws = sws_getContext(img->width, img->height, AV_PIX_FMT_BGRA,
+		width, height, AV_PIX_FMT_BGRA, SWS_BILINEAR, NULL, NULL, NULL);
+	const uint8_t *src[4] = { img->data[0] };
+	int src_stride[4] = { img->linestep[0] * 4 };
+	uint8_t *dst[4] = { bitmap->data };
+	int dst_stride[4] = { width * 4 };
+	if (!sws || sws_scale(sws, src, src_stride, 0, img->height, dst, dst_stride) != height) {
+		ret = AVOS_ERR;
+		goto out;
+	}
+	if (!avos_mr_aborted(mr)) { *pbitmap = bitmap; bitmap = NULL; }
+out:
+	sws_freeContext(sws);
+	free(bitmap);
+	thumb_stream_destroy(mr->thumb_stream);
+	mr->thumb_stream = NULL;
+	return ret;
 }
 
 static int avos_mr_getapic(avos_mr_t *mr, avos_apic_t **papic)
 {
 	avos_apic_t *apic;
 
+	if (!papic) return AVOS_ERR;
 	*papic = NULL;
 	if (avos_mr_retrieve(mr) != AVOS_ERR_OK || !mr->apic.valid)
 		return AVOS_ERR_OK; // not critical, apic is NULL
 
+	if (!mr->apic.buffer || mr->apic.size > mr->apic.buffer_size || mr->apic.size > APIC_MAX_SIZE)
+		return AVOS_ERR;
 	apic = (avos_apic_t *) calloc(1, sizeof(avos_apic_t) + mr->apic.size);
 	if (!apic)
 		return AVOS_ERR;
@@ -409,6 +441,7 @@ static const avos_mr_handle_t avos_mr_handle = {
 	.extractmetadata = avos_mr_extractmetadata,
 	.getframe = avos_mr_getframe,
 	.getapic = avos_mr_getapic,
+	.cancel = avos_mr_cancel,
 };
 
 const avos_mr_handle_t *avos_mr_get_handle()

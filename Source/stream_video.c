@@ -1980,7 +1980,7 @@ serprintf("error in stream_init\r\n");
 	s->open = 1;
 
 	// Align timeline mapping with the currently effective audio speed at stream start.
-	if( audio_interface_is_audio_speed_enabled() ) {
+	if( !(_flags & STREAM_THUMB) && audio_interface_is_audio_speed_enabled() ) {
 		float current_speed = audio_interface_get_audio_speed();
 		timeline_map_apply( 0.0, 0.0, current_speed );
 	}
@@ -3637,6 +3637,7 @@ DBGS serprintf("VIDEO SIZE CHANGED! %dx%d|%d -> %dx%d|%d\r\n", s->video->width, 
 static void *_decode_thread( void *data )
 {
 	STREAM *s = (STREAM *)data;
+	timeline_set_local_identity(!!(s->flags & STREAM_THUMB));
 DBGS serprintf("PID[%5d] decode_thread::Starting\r\n", getpid() );	
 	
 	while( s->codec_run ) {
@@ -3672,6 +3673,7 @@ DBGS serprintf("PID[%5d] decode_thread::Exiting\r\n", getpid() );
 static void *_parser_thread( void *data )
 {
 	STREAM *s = (STREAM *)data;
+	timeline_set_local_identity(!!(s->flags & STREAM_THUMB));
 	int yield = 1;
 	int last_time = 0;
 DBGS serprintf("PID[%5d] stream_parser_thread::Starting\r\n", getpid() );	
@@ -3717,6 +3719,7 @@ DBGS serprintf("PID[%5d] stream_parser_thread::Exiting\r\n", getpid() );
 static void *_player_thread( void *data )
 {
 	STREAM *s = (STREAM *)data;
+	timeline_set_local_identity(!!(s->flags & STREAM_THUMB));
 DBGS serprintf("PID[%5d] stream_player_thread::Starting\r\n", getpid() );	
 	
 	while( thread_state_get( &s->engine_tstate ) != THREAD_EXIT ) {

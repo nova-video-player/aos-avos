@@ -46,6 +46,7 @@ void ExtractDurationInfo( int duration, unsigned int *days, unsigned int *hours,
 
 void clear_info( FILE_INFO *info );
 
+int get_url_info_with_abort(STREAM_URL *src, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort, void *opaque);
 int  get_url_info         ( STREAM_URL *src, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );
 int  get_file_info         ( const char *path, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );
 int  get_file_info_clean   ( const char *path, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );

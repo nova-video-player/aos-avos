@@ -45,36 +45,36 @@
 struct thumb_stream_t {
 	STREAM *s;
 	int colorspace;
+	int (*abort)(void *);
+	void *abort_opaque;
 	int num_frames;
 	VIDEO_FRAME *frames[STREAM_MAX_FRAMES];
 	int frames_get[STREAM_MAX_FRAMES];
 };
 
-static int _open( STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx, int num_frames, STREAM_RC *rc )
+static int _open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx, int num_frames, STREAM_RC *rc)
 {
-	int i;
 	thumb_stream_t *p = sink->priv;
-
+	if (num_frames <= 0 || num_frames > STREAM_MAX_FRAMES ||
+	    video->width <= 0 || video->width > VIDEO_MAX_WIDTH ||
+	    video->height <= 0 || video->height > VIDEO_MAX_HEIGHT) return 1;
 	video->colorspace = p->colorspace;
-
-	if (stream_alloc_frames(&p->frames, video->width, video->height, video->colorspace, STREAM_MEM_NRM, &num_frames) != 0) {
+	int wanted = num_frames;
+	stream_alloc_frames(&p->frames, video->width, video->height, video->colorspace,
+		STREAM_MEM_NRM, &num_frames);
+	if (num_frames != wanted) {
+		stream_free_frames(&p->frames, num_frames);
+		memset(p->frames, 0, sizeof(p->frames));
+		p->num_frames = 0;
 		return 1;
 	}
 	p->num_frames = num_frames;
-
-	for( i = 0; i < p->num_frames; i++ ) {
-		p->frames[i] = frame_alloc_with_cs_and_mem( video->width, video->height, video->colorspace, STREAM_MEM_NRM, 1 );
-		if( !p->frames[i] ) {
-serprintf("cannot alloc frame %d\r\n", i);
-			return 1;
-		}
-		p->frames[i]->index   = i;
+	for (int i = 0; i < p->num_frames; i++) {
 		p->frames[i]->user_ID = i;
-		p->frames[i]->locked  = 0;
 		p->frames_get[i] = 0;
 	}
 	sink->is_open = 1;
-        return 0;
+	return 0;
 }
 
 static int _close( STREAM_SINK_VIDEO *sink )
@@ -82,6 +82,7 @@ static int _close( STREAM_SINK_VIDEO *sink )
 	thumb_stream_t *p = sink->priv;
 
 	stream_free_frames(&(p->frames), p->num_frames);
+	memset(p->frames, 0, sizeof(p->frames));
 	p->num_frames = 0;
 	sink->is_open = 0;
         return 0;
@@ -107,6 +108,7 @@ static int _put( STREAM_SINK_VIDEO *sink, VIDEO_FRAME *frame )
 {
 	thumb_stream_t *p = sink->priv;
 
+	if (!frame || frame->index < 0 || frame->index >= p->num_frames) return 1;
 	p->frames_get[frame->index] = 0;
 
         return frame->blit_time;
@@ -135,7 +137,7 @@ static VIDEO_FRAME *_get_frame( STREAM_SINK_VIDEO *sink, int index )
 
 	thumb_stream_t *p = sink->priv;
 
-	return index < p->num_frames ? p->frames[index] : NULL;
+	return index >= 0 && index < p->num_frames ? p->frames[index] : NULL;
 }
 
 // ************************************************
@@ -182,77 +184,73 @@ thumb_stream_t *thumb_stream_create()
 	return (thumb_stream_t *)acalloc(1, sizeof(thumb_stream_t));
 }
 
-IMAGE* thumb_stream_get_frame(thumb_stream_t *thumb_stream, STREAM_URL *src, int etype, int thumb_time, int colorspace, int *rotation)
+static int thumb_aborted(void *opaque)
 {
-        STREAM *stream;
-        STREAM_SINK_VIDEO *sink;
-
-	if (thumb_stream->s) {
-		stream_stop(thumb_stream->s);
-		stream_delete(&thumb_stream->s);
-		thumb_stream->s = NULL;
-	}
-        if (!(stream = stream_new())) {
-		ERR serprintf("%s : cannot create stream\r\n", __FUNCTION__);
-		return NULL;
-        }
-	thumb_stream->s = stream;
-	thumb_stream->colorspace = colorspace;
-
-	sink = _thumb_sink_new(thumb_stream);
-	if (!sink) {
-		return NULL;
-	}
-
-	stream_set_max_video_dimensions(stream, VIDEO_MAX_WIDTH, VIDEO_MAX_HEIGHT);
-        stream_set_buffer_size(stream, 12);   // use 12 MB for thumb creation 
-	stream_set_video_sink(stream, sink);
-
-        if ( stream_open( stream, src, etype, STREAM_MULTI | STREAM_THUMB ) ) {
-		serprintf("thumb: ve %d\r\n", stream->video_error );
-		return NULL;
-        }
-	
-	// now lets decide where to get the thumb from:
-	int start;
-	int duration;
-	stream_get_current_time(stream, &duration);
-	if( !duration ) {
-		int total;
-		stream_get_current_pos( stream, &total );
-		start = total / 2;
-		serprintf("get thumb at pos %d\r\n", start );
-	} else {
-		// set thumb_time only if stream has duration.
-		if (thumb_time != -1 && thumb_time <= duration ) {
-			start = thumb_time;
-		} else {
-			start = duration / 2;
-			start = MIN( THUMB_TIME, start );
-		}
-		serprintf("get thumb at time %d  duration %d\r\n", start, duration );
-	}
-		
-	stream_set_start_time( stream, start );
-	
-        if ( stream_start( stream ) ) {
-		serprintf("thumb: ve %d\r\n", stream->video_error );
-		return NULL;
-        }
-
-	if (rotation)
-		*rotation = stream->video->rotation;
-
-	return (IMAGE *) stream->current_frame;
+	STREAM *s = opaque;
+	thumb_stream_t *p = stream_get_user_ctx(s);
+	return p->abort && p->abort(p->abort_opaque);
 }
 
-void thumb_stream_destroy(thumb_stream_t *thumb_stream)
+static void thumb_stream_clear(thumb_stream_t *p)
 {
-	if (thumb_stream->s) {
-		stream_stop(thumb_stream->s);
-		stream_delete(&thumb_stream->s);
+	if (!p->s) return;
+	if (p->s->open) stream_stop(p->s);
+	// Failure before stream_init/open never reaches stream_stop's sink cleanup.
+	if (p->s->video_sink) {
+		if (p->s->video_sink->is_open) _close(p->s->video_sink);
+		_delete(p->s->video_sink);
+		p->s->video_sink = NULL;
 	}
-	afree(thumb_stream);
+	stream_delete(&p->s);
+}
+
+IMAGE* thumb_stream_get_frame(thumb_stream_t *p, STREAM_URL *src, int etype,
+	int thumb_time, int colorspace, int *rotation, int (*abort)(void *), void *opaque)
+{
+	int old_identity = timeline_set_local_identity(1);
+	IMAGE *image = NULL;
+	thumb_stream_clear(p);
+	p->abort = abort;
+	p->abort_opaque = opaque;
+	if (abort && abort(opaque)) goto out;
+	STREAM *s = p->s = stream_new();
+	if (!s) goto out;
+	p->colorspace = colorspace;
+	STREAM_SINK_VIDEO *sink = _thumb_sink_new(p);
+	if (!sink) goto out;
+	stream_set_video_sink(s, sink);
+	stream_set_user_ctx(s, p);
+	stream_set_abort_handler(s, thumb_aborted);
+	stream_set_max_video_dimensions(s, VIDEO_MAX_WIDTH, VIDEO_MAX_HEIGHT);
+	stream_set_buffer_size(s, 12);
+	if (stream_open(s, src, etype, STREAM_MULTI | STREAM_THUMB)) goto out;
+	int duration;
+	stream_get_current_time(s, &duration);
+	int start;
+	if (!duration) {
+		int total;
+		stream_get_current_pos(s, &total);
+		start = total / 2;
+	} else {
+		start = thumb_time >= 0 && thumb_time <= duration ? thumb_time : MIN(THUMB_TIME, duration / 2);
+	}
+	stream_set_start_time(s, start);
+	if (stream_start(s) || (abort && abort(opaque)) || s->video_error) goto out;
+	if (rotation) *rotation = s->video->rotation;
+	image = (IMAGE *)s->current_frame;
+out:
+	if (!image) thumb_stream_clear(p);
+	timeline_set_local_identity(old_identity);
+	return image;
+}
+
+void thumb_stream_destroy(thumb_stream_t *p)
+{
+	if (!p) return;
+	int old_identity = timeline_set_local_identity(1);
+	thumb_stream_clear(p);
+	timeline_set_local_identity(old_identity);
+	afree(p);
 }
 
 #endif	// CONFIG_VIDEO

@@ -43,6 +43,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/time.h>
 
 #include <string.h>
 #include <strings.h>
@@ -554,6 +555,10 @@ serprintf( "untouched (!?) vrate=%d; vscale=%d\n", video->rate, video->scale );
 					// libavformat used to skip the first 4 bytes in av1 private data but not anymore
 					// for AV1 both sfdec android hw codecs and dav1d do not want this thus skip it
 					int offset = ( video->format == VIDEO_FORMAT_AV1 ) ? 4 : 0;
+					if (!codecpar->extradata || codecpar->extradata_size < offset) {
+						serprintf("FFMPEG: invalid codec extradata size %d\n", codecpar->extradata_size);
+						return 1;
+					}
 					if( codecpar->extradata_size <= sizeof( video->extraData ) ) {
 						// Add debug output to investigate the extradata
 						DBGP {
@@ -1049,7 +1054,7 @@ DBGP serprintf("info\r\n");
 		}
 	}
 
-	_parse_format( s->etype, ff_p );
+	if (_parse_format(s->etype, ff_p)) goto ErrorExit4;
 
 	memcpy( &s->av, &ff_p->av, sizeof( AV_PROPERTIES ) );
 
@@ -2365,89 +2370,133 @@ STREAM_REGISTER_IO( proto, _dummy_new, STREAM_IO_NONLOCAL, ETYPE_RTSP );
 //	get_info_FFMPEG
 //
 // *****************************************************************************
-static int _get_info_FFMPEG( const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
+typedef struct metadata_abort_context {
+	FILE_INFO_ABORT abort;
+	void *opaque;
+	int64_t deadline_us;
+} metadata_abort_context;
+
+static int metadata_interrupted(void *opaque)
 {
-DBGP serprintf("ReadFFMPEGInfo: ");
-	const char *full_path = src->url;
+	metadata_abort_context *ctx = opaque;
+	return (ctx->abort && ctx->abort(ctx->opaque)) || av_gettime_relative() >= ctx->deadline_us;
+}
 
-	FF_PRIV *priv = NULL;
-	// allocate private data
-	if( !(priv = (FF_PRIV*)amalloc( sizeof( FF_PRIV ) ) ) ) {
-		return 1;
+static void metadata_tag_string(AVDictionary *dict, const char *key, char *dst, size_t size, ID3_TAG *tag)
+{
+	AVDictionaryEntry *entry = av_dict_get(dict, key, NULL, 0);
+	if (!entry || !entry->value[0]) return;
+	snprintf(dst, size, "%s", entry->value);
+	tag->valid = 1;
+}
+
+static int metadata_tag_number(AVDictionary *dict, const char *key, ID3_TAG *tag)
+{
+	AVDictionaryEntry *entry = av_dict_get(dict, key, NULL, 0);
+	if (!entry) return 0;
+	char *end;
+	errno = 0;
+	long value = strtol(entry->value, &end, 10);
+	if (errno || end == entry->value || value < 0 || value > INT_MAX) return 0;
+	tag->valid = 1;
+	return value;
+}
+
+static int metadata_extract_tags(AVFormatContext *fmt, ID3_TAG *tag, APIC *apic)
+{
+#define TAG(key, field) metadata_tag_string(fmt->metadata, key, tag->field, sizeof(tag->field), tag)
+	TAG("title", title);
+	TAG("artist", artist);
+	TAG("album", album);
+	TAG("album_artist", album_artist);
+	TAG("composer", composer);
+	TAG("author", author);
+	TAG("writer", writer);
+	TAG("genre", genre);
+	TAG("date", year);
+	if (!tag->year[0]) TAG("year", year);
+	TAG("comment", comment);
+	TAG("description", description);
+	TAG("compilation", compilation);
+	TAG("location", location);
+	tag->track = metadata_tag_number(fmt->metadata, "track", tag);
+	tag->discnumber = metadata_tag_number(fmt->metadata, "disc", tag);
+#undef TAG
+	if (!apic) return 0;
+	apic->valid = 0;
+	apic->size = 0;
+	unsigned cap = MIN(apic->buffer_size, APIC_MAX_SIZE);
+	for (unsigned i = 0; i < fmt->nb_streams; i++) {
+		AVStream *st = fmt->streams[i];
+		AVPacket *picture = &st->attached_pic;
+		if (!(st->disposition & AV_DISPOSITION_ATTACHED_PIC) || !picture->data ||
+		    picture->size <= 0 || (unsigned)picture->size > cap) continue;
+		int type;
+		if (st->codecpar->codec_id == AV_CODEC_ID_MJPEG) type = ETYPE_JPG;
+		else if (st->codecpar->codec_id == AV_CODEC_ID_PNG) type = ETYPE_PNG;
+		else continue;
+		if (!apic->buffer) {
+			apic->buffer = amalloc(picture->size);
+			if (!apic->buffer) return 1;
+			apic->buffer_size = picture->size;
+		}
+		memcpy(apic->buffer, picture->data, picture->size);
+		apic->size = picture->size;
+		apic->etype = type;
+		apic->valid = 1;
+		tag->apic = 1;
+		break;
 	}
-	
-	memset( priv, 0, sizeof( FF_PRIV ) );
-	av_init_props( priv );
+	return 0;
+}
 
-	int err = 0;
-	AVDictionary **opts = NULL;
-	int nb_streams = 0;
-
-	// Open video file
+static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort)
+{
+	int err = 1;
+	AVDictionary *options = NULL;
+	metadata_abort_context cancel = {abort, info->abort_opaque, av_gettime_relative() + 30000000};
+	if (metadata_interrupted(&cancel)) return 1;
+	FF_PRIV *priv = acalloc(1, sizeof(*priv));
+	if (!priv) return 1;
+	av_init_props(priv);
 	priv->fmt = avformat_alloc_context();
-	if (!priv->fmt) { afree(priv); return 1; }
-
-	// For metadata-only retrieval: use minimal probing to speed up file scanning
-	AVDictionary *fmt_opts = NULL;
-	av_dict_set(&fmt_opts, "probesize", "500000", 0);      // 500KB instead of 5MB default
-	av_dict_set(&fmt_opts, "analyzeduration", "1000000", 0);  // 1 second max
-	ffmpeg_set_http_options(&fmt_opts, src);
-
-	serprintf("FFMPEG: metadata opening url [%s]\r\n", full_path);
-	if( ffmpeg_open_input(priv, full_path, &fmt_opts) != 0) {
-serprintf("FFMPEG: cannot open file [%s]\r\n", full_path);
-		av_dict_free(&fmt_opts);
-		err = 1;
-		goto ErrorExit;
+	if (!priv->fmt) goto out;
+	priv->fmt->interrupt_callback = (AVIOInterruptCB){metadata_interrupted, &cancel};
+	av_dict_set(&options, "probesize", "500000", 0);
+	av_dict_set(&options, "analyzeduration", "1000000", 0);
+	ffmpeg_set_http_options(&options, src);
+	if (ffmpeg_open_input(priv, src->url, &options) < 0 || metadata_interrupted(&cancel)) goto out;
+	// analyzeduration is a format option, not a per-decoder option. A failed
+	// probe must not publish a cached success, even when it found some tracks.
+	if (avformat_find_stream_info(priv->fmt, NULL) < 0 || metadata_interrupted(&cancel)) goto out;
+	if (priv->fmt->pb && priv->fmt->pb->error < 0 && priv->fmt->pb->error != AVERROR_EOF) goto out;
+	if (_parse_format(info->etype, priv) || metadata_interrupted(&cancel)) goto out;
+	if (!priv->av.as_max && !priv->av.vs_max) goto out;
+	if (metadata_extract_tags(priv->fmt, &priv->tag, apic)) goto out;
+	memcpy(&info->av, &priv->av, sizeof(info->av));
+	memcpy(&info->id3_tag, &priv->tag, sizeof(info->id3_tag));
+	// Large codec headers belong to AVFormatContext. Metadata results must
+	// not retain dangling references after that context closes.
+	for (int i = 0; i < info->av.vs_max; i++) {
+		info->av.video[i].extraData2 = NULL;
+		info->av.video[i].extraDataSize2 = 0;
 	}
-	av_dict_free(&fmt_opts);
-
-DBGP serprintf("info\r\n");
-	// Retrieve stream information with stream-specific optimization
-	// For file scanning: only analyze video stream thoroughly, minimize audio analysis
-	nb_streams = priv->fmt->nb_streams;
-	opts = (AVDictionary **)acalloc(nb_streams, sizeof(AVDictionary *));
-	if (opts) {
-		for (int i = 0; i < nb_streams; i++) {
-			if (priv->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-				// Analyze video stream with minimal time
-				av_dict_set(&opts[i], "analyzeduration", "1000000", 0);  // 1 second max
-			} else {
-				// Minimal analysis for audio/subtitles - just get basic info
-				av_dict_set(&opts[i], "analyzeduration", "500000", 0);  // 0.5 second
-			}
-		}
+	for (int i = 0; i < info->av.as_max; i++) {
+		info->av.audio[i].extraData2 = NULL;
+		info->av.audio[i].extraDataSize2 = 0;
 	}
-	if (avformat_find_stream_info(priv->fmt, opts) < 0) {
-		printf("FFMPEG: cannot find stream info\r\n");
+	for (int i = 0; i < info->av.subs_max; i++) {
+		info->av.sub[i].extraData2 = NULL;
+		info->av.sub[i].extraDataSize2 = 0;
 	}
-	// Clean up
-	if (opts) {
-		for (int i = 0; i < nb_streams; i++) {
-			av_dict_free(&opts[i]);
-		}
-		afree(opts);
-	}
-
-	_parse_format( info->etype, priv );
-
-	memcpy( &info->av, &priv->av, sizeof( AV_PROPERTIES ) );
-	memcpy( &info->id3_tag, &priv->tag, sizeof( ID3_TAG ) );
-
-	info->size     = priv->size;
+	info->size = priv->size;
 	info->duration = priv->duration;
-
-	// Format bitstream informations for display
-DBGP serprintf("video %d/%d  audio %d/%d\r\n", info->av.vs_max, info->video->valid, info->av.as_max, info->audio->valid);
-
-ErrorExit:
-	if( priv && priv->fmt ) {
-		// Close the video file
-		avformat_close_input(&priv->fmt);
-	}
+	err = metadata_interrupted(&cancel) ? 1 : 0;
+out:
+	av_dict_free(&options);
+	if (priv->fmt) avformat_close_input(&priv->fmt);
 	ffmpeg_close_fd_input(priv);
-	afree( priv );
-
+	afree(priv);
 	return err;
 }
 

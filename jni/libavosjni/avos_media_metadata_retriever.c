@@ -77,42 +77,56 @@ static inline int handle_ret(JNIEnv *env, int ret, const char *cmd)
 
 #define CHECK(cmd) handle_ret(env, (cmd), #cmd)
 
-static inline void set_mr(JNIEnv *env, jobject thiz, avos_mr_t *mr)
-{
-    pthread_mutex_lock(&mtx);
-    (*env)->SetLongField(env, thiz, mr_fields.handle, (jlong) mr);
-    pthread_mutex_unlock(&mtx);
-}
-
-static inline avos_mr_t *get_mr(JNIEnv *env, jobject thiz)
-{
+// The Java field owns a context. Leases keep it alive through the last JNI
+// copy, while operations on a single retriever are serialized independently.
+typedef struct mr_context {
     avos_mr_t *mr;
+    pthread_mutex_t operation;
+    pthread_cond_t idle;
+    unsigned users; // protected by mtx
+    int closing;
+} mr_context;
+
+static void put_mr(mr_context **lease)
+{
+    mr_context *ctx = *lease;
+    if (!ctx) return;
+    pthread_mutex_unlock(&ctx->operation);
     pthread_mutex_lock(&mtx);
-    mr = (avos_mr_t *)(*env)->GetLongField(env, thiz, mr_fields.handle);
+    if (--ctx->users == 0) pthread_cond_broadcast(&ctx->idle);
     pthread_mutex_unlock(&mtx);
-    return mr;
 }
 
-static inline avos_mr_t *get_mr_or_throw(JNIEnv *env, jobject thiz)
+static mr_context *acquire_mr(JNIEnv *env, jobject thiz)
 {
-    avos_mr_t *mr = get_mr(env, thiz);
-    if (!mr)
-        jniThrowException(env, "java/lang/IllegalStateException", "no mr object");
-    return mr;
+    pthread_mutex_lock(&mtx);
+    mr_context *ctx = (mr_context *)(intptr_t)(*env)->GetLongField(env, thiz, mr_fields.handle);
+    if (ctx) ctx->users++;
+    pthread_mutex_unlock(&mtx);
+    if (ctx) {
+        pthread_mutex_lock(&ctx->operation);
+        if (!__atomic_load_n(&ctx->closing, __ATOMIC_ACQUIRE)) return ctx;
+        put_mr(&ctx);
+    }
+    jniThrowException(env, "java/lang/IllegalStateException", "retriever released");
+    return NULL;
 }
+
+#define ACQUIRE_MR() \
+    mr_context *lease __attribute__((cleanup(put_mr))) = acquire_mr(env, thiz); \
+    avos_mr_t *mr = lease ? lease->mr : NULL
 
 void
 Java_com_archos_medialib_AvosMediaMetadataRetriever_create(JNIEnv *env, jobject thiz, jobject weak_thiz)
 {
-    avos_mr_t *mr;
-
-    if (!avos)
-        goto err;
-    mr = avos->create();
-    if (!mr)
-        goto err;
-
-    set_mr(env, thiz, mr);
+    mr_context *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) goto err;
+    if (!avos || !(ctx->mr = avos->create())) { free(ctx); goto err; }
+    pthread_mutex_init(&ctx->operation, NULL);
+    pthread_cond_init(&ctx->idle, NULL);
+    pthread_mutex_lock(&mtx);
+    (*env)->SetLongField(env, thiz, mr_fields.handle, (jlong)(intptr_t)ctx);
+    pthread_mutex_unlock(&mtx);
     return;
 err:
     jniThrowException(env, "java/lang/IllegalStateException", "can't create mr");
@@ -121,14 +135,18 @@ err:
 void
 Java_com_archos_medialib_AvosMediaMetadataRetriever_nativeRelease(JNIEnv *env, jobject thiz)
 {
-    avos_mr_t *mr = get_mr(env, thiz);
-    if (!mr)
-        return;
-    LOGV("nativeRelease\n");
-
-    avos->destroy(mr);
-
-    set_mr(env, thiz, NULL);
+    pthread_mutex_lock(&mtx);
+    mr_context *ctx = (mr_context *)(intptr_t)(*env)->GetLongField(env, thiz, mr_fields.handle);
+    if (!ctx) { pthread_mutex_unlock(&mtx); return; }
+    (*env)->SetLongField(env, thiz, mr_fields.handle, 0);
+    __atomic_store_n(&ctx->closing, 1, __ATOMIC_RELEASE);
+    avos->cancel(ctx->mr);
+    while (ctx->users) pthread_cond_wait(&ctx->idle, &mtx);
+    pthread_mutex_unlock(&mtx);
+    avos->destroy(ctx->mr);
+    pthread_mutex_destroy(&ctx->operation);
+    pthread_cond_destroy(&ctx->idle);
+    free(ctx);
 }
 
 static void keys_values_free(char **entries)
@@ -199,9 +217,9 @@ err:
 }
 
 void
-Java_com_archos_medialib_AvosMediaMetadataRetriever_setDataSource(JNIEnv *env, jobject thiz, jstring path, jobjectArray keys, jobjectArray values)
+Java_com_archos_medialib_AvosMediaMetadataRetriever_nativeSetDataSource(JNIEnv *env, jobject thiz, jstring path, jobjectArray keys, jobjectArray values)
 {
-    avos_mr_t *mr = get_mr_or_throw(env, thiz);
+    ACQUIRE_MR();
     if (!mr)
         return;
 
@@ -227,10 +245,17 @@ Java_com_archos_medialib_AvosMediaMetadataRetriever_setDataSource(JNIEnv *env, j
     (*env)->ReleaseStringUTFChars(env, path, c_path);
 }
 
+// Keep the entry point for Java callers built before the proxy-owner wrapper.
+void
+Java_com_archos_medialib_AvosMediaMetadataRetriever_setDataSource(JNIEnv *env, jobject thiz, jstring path, jobjectArray keys, jobjectArray values)
+{
+    Java_com_archos_medialib_AvosMediaMetadataRetriever_nativeSetDataSource(env, thiz, path, keys, values);
+}
+
 void
 Java_com_archos_medialib_AvosMediaMetadataRetriever_setDataSourceFD(JNIEnv *env, jobject thiz, jobject fileDescriptor, jlong offset, jlong length)
 {
-    avos_mr_t *mr = get_mr_or_throw(env, thiz);
+    ACQUIRE_MR();
     if (!mr)
         return;
 
@@ -246,7 +271,7 @@ jobject
 Java_com_archos_medialib_AvosMediaMetadataRetriever_extractMetadata(JNIEnv *env, jobject thiz, jint keyCode)
 {
     const char *str;
-    avos_mr_t *mr = get_mr_or_throw(env, thiz);
+    ACQUIRE_MR();
     if (!mr) return NULL;
     str = avos->extractmetadata(mr, keyCode);
     if (str)
@@ -259,11 +284,11 @@ jbyteArray
 Java_com_archos_medialib_AvosMediaMetadataRetriever_getMetadata(JNIEnv *env, jobject thiz)
 {
     metadata_buffer_t *buffer = NULL;
-    avos_mr_t *mr = get_mr_or_throw(env, thiz);
+    ACQUIRE_MR();
     jbyteArray array = NULL;
     if (!mr) return NULL;
 
-    if (avos->getmetadata(mr, &buffer))
+    if (avos->getmetadata(mr, &buffer) || !buffer)
         return NULL;
 
     array =  (*env)->NewByteArray(env, avos_metadata->size(buffer));
@@ -289,13 +314,18 @@ jobject
 Java_com_archos_medialib_AvosMediaMetadataRetriever_nativeGetFrameAtTime(JNIEnv *env, jobject thiz, jlong timeUs, jint option)
 {
     avos_bgra_bitmap_t *frame = NULL;
-    avos_mr_t *mr = get_mr_or_throw(env, thiz);
+    ACQUIRE_MR();
     jobject bitmap;
     float scale;
     uint32_t scaled_height;
 
     if (!mr) return NULL;
-    CHECK(avos->getframe(mr, timeUs == -1 ? -1 : timeUs / 1000, &frame));
+    if (timeUs < -1 || timeUs / 1000 > INT32_MAX) {
+        jniThrowException(env, "java/lang/IllegalArgumentException", "thumbnail time out of range");
+        return NULL;
+    }
+    if (CHECK(avos->getframe(mr, timeUs == -1 ? -1 : timeUs / 1000, &frame)) != AVOS_ERR_OK)
+        return NULL;
     if (!frame)
         return NULL;
 
@@ -344,12 +374,12 @@ jbyteArray
 Java_com_archos_medialib_AvosMediaMetadataRetriever_getEmbeddedPicture(JNIEnv *env, jobject thiz, jint pictureType)
 {
     LOGV("getEmbeddedPicture: %d", pictureType);
-    avos_mr_t *mr = get_mr_or_throw(env, thiz);
-    avos_apic_t *apic;
+    ACQUIRE_MR();
+    avos_apic_t *apic = NULL;
     jbyteArray array;
 
     if (!mr) return NULL;
-    CHECK(avos->getapic(mr, &apic));
+    if (CHECK(avos->getapic(mr, &apic)) != AVOS_ERR_OK) return NULL;
     if (!apic)
         return NULL;
 

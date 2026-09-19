@@ -301,7 +301,7 @@ ERR serprintf("cannot create io for: %s\n", src->url );
 	
 	if( !io->mmap ) {
 ERR serprintf("io cannot mmap for: %s\n", src->url );
-		return 1;
+		goto ErrorExit;
 	}
 
 	if( io->open( io, O_RDONLY ) ) {
@@ -390,15 +390,21 @@ static int get_info_subtitle(const char *full_path, FILE_INFO *info)
 //	get_url_info
 //
 // ************************************************
-int get_url_info( STREAM_URL *src, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort )
+int get_url_info(STREAM_URL *src, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort)
 {
-	if( !src ) {
+	return get_url_info_with_abort(src, type, etype, info, apic, abort, NULL);
+}
+
+int get_url_info_with_abort(STREAM_URL *src, int type, int etype, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort, void *opaque)
+{
+	if( !src || !info || (abort && abort(opaque)) ) {
 		return 1;
 	}
 
 DBG serprintf("get_url_info: %s %d/%d\r\n", src->url, type, etype );
 
 	clear_info( info );
+	info->abort_opaque = opaque;
 
 	info->type  = type;
 	info->etype = etype;
@@ -432,7 +438,8 @@ DBG serprintf("mmap: %s\r\n", src->url);
 		err = get_info_mmap_io( src, info, apic, abort, info_mmap );
 	}
 
-	if (type == TYPE_VID) {
+	if (abort && abort(opaque)) return 1;
+	if (!err && type == TYPE_VID) {
 		get_info_subtitle( src->url, info );
 	}
 	
@@ -448,7 +455,7 @@ if( err ) {
 		} 
 	}
 
-	return err;
+	return abort && abort(opaque) ? 1 : err;
 }
 
 // ************************************************

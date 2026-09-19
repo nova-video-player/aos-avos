@@ -92,6 +92,8 @@ double ts_to_rst_delta( double time_ms );
 #define RST_TO_TS_DELTA( value, return_type ) ( (return_type)rst_to_ts_delta( (double)( value ) ) )
 #define TS_TO_RST_DELTA( value, return_type ) ( (return_type)ts_to_rst_delta( (double)( value ) ) )
 
+// Thumbnail workers use identity timestamps without changing playback state.
+int timeline_set_local_identity(int enabled);
 void timeline_map_apply( double rst_anchor_ms, double ts_anchor_ms, float speed );
 
 int is_audio_speed_changed( float target_speed );

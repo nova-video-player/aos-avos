@@ -563,8 +563,18 @@ static timeline_state_t timeline_states[2] = {
 static volatile int timeline_active_index = 0;
 static pthread_mutex_t timeline_update_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static __thread int timeline_local_identity;
+
+int timeline_set_local_identity(int enabled)
+{
+	int old = timeline_local_identity;
+	timeline_local_identity = enabled;
+	return old;
+}
+
 static inline timeline_state_t timeline_snapshot(void)
 {
+	if (timeline_local_identity) return (timeline_state_t){0.0, 0.0, 1.0, 1.0};
 #if defined(__GNUC__)
 	int idx = __atomic_load_n(&timeline_active_index, __ATOMIC_ACQUIRE);
 #else
@@ -575,11 +585,12 @@ static inline timeline_state_t timeline_snapshot(void)
 
 float get_effective_audio_speed( void )
 {
-	return audio_interface_is_audio_speed_enabled() ? audio_interface_get_audio_speed() : 1.0f;
+	return !timeline_local_identity && audio_interface_is_audio_speed_enabled() ? audio_interface_get_audio_speed() : 1.0f;
 }
 
 void timeline_map_apply( double rst_anchor_ms, double ts_anchor_ms, float speed )
 {
+	if (timeline_local_identity) return;
 	if( speed <= 0.0f || !isfinite(speed) ) {
 		speed = 1.0f;
 	}

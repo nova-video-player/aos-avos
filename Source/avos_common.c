@@ -116,14 +116,15 @@ avos_msg_t *avos_msg_new_bitmap_subtitle(uint32_t id, uint32_t position, uint32_
 
 static int avos_metadata_buffer_realloc(metadata_buffer_t *buffer, size_t size)
 {
-	if (buffer->write_off + size > buffer->data_size) {
-		buffer->data_size += METADATA_BUFFER_SIZE;
-		buffer->data = realloc(buffer->data, buffer->data_size);
-		if (!buffer->data) {
-			buffer->data_size = 0;
-			buffer->write_off = 0;
-			return -1;
-		}
+	if (!buffer || size > SIZE_MAX - buffer->write_off) return -1;
+	size_t needed = buffer->write_off + size;
+	if (needed > buffer->data_size) {
+		if (needed > SIZE_MAX - (METADATA_BUFFER_SIZE - 1)) return -1;
+		size_t capacity = (needed + METADATA_BUFFER_SIZE - 1) & ~(size_t)(METADATA_BUFFER_SIZE - 1);
+		uint8_t *data = realloc(buffer->data, capacity);
+		if (!data) return -1;
+		buffer->data = data;
+		buffer->data_size = capacity;
 	}
 	return 0;
 }
@@ -253,24 +254,16 @@ err:
 
 metadata_buffer_t *avos_metadata_dup(metadata_buffer_t *buffer)
 {
-	metadata_buffer_t *dup;
-	
-	dup = malloc(sizeof(metadata_buffer_t));
-	if (!dup)
-		goto err;
-	memcpy(dup, buffer, sizeof(metadata_buffer_t));
-	dup->data = malloc(buffer->data_size);
-	if (!dup->data)
-		goto err;
-	memcpy(dup->data, buffer->data, buffer->data_size);
-	return dup;
-err:
-	if (dup) {
-		if (dup->data)
-			free(dup->data);
-		free(dup);
+	if (!buffer) return NULL;
+	metadata_buffer_t *dup = calloc(1, sizeof(*dup));
+	if (!dup) return NULL;
+	if (buffer->write_off) {
+		dup->data = malloc(buffer->write_off);
+		if (!dup->data) { free(dup); return NULL; }
+		memcpy(dup->data, buffer->data, buffer->write_off);
 	}
-	return NULL;
+	dup->data_size = dup->write_off = buffer->write_off;
+	return dup;
 }
 
 uint8_t *avos_metadata_data(metadata_buffer_t *buffer)

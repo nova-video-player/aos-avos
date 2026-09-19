@@ -20,7 +20,7 @@
 typedef struct  thumb_stream_t thumb_stream_t;
 
 thumb_stream_t*	thumb_stream_create();
-IMAGE*		thumb_stream_get_frame(thumb_stream_t *thumb_stream, STREAM_URL *src, int etype, int thumb_time, int colorspace, int *rotation);
+IMAGE*		thumb_stream_get_frame(thumb_stream_t *thumb_stream, STREAM_URL *src, int etype, int thumb_time, int colorspace, int *rotation, int (*abort)(void *), void *opaque);
 void		thumb_stream_destroy(thumb_stream_t *thumb_stream);
 
 #endif // THUMB_STREAM

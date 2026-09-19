@@ -34,8 +34,11 @@ typedef struct avos_mr_handle {
 	int (*setdatasource_fd)	(avos_mr_t *mr, int fd, int64_t offset, int64_t length);
 	int (*getmetadata)	(avos_mr_t *mr, metadata_buffer_t **buffer);
 	const char *(*extractmetadata) (avos_mr_t *mr, uint32_t id);
+	// The returned frame owns its pixels; free the frame once the copy is complete.
 	int (*getframe)		(avos_mr_t *mr, int time_ms, avos_bgra_bitmap_t **pframe);
 	int (*getapic)		(avos_mr_t *mr, avos_apic_t **papic);
+	// May run concurrently with an operation; destruction still requires quiescence.
+	void (*cancel)          (avos_mr_t *mr);
 } avos_mr_handle_t;
 
 const avos_mr_handle_t *avos_mr_get_handle();

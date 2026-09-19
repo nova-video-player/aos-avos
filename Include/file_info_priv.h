@@ -49,6 +49,7 @@ typedef struct FILE_INFO {
 	time_t		date;
 	
 	char		full_path[MAX_NAME_LEN + 1];
+	void *abort_opaque; // borrowed for the duration of get_url_info_with_abort()
 } FILE_INFO;
 
 typedef int (*FILE_INFO_PATH)( const char *path,           struct FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort );

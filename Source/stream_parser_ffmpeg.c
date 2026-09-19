@@ -1517,6 +1517,27 @@ static int parser_read_error(STREAM *s, int error)
 	return FF_PARSE_ERROR;
 }
 
+// A read-ahead failure does not invalidate packets already admitted to the
+// queues. Drain those packets and decoder/sink output before reporting the file
+// error. A seek failure cannot use this path: its consumers are still idle.
+static int parser_input_error(STREAM *s, int result, int demux_result)
+{
+	AVIOContext *pb = ff_p->fmt->pb;
+	serprintf("FFMPEG: read failure: %s demux=%d io=%d eof=%d pos=%lld size=%lld "
+		"aq=%d vq=%d; %s\n", av_err2str(result), demux_result,
+		pb ? pb->error : 0, pb ? pb->eof_reached : 0,
+		(long long)(pb ? avio_tell(pb) : -1),
+		ff_p->size_known ? (long long)ff_p->size : -1LL,
+		queue_packets(&ff_p->aq), queue_packets(&ff_p->vq),
+		ff_p->seeking ? "seek failed" : "draining queued media before error");
+	if (ff_p->seeking)
+		return parser_read_error(s, result);
+	ff_p->read_failed = 1;
+	s->parser_error = 1;
+	s->audio_parse_end = s->video_parse_end = 1;
+	return FF_PARSE_ERROR;
+}
+
 // Reserve bounded headroom for the audio packet that ends starvation. Never
 // retain unlimited keyframes/subtitles while scanning a long audio gap.
 static int enqueue_media_packet(STREAM *s, AVQueue *q, AVPacket *packet, int audio_starved)
@@ -1598,6 +1619,7 @@ DBGP serprintf("FFMPEG: sleep\r\n");
 	AVPacket packet = { 0 };
 	// Read new packet
 	int result = av_read_frame(fmt, &packet);
+	int demux_result = result;
 	if (result < 0) {
 		av_packet_unref(&packet);
 		if (s->parser_interrupt || stream_abort(s)) return FF_PARSE_WAIT;
@@ -1611,7 +1633,7 @@ DBGP serprintf("FFMPEG: sleep\r\n");
 			}
 			return FF_PARSE_WAIT;
 		}
-		if (result != AVERROR_EOF) return parser_read_error(s, result);
+		if (result != AVERROR_EOF) return parser_input_error(s, result, demux_result);
 		s->video_parse_end = s->audio_parse_end = 1;
 		return FF_PARSE_END;
 	}
@@ -1824,6 +1846,7 @@ serprintf("FFMPEG: seek error\r\n");
 	s->audio_parse_end = 0;
 	s->video_parse_end = 0;
 	ff_p->read_failed = 0;
+	s->parser_error = 0;
 	ff_p->drop_video_until_key = 0;
 
 	_flush_packets( &ff_p->vq, "VID" );

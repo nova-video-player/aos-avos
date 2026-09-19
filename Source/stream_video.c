@@ -183,6 +183,7 @@ static int  	_stream_get_real_time( STREAM *s, int time );
 static int  	_stream_seek_real( STREAM *s, int time, int pos, int dir, int flags, int force_reload );
 static void 	_stream_player_sync( STREAM *s );
 static void 	_stream_player_async( STREAM *s );
+static int _check_end( STREAM *s );
 static int  	_stream_wait_for_idle( STREAM *s, int timeout );
 static int  	_stream_play_n_frames( STREAM *s, int n, int time, int old_time );
 static void 	_do_stuff( STREAM *s );
@@ -3737,7 +3738,13 @@ DBGS serprintf("PID[%5d] stream_player_thread::Starting\r\n", getpid() );
 		thread_state_ack( &s->engine_tstate );
 		s->engine_yield = 1;
 		if( thread_state_get( &s->engine_tstate ) == THREAD_RUNNING ) {
-			if( s->player && s->video_error == VE_NO_ERROR ) {
+			if( s->video_error != VE_NO_ERROR ) {
+				// Errors raised by parser/audio workers must reach the same
+				// recovery/notification path as errors raised by the player.
+				// Suppressing the player alone leaves the app "playing" forever.
+				if( !s->stream_end )
+					_check_end(s);
+			} else if( s->player ) {
 				s->player( s );
 			}
 		}
@@ -3933,7 +3940,8 @@ serprintf("____%d %lld\r\n", s->buffer->buf_scan, s->buffer->buf_scan_pos );
 	}
 
 	if( s->video_error ) {
-		if( stream_handle_codec_error && !stream_force_prio && s->video_error == VE_VIDEO_CODEC_ERROR ) {
+		if( stream_handle_codec_error && !stream_force_prio && s->video_dec &&
+		    s->video_error == VE_VIDEO_CODEC_ERROR ) {
 			if( !_handle_video_codec_error( s ) ) {
 				_free_all_frames( s );
 		
@@ -3959,7 +3967,7 @@ serprintf("error, stop!\r\n");
 		
 		if( video_end && audio_end ) {
 			// maybe the parser wants to go on?
-			if( !s->video_error && s->parser->start_next && !s->parser->start_next( s ) ) {
+			if( !s->video_error && !s->parser_error && s->parser->start_next && !s->parser->start_next( s ) ) {
 DBGS serprintf("stream_end: parser starts next!\r\n");
 				_seek_init( s );
 				_video_init( s, -1 );

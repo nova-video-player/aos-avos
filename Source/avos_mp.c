@@ -1092,8 +1092,17 @@ static int avos_mp_setdatasource_fd(avos_mp_t *mp, int fd, int64_t offset, int64
 
 static int avos_mp_setsurface(avos_mp_t *mp, void *handle)
 {
-	mp->surface_handle = handle;
-	return AVOS_ERR_OK;
+	// A live decoder/sink borrows this window until close finishes. Surface
+	// replacement is a stop/reopen transaction performed by the Java owner.
+	pthread_mutex_lock(&mp->async.mtx);
+	int ret = AVOS_ERR_OK;
+	if (mp->async.destroying ||
+	    (handle != mp->surface_handle && (mp->media || mp->async.open_pending)))
+		ret = AVOS_ERR_CRITICAL;
+	else
+		mp->surface_handle = handle;
+	pthread_mutex_unlock(&mp->async.mtx);
+	return ret;
 }
 
 int avos_mp_getmetadata(avos_mp_t *mp, metadata_buffer_t **buffer)

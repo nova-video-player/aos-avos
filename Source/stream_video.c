@@ -5672,6 +5672,8 @@ int stream_set_audio_stream( STREAM *s, int audio_stream )
 
 int stream_refresh_audio_stream( STREAM *s )
 {
+	// External audio changes must not turn video-only playback into an error.
+	if (!s->audio->valid) return 0;
 	return stream_set_audio_stream_internal( s, s->av.as, 1 );
 }
 

@@ -124,22 +124,6 @@ static inline avos_mp_t *get_mp_or_throw(JNIEnv *env, jobject thiz)
     return mp;
 }
 
-static inline void set_surface(JNIEnv *env, jobject thiz, void *surface)
-{
-    pthread_mutex_lock(&mtx);
-    (*env)->SetLongField(env, thiz, mp_fields.native_window, (jlong)surface);
-    pthread_mutex_unlock(&mtx);
-}
-
-static inline void *get_surface(JNIEnv *env, jobject thiz)
-{
-    void *surface;
-    pthread_mutex_lock(&mtx);
-    surface = (void *)(*env)->GetLongField(env, thiz, mp_fields.native_window);
-    pthread_mutex_unlock(&mtx);
-    return surface;
-}
-
 static inline void *get_surface_and_clear(JNIEnv *env, jobject thiz)
 {
     void *surface;
@@ -325,7 +309,6 @@ unregister_avosmediaplayer(JNIEnv *env)
 void
 Java_com_archos_medialib_AvosMediaPlayer_create(JNIEnv *env, jobject thiz, jobject weak_thiz)
 {
-    void *surface;
     const char *err_msg = NULL;
     avos_mp_t *mp;
     event_ctx_t *event_ctx;
@@ -346,10 +329,6 @@ Java_com_archos_medialib_AvosMediaPlayer_create(JNIEnv *env, jobject thiz, jobje
         goto err;
     }
     avos->setpriv(mp, event_ctx);
-
-    surface = get_surface(env, thiz);
-    if (surface)
-        avos->setsurface(mp, surface);
 
     set_mp(env, thiz, mp);
     return;
@@ -372,31 +351,29 @@ free_native_window(JNIEnv *env, jobject thiz)
 void
 Java_com_archos_medialib_AvosMediaPlayer_setVideoSurface(JNIEnv *env, jobject thiz, jobject jsurface)
 {
-    int ret;
-    void *surface;
-    const char *err_msg = NULL;
-    avos_mp_t *mp __attribute__((cleanup(release_mp_call))) = NULL;
-    jclass clazz;
-    jfieldID surface_field;
-
-    LOGD("setVideoSurface\n");
-
-    free_native_window(env, thiz);
-
-    surface = ANativeWindow_fromSurface(env, jsurface);;
-    if (!surface) {
-        err_msg = "!surface";
-        goto err;
+    avos_mp_t *mp __attribute__((cleanup(release_mp_call))) = get_mp_or_throw(env, thiz);
+    if (!mp) return;
+    ANativeWindow *window = jsurface ? ANativeWindow_fromSurface(env, jsurface) : NULL;
+    if (jsurface && !window) {
+        jniThrowException(env, "java/lang/IllegalArgumentException", "invalid surface");
+        return;
     }
-
-    set_surface(env, thiz, surface);
-
-    mp = get_mp(env, thiz);
-    if (mp)
-        avos->setsurface(mp, surface);
-    return;
-err:
-    jniThrowException(env, "java/lang/IllegalArgumentException", err_msg);
+    // Detachment must stop all consumers before dropping the owned reference.
+    if (!jsurface && CHECK(avos->close(mp)) != AVOS_ERR_OK) return;
+    pthread_mutex_lock(&mtx);
+    avos_mp_t *current = (avos_mp_t *)(*env)->GetLongField(env, thiz, mp_fields.handle);
+    int ret = current == mp ? avos->setsurface(mp, window) : AVOS_ERR_CRITICAL;
+    ANativeWindow *old = NULL;
+    if (ret == AVOS_ERR_OK) {
+        old = (ANativeWindow *)(*env)->GetLongField(env, thiz, mp_fields.native_window);
+        (*env)->SetLongField(env, thiz, mp_fields.native_window, (jlong)(intptr_t)window);
+    }
+    pthread_mutex_unlock(&mtx);
+    if (old) ANativeWindow_release(old);
+    if (ret != AVOS_ERR_OK) {
+        if (window) ANativeWindow_release(window);
+        jniThrowException(env, "java/lang/IllegalStateException", "stop playback before replacing its surface");
+    }
 }
 
 void

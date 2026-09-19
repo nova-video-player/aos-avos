@@ -590,6 +590,22 @@ static audio_ctx_t *audiotrack_open(int mode)
 	return at;
 }
 
+// Resolve through the application's loader: decoder threads are native threads.
+static void audiotrack_observe_route(audio_ctx_t *at, int attach)
+{
+	jstring name = (*at->env)->NewStringUTF(at->env, "com.archos.medialib.LibAvos");
+	jclass clazz = name ? (*at->env)->CallObjectMethod(at->env, myClassLoader, myFindClassMethod, name) : NULL;
+	if (name) (*at->env)->DeleteLocalRef(at->env, name);
+	if (clazz) {
+		jmethodID method = (*at->env)->GetStaticMethodID(at->env, clazz,
+			attach ? "observeAudioRoute" : "forgetAudioRoute", "(Landroid/media/AudioTrack;)V");
+		if (method) (*at->env)->CallStaticVoidMethod(at->env, clazz, method, at->obj);
+		(*at->env)->DeleteLocalRef(at->env, clazz);
+	}
+	// Older MediaLib builds have no observer; retain playback compatibility.
+	if ((*at->env)->ExceptionCheck(at->env)) (*at->env)->ExceptionClear(at->env);
+}
+
 static int audiotrack_close(audio_ctx_t **pat)
 {
 	if (!pat || !*pat) return 0;
@@ -625,6 +641,7 @@ static int audiotrack_close(audio_ctx_t **pat)
 		if (underrun_count > 0)
 			ERR LOG("Underrun count: %d", underrun_count);
 
+		audiotrack_observe_route(at, 0);
 		call_void_method(at, "release", "()V");
 		(*at->env)->DeleteGlobalRef(at->env, at->obj);
 		at->obj = NULL;  // Prevent use-after-free
@@ -1076,6 +1093,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		memset(&at->presentation_snapshot, 0, sizeof(at->presentation_snapshot));
 		at->presentation_snapshot.generation = at->presentation_generation;
 		at->presentation_snapshot.state = AT_PRESENTATION_UNAVAILABLE;
+		audiotrack_observe_route(at, 0);
 		call_void_method( at, "release", "()V" );
 		( *at->env )->DeleteGlobalRef( at->env, at->obj );
 		jthrowable exception = ( *at->env )->ExceptionOccurred( at->env );
@@ -1401,6 +1419,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// Diagnostic: compare requested compressed config vs actual AudioTrack config.
 		// Some HALs may silently force PCM/stereo while passthrough remains enabled.
 		if (!failed) {
+			audiotrack_observe_route(at, 1);
 			int actual_format = call_int_method(at, "getAudioFormat", "()I");
 			int actual_chmask = call_int_method(at, "getChannelConfiguration", "()I");
 			int actual_rate = call_int_method(at, "getSampleRate", "()I");

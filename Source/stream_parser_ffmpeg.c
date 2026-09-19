@@ -1182,6 +1182,14 @@ static int queue_bytes(AVQueue *q)
 	return bytes;
 }
 
+static int queue_packets(AVQueue *q)
+{
+	pthread_mutex_lock(&q->mutex);
+	int packets = q->packets;
+	pthread_mutex_unlock(&q->mutex);
+	return packets;
+}
+
 static int _add_packet( AVQueue *q, AVPacket *packet )
 {
 	pthread_mutex_lock( &q->mutex );
@@ -1559,7 +1567,22 @@ DBGP serprintf("FFMPEG: wake\r\n");
 	// that case instead of deadlocking with audio starved forever - memory
 	// is bounded by enqueue_media_packet(), including retained keyframes and
 	// the selected subtitle queue.
-	int audio_starved = s->audio->valid && ff_p->aq.packets == 0 && !s->audio_parse_end;
+	int audio_packets = queue_packets(&ff_p->aq);
+	int audio_starved = s->audio->valid && audio_packets == 0 && !s->audio_parse_end;
+
+	// Small access units (notably TrueHD) can exhaust the packet count well
+	// before the byte budget. Stop BEFORE av_read_frame: queue capacity is
+	// backpressure, not allocation failure, and the next packet must not be
+	// consumed or dropped. Consumers only remove packets while this producer
+	// runs, so a free slot remains available for the next admission.
+	// Preserve the bounded audio-gap scan and seek-preroll policies below.
+	if (!ff_p->seeking && !audio_starved &&
+	    (audio_packets >= FF_QUEUE_MAX_PACKETS ||
+	     queue_packets(&ff_p->vq) >= FF_QUEUE_MAX_PACKETS ||
+	     queue_packets(&ff_p->sq) >= FF_QUEUE_MAX_PACKETS)) {
+DBGP2		serprintf("FFMPEG: packet queue full, waiting for consumption (audio=%d)\n", audio_packets);
+		return FF_PARSE_WAIT;
+	}
 
 	if( mem_used > ff_p->buffer_size && !audio_starved && !ff_p->seeking ) {
 DBGP2 serprintf("FFMPEG full %d %d %d %d\r\n", ff_p->aq.mem_used, ff_p->vq.mem_used, ff_p->sq.mem_used, ff_p->buffer_size);

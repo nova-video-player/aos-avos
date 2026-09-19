@@ -47,6 +47,7 @@
 #include "astdlib.h"
 #include "util.h"
 #include "atime.h"
+#include <pthread.h>
 
 #ifdef CONFIG_FFMPEG_AUDIO
 #include <libavfilter/avfilter.h>
@@ -114,6 +115,9 @@ static void atempo_get_state(AVFilterContext *ctx,
 #define ATEMPO_FIFO_DRAIN_MAX_MS 5
 
 struct ctx {
+	// Object lifetime is protected by the stream audio lifecycle lease.
+	// This lock protects graph/FIFO state while the audio worker replaces it.
+	pthread_mutex_t mutex;
 	AVFilterGraph *filter_graph;
 	AVFilterContext *abuffer_ctx;
 	AVFilterContext *aformat_in_ctx;
@@ -180,7 +184,7 @@ struct ctx {
 	INT64  omap_prev_media;             // last emitted-media frontier sampled
 };
 
-static int _flush(STREAM_FILTER_AUDIO *f);
+static int _flush_locked(STREAM_FILTER_AUDIO *f);
 
 // Clear the production output->media map.  The map's write_cursor (the wrapper
 // output-sample index where the next produced burst will be recorded) is realigned
@@ -404,6 +408,7 @@ static void ctx_free(struct ctx *ctx)
         ctx->output_buffer_size = 0;
     }
 
+	pthread_mutex_destroy(&ctx->mutex);
 	afree(ctx);
 }
 
@@ -631,6 +636,7 @@ static int _open(STREAM_FILTER_AUDIO *f, AUDIO_PROPERTIES *audio)
 		return -1;
 	}
 
+	pthread_mutex_init(&ctx->mutex, NULL);
 	f->priv = ctx;
 	ctx->enabled = 0;
 	ctx->filter_initialized = 0;
@@ -693,13 +699,13 @@ error:
 	return -1;
 }
 
-static int _close(STREAM_FILTER_AUDIO *f)
+static int _close_locked(STREAM_FILTER_AUDIO *f)
 {
 	DBGA serprintf("atempo: close\n");
 	struct ctx *ctx = f->priv;
 	if (ctx) {
 		if (ctx->filter_graph) {
-			_flush(f);
+			_flush_locked(f);
 			avfilter_graph_free(&ctx->filter_graph);
 			ctx->abuffer_ctx = NULL;
 			ctx->aformat_in_ctx = NULL;
@@ -951,7 +957,7 @@ int stream_filter_audio_atempo_needs_format_drain(STREAM_FILTER_AUDIO *f, const 
 		(!ctx->eof || av_audio_fifo_size(ctx->fifo) > 0);
 }
 
-static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
+static int _filter_locked(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 {
 	if (!f->priv || !frame)
 		return frame ? atempo_fail(frame) : -1;
@@ -966,7 +972,7 @@ static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 	return 0;
 }
 
-static int _drain(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame, int end)
+static int _drain_locked(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame, int end)
 {
 	memset(frame, 0, sizeof(*frame));
 	struct ctx *ctx = f->priv;
@@ -984,7 +990,7 @@ static int _drain(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame, int end)
 	return 0;
 }
 
-static int _flush(STREAM_FILTER_AUDIO *f)
+static int _flush_locked(STREAM_FILTER_AUDIO *f)
 {
 	struct ctx *ctx = f->priv;
 	if (!ctx)
@@ -1007,7 +1013,7 @@ static int _flush(STREAM_FILTER_AUDIO *f)
 	return 0;
 }
 
-static int _delay(STREAM_FILTER_AUDIO *f)
+static int _delay_locked(STREAM_FILTER_AUDIO *f)
 {
 	struct ctx *ctx = f->priv;
 
@@ -1121,7 +1127,7 @@ static int _delay(STREAM_FILTER_AUDIO *f)
 	return delay_ms;
 }
 
-static int _set_param(STREAM_FILTER_AUDIO *f, void *params, void *night_on)
+static int _set_param_locked(STREAM_FILTER_AUDIO *f, void *params, void *night_on)
 {
 	struct ctx *ctx = f->priv;
 
@@ -1138,6 +1144,61 @@ static int _set_param(STREAM_FILTER_AUDIO *f, void *params, void *night_on)
 	}
 
 	return 0;
+}
+
+// Hold only across filter operations, never across an AudioTrack write or wait.
+static int _filter(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
+{
+	struct ctx *ctx = f->priv;
+	if (ctx) pthread_mutex_lock(&ctx->mutex);
+	int ret = _filter_locked(f, frame);
+	if (ctx) pthread_mutex_unlock(&ctx->mutex);
+	return ret;
+}
+
+static int _drain(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame, int end)
+{
+	struct ctx *ctx = f->priv;
+	if (ctx) pthread_mutex_lock(&ctx->mutex);
+	int ret = _drain_locked(f, frame, end);
+	if (ctx) pthread_mutex_unlock(&ctx->mutex);
+	return ret;
+}
+
+static int _flush(STREAM_FILTER_AUDIO *f)
+{
+	struct ctx *ctx = f->priv;
+	if (ctx) pthread_mutex_lock(&ctx->mutex);
+	int ret = _flush_locked(f);
+	if (ctx) pthread_mutex_unlock(&ctx->mutex);
+	return ret;
+}
+
+static int _delay(STREAM_FILTER_AUDIO *f)
+{
+	struct ctx *ctx = f->priv;
+	if (ctx) pthread_mutex_lock(&ctx->mutex);
+	int ret = _delay_locked(f);
+	if (ctx) pthread_mutex_unlock(&ctx->mutex);
+	return ret;
+}
+
+static int _set_param(STREAM_FILTER_AUDIO *f, void *params, void *night_on)
+{
+	struct ctx *ctx = f->priv;
+	if (ctx) pthread_mutex_lock(&ctx->mutex);
+	int ret = _set_param_locked(f, params, night_on);
+	if (ctx) pthread_mutex_unlock(&ctx->mutex);
+	return ret;
+}
+
+static int _close(STREAM_FILTER_AUDIO *f)
+{
+	struct ctx *ctx = f->priv;
+	if (ctx) pthread_mutex_lock(&ctx->mutex);
+	int ret = _close_locked(f);
+	if (ctx) pthread_mutex_unlock(&ctx->mutex);
+	return ret;
 }
 
 static int _delete(STREAM_FILTER_AUDIO *f)
@@ -1193,7 +1254,12 @@ int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f,
 int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate)
 {
 	struct ctx *ctx = f ? f->priv : NULL;
-	if (!ctx || ctx->sample_rate <= 0) {
+	if (!ctx) {
+		return 0;
+	}
+	pthread_mutex_lock(&ctx->mutex);
+	if (ctx->sample_rate <= 0) {
+		pthread_mutex_unlock(&ctx->mutex);
 		return 0;
 	}
 	if (out_samples) {
@@ -1205,6 +1271,7 @@ int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *f, UINT64 *
 	if (rate) {
 		*rate = ctx->sample_rate;
 	}
+	pthread_mutex_unlock(&ctx->mutex);
 	return 1;
 }
 

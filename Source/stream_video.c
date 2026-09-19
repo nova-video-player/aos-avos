@@ -729,7 +729,7 @@ DBGS serprintf("audio[%d] set parser!\r\n", new);
 //	stream_open_video_dec
 //
 // *****************************************************************************
-static int stream_open_video_dec( STREAM *s, int *unsupported )
+static int _stream_open_video_dec( STREAM *s, int *unsupported )
 {
 	s->video_decoder_drained = 0;
 DBGS serprintf("stream_open_video_dec\r\n");
@@ -928,6 +928,14 @@ serprintf("no video_dec found!\r\n");
 	return 1;
 }
 
+static int stream_open_video_dec( STREAM *s, int *unsupported )
+{
+	pthread_mutex_lock(&s->video_control_mutex);
+	int ret = _stream_open_video_dec(s, unsupported);
+	pthread_mutex_unlock(&s->video_control_mutex);
+	return ret;
+}
+
 // *****************************************************************************
 //
 //	stream_close_audio_dec
@@ -1105,6 +1113,7 @@ static void _stream_close_video_sink( STREAM *s, int delete_sink )
 
 static void stream_close_video_dec( STREAM *s )
 {
+	pthread_mutex_lock(&s->video_control_mutex);
 	// Clean up the decoder frames first (while frames are still allocated and valid)
 	if( s->video_dec ) {
 		DBGS serprintf("stream_close_video_dec\r\n");
@@ -1122,6 +1131,7 @@ static void stream_close_video_dec( STREAM *s )
 	}
 
 	_free_video_buffers( s );
+	pthread_mutex_unlock(&s->video_control_mutex);
 }
 
 void stream_close_sub_dec( STREAM *s );
@@ -2787,6 +2797,7 @@ serprintf("took %d  frames %d  FPS %f\n", took, s->fps_count, (float)s->fps_coun
 	// The sfdec2 render thread can query stream timing state. Destroy these
 	// locks only after every decoder/sink component has stopped and joined.
 	pthread_mutex_destroy( &s->video_sink_mutex );
+	pthread_mutex_destroy( &s->video_control_mutex );
 	pthread_mutex_destroy( &s->anchor_mutex );
 	pthread_mutex_destroy( &s->mode2_heard_mutex );
 	pthread_cond_destroy( &s->audio_lifecycle_cond );
@@ -4471,13 +4482,11 @@ serprintf("error preparing decoder in realloc!\n");
 
 static int _handle_video_codec_error( STREAM *s )
 {
+	int cpu = s->video_dec->cpu;
+	// Decoder cleanup still owns references to sink frames. Release those
+	// references before closing/freeing the sink, just as on normal stop.
+	stream_close_video_dec( s );
 	_stream_close_video_sink( s, 1 );
-
-	int cpu = s->video_dec->cpu;	
-
-	if( s->video_dec->is_open) {
-		stream_close_video_dec( s );
-	}
 
 	// lower the priority
 	cpu--;

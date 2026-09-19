@@ -598,7 +598,7 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 	}
 }
 
-static int stream_audio_setup_ac3_sink(STREAM *s)
+static int _stream_audio_setup_ac3_sink(STREAM *s)
 {
 #ifdef CONFIG_SPDIF
 	if( !s || !s->audio_sink )
@@ -645,6 +645,14 @@ static int stream_audio_setup_ac3_sink(STREAM *s)
 	(void)s;
 	return -1;
 #endif
+}
+
+static int stream_audio_setup_ac3_sink(STREAM *s)
+{
+	stream_audio_reconfigure_begin(s);
+	int ret = _stream_audio_setup_ac3_sink(s);
+	stream_audio_reconfigure_end(s);
+	return ret;
 }
 
 // ************************************************************
@@ -1222,6 +1230,7 @@ static int _stream_audio_wait_pcm_output(STREAM *s)
 {
 	if( !s->audio_ctx || !s->audio_sink_open )
 		return 0;
+	stream_atempo_commit_poll(s);
 	uint64_t written = 0, presented = 0;
 	int rate = 0, presented_rate = 0, source = 0, age = 0;
 	int have_written = audio_interface_get_written_frames(s->audio_ctx, &written, &rate);
@@ -1241,6 +1250,7 @@ static int _stream_audio_wait_pcm_output(STREAM *s)
 	while( elapsed < delay + 2000 ) {
 		if( _stream_audio_wait_for_resume(s) )
 			return -1;
+		stream_atempo_commit_poll(s);
 		if( have_frames ) {
 			if( audio_interface_get_presented_frames(s->audio_ctx, &presented,
 				&presented_rate, &source, &age, 1) && presented_rate == rate &&
@@ -1307,6 +1317,11 @@ static int _stream_audio_drain_atempo(STREAM *s, AUDIO_FRAME *frame, int *output
 		return 1;
 	if( _stream_audio_wait_pcm_output(s) < 0 )
 		return -1;
+	if( _abort(s) || s->aborted )
+		return -1;
+	// No more audio calls will poll the queue. All submitted PCM has drained;
+	// finish any remaining checkpoint even on delay-only presentation routes.
+	stream_atempo_commit_finish(s);
 	s->audio_atempo_draining = 0;
 	s->audio_decoder_draining = 0;
 	s->audio_end = 1;
@@ -2135,6 +2150,7 @@ serprintf(" ae! ");
 					if( !passthrough_active && !is_ac3_recoding &&
 					    _stream_audio_wait_pcm_output(s) < 0 )
 						return;
+					stream_audio_reconfigure_begin(s);
 					// Capture epoch ownership before stop/close/reset operations. Initial
 					// passthrough setup has no established submitted/audio anchor and must
 					// use the latency-compensated raw Mode 2 seed.
@@ -2206,6 +2222,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 									stream_audio_wait_for_passthrough_idle(s, "passthrough-reopen");
 									if( s->audio_sink->open( s ) ) {
 										stream_audio_sink_failed( s, "passthrough sink reopen" );
+										stream_audio_reconfigure_end(s);
 										return;
 									}
 								}
@@ -2227,6 +2244,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								s->audio_sink->close( s );
 								if( s->audio_sink->open( s ) ) {
 									stream_audio_sink_failed( s, "PCM format-change sink reopen" );
+									stream_audio_reconfigure_end(s);
 									return;
 								}
 							}
@@ -2255,6 +2273,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								// Call start() with AC3 2-channel format
 								if( s->audio_sink->start( s ) ) {
 									stream_audio_sink_failed( s, "AC3 sink restart" );
+									stream_audio_reconfigure_end(s);
 									return;
 								} else {
 									s->audio_sink_open = 1;
@@ -2264,10 +2283,12 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								}
 							} else {
 								stream_audio_sink_failed( s, "AC3 muxer reinitialization" );
+								stream_audio_reconfigure_end(s);
 								return;
 							}
 #else
 							stream_audio_sink_failed( s, "AC3 passthrough unavailable" );
+							stream_audio_reconfigure_end(s);
 							return;
 #endif
 						} else {
@@ -2282,6 +2303,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 #ifdef CONFIG_SPDIF
 							if( passthrough_mode && !spdif_init(sink) ) {
 								stream_audio_sink_failed( s, "passthrough muxer reinitialization" );
+								stream_audio_reconfigure_end(s);
 								return;
 							}
 							if( passthrough_mode ) {
@@ -2295,6 +2317,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 							if( s->audio_sink->start( s ) ) {
 								stream_audio_sink_failed( s, "format-change sink restart" );
+								stream_audio_reconfigure_end(s);
 								return;
 							} else {
 								s->audio_sink_open = 1;
@@ -2302,6 +2325,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							}
 						}
 					}
+					stream_audio_reconfigure_end(s);
 				}
 
 					int ac3_recode_output_frames = 1;

@@ -807,6 +807,8 @@ typedef struct STREAM {
 	int		sub_dec_open;
 
 	STREAM_SINK_VIDEO *video_sink;
+	// Serializes speed callbacks with decoder creation/destruction.
+	pthread_mutex_t video_control_mutex;
 	pthread_mutex_t video_sink_mutex;
 	int		video_sink_count;
 
@@ -1141,6 +1143,7 @@ int	stream_set_per_frame_handler( STREAM *s, PER_FRAME_HANDLER per_frame );
 int	stream_set_av_delay         ( STREAM *s, int av_delay );
 int	stream_set_av_speed         ( STREAM *s, float av_speed );
 void	stream_atempo_commit_poll   ( STREAM *s );
+void stream_atempo_commit_finish(STREAM *s);
 int stream_atempo_commit_queue(STREAM *s, float speed, UINT64 boundary);
 int	stream_can_apply_av_speed   ( STREAM *s );
 

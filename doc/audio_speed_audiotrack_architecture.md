@@ -57,6 +57,14 @@ Speed changes no longer flush the pipeline. Instead, the player maintains an anc
 Whenever `stream_set_av_speed` succeeds (or the audio hardware reports a quantised ratio), the current playback position is captured and used as the new anchor so in-flight buffers keep their ordering.
 Both speed backends use seamless timeline updates without a self-seek on speed changes.
 
+### Concurrent format changes
+
+Speed commands hold an audio lifecycle reader lease while accessing AudioTrack.
+Audio-worker sink reconfiguration takes the writer lease through stop, recreation,
+and restart, so a command cannot use a released track. Decoder speed callbacks
+also share `video_control_mutex` with decoder open/close. Neither mechanism adds a
+pause, flush, or seek to ordinary speed changes.
+
 ### AudioTrack PlaybackParams Speed-Epoch Clock
 
 Plain PCM AudioTrack PlaybackParams speed changes have one extra clock rule.

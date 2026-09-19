@@ -229,7 +229,10 @@ static void _get_next_int_sub( STREAM *s, int time )
 // *****************************************************************************
 static void _get_next_ext_sub( STREAM *s, int time )
 {
-	if( !s->seek ) {
+	if( !s->seek && time >= 0 ) {
+		// One current-position lookup is enough, including a gap/empty track.
+		// A future DVD display offset remains pending until playback reaches it.
+		s->subtitle_replay = 0;
 		if( !s->sub_dec && s->subtitle->format == SUB_FORMAT_DVD_GFX ) {
 			// try to get a sub decoder
 			s->sub_dec = stream_get_new_dec_sub( s->subtitle->format );
@@ -415,9 +418,9 @@ DBGS serprintf("stream_check_subtitles, has new ext subtitles\r\n");
 	return 0;
 }
 
-// Supported parsers rebuild only the selected subtitle queue. Audio, video,
-// their renderer clocks and sink state continue untouched throughout the switch.
-static int _switch_internal_subtitle(STREAM *s, int sub_stream)
+// Internal tracks rebuild only their parser queue; external tracks rewind their
+// own cue cursor. Neither needs to seek or restart audio/video.
+static int _switch_subtitle(STREAM *s, int sub_stream)
 {
 	if( thread_state_get(&s->sub_tstate) == THREAD_EXIT ||
 	    thread_state_get(&s->parser_tstate) == THREAD_EXIT )
@@ -438,20 +441,28 @@ static int _switch_internal_subtitle(STREAM *s, int sub_stream)
 	s->subtitle_frame = NULL;
 	s->av.subs = sub_stream;
 	s->subtitle = &s->av.sub[sub_stream];
-	s->sub_dec = stream_get_new_dec_sub(s->subtitle->format);
-	int failed = stream_open_sub_dec(s);
-	if( !failed )
-		failed = s->parser->reset_subtitle(s);
+	int failed = 0;
+	if( s->subtitle->ext ) {
+		stream_sub_ext_reset(s);
+	} else {
+		s->sub_dec = stream_get_new_dec_sub(s->subtitle->format);
+		failed = stream_open_sub_dec(s);
+		if( !failed )
+			failed = s->parser->reset_subtitle(s);
+	}
 	if( failed ) {
 		stream_close_sub_dec(s);
 		s->av.subs = previous;
 		s->subtitle = &s->av.sub[previous];
-		s->parser->reset_subtitle(s);
+		if( s->subtitle->ext )
+			stream_sub_ext_reset(s);
+		else
+			s->parser->reset_subtitle(s);
 	}
 	// Clear already queued/displayed app cues before sending any replay output.
 	if( s->message_cb )
 		s->message_cb(s, STREAM_SUBTITLE_CLEARED);
-	s->subtitle_replay = !s->subtitle->ext;
+	s->subtitle_replay = 1;
 	// Selection changes no track properties. A metadata notification here
 	// makes the app reapply its selection, recursively reopening this decoder.
 	if( parser_state == THREAD_RUNNING )
@@ -489,14 +500,14 @@ serprintf("SsS: sub_stream already set\n");
 //		return 0;
 	}
 
-	if( !s->av.sub[sub_stream].ext && s->parser->reset_subtitle )
-		return _switch_internal_subtitle(s, sub_stream);
+	if( s->av.sub[sub_stream].ext || s->parser->reset_subtitle )
+		return _switch_subtitle(s, sub_stream);
 
 	int was_paused = stream_pause( s );
 
 	// idle threads to make sure they are at a known state
 	thread_state_set( &s->engine_tstate, THREAD_IDLE );
-	thread_state_set( &s->sub_tstate,    THREAD_IDLE );
+	int sub_state = thread_state_set( &s->sub_tstate, THREAD_IDLE );
 	
 	// close old subtitle decoder
 	stream_close_sub_dec( s );
@@ -510,7 +521,6 @@ serprintf("SsS: sub_stream already set\n");
 	
 	// run threads again
 	thread_state_set( &s->engine_tstate, THREAD_RUNNING );
-	thread_state_set( &s->sub_tstate,    THREAD_RUNNING );
 
 	stream_un_pause( s, was_paused );
 
@@ -520,6 +530,12 @@ serprintf("SsS: sub_stream already set\n");
 		// reseek to current time to get internal subtitle decoder to reinitialize
 		stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
 	}
+	if( s->message_cb )
+		s->message_cb(s, STREAM_SUBTITLE_CLEARED);
+	s->subtitle_replay = 1;
+	if( sub_state == THREAD_RUNNING )
+		thread_state_set(&s->sub_tstate, sub_state);
+
 	return 0;
 }
 

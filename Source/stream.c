@@ -281,6 +281,7 @@ DBGS serprintf("stream_init\r\n" );
 	pthread_mutex_init( &s->audio_lifecycle_mutex, NULL );
 	pthread_cond_init( &s->audio_lifecycle_cond, NULL );
 	// Serializes video-sink calls from the audio thread with sink teardown.
+	pthread_mutex_init( &s->video_control_mutex, NULL );
 	pthread_mutex_init( &s->video_sink_mutex,  NULL );
 	pthread_mutex_init( &s->anchor_mutex,      NULL );
 	pthread_mutex_init( &s->mode2_heard_mutex, NULL );
@@ -652,6 +653,15 @@ static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_
 		audio_time_ts, audio_time_ts, stream_sync_av_delay( s ) );
 }
 
+static int _stream_speed_sink_is_sfdec2(STREAM *s)
+{
+	pthread_mutex_lock(&s->video_sink_mutex);
+	int result = s->video_sink && s->video_sink->name &&
+		!strcmp(s->video_sink->name, "sfdec2");
+	pthread_mutex_unlock(&s->video_sink_mutex);
+	return result;
+}
+
 static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int heard_ts,
 	int speed_changed, int using_atempo, int *used_current_ts, int *used_last_good )
 {
@@ -674,7 +684,7 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 				anchor_ts = 0;
 			}
 			use_last_good = 1;
-		} else if( !delay_valid && s->video_sink && s->video_sink->name && strcmp(s->video_sink->name, "sfdec2") == 0 ) {
+		} else if( !delay_valid && _stream_speed_sink_is_sfdec2(s) ) {
 			// sfdec2 timed pacing: if delay is invalid, heard_ts can lag far behind stream time.
 			// Using it for timeline_map_apply bakes in large skew during speed changes.
 			// Fall back to the current stream time until delay is valid.
@@ -691,7 +701,7 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 	return use_current ? current_time_ts : anchor_ts;
 }
 
-int stream_set_av_speed( STREAM *s, float av_speed )
+static int _stream_set_av_speed( STREAM *s, float av_speed )
 {
 	if( !s ) return 1;
 
@@ -782,7 +792,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		DBG serprintf( "stream:stream_set_av_speed snapshot last_good=%d last_good_valid=%d last_good_atempo=%d hist=%d sink_driven=%d\n",
 			s->last_good_delay_ms, s->last_good_delay_valid,
 			s->last_good_atempo_delay_ms, s->av_delay_history_count,
-			(s->video_sink && s->video_sink->put_time) ? 1 : 0 );
+			s->put_time_mode ? 1 : 0 );
 		if( use_last_good_for_speed ) {
 			int current_atempo_delay = 0;
 			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
@@ -912,7 +922,7 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 		}
 	}
 	if( s->video->valid && !defer_commit ) {
-		int is_sfdec2 = (s->video_sink && s->video_sink->name && strcmp(s->video_sink->name, "sfdec2") == 0);
+		int is_sfdec2 = _stream_speed_sink_is_sfdec2(s);
 		if( is_sfdec2 ) {
 			// For sfdec2 timed rendering, always seed the anchor when audio_time exists.
 			if( s->audio_time != -1 ) {
@@ -941,6 +951,24 @@ int stream_set_av_speed( STREAM *s, float av_speed )
 	}
 
 	return speed_apply_failed;
+}
+
+// The control queue excludes seek/track switches, but the audio and engine
+// workers can still reconfigure their decoders. Keep their objects alive through
+// the command without pausing or flushing submitted audio.
+int stream_set_av_speed( STREAM *s, float av_speed )
+{
+	if( !s ) return 1;
+	pthread_mutex_lock(&s->audio_lifecycle_mutex);
+	while( s->audio_reconfiguring )
+		pthread_cond_wait(&s->audio_lifecycle_cond, &s->audio_lifecycle_mutex);
+	s->audio_readers++;
+	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
+	pthread_mutex_lock(&s->video_control_mutex);
+	int ret = _stream_set_av_speed(s, av_speed);
+	pthread_mutex_unlock(&s->video_control_mutex);
+	stream_audio_read_release(s);
+	return ret;
 }
 
 // Audio-thread only: the wrapper has accepted the tempo command and its
@@ -978,10 +1006,11 @@ int stream_atempo_commit_queue( STREAM *s, float speed, UINT64 boundary )
 
 // Apply the deferred atempo video-side speed commit once the audio playhead
 // crosses the output-frame boundary where new-speed content begins.
-// Called from stream_sync_audio (audio sync path) on every audio write.
-void stream_atempo_commit_poll( STREAM *s )
+// Audio-thread only: called on writes and while draining submitted PCM.
+static void _stream_atempo_commit_poll( STREAM *s, int drained )
 {
-	if( !s || s->atempo_commit_count <= 0 || s->paused || s->paused_internal )
+	if( !s || s->atempo_commit_count <= 0 || s->aborted ||
+	    (!drained && (s->paused || s->paused_internal)) )
 		return;
 	UINT64 playhead = 0;
 	int rate = 0, ledger_state = -1;
@@ -1021,7 +1050,9 @@ void stream_atempo_commit_poll( STREAM *s )
 		// Timeout safety: if the playhead stalls or becomes unavailable (pause,
 		// sink recreation), fall back to immediate apply.  Strict ordering: if
 		// the front is not ready, stop — never skip ahead to a later step.
-		if( !crossed && waited_ms < 3000 )
+		// A successful terminal drain proves no old-speed PCM remains, even
+		// when this route cannot provide a usable presentation counter.
+		if( !drained && !crossed && waited_ms < 3000 )
 			break;
 		s->atempo_commit_head = ( idx + 1 ) % STREAM_ATEMPO_COMMIT_MAX;
 		s->atempo_commit_count--;
@@ -1055,6 +1086,7 @@ void stream_atempo_commit_poll( STREAM *s )
 
 	timeline_map_apply( (double)anchor_rst_use, (double)anchor_ts, applied_speed );
 
+	pthread_mutex_lock(&s->video_control_mutex);
 	int num = (int)( applied_speed * 100 + 0.5f );
 	num = MAX( 1, num );
 	s->video_speed_num = num;
@@ -1062,11 +1094,23 @@ void stream_atempo_commit_poll( STREAM *s )
 	if( s->video_dec && s->video_dec->set_playback_speed && s->video && s->video->valid ) {
 		s->video_dec->set_playback_speed( s->video_dec, 100, num );
 	}
+	pthread_mutex_unlock(&s->video_control_mutex);
 	if( s->video && s->video->valid ) {
 		_stream_anchor_video_sink_to_audio_clock( s, anchor_ts );
 	}
 }
 
+
+void stream_atempo_commit_poll( STREAM *s )
+{
+	_stream_atempo_commit_poll(s, 0);
+}
+
+void stream_atempo_commit_finish( STREAM *s )
+{
+	// Audio-thread only, after successful presentation drain (never on abort).
+	_stream_atempo_commit_poll(s, 1);
+}
 
 // ************************************************************
 //

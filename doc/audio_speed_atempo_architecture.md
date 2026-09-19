@@ -573,6 +573,20 @@ state and any pending output.
    replacement boundary in the new frame domain. Without new output evidence,
    the existing timeout fallback remains available.
 
+### Concurrent reconfiguration and decoder recovery
+
+The native control queue serializes speed requests with seek and track changes.
+Audio-worker format changes also take the audio lifecycle writer lease; a speed
+command holds a reader lease while querying or changing the sink. The atempo
+context mutex separately protects graph/FIFO replacement against delay and ledger
+queries. These locks do not require pausing or flushing queued PCM for a speed
+change.
+
+`video_control_mutex` serializes decoder open/close with speed callbacks from both
+the control and audio threads. A replacement decoder receives the cached committed
+video speed; a later atempo commit updates that replacement under the same lock.
+Decoder cleanup precedes freeing sink-owned frames during recovery as on stop.
+
 ### End of stream and filter failures
 
 At decoder EOF, any unfinished pre-filter PCM batch is fed through atempo before
@@ -581,7 +595,11 @@ bounded PCM blocks through the normal filters, writer, ledger, and clock
 accounting. PCM completion also waits for submitted sink output before reporting
 `end()`, using presentation counters when available and a bounded delay-based
 wait otherwise.
-Drained output is not filtered through atempo a second time.
+Drained output is not filtered through atempo a second time. The presentation
+wait continues polling pending speed commits after the final write. On successful
+terminal drain, remaining commits are completed before audio EOF is published,
+including on routes that provide only a delay estimate. Aborted or failed drains
+do not force a final speed commit.
 
 PCM format changes follow the same drain ordering without ending playback. The
 incoming decoded frame is retained while the previous pre-filter batch, atempo

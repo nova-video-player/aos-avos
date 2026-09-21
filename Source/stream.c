@@ -673,8 +673,9 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 		int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
 		if( !delay_valid && speed_changed && s->last_good_delay_valid && s->audio_time >= 0 ) {
 			int effective_delay = s->last_good_delay_ms;
-			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
-				effective_delay += s->audio_filter_atempo->delay( s->audio_filter_atempo );
+			STREAM_FILTER_AUDIO *_anchor_speed_filter = stream_get_audio_speed_filter(s);
+			if( using_atempo && _anchor_speed_filter && _anchor_speed_filter->delay ) {
+				effective_delay += _anchor_speed_filter->delay( _anchor_speed_filter );
 				if( effective_delay < 0 ) {
 					effective_delay = 0;
 				}
@@ -737,7 +738,7 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 		return 1;
 	}
 
-	int using_atempo = (s->audio_filter_atempo != NULL);
+	int using_atempo = (stream_get_audio_speed_filter(s) != NULL);
 	if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
 		using_atempo = 0;
 	}
@@ -746,7 +747,7 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 	}
 	audio_interface_set_using_atempo( using_atempo );
 	DBG2 serprintf("stream:stream_set_av_speed gate req=%.3f speed_enabled=%d filter=%p using_atempo_pref=%d effective_using_atempo=%d current_speed=%.3f\n",
-		av_speed, audio_interface_is_audio_speed_enabled(), s->audio_filter_atempo,
+		av_speed, audio_interface_is_audio_speed_enabled(), stream_get_audio_speed_filter(s),
 		audio_interface_is_using_atempo(), using_atempo, audio_interface_get_audio_speed());
 
 	int audio_latency_ms = -1;
@@ -779,8 +780,9 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 		int delay_valid = s->audio_ctx ? audio_interface_is_delay_valid( s->audio_ctx ) : 1;
 		int delay_streak = s->audio_ctx ? audio_interface_get_delay_valid_streak( s->audio_ctx ) : 0;
 		int atempo_delay = 0;
-		if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
-			atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+		STREAM_FILTER_AUDIO *_speed_change_speed_filter = stream_get_audio_speed_filter(s);
+		if( using_atempo && _speed_change_speed_filter && _speed_change_speed_filter->delay ) {
+			atempo_delay = _speed_change_speed_filter->delay( _speed_change_speed_filter );
 		}
 		DBG serprintf( "stream:stream_set_av_speed delay_valid=%d streak=%d v=%d a=%d heard_ts=%d av_delay=%d\n",
 			delay_valid, delay_streak, s->video_time, s->audio_time, anchor_ts, stream_sync_av_delay( s ) );
@@ -795,8 +797,8 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 			s->put_time_mode ? 1 : 0 );
 		if( use_last_good_for_speed ) {
 			int current_atempo_delay = 0;
-			if( using_atempo && s->audio_filter_atempo && s->audio_filter_atempo->delay ) {
-				current_atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+			if( using_atempo && _speed_change_speed_filter && _speed_change_speed_filter->delay ) {
+				current_atempo_delay = _speed_change_speed_filter->delay( _speed_change_speed_filter );
 			}
 			DBG serprintf( "stream:stream_set_av_speed speed_change using last_good_delay=%d last_good_atempo=%d cur_atempo=%d (audio_time=%d anchor_ts=%d)\n",
 				s->last_good_delay_ms, s->last_good_atempo_delay_ms, current_atempo_delay, s->audio_time, anchor_ts );
@@ -831,7 +833,10 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 		// content begins (stream_atempo_commit_poll).
 		// The audio thread publishes the boundary only after the filter accepts
 		// the command. It also accounts for PCM already returned by the wrapper.
-		defer_commit = s->audio && s->audio->valid;
+		// Both software backends publish production-time output checkpoints.
+		// Sonic supplies its effective blended speed; the shared writer translates
+		// those boundaries into accepted sink frames before the playhead gate.
+		defer_commit = stream_get_audio_speed_filter(s) && s->audio && s->audio->valid;
 		if( !defer_commit )
 			timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, clamped_speed );
 		applied_speed = clamped_speed;
@@ -1004,7 +1009,7 @@ int stream_atempo_commit_queue( STREAM *s, float speed, UINT64 boundary )
 	return 0;
 }
 
-// Apply the deferred atempo video-side speed commit once the audio playhead
+// Apply a deferred software-filter video-speed commit once the audio playhead
 // crosses the output-frame boundary where new-speed content begins.
 // Audio-thread only: called on writes and while draining submitted PCM.
 static void _stream_atempo_commit_poll( STREAM *s, int drained )
@@ -1045,7 +1050,10 @@ static void _stream_atempo_commit_poll( STREAM *s, int drained )
 			// the flip below anchors to the fresh ledger RST and not the stale map.
 			crossed = have_ph && ledger_state == 0;
 		} else {
-			crossed = have_ph && playhead >= cp->boundary;
+			// A reservation can be rolled back after a zero/retry write. Require
+			// at least one accepted frame beyond the checkpoint before committing.
+			crossed = have_ph && playhead >= cp->boundary &&
+				cp->boundary < s->atempo_ledger_output_frames;
 		}
 		// Timeout safety: if the playhead stalls or becomes unavailable (pause,
 		// sink recreation), fall back to immediate apply.  Strict ordering: if

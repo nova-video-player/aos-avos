@@ -50,6 +50,9 @@
 #include <pthread.h>
 
 #ifdef CONFIG_FFMPEG_AUDIO
+int stream_filter_audio_atempo_get_ledger_stats(STREAM_FILTER_AUDIO *, UINT64 *, int *, int *);
+int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *, float *, UINT64 *);
+int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *, UINT64, int, INT64 *, int *);
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersrc.h>
 #include <libavfilter/buffersink.h>
@@ -1233,6 +1236,9 @@ STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new(void)
 	f->set_param = _set_param;
 	f->delay     = _delay;
 	f->drain     = _drain;
+	f->get_output_state = stream_filter_audio_atempo_get_ledger_stats;
+	f->take_speed_commit = stream_filter_audio_atempo_take_speed_commit;
+	f->lookup_output_media = stream_filter_audio_atempo_lookup_output_media;
 
 	DBGA serprintf("atempo: audio speed filter created\n");
 	return f;

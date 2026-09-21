@@ -44,6 +44,16 @@ typedef struct STREAM_FILTER_AUDIO {
 	FILTER_AUDIO_DELAY   delay;
 	FILTER_AUDIO_DRAIN   drain;
 
+	// Optional software-speed timing interface. Indices count interleaved PCM
+	// frames, not bytes or channel samples. Consume the returned PCM and its
+	// checkpoint before the next filter/drain call. Sink writes may split it.
+	int (*get_output_state)(struct STREAM_FILTER_AUDIO *f, UINT64 *frames,
+	                        int *queued, int *rate);
+	int (*take_speed_commit)(struct STREAM_FILTER_AUDIO *f, float *speed,
+	                         UINT64 *boundary);
+	int (*lookup_output_media)(struct STREAM_FILTER_AUDIO *f, UINT64 start,
+	                           int frames, INT64 *media_frames, int *rate);
+
 	void		*priv;
 } STREAM_FILTER_AUDIO;
 

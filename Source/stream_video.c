@@ -77,7 +77,7 @@ int 		stream_zero_fill   = 1;
 
 int 		stream_max_delay   = 1;
 int 		stream_no_sync     = 0;
-static int	stream_disable_atempo = 0;  // disable atempo filter (use AudioTrack PlaybackParams instead)
+static int	stream_audio_speed_backend = 0;  // 0=atempo (default), 1=AudioTrack PlaybackParams, 2=Sonic
 int	 	stream_no_audio    = 0;
 int	 	stream_force_drop_audio  = -1;
 int	 	stream_no_subtitles = 0;
@@ -214,6 +214,7 @@ STREAM_FILTER_AUDIO *stream_filter_audio_jni_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_ac3_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_sonic_new( void );
 
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
@@ -607,9 +608,10 @@ DBGS serprintf("stream_open_audio_filter: created [%s] (will open lazily on firs
 		}
 	}
 
-	// Open atempo audio speed control filter (unless disabled via preference)
+	// Open the selected audio speed control filter (atempo, Sonic, or none when
+	// AudioTrack PlaybackParams is selected).
 #ifdef CONFIG_FFMPEG_AUDIO
-	if (!stream_disable_atempo) {
+	if (stream_audio_speed_backend == 0) {
 		s->audio_atempo_draining = 0;
 		s->audio_decoder_draining = 0;
 		s->audio_end = 0;
@@ -625,8 +627,24 @@ DBGS serprintf("stream_open_audio_filter: created [%s] (will open lazily on firs
 DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_atempo->name);
 			}
 		}
+	} else if (stream_audio_speed_backend == 2) {
+		s->audio_atempo_draining = 0;
+		s->audio_decoder_draining = 0;
+		s->audio_end = 0;
+		s->audio_filter_sonic = stream_filter_audio_sonic_new();
+		if( s->audio_filter_sonic ) {
+			if( s->audio_filter_sonic->open( s->audio_filter_sonic, s->audio ) ) {
+				serprintf("stream_open_audio_filter: failed to open sonic filter\n");
+				if( s->audio_filter_sonic->delete ) {
+					s->audio_filter_sonic->delete( s->audio_filter_sonic );
+				}
+				s->audio_filter_sonic = NULL;
+			} else {
+DBGS serprintf("stream_open_audio_filter: opened [%s]\r\n", s->audio_filter_sonic->name);
+			}
+		}
 	} else {
-		serprintf("stream_open_audio_filter: atempo filter disabled (using AudioTrack PlaybackParams)\n");
+		serprintf("stream_open_audio_filter: atempo/sonic filter disabled (using AudioTrack PlaybackParams)\n");
 	}
 #endif
 	return 0;
@@ -1022,6 +1040,16 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 			s->audio_filter_atempo->delete( s->audio_filter_atempo );
 		}
 		s->audio_filter_atempo = NULL;
+	}
+	// Close and delete sonic filter
+	if( s->audio_filter_sonic ) {
+		if( s->audio_filter_sonic->close ) {
+			s->audio_filter_sonic->close( s->audio_filter_sonic );
+		}
+		if( s->audio_filter_sonic->delete ) {
+			s->audio_filter_sonic->delete( s->audio_filter_sonic );
+		}
+		s->audio_filter_sonic = NULL;
 	}
 }
 
@@ -1571,13 +1599,13 @@ void stream_set_audio_downmix( int downmix )
 
 // *****************************************************************************
 //
-//	stream_disable_atempo_filter
+//	stream_set_audio_speed_backend
 //
 // *****************************************************************************
-void stream_disable_atempo_filter( int disable )
+void stream_set_audio_speed_backend( int backend )
 {
-	stream_disable_atempo = disable;
-serprintf("stream_disable_atempo_filter: %d (0=use atempo, 1=use AudioTrack PlaybackParams)\n", disable);
+	stream_audio_speed_backend = backend;
+serprintf("stream_set_audio_speed_backend: %d (0=atempo, 1=AudioTrack PlaybackParams, 2=Sonic)\n", backend);
 }
 
 // *****************************************************************************

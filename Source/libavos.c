@@ -357,10 +357,12 @@ void libavos_enable_audio_speed(int enable)
 	audio_interface_enable_audio_speed(enable);
 }
 
-void libavos_disable_atempo_filter(int disable)
+void libavos_set_audio_speed_backend(int backend)
 {
-	audio_interface_set_using_atempo(disable ? 0 : 1);
-	stream_disable_atempo_filter(disable);
+	// backend: 0=atempo, 1=AudioTrack PlaybackParams, 2=Sonic
+	// Generic "software filter active" flag: true for atempo AND Sonic.
+	audio_interface_set_using_atempo(backend == 1 ? 0 : 1);
+	stream_set_audio_speed_backend(backend);
 }
 
 void libavos_set_parser_sync_mode(int mode)

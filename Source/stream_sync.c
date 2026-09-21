@@ -1931,7 +1931,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				if( dense || now_ms - s->atempo_ledger_last_log_ms >= 500 ) {
 					UINT64 flt_out = 0;
 					int flt_fifo = 0, flt_rate = 0;
-					stream_filter_audio_atempo_get_ledger_stats( s->audio_filter_atempo,
+					stream_speed_output_state( s,
 						&flt_out, &flt_fifo, &flt_rate );
 					s->atempo_ledger_last_log_ms = now_ms;
 					DBG serprintf("at_ledger: ledger_heard=%d heard=%d diff=%d eff_heard=%d lat_frames=%lld applied=%d playhead=%llu out_written=%llu state=%d block_start=%llu block_ts=%d block_nframes=%d q_fifo=%d flt_out=%llu flt_rate=%d src=%d age=%d speed=%.3f dense=%d\n",
@@ -2093,7 +2093,8 @@ static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink )
 	int audio_speed_enabled = audio_interface_is_audio_speed_enabled();
 	int using_atempo_pref = audio_interface_is_using_atempo();
 	int diag_log = _sync_diag_should_log(s);
-	int use_atempo = (s->audio_filter_atempo != NULL);
+	STREAM_FILTER_AUDIO *speed_filter = stream_get_audio_speed_filter(s);
+	int use_atempo = (speed_filter != NULL);
 	if (!audio_speed_enabled || !using_atempo_pref) {
 		use_atempo = 0;
 	}
@@ -2105,16 +2106,16 @@ static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink )
 	if (passthrough || ac3_recoding) {
 		use_atempo = 0;
 	}
-	if( use_atempo && s->audio_filter_atempo->delay ) {
-		atempo_delay = s->audio_filter_atempo->delay( s->audio_filter_atempo );
+	if( use_atempo && speed_filter->delay ) {
+		atempo_delay = speed_filter->delay( speed_filter );
 		filter_delay += atempo_delay;
 	}
 	DBGY2 serprintf("stream_sync_av_delay: atempo_delay=%d filter_atempo=%p delay_fn=%p enabled=%d\n",
-		atempo_delay, s->audio_filter_atempo,
-		s->audio_filter_atempo ? s->audio_filter_atempo->delay : NULL, use_atempo);
+		atempo_delay, speed_filter,
+		speed_filter ? speed_filter->delay : NULL, use_atempo);
 	if (atempo_delay_log_count < 10) {
 		DBGY2 serprintf("stream_sync_av_delay: atempo_gate[%d] filter=%p speed_enabled=%d using_atempo_pref=%d use=%d delay=%d speed=%.3f\n",
-			atempo_delay_log_count, s->audio_filter_atempo, audio_speed_enabled,
+			atempo_delay_log_count, speed_filter, audio_speed_enabled,
 			using_atempo_pref, use_atempo, atempo_delay, audio_interface_get_audio_speed());
 		atempo_delay_log_count++;
 	}
@@ -2163,7 +2164,7 @@ static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink )
 				codec_delay, filter_delay, atempo_delay, sink_delay,
 				sink_delay - ac3_pacer_lead, ac3_pacer_lead, video_delay, total_delay,
 				total_delay - ac3_pacer_lead,
-				audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL, passthrough, ac3_recoding);
+				audio_interface_get_audio_speed(), speed_filter != NULL, passthrough, ac3_recoding);
 		}
 		return total_delay;
 	} else {
@@ -2173,7 +2174,7 @@ static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink )
 				codec_delay, filter_delay, atempo_delay, sink_delay,
 				sink_delay - ac3_pacer_lead, ac3_pacer_lead, video_delay, total_delay,
 				total_delay - ac3_pacer_lead,
-				audio_interface_get_audio_speed(), s->audio_filter_atempo != NULL, passthrough, ac3_recoding);
+				audio_interface_get_audio_speed(), speed_filter != NULL, passthrough, ac3_recoding);
 		}
 		return total_delay;
 	}
@@ -2230,7 +2231,7 @@ DBGY	serprintf("stream_av_diff: put_time_mode=%d\n", s ? s->put_time_mode : -1);
 		}
 	}
 #endif
-	int using_atempo = (s->audio_filter_atempo != NULL);
+	int using_atempo = (stream_get_audio_speed_filter(s) != NULL);
 	// User AV delay is part of A/V relationship and must be visible to sync gating.
 	int user_av_delay = s->av_delay + stream_dbg_delay;
 	int diff = ( video_time - audio_time ) + sync_delay + RST_TO_TS_DELTA( user_av_delay, int );
@@ -2247,7 +2248,8 @@ DBGY	serprintf("stream_av_diff: v=%d a=%d sync_delay=%d av_delay=%d dbg_delay=%d
 // ************************************************************
 int stream_get_atempo_delay( STREAM *s )
 {
-	int use_atempo = (s && s->audio_filter_atempo != NULL);
+	STREAM_FILTER_AUDIO *speed_filter = s ? stream_get_audio_speed_filter(s) : NULL;
+	int use_atempo = (speed_filter != NULL);
 	int ac3_recoding = 0;
 	int passthrough = 0;
 #ifdef CONFIG_AUDIO_AC3
@@ -2265,8 +2267,8 @@ int stream_get_atempo_delay( STREAM *s )
 	if( passthrough || ac3_recoding ) {
 		return 0;
 	}
-	if( s->audio_filter_atempo->delay ) {
-		return s->audio_filter_atempo->delay( s->audio_filter_atempo );
+	if( speed_filter->delay ) {
+		return speed_filter->delay( speed_filter );
 	}
 	return 0;
 }

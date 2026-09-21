@@ -88,6 +88,9 @@ ifeq ($(AUDIO),ON)
 	endif
 	# atempo filter for audio speed control (always enabled with FFmpeg audio)
 	CSRC_AUDIO += stream_filter_audio_atempo.c
+	# sonic filter for audio speed control (experimental, not yet wired into playback)
+	CSRC_AUDIO += sonic.c
+	CSRC_AUDIO += stream_filter_audio_sonic.c
 endif
 
 ifeq ($(VIDEO),ON)

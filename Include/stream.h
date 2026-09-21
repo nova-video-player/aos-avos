@@ -167,7 +167,9 @@ typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
 } STREAM_ATEMPO_LEDGER_ENTRY;
 
 // Deferred atempo video-commit checkpoint (one per speed step).
-#define STREAM_ATEMPO_COMMIT_MAX 16
+// Sonic may publish several effective-speed checkpoints during one blended
+// transition. Keep as many checkpoints as the presentation ledger has blocks.
+#define STREAM_ATEMPO_COMMIT_MAX STREAM_ATEMPO_LEDGER_SIZE
 // Sentinel boundary: the ledger frame domain was invalidated (seek/flush/pause), so
 // this checkpoint must NOT drain against the stale timeline map.  The commit poll
 // applies it only once the new ledger is active and the playhead resolves state==0
@@ -777,7 +779,8 @@ typedef struct STREAM {
 	STREAM_FILTER_AUDIO *audio_filter;
 	STREAM_FILTER_AUDIO *audio_filter_compress;  // Compression/boost filter
 	STREAM_FILTER_AUDIO *audio_filter_ac3;       // AC3 encoding filter
-	STREAM_FILTER_AUDIO *audio_filter_atempo;    // Audio speed control filter
+	STREAM_FILTER_AUDIO *audio_filter_atempo;    // Audio speed control filter (FFmpeg atempo backend)
+	STREAM_FILTER_AUDIO *audio_filter_sonic;     // Audio speed control filter (Sonic backend)
 	STREAM_FILTER_AUDIO *audio_filter_jni;
 	int             audio_filter_enabled;
 	int             audio_filter_level;
@@ -989,7 +992,7 @@ typedef struct STREAM {
 	int		atempo_ledger_lat_samples;
 	int		atempo_ledger_lat_valid;
 	int		atempo_ledger_lat_last_ms;
-	// Playhead-gated video commit for atempo speed changes.
+	// Playhead-gated video commits shared by atempo and Sonic speed changes.
 	// The filter switches speed immediately, but ~300-400ms of old-speed output
 	// is still queued in the sink; switching the video timeline at write time
 	// makes video and audible content advance at different media rates during
@@ -1082,10 +1085,12 @@ int	stream_set_audio_stream( STREAM *s, int audio_stream );
 int	stream_refresh_audio_stream( STREAM *s );
 int	stream_set_audio_filter_level( STREAM *s, int level, int night_on );
 void	stream_set_audio_downmix( int downmix );
-void	stream_disable_atempo_filter( int disable );
+// Audio speed backend selection: 0 = FFmpeg atempo, 1 = AudioTrack PlaybackParams, 2 = Sonic
+void	stream_set_audio_speed_backend( int backend );
 int	stream_filter_audio_atempo_get_ledger_stats( STREAM_FILTER_AUDIO *f, UINT64 *out_samples, int *fifo_samples, int *rate );
 int stream_filter_audio_atempo_take_speed_commit(STREAM_FILTER_AUDIO *f, float *speed, UINT64 *boundary);
 int stream_filter_audio_atempo_needs_format_drain(STREAM_FILTER_AUDIO *f, const AUDIO_FRAME *frame);
+int stream_filter_audio_sonic_needs_format_drain(STREAM_FILTER_AUDIO *f, const AUDIO_FRAME *frame);
 int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *ns_in, INT64 *ns_out, int *ring, int *rate );
 int	stream_filter_audio_atempo_lookup_output_media( STREAM_FILTER_AUDIO *f, UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate );
 int	stream_check_subtitles( STREAM *s );
@@ -1216,9 +1221,40 @@ int 	stream_lock_frame       ( STREAM *s, void *tag );
 VIDEO_FRAME *stream_unlock_frame( STREAM *s, void *tag );
 VIDEO_FRAME *stream_get_frame   ( STREAM *s, void *tag );
 
-static inline UINT64 stream_get_size( STREAM *s ) 
-{ 
-	return s->size; 
+static inline UINT64 stream_get_size( STREAM *s )
+{
+	return s->size;
+}
+
+// Returns the currently active audio speed control filter (atempo or Sonic),
+// whichever backend is open. NULL when audio speed is disabled or backend is
+// AudioTrack PlaybackParams. atempo and sonic filters are mutually exclusive:
+// only one is ever open at a time (see stream_open_audio_filter()).
+// Both backends expose output/media accounting and speed checkpoints through
+// the vtable. Only the legacy FFmpeg audit accessor remains atempo-specific.
+static inline STREAM_FILTER_AUDIO *stream_get_audio_speed_filter( STREAM *s )
+{
+	if( s->audio_filter_atempo ) return s->audio_filter_atempo;
+	if( s->audio_filter_sonic )  return s->audio_filter_sonic;
+	return NULL;
+}
+
+static inline int stream_speed_output_state(STREAM *s, UINT64 *frames, int *queued, int *rate)
+{
+	STREAM_FILTER_AUDIO *f = stream_get_audio_speed_filter(s);
+	return f && f->get_output_state && f->get_output_state(f, frames, queued, rate);
+}
+
+static inline int stream_speed_take_commit(STREAM *s, float *speed, UINT64 *boundary)
+{
+	STREAM_FILTER_AUDIO *f = stream_get_audio_speed_filter(s);
+	return f && f->take_speed_commit && f->take_speed_commit(f, speed, boundary);
+}
+
+static inline int stream_speed_output_media(STREAM *s, UINT64 start, int frames, INT64 *media, int *rate)
+{
+	STREAM_FILTER_AUDIO *f = stream_get_audio_speed_filter(s);
+	return f && f->lookup_output_media && f->lookup_output_media(f, start, frames, media, rate);
 }
 int     stream_get_time_default( STREAM *s, int *total_time );
 

@@ -246,7 +246,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 	int have_ledger = s->atempo_ledger_active || _stream_atempo_ledger_arm(s, sample_rate);
 	float commit_speed;
 	UINT64 wrapper_boundary;
-	while( stream_filter_audio_atempo_take_speed_commit(s->audio_filter_atempo,
+	while( stream_speed_take_commit(s,
 		&commit_speed, &wrapper_boundary) ) {
 		UINT64 boundary = have_ledger ? s->atempo_ledger_output_frames +
 			(wrapper_boundary > wrapper_start ? wrapper_boundary - wrapper_start : 0) :
@@ -299,7 +299,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 		{
 			INT64 b_span_frames = 0;
 			int b_rate = 0;
-			if( stream_filter_audio_atempo_lookup_output_media( s->audio_filter_atempo,
+			if( stream_speed_output_media( s,
 				wrapper_start, nframes, &b_span_frames, &b_rate ) && b_rate > 0 ) {
 				UINT64 w_start = wrapper_start;
 				if( b_span_frames < 0 ) {
@@ -381,7 +381,7 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		// Look up its accepted prefix instead of scaling the whole mixed span.
 		INT64 media_frames = 0;
 		int media_rate = 0;
-		if( stream_filter_audio_atempo_lookup_output_media(s->audio_filter_atempo,
+		if( stream_speed_output_media(s,
 			wrapper_start, written_frames, &media_frames, &media_rate) && media_rate > 0 )
 			new_span_us = (media_frames * 1000000) / media_rate;
 		entry->block_rst_span_us = new_span_us;
@@ -693,6 +693,9 @@ void stream_audio_flush( STREAM *s )
 	// ordinary pause does not call this destructive reset.
 	if( s->audio_filter_atempo && s->audio_filter_atempo->flush ) {
 		s->audio_filter_atempo->flush( s->audio_filter_atempo );
+	}
+	if( s->audio_filter_sonic && s->audio_filter_sonic->flush ) {
+		s->audio_filter_sonic->flush( s->audio_filter_sonic );
 	}
 	if( s->audio_filter_compress && s->audio_filter_compress->flush ) {
 		s->audio_filter_compress->flush( s->audio_filter_compress );
@@ -1293,7 +1296,7 @@ static int _stream_audio_drain_ac3(STREAM *s, AUDIO_FRAME *frame)
 
 static int _stream_audio_uses_atempo(STREAM *s)
 {
-	return s->audio_filter_atempo && audio_interface_is_audio_speed_enabled() &&
+	return stream_get_audio_speed_filter(s) && audio_interface_is_audio_speed_enabled() &&
 		audio_interface_is_using_atempo() && !libavos_get_ac3_recoding_enabled() &&
 		(!s->audio_sink || !s->audio_sink->get_passthrough(s));
 }
@@ -1307,9 +1310,10 @@ static int _stream_audio_drain_atempo(STREAM *s, AUDIO_FRAME *frame, int *output
 		_pcm_accum_take(s, frame);
 		return 1;
 	}
-	if( !s->audio_filter_atempo || !s->audio_filter_atempo->drain ||
-	    s->audio_filter_atempo->drain(s->audio_filter_atempo, frame, 1) < 0 ) {
-		stream_audio_sink_failed(s, "atempo drain failed");
+	STREAM_FILTER_AUDIO *speed_filter = stream_get_audio_speed_filter(s);
+	if( !speed_filter || !speed_filter->drain ||
+	    speed_filter->drain(speed_filter, frame, 1) < 0 ) {
+		stream_audio_sink_failed(s, "audio speed filter drain failed");
 		return -1;
 	}
 	*output_ready = 1;
@@ -1827,6 +1831,9 @@ serprintf(" ae! ");
 	int frame_channels = 0;
 	int use_atempo = 0;
 	int dbg_atempo_in = 0, dbg_atempo_out = 0, dbg_atempo_fifo = 0;
+	// Generic speed-control filter (atempo or Sonic, mutually exclusive).
+	// Only FFmpeg-specific audit access remains gated on audio_filter_atempo.
+	STREAM_FILTER_AUDIO *speed_filter = stream_get_audio_speed_filter( s );
 
 		// Reset resume_write diagnostic counter before atempo runs so the
 		// first post-resume filter call is captured at index [0].
@@ -1846,7 +1853,7 @@ serprintf(" ae! ");
 		// output to avoid excessive filter/JNI/AudioTrack calls without changing
 		// the write cadence of codecs that already produce practical blocks.
 		// atempo_filter_enabled: whether the filter will actually run this frame.
-		int atempo_filter_enabled = (s->audio_filter_atempo != NULL &&
+		int atempo_filter_enabled = (speed_filter != NULL &&
 			audio_interface_is_audio_speed_enabled() &&
 			audio_interface_is_using_atempo() &&
 			passthrough != 1 && passthrough != 2);
@@ -1931,14 +1938,20 @@ serprintf(" ae! ");
 			}
 		}
 
-		// Finish the old atempo graph and FIFO before admitting new geometry.
-		// The decoded frame is owned until that drain has reached the writer.
-		if( atempo_filter_enabled && !atempo_output_ready &&
-		    stream_filter_audio_atempo_needs_format_drain(s->audio_filter_atempo, &audio_frame) ) {
+		// Finish the old speed-filter geometry (atempo graph/FIFO, or Sonic
+		// stream) before admitting new geometry. The decoded frame is owned
+		// until that drain has reached the writer. Both backends need this:
+		// reconfiguring in place would otherwise silently discard whatever
+		// audio the filter still had buffered for the previous format.
+		if( atempo_filter_enabled && speed_filter && !atempo_output_ready &&
+		    ( (s->audio_filter_atempo &&
+		       stream_filter_audio_atempo_needs_format_drain(s->audio_filter_atempo, &audio_frame)) ||
+		      (s->audio_filter_sonic &&
+		       stream_filter_audio_sonic_needs_format_drain(s->audio_filter_sonic, &audio_frame)) ) ) {
 			if( _pcm_retain_frame(s, &audio_frame) < 0 )
 				return;
-			if( s->audio_filter_atempo->drain(s->audio_filter_atempo, &audio_frame, 1) < 0 ) {
-				stream_audio_sink_failed(s, "atempo format drain failed");
+			if( speed_filter->drain(speed_filter, &audio_frame, 1) < 0 ) {
+				stream_audio_sink_failed(s, "audio speed filter format drain failed");
 				return;
 			}
 			if( !audio_frame.size )
@@ -1969,7 +1982,7 @@ serprintf(" ae! ");
 				// 1. Audio speed feature is enabled
 				// 2. User selected atempo (not AudioTrack PlaybackParams)
 				// 3. NOT in passthrough mode 1 or 2 (compressed audio to receiver)
-				use_atempo = (s->audio_filter_atempo != NULL);
+				use_atempo = (speed_filter != NULL);
 				int audio_speed_enabled = audio_interface_is_audio_speed_enabled();
 				int using_atempo_pref = audio_interface_is_using_atempo();
 				if (!audio_speed_enabled) {
@@ -1983,15 +1996,15 @@ serprintf(" ae! ");
 				}
 				if (atempo_gate_log_count < 10) {
 					DBG2 serprintf("stream_audio: atempo_gate[%d] filter=%p speed_enabled=%d using_atempo_pref=%d passthrough=%d frame_size=%d use=%d speed=%.3f\n",
-						atempo_gate_log_count, s->audio_filter_atempo, audio_speed_enabled,
+						atempo_gate_log_count, speed_filter, audio_speed_enabled,
 						using_atempo_pref, passthrough, audio_frame.size, use_atempo,
 						audio_interface_get_audio_speed());
 					atempo_gate_log_count++;
 				}
 
 				if (use_atempo && !atempo_output_ready && audio_frame.size > 0) {
-					int _atempo_before_fifo = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
-						s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+					int _atempo_before_fifo = (speed_filter && speed_filter->delay) ?
+						speed_filter->delay( speed_filter ) : 0;
 					if( _stream_audio_speed_diag_active( s ) ) {
 						DBG serprintf("atempo_diag: epoch=%d speed=%.3f in_size=%d in_rate=%d in_ch=%d in_fake=%d fifo_before=%d audio_time=%d video_time=%d\n",
 							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
@@ -2002,19 +2015,19 @@ serprintf(" ae! ");
 						dbg_atempo_in = audio_frame.size;
 						dbg_atempo_fifo = _atempo_before_fifo;
 					}
-					DBG serprintf("stream_audio: applying atempo filter\n");
-					if( s->audio_filter_atempo->filter(s->audio_filter_atempo, &audio_frame) < 0 || audio_frame.error ) {
-						stream_audio_sink_failed(s, "atempo processing failed");
+					DBG serprintf("stream_audio: applying speed filter [%s]\n", speed_filter ? speed_filter->name : "?");
+					if( speed_filter->filter(speed_filter, &audio_frame) < 0 || audio_frame.error ) {
+						stream_audio_sink_failed(s, "audio speed filter processing failed");
 						return;
 					}
 					if (resume_write_log_count < 3) {
 						dbg_atempo_out = audio_frame.size;
-						dbg_atempo_fifo = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
-							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+						dbg_atempo_fifo = (speed_filter && speed_filter->delay) ?
+							speed_filter->delay( speed_filter ) : 0;
 					}
 					if( _stream_audio_speed_diag_active( s ) ) {
-						int after_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
-							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+						int after_delay = (speed_filter && speed_filter->delay) ?
+							speed_filter->delay( speed_filter ) : 0;
 						DBG serprintf("atempo_diag: epoch=%d speed=%.3f out_size=%d out_rate=%d out_ch=%d out_fake=%d fifo_after=%d audio_time=%d video_time=%d\n",
 							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
 							audio_frame.size, audio_frame.samplesPerSec, audio_frame.channels,
@@ -2402,13 +2415,14 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				int size = audio_frame.size;
 				int total_size = audio_frame.size;
 				UINT64 atempo_output_start = 0;
-				if( use_atempo && total_size > 0 ) {
+				// Both software filters publish output-frame cursors and media spans.
+				if( use_atempo && speed_filter && total_size > 0 ) {
 					UINT64 output_end = 0;
 					int fifo = 0, rate = 0;
 					int frames = total_size / (bytes_per_sample * channels);
-					if( !stream_filter_audio_atempo_get_ledger_stats(s->audio_filter_atempo,
+					if( !stream_speed_output_state(s,
 						&output_end, &fifo, &rate) || output_end < (UINT64)frames ) {
-						stream_audio_sink_failed(s, "invalid atempo output cursor");
+						stream_audio_sink_failed(s, "invalid speed-filter output cursor");
 						return;
 					}
 					atempo_output_start = output_end - frames;
@@ -2645,14 +2659,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// Retry the same output after resume/preload and recheck gates.
 							continue;
 						}
-						if( use_atempo && bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
+						// Share accepted-write accounting for both software speed filters.
+						if( use_atempo && speed_filter && bytes_per_sample > 0 && channels > 0 && sample_rate > 0 ) {
 							ledger_bpf = bytes_per_sample * channels;
 							ledger_reserved_frames = ledger_bpf > 0 ? audio_frame.size / ledger_bpf : 0;
 							wrapper_start += (total_size - size) / ledger_bpf;
 							ledger_reserved = _stream_atempo_ledger_reserve(
 								s, ledger_reserved_frames, sample_rate, wrapper_start );
 							if( ledger_reserved < 0 ) {
-								stream_audio_sink_failed(s, "atempo commit queue exhausted");
+								stream_audio_sink_failed(s, "speed-filter commit queue exhausted");
 								return;
 							}
 						}
@@ -2776,8 +2791,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					loop_write_count++;
 					if( _stream_audio_speed_diag_active( s ) ) {
 						int sink_delay = s->audio_ctx ? audio_interface_get_delay( s->audio_ctx ) : -1;
-						int atempo_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
-							s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+						STREAM_FILTER_AUDIO *_diag_speed_filter = stream_get_audio_speed_filter(s);
+						int atempo_delay = (_diag_speed_filter && _diag_speed_filter->delay) ?
+							_diag_speed_filter->delay( _diag_speed_filter ) : 0;
 						DBG serprintf("audio_write_diag: epoch=%d speed=%.3f atempo=%d req=%d wrote=%d total=%d effective=%lld bps=%lld audio_time=%d video_time=%d sink_delay=%d last_good=%d\n",
 							s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
 							atempo_delay, audio_frame.size, size_written, total_size,
@@ -2945,8 +2961,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 
 							if( add_ms > 0 ) {
 								if( _stream_audio_time_diag_active( s ) ) {
-									int atempo_delay = (s->audio_filter_atempo && s->audio_filter_atempo->delay) ?
-										s->audio_filter_atempo->delay( s->audio_filter_atempo ) : 0;
+									STREAM_FILTER_AUDIO *_diag_speed_filter = stream_get_audio_speed_filter(s);
+									int atempo_delay = (_diag_speed_filter && _diag_speed_filter->delay) ?
+										_diag_speed_filter->delay( _diag_speed_filter ) : 0;
 									DBG serprintf("audio_time_step: epoch=%d speed=%.3f chunk_us=%lld remainder_before=%lld remainder_after=%lld add_ms=%d size_written=%d total=%d atempo=%d before=%d video=%d loop=%d\n",
 										s->audio_speed_diag_epoch, audio_interface_get_audio_speed(),
 										(long long)chunk_time_us, (long long)remainder_before,
@@ -2954,6 +2971,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 										atempo_delay, s->audio_time, s->video_time, loop_write_count);
 								}
 								if( use_atempo ) {
+									// A speed filter (atempo or Sonic) has already time-stretched
+									// this PCM at the fixed native output rate, so add_ms
+									// (bytes_written / native bytes_per_sec) is already the
+									// chunk's TS/physical duration. No further scaling: adding
+									// TS_TO_RST_DELTA(add_ms) here double-scales by speed.
 									_add_audio_time( s, add_ms );
 								} else {
 									_add_audio_time( s, RST_TO_TS_DELTA(add_ms, int) );
@@ -3039,8 +3061,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							int delta = (UINT64)1000 * (UINT64)s->audio_samples / (UINT64)sync_rate;
 							int prev_audio_time = s->audio_time;
 
-							// Check if atempo filter is active - output samples are already in TS domain (physical time)
-							int use_atempo = (s->audio_filter_atempo != NULL);
+							// Check if a speed filter (atempo or Sonic) is active - output samples are already in TS domain (physical time)
+							int use_atempo = (stream_get_audio_speed_filter(s) != NULL);
 							if (!audio_interface_is_audio_speed_enabled() || !audio_interface_is_using_atempo()) {
 								use_atempo = 0;
 							}

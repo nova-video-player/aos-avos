@@ -233,6 +233,11 @@ void libavos_set_spatializer_capabilities(int capabilities)
 	device_config_set_spatializer_capabilities(capabilities);
 }
 
+int libavos_set_sofa_mode(int mode, const char *path)
+{
+    return audio_interface_set_sofa_config(mode, path);
+}
+
 void libavos_set_spatializer_enabled(int enabled)
 {
 	serprintf("libavos_set_spatializer_enabled: %d\n", enabled);

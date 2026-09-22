@@ -391,6 +391,18 @@ Java_com_archos_medialib_LibAvos_nativeSetSpatializerEnabled(JNIEnv *env, jobjec
     pthread_mutex_unlock(&libavos.mtx);
 }
 
+jboolean
+Java_com_archos_medialib_LibAvos_nativeSetSofaMode(JNIEnv *env, jclass clazz, jint mode, jstring profile)
+{
+    const char *path = profile ? (*env)->GetStringUTFChars(env, profile, NULL) : NULL;
+    if (profile && !path) return JNI_FALSE;
+    pthread_mutex_lock(&libavos.mtx);
+    int ret = libavos_set_sofa_mode(mode, path);
+    pthread_mutex_unlock(&libavos.mtx);
+    if (path) (*env)->ReleaseStringUTFChars(env, profile, path);
+    return ret == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
 void
 Java_com_archos_medialib_LibAvos_nativeSetMaxPcmChannels(JNIEnv *env, jobject thiz, jint max_channels)
 {

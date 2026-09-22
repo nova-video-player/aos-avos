@@ -219,4 +219,12 @@ int audio_interface_change_audio_speed(audio_ctx_t *ctx, float speed);
 void audio_interface_set_using_atempo(int using_atempo);
 int audio_interface_is_using_atempo();
 
+#define AUDIO_SOFA_OFF 0
+#define AUDIO_SOFA_TV 1
+#define AUDIO_SOFA_HEADPHONES 2
+#define AUDIO_SOFA_PATH_MAX 1024
+/* Configuration is snapshotted when opening a stream; changes require refresh. */
+int audio_interface_set_sofa_config(int mode, const char *path);
+int audio_interface_get_sofa_config(char *path, int capacity);
+
 #endif

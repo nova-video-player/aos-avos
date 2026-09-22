@@ -672,7 +672,7 @@ static int _stream_get_speed_anchor_ts( STREAM *s, int current_time_ts, int hear
 	if( s && s->audio_ctx ) {
 		int delay_valid = audio_interface_is_delay_valid( s->audio_ctx );
 		if( !delay_valid && speed_changed && s->last_good_delay_valid && s->audio_time >= 0 ) {
-			int effective_delay = s->last_good_delay_ms;
+			int effective_delay = s->last_good_delay_ms + stream_get_sofa_delay(s);
 			STREAM_FILTER_AUDIO *_anchor_speed_filter = stream_get_audio_speed_filter(s);
 			if( using_atempo && _anchor_speed_filter && _anchor_speed_filter->delay ) {
 				effective_delay += _anchor_speed_filter->delay( _anchor_speed_filter );

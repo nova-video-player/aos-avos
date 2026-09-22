@@ -404,6 +404,11 @@ static int audiotrack_get_requested_spatialization_behavior(audio_ctx_t *at, int
 	if (track_format != 2 && track_format != 3)
 		return -1;
 
+    // Software binaural output must never be spatialized a second time,
+    // including stereo and devices whose platform capability probe failed.
+    if (audio_interface_get_sofa_config(NULL, 0) != AUDIO_SOFA_OFF) {
+        return AUDIO_ATTRIBUTES_SPATIALIZATION_BEHAVIOR_NEVER;
+    }
 	if (output_channels <= 2)
 		return -1;
 

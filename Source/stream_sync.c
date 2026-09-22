@@ -1159,10 +1159,30 @@ int stream_get_pcm_startup_seed_delay_ms( STREAM *s )
 // ************************************************************
 static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink );
 
+int stream_get_sofa_delay( STREAM *s )
+{
+	int us = s ? __atomic_load_n(&s->audio_sofa_signal_delay_us, __ATOMIC_ACQUIRE) : 0;
+	// Software tempo precedes SOFA: these are already output/TS samples.
+	// PlaybackParams stretches SOFA's PCM too, so convert its delay to TS.
+	if( audio_interface_is_audio_speed_enabled() && !audio_interface_is_using_atempo() )
+		us = RST_TO_TS_DELTA(us, int);
+	return (us + 500) / 1000;
+}
+
+static UINT64 _stream_sofa_heard_frame( STREAM *s, UINT64 playhead, int rate )
+{
+	int us = __atomic_load_n(&s->audio_sofa_signal_delay_us, __ATOMIC_ACQUIRE);
+	// Correct in sample space, BEFORE lookup, including when a delay crosses
+	// an atempo/Sonic speed boundary. This also preserves the RST mapping.
+	UINT64 frames = rate > 0 ? ((UINT64)MAX(0, us) * rate + 500000) / 1000000 : 0;
+	return playhead > frames ? playhead - frames : 0;
+}
+
 static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_static,
 	int renderer_locked)
 {
 	stream_delay_status_t status = { 0 };
+	status.effective_delay_ms = stream_get_sofa_delay(s);
 	int passthrough_mode = s && s->audio_sink ? s->audio_sink->get_passthrough( s ) : 0;
 	int ac3_recoding = 0;
 #ifdef CONFIG_AUDIO_AC3
@@ -1212,7 +1232,7 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 					return status;
 				}
 
-				int last_good_delay = s->last_good_delay_ms + stream_get_atempo_delay( s );
+				int last_good_delay = s->last_good_delay_ms + stream_get_atempo_delay( s ) + stream_get_sofa_delay(s);
 				int drift = dynamic_delay - last_good_delay;
 				if( ABS( drift ) >= STREAM_PCM_DELAY_DRIFT_CORRECT_MS ) {
 					DBG serprintf("pcm_delay_select: large stable drift dynamic=%d last_good=%d drift=%d streak=%d threshold=%d\n",
@@ -1236,7 +1256,7 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 		}
 
 		if( !passthrough_mode && !ac3_recoding && s->last_good_delay_valid ) {
-			status.effective_delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s );
+			status.effective_delay_ms = s->last_good_delay_ms + stream_get_atempo_delay( s ) + stream_get_sofa_delay(s);
 			status.is_anchorable = 1;
 			status.is_fallback = 1;
 			status.source = STREAM_DELAY_SOURCE_LAST_GOOD;
@@ -1255,7 +1275,7 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 			}
 		}
 		if( static_latency > 0 ) {
-			status.effective_delay_ms = static_latency;
+			status.effective_delay_ms = static_latency + stream_get_sofa_delay(s);
 			status.is_anchorable = 1;
 			status.is_delay_valid = 1;
 			status.is_fallback = 1;
@@ -1337,6 +1357,7 @@ typedef struct {
 
 static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup( STREAM *s, UINT64 playhead, int playhead_rate )
 {
+	playhead = _stream_sofa_heard_frame(s, playhead, playhead_rate);
 	ATEMPO_LEDGER_LOOKUP r = { STREAM_NO_PTS_VALUE, STREAM_NO_PTS_VALUE, 0, 0, 0, 0 };
 	int oldest = (s->atempo_ledger_write - s->atempo_ledger_count + STREAM_ATEMPO_LEDGER_SIZE) %
 		STREAM_ATEMPO_LEDGER_SIZE;
@@ -1440,6 +1461,9 @@ int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate,
 		*playhead = *playhead > latency ? *playhead - latency : 0;
 	}
 	ATEMPO_LEDGER_LOOKUP r = _stream_atempo_ledger_lookup(s, *playhead, *rate);
+	// The caller also tests speed-commit boundaries against this observation.
+	// Return the same acoustic frame index that the lookup used, exactly once.
+	*playhead = _stream_sofa_heard_frame(s, *playhead, *rate);
 	if( r.heard == STREAM_NO_PTS_VALUE || r.heard_rst == STREAM_NO_PTS_VALUE || r.state < 0 )
 		return 0;
 	*ts = r.heard;
@@ -1609,8 +1633,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		// Startup grace for Mode 1: if timing is invalid at the very start, include static latency.
 		if( !is_mode2_sync && s->put_time_mode && s->audio_time > 0 && s->sync_v_time >= 0 &&
 			s->sync_v_time < 500 && s->audio_ctx ) {
-			if( static_latency > heard_delay ) {
-				heard_delay = static_latency;
+			if( static_latency + stream_get_sofa_delay(s) > heard_delay ) {
+				heard_delay = static_latency + stream_get_sofa_delay(s);
 			}
 		}
 #endif
@@ -2124,6 +2148,7 @@ static int _stream_sync_av_delay( STREAM *s, int inspect_video_sink )
 	int run_filter = (!passthrough || ac3_recoding);
 	if( run_filter ) {
 		// Sum delays from filters that are actually applied
+		filter_delay += stream_get_sofa_delay(s);
 		if( s->audio_filter_compress && s->audio_filter_compress->delay ) {
 			filter_delay += s->audio_filter_compress->delay( s->audio_filter_compress );
 		}
@@ -2317,7 +2342,9 @@ static void _stream_pcm_update_delay_cache( STREAM *s, int current_av_delay,
 	int old_last_good_delay = s->last_good_delay_ms;
 	int old_last_good_atempo = s->last_good_atempo_delay_ms;
 	int new_last_good_atempo = stream_get_atempo_delay( s );
-	s->last_good_delay_ms = current_av_delay - new_last_good_atempo;
+	// A different SOFA profile or PlaybackParams rate must not leave its
+	// signal delay baked into the hardware-only latency cache.
+	s->last_good_delay_ms = current_av_delay - new_last_good_atempo - stream_get_sofa_delay(s);
 	s->last_good_delay_valid = 1;
 	s->last_good_atempo_delay_ms = new_last_good_atempo;
 	DBG serprintf( "stream_sync_audio: last_good_delay %d->%d last_good_atempo %d->%d speed=%.3f raw=%d streak=%d sensitive=%d hist=%d\n",
@@ -2382,10 +2409,10 @@ static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	// selected-delay provider during normal playback; the Phase 2 drift gate
 	// handles later correction if last_good is stale.
 	if( s->last_good_delay_valid ) {
-		int atempo_delay   = stream_get_atempo_delay( s );
-		int lg_total       = s->last_good_delay_ms + atempo_delay;
+		int filter_delay   = stream_get_atempo_delay( s ) + stream_get_sofa_delay(s);
+		int lg_total       = s->last_good_delay_ms + filter_delay;
 		int static_lat     = audio_interface_get_latency( s->audio_ctx );
-		int static_total   = (static_lat > 0) ? (static_lat + atempo_delay) : 0;
+		int static_total   = (static_lat > 0) ? (static_lat + filter_delay) : 0;
 		// Clamp last_good up to static latency: after AudioTrack flush+preload the
 		// queue starts at at least static_lat, so anchoring on a low drain-state
 		// last_good value (e.g. 15ms) would place audio_time too early and cause
@@ -2404,7 +2431,7 @@ static int _stream_pcm_reanchor_select_delay( STREAM *s, int *delay_ms,
 	if( *delay_ms > 0 ) {
 		// Static is only a cold resume fallback, but it still needs the filter
 		// delay so heard_ts lands on sync_v_time after the reanchor.
-		*delay_ms += stream_get_atempo_delay( s );
+		*delay_ms += stream_get_atempo_delay( s ) + stream_get_sofa_delay(s);
 		*source = PCM_REANCHOR_SOURCE_STATIC;
 		return 1;
 	}
@@ -2613,7 +2640,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 				s->last_good_candidate_ms    = 0;
 				s->last_good_candidate_count = 0;
 			} else {
-				int last_good_total = s->last_good_delay_ms + stream_get_atempo_delay( s );
+				int last_good_total = s->last_good_delay_ms + stream_get_atempo_delay( s ) + stream_get_sofa_delay(s);
 				int delta = evidence_ms - last_good_total;
 				if( delta < 0 ) delta = -delta;
 				if( delta <= STREAM_PCM_EVIDENCE_COMMIT_DELTA_MS ) {

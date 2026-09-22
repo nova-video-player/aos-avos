@@ -781,6 +781,10 @@ typedef struct STREAM {
 	STREAM_FILTER_AUDIO *audio_filter_ac3;       // AC3 encoding filter
 	STREAM_FILTER_AUDIO *audio_filter_atempo;    // Audio speed control filter (FFmpeg atempo backend)
 	STREAM_FILTER_AUDIO *audio_filter_sonic;     // Audio speed control filter (Sonic backend)
+	int audio_sofa_mode;                        // Configuration latched before decoder open
+	char audio_sofa_path[AUDIO_SOFA_PATH_MAX];
+	STREAM_FILTER_AUDIO *audio_filter_mysofa;    // Frame-preserving stereo spatializer
+	int audio_sofa_signal_delay_us;             // Atomic snapshot; no filter access on renderer thread
 	STREAM_FILTER_AUDIO *audio_filter_jni;
 	int             audio_filter_enabled;
 	int             audio_filter_level;

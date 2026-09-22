@@ -43,6 +43,9 @@ typedef struct STREAM_FILTER_AUDIO {
 	FILTER_AUDIO_PARAM   set_param;
 	FILTER_AUDIO_DELAY   delay;
 	FILTER_AUDIO_DRAIN   drain;
+	// Common acoustic reference delay in microseconds at the PCM sample rate.
+	// Distinct from queued programme duration returned by delay().
+	int (*signal_delay_us)(struct STREAM_FILTER_AUDIO *f);
 
 	// Optional software-speed timing interface. Indices count interleaved PCM
 	// frames, not bytes or channel samples. Consume the returned PCM and its

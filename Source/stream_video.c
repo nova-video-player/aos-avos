@@ -215,6 +215,7 @@ STREAM_FILTER_AUDIO *stream_filter_audio_compress_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_ac3_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_atempo_new( void );
 STREAM_FILTER_AUDIO *stream_filter_audio_sonic_new( void );
+STREAM_FILTER_AUDIO *stream_filter_audio_mysofa_new(int mode, const char *path);
 
 extern int libavos_get_ac3_recoding_enabled(void);
 extern int libavos_get_max_pcm_channels(void);
@@ -412,7 +413,13 @@ DBGS serprintf("stream_open_audio_dec: downmix=%d max_channels=%d ac3_recoding=%
 	DBG serprintf("stream_open_audio_dec: input channels=%d rate=%d bits=%d passthrough=%d downmix_pref=%d max_pcm=%d ac3_recoding=%d\n",
 		s->audio->channels, s->audio->samplesPerSec, s->audio->bitsPerSample,
 		spdif_is_passthrough_on(), stream_audio_downmix, s->audio_max_channels, ac3_recoding);
-	if( stream_audio_downmix && !ac3_recoding ) {
+	s->audio_sofa_mode = audio_interface_get_sofa_config(s->audio_sofa_path, sizeof(s->audio_sofa_path));
+    if (ac3_recoding || spdif_is_passthrough_on()) s->audio_sofa_mode = AUDIO_SOFA_OFF;
+    int software_spatialization = s->audio_sofa_mode != AUDIO_SOFA_OFF;
+    if (software_spatialization) {
+        s->audio->request_channels = 0;
+    }
+	if( stream_audio_downmix && !ac3_recoding && !software_spatialization ) {
 		s->audio->request_channels = s->audio_max_channels;
 DBGS serprintf("stream_open_audio_dec: setting request_channels=%d for downmix\r\n", s->audio->request_channels);
 	} else if( ac3_recoding ) {
@@ -430,7 +437,7 @@ DBGS serprintf("stream_open_audio_dec: clearing request_channels for AC3 recodin
 		passthrough_mode = 0;
 	}
 #endif
-	if( !passthrough_mode && !ac3_recoding ) {
+	if( !passthrough_mode && !ac3_recoding && !software_spatialization ) {
 		int pcm_cap = libavos_get_max_pcm_channels();         // 0 if unknown
 		int desired  = s->audio->request_channels;            // may be 0 (no downmix) or user downmix
 
@@ -607,6 +614,20 @@ DBGS serprintf("stream_open_audio_filter: created [%s] (will open lazily on firs
 			s->audio_filter_enabled = 0;
 		}
 	}
+
+#ifdef CONFIG_FFMPEG_AUDIO
+    __atomic_store_n(&s->audio_sofa_signal_delay_us, 0, __ATOMIC_RELEASE);
+    if (s->audio_sofa_mode && !ac3_recoding && !spdif_is_passthrough_on()) {
+        s->audio_filter_mysofa = stream_filter_audio_mysofa_new(s->audio_sofa_mode, s->audio_sofa_path);
+        if (!s->audio_filter_mysofa || s->audio_filter_mysofa->open(s->audio_filter_mysofa, s->audio)) {
+            if (s->audio_filter_mysofa) s->audio_filter_mysofa->delete(s->audio_filter_mysofa);
+            s->audio_filter_mysofa = NULL;
+            return 1;
+        }
+        __atomic_store_n(&s->audio_sofa_signal_delay_us,
+            s->audio_filter_mysofa->signal_delay_us(s->audio_filter_mysofa), __ATOMIC_RELEASE);
+    }
+#endif
 
 	// Open the selected audio speed control filter (atempo, Sonic, or none when
 	// AudioTrack PlaybackParams is selected).
@@ -1031,6 +1052,11 @@ DBGS serprintf("stream_close_audio_filter\r\n");
 		}
 		s->audio_filter = NULL;
 	}
+    if (s->audio_filter_mysofa) {
+        __atomic_store_n(&s->audio_sofa_signal_delay_us, 0, __ATOMIC_RELEASE);
+        s->audio_filter_mysofa->delete(s->audio_filter_mysofa);
+        s->audio_filter_mysofa = NULL;
+    }
 	// Close and delete atempo filter
 	if( s->audio_filter_atempo ) {
 		if( s->audio_filter_atempo->close ) {
@@ -2421,7 +2447,11 @@ serprintf("AUD_DEC: [%s]\r\n", s->audio_dec ? s->audio_dec->name : "(none)" );
 
 		s->audio_stuff_zero = 1;
 
-		stream_open_audio_filter( s );
+        if (stream_open_audio_filter(s)) {
+            stream_close_audio_filter(s);
+            stream_close_audio_dec(s);
+            stream_drop_audio(s);
+        }
 	}
 
 	// if we have neither audio or video we fail here

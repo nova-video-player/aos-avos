@@ -16,6 +16,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
 
 #include "global.h"
 #include "debug.h"
@@ -29,6 +31,32 @@ static float previous_audio_speed = 1.0f;
 
 static int is_audio_speed_enabled = 0;
 static int using_atempo = 0;
+static pthread_mutex_t sofa_lock = PTHREAD_MUTEX_INITIALIZER;
+static int sofa_mode;
+static char sofa_path[AUDIO_SOFA_PATH_MAX];
+
+int audio_interface_set_sofa_config(int mode, const char *path)
+{
+    if (mode < AUDIO_SOFA_OFF || mode > AUDIO_SOFA_HEADPHONES ||
+        (mode && (!path || !path[0] || strlen(path) >= sizeof(sofa_path))))
+        return -1;
+    pthread_mutex_lock(&sofa_lock);
+    sofa_mode = mode;
+    snprintf(sofa_path, sizeof(sofa_path), "%s", mode ? path : "");
+    pthread_mutex_unlock(&sofa_lock);
+    return 0;
+}
+
+int audio_interface_get_sofa_config(char *path, int capacity)
+{
+    pthread_mutex_lock(&sofa_lock);
+    int mode = sofa_mode;
+    if (path && capacity > 0)
+        snprintf(path, capacity, "%s", sofa_path);
+    pthread_mutex_unlock(&sofa_lock);
+    return mode;
+}
+
 
 #ifdef CONFIG_ANDROID
 extern const audio_interface_impl_t audio_interface_impl_opensles;

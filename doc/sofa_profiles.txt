@@ -1,24 +1,31 @@
-# Nova Video Player SOFA HRTF Profiles
-# Metadata for spatial audio filter configuration
+# Nova Video Player SOFA HRTF profiles (September 2026)
+# Source/license/checksum details: Video/assets/sofa/NOTICE.txt
 
 [TV_SPEAKERS]
 file=HRIR_FULL2DEG_TV_speakers.sofa
-description=Neumann KU100 HRIR Full 2-degree resolution
-use_case=Spatial audio simulation for TV speakers (front-facing stereo pair)
-listener_position=far-field (>1m from speakers)
-sample_rate=96000
+description=TH Koeln Neumann KU100 HRIR Full 2-degree resolution
+use_case=Binaural target plus experimental regularized four-path TV inverse
+listener_distance_m=2.0
+speaker_spacing_m=1.0
+speaker_height_relative_to_ears_m=0.0
+listener_position=Centered; physical speaker azimuths approximately +/-14.04 degrees
+inverse_design_offsets_m=-0.05,0,+0.05
+sample_rate=48000
 channels=2
 type=HRTF
+signal_reference_us=5854
+filter_design=sofa_tv_filter.json
 
 [HEADPHONES]
-file=subject_003_headphones.sofa
-description=CIPIC Subject 003 Head-Related Transfer Functions
-use_case=Spatial audio simulation for ear-covering headphones
-listener_position=direct (headphone coupling)
-sample_rate=44100
+file=D1_48K_24bit_256tap_FIR_SOFA.sofa
+description=SADIE II v2-2 D1 Neumann KU100, diffuse-field equalized
+use_case=Generic binaural headphone playback
+listener_position=Headphone playback of binaural ear signals
+sample_rate=48000
 channels=2
 type=HRTF
+signal_reference_us=2229
 
-# SOFA Standard: AES69-2022
-# Format: Spatially Oriented Format for Acoustics
-# Reference: https://www.sofaconventions.org/
+# Listener geometry is a fixed engineering default, not a user calibration.
+# Timing references preserve per-ear/per-direction differences, not exact
+# frequency-independent group delays. No headphone-specific EQ or head tracking.

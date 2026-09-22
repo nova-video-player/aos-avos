@@ -65,5 +65,6 @@ int  libavos_get_max_pcm_channels(void);
 void libavos_set_pcm_channel_masks(const int *masks, int count);
 void libavos_set_spatializer_capabilities(int capabilities);
 void libavos_set_spatializer_enabled(int enabled);
+int libavos_set_sofa_mode(int mode, const char *path);
 
 #endif

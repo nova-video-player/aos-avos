@@ -587,6 +587,15 @@ void stream_audio_copy_sink_from_source(STREAM *s)
 		}
 	}
 
+    if (s->audio_filter_mysofa) {
+        sink->channels = sink->sourceChannels = 2;
+        sink->channelMask = 3; // AV_CH_LAYOUT_STEREO
+        sink->request_channels = 0;
+        sink->bitsPerSample = sink->sourceBitsPerSample = 16;
+        sink->bytesPerFrame = 4;
+        sink->bytesPerSec = sink->samplesPerSec * 4;
+    }
+
 	// When passthrough is disabled, or when the current route does not support
 	// this compressed format, decode to PCM and configure the sink as PCM before
 	// the first decoded frame arrives.
@@ -689,6 +698,9 @@ void stream_audio_flush( STREAM *s )
 	if( s->audio_dec ) {
 		s->audio_dec->flush( s->audio );
 	}
+    if (s->audio_filter_mysofa) {
+        s->audio_filter_mysofa->flush(s->audio_filter_mysofa);
+    }
 	// Flush all active filters. A seek must discard the WSOLA ring and FIFO;
 	// ordinary pause does not call this destructive reset.
 	if( s->audio_filter_atempo && s->audio_filter_atempo->flush ) {
@@ -1080,11 +1092,12 @@ static void _stream_abort_incomplete_compressed_unit(
 static int _wait( STREAM *s, int wait )
 {
 	int inserted = 0;
+    AUDIO_PROPERTIES *output = s->audio_filter_mysofa ? stream_audio_get_sink_props(s) : s->audio;
 	if( s->audio_sink ) {
 		while( wait ) {
 			int to_wait = MIN( 20, wait );
-			int samples = to_wait * s->audio->samplesPerSec / 1000;
-			int size = samples * s->audio->bytesPerFrame;
+			int samples = to_wait * output->samplesPerSec / 1000;
+			int size = samples * output->bytesPerFrame;
 			UCHAR silence[size];
 			memset( silence, 0, size );
 			AUDIO_FRAME frame = { 0 };
@@ -1116,17 +1129,17 @@ static int _wait( STREAM *s, int wait )
 				return 0; // The recreated track discarded all earlier silence.
 			}
 			if( size_written > 0 && audio_interface_is_using_atempo() &&
-			    s->audio->bytesPerFrame > 0 && s->audio->samplesPerSec > 0 ) {
+			    output->bytesPerFrame > 0 && output->samplesPerSec > 0 ) {
 				_stream_atempo_ledger_append_hold( s,
-					size_written / s->audio->bytesPerFrame,
-					s->audio->samplesPerSec );
+					size_written / output->bytesPerFrame,
+					output->samplesPerSec );
 			}
 			// Credit only the silence actually accepted by the sink. A partial or
 			// failed write must not over-credit the scheduler hold, which would
 			// push manual_audio_delay_applied_ms above what was really inserted.
-			int written_ms = ( size_written > 0 && s->audio->bytesPerFrame > 0 &&
-			    s->audio->samplesPerSec > 0 )
-				? ( size_written / s->audio->bytesPerFrame ) * 1000 / s->audio->samplesPerSec
+			int written_ms = ( size_written > 0 && output->bytesPerFrame > 0 &&
+			    output->samplesPerSec > 0 )
+				? ( size_written / output->bytesPerFrame ) * 1000 / output->samplesPerSec
 				: 0;
 			wait -= to_wait;
 			inserted += written_ms;
@@ -1141,7 +1154,8 @@ static int _wait( STREAM *s, int wait )
 
 static void _write_zero_data( STREAM *s, int time ) 
 {
-	int bytes = s->audio->bytesPerFrame * s->audio->samplesPerSec * time / 1000;
+	AUDIO_PROPERTIES *output = s->audio_filter_mysofa ? stream_audio_get_sink_props(s) : s->audio;
+	int bytes = output->bytesPerFrame * output->samplesPerSec * time / 1000;
 DBGA serprintf("_write_zero_data %d -> %d\r\n", time, bytes );
 
 	UCHAR *zero = acalloc(1, bytes);
@@ -2109,6 +2123,22 @@ serprintf(" ae! ");
 					DBG3 serprintf("stream_audio: post-filter frame fmt=%04X size=%d\n",
 						audio_frame.format, audio_frame.size);
 
+                if (s->audio_filter_mysofa && !passthrough_active && !ac3_recoding && audio_frame.size > 0) {
+                    // SOFA is synchronous and frame/rate preserving. Speed-ledger
+                    // indices still describe the exact frames sent to the sink.
+                    if (!atempo_output_ready)
+                        s->audio_filter_mysofa->set_param(s->audio_filter_mysofa, &s->audio->channelMask, NULL);
+                    if (s->audio_filter_mysofa->filter(s->audio_filter_mysofa, &audio_frame) < 0) {
+                        stream_audio_sink_failed(s, "SOFA spatialization failed");
+                        return;
+                    }
+                    // Compare output geometry with the sink, not multichannel
+                    // decoder geometry, which must remain intact for future PCM.
+                    original_channels = sink_props->channels;
+                    original_rate = sink_props->samplesPerSec;
+                    original_bits = sink_props->bitsPerSample;
+                }
+
 				// Check if filter changed the audio format or layout (e.g., PCM -> AC3 recoding)
 				int expected_format = sink_props ? sink_props->format : original_format;
 				int is_pcm_to_pcm = (!ac3_recoding && sink_props &&
@@ -2183,7 +2213,7 @@ serprintf(" ae! ");
 					// AudioTrack with AC3 2-channel IEC61937 format.
 					// The sync code uses s->audio->bytesPerFrame to convert fakeSize to samples,
 					// so s->audio must reflect the original decoded PCM format, not the AC3 container.
-					if( !is_ac3_recoding ) {
+					if( !is_ac3_recoding && !s->audio_filter_mysofa ) {
 						// For non-AC3-recoding format changes, update s->audio properties normally
 						if( format_changed ) {
 							s->audio->format = audio_frame.format;
@@ -2310,6 +2340,10 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// would overwrite the AC3 format with the source codec format.
 							if( !libavos_get_ac3_recoding_enabled() || !ac3_sink_configured ) {
 								stream_audio_copy_sink_from_source( s );
+                                if (s->audio_filter_mysofa) {
+                                    sink->samplesPerSec = audio_frame.samplesPerSec;
+                                    sink->bytesPerSec = sink->samplesPerSec * sink->bytesPerFrame;
+                                }
 							}
 							// Set passthrough mode based on whether this route supports the sink format.
 							int passthrough_mode = stream_audio_requested_passthrough_for_format( sink->format );
@@ -2936,7 +2970,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 
 						// Byte-ratio timing is valid for PCM-like fixed-rate outputs.
 						// Keep VBR and incomplete-metadata paths on conservative fallback timing.
-						int use_rational_timing = (!s->audio->vbr &&
+						int use_rational_timing = ((!s->audio->vbr || s->audio_filter_mysofa) &&
 							audio_frame.size > 0 &&
 							bytes_per_sample > 0 &&
 							channels > 0 &&
@@ -3013,6 +3047,8 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						// add the samples and calc new time
 						if( s->audio->samplesPerSec ) {
 							int bpf = s->audio->bytesPerFrame;
+                            if (s->audio_filter_mysofa && !passthrough_active)
+                                bpf = 4; // SOFA output is stereo S16, source stays multichannel
 #ifdef CONFIG_SPDIF
 							if( passthrough_active && audio_frame.fakeSize > 0 ) {
 								AUDIO_PROPERTIES *spdif_props = stream_audio_get_sink_props( s );

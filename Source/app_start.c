@@ -69,6 +69,17 @@ serprintf("SIGALRM received\n");
 		return;
 	}
 
+#ifdef SIM
+	// Simulator: SIGINT/SIGTERM/SIGQUIT are normal terminations. Exit
+	// immediately with _exit() (async-signal-safe) so we neither dump core
+	// (macOS crash report) nor deadlock in the cleanup below, which is not
+	// safe to run from a signal handler while other threads hold locks.
+	if (signum == SIGINT || signum == SIGTERM || signum == SIGQUIT) {
+serprintf("\nTERMINATED( %d )\n", signum);
+		_exit(0);
+	}
+#endif
+
 serprintf("\nTERMINATED( %d )\n", signum);
 
 #ifdef DMALLOC

@@ -172,6 +172,10 @@ void mainloop_enter( void )
             break;
         }
     }
+
+    if (quit) {
+        mainloop_exit();
+    }
 #endif
 
 

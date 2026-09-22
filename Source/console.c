@@ -23,6 +23,10 @@
 #include "timers.h"
 #include "message.h"
 
+#ifdef SIM
+#include "mainloop.h"
+#endif
+
 #include <ctype.h>
 
 #ifdef DEBUG_MSG
@@ -156,6 +160,14 @@ void CONSOLE_handle_char( unsigned char byte )
 		cmd[cmd_row][cmd_column] = 0;
 		newline = 0;
 	}
+
+#ifdef SIM
+	// Simulator: 'q' on an empty prompt quits cleanly.
+	if (byte == 'q' && len[cmd_row] == 0) {
+		mainloop_exit();
+		return;
+	}
+#endif
 
 	if (!is_parameter_mode()) {
 		size_t key = is_special( byte );

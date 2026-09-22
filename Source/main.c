@@ -21,6 +21,8 @@
 #include "athread.h"
 #include "mainloop.h"
 
+#include <unistd.h>
+
 void app_start( int argc, char *argv[] );
 void gui_start( void );
 void cli_start( int argc, char *argv[] );
@@ -74,6 +76,12 @@ serprintf("\r\n...done with serial commands\r\n\r\n");
 	mainloop_deinit();
 
 	LOG_close();
+
+#ifdef SIM
+	// Simulator: exit immediately, background decode/audio threads are still
+	// running and a normal exit() can deadlock while flushing stdio/atexit.
+	_exit(0);
+#endif
 
 	return 0;
 }

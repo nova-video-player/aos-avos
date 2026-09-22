@@ -27,7 +27,13 @@
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 
-extern void RenderX(unsigned char *, unsigned char *, int, int, int, int);
+#if defined(__APPLE__)
+#define AVOS_WEAK_IMPORT __attribute__((weak_import))
+#else
+#define AVOS_WEAK_IMPORT __attribute__((weak))
+#endif
+
+extern void RenderX(unsigned char *, unsigned char *, int, int, int, int) AVOS_WEAK_IMPORT;
 
 typedef struct convert {
 	pthread_mutex_t mutex;
@@ -225,6 +231,10 @@ static int deinterlace(convert_t *c, AVFrame **src)
 {
 	/* Retain the existing 8-bit planar deinterlacer as a separate stage. */
 	if ((*src)->format != AV_PIX_FMT_YUV420P && (*src)->format != AV_PIX_FMT_YUVJ420P)
+		return 0;
+	/* The deinterlacer implementation lives in libdeinterlace, which is not
+	 * linked in the standalone simulator: skip deinterlacing when absent. */
+	if (!RenderX)
 		return 0;
 	int ret = prepare_frame(&c->deinterlaced, (*src)->format, (*src)->width, (*src)->height);
 	if (ret < 0)

@@ -34,6 +34,10 @@
 #include "dts.h"
 #include "stream_fd.h"
 
+#if defined(__APPLE__) && !defined(pread64)
+#define pread64 pread
+#endif
+
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FFMPEG_PARSER
 
@@ -683,7 +687,9 @@ serprintf("FF: parse H264 SPS\n");
                             }
 
                             if (video->dv_profile) {
+#ifdef CONFIG_ANDROID
                                 dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+#endif
                                 force_dovi = (dovi_decoder != NULL);
                             }
 

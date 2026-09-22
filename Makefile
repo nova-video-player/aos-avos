@@ -79,6 +79,9 @@ LDFLAGS += -rdynamic
 ifeq ($(UNAME_S),Linux)
 LDFLAGS += -Wl,-z,max-page-size=16384
 endif
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS += -Wl,-undefined,dynamic_lookup
+endif
 
 LDFLAGS += -L$(TOOLCHAIN_PATH)/usr/$(LIBDIR)
 

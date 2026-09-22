@@ -64,13 +64,18 @@ int stream_filter_audio_atempo_lookup_output_media(STREAM_FILTER_AUDIO *, UINT64
 
 // Read-only af_atempo state accessor added to the vendored filter: reports
 // media counters and WSOLA ring occupancy used by the atempo output ledger.
+#if defined(__APPLE__)
+#define AVOS_WEAK_IMPORT __attribute__((weak_import))
+#else
+#define AVOS_WEAK_IMPORT __attribute__((weak))
+#endif
 extern void avfilter_atempo_get_state(AVFilterContext *ctx,
                                   int *ring_size,
                                   int64_t *pos_in,
                                   int64_t *pos_out,
                                   int64_t *ns_in,
                                   int64_t *ns_out,
-                                  double *tempo);
+                                  double *tempo) AVOS_WEAK_IMPORT;
 extern void avfilter_atempo_get_state_v2(AVFilterContext *ctx,
                                      int *ring_size,
                                      int64_t *pos_in,
@@ -78,7 +83,7 @@ extern void avfilter_atempo_get_state_v2(AVFilterContext *ctx,
                                      int64_t *ns_in,
                                      int64_t *ns_out,
                                      double *tempo,
-                                     int64_t *media_out) __attribute__((weak));
+                                     int64_t *media_out) AVOS_WEAK_IMPORT;
 
 static void atempo_get_state(AVFilterContext *ctx,
 	int *ring_size, int64_t *pos_in, int64_t *pos_out,
@@ -90,7 +95,7 @@ static void atempo_get_state(AVFilterContext *ctx,
 	if (avfilter_atempo_get_state_v2) {
 		avfilter_atempo_get_state_v2(ctx, ring_size, pos_in, pos_out,
 			ns_in, ns_out, tempo, media_out);
-	} else {
+	} else if (avfilter_atempo_get_state) {
 		avfilter_atempo_get_state(ctx, ring_size, pos_in, pos_out,
 			ns_in, ns_out, tempo);
 	}

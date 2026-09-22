@@ -111,7 +111,7 @@ spacing, 2 m perpendicular listening distance, centered listener, speakers at
 ear height** (about ±14.04 degrees). The user specified distance and centering;
 spacing and height are engineering defaults pending physical measurements.
 
-`test/design-sofa-tv.py` uses all four interpolated KU100 paths, relative path
+`doc/tests/design-sofa-tv.py` uses all four interpolated KU100 paths, relative path
 propagation at 343 m/s and distance attenuation. It fits the center and ±5 cm
 lateral offsets together. It uses Tikhonov regularization (0.03 times the largest
 normal-matrix eigenvalue), a matrix gain limit of 2, and partial cancellation:
@@ -214,7 +214,7 @@ copies are redundant; app assets take precedence during merging. Keep the
 hashes in SofaProfileManager in sync when replacing models. Both bundled models
 are **48 kHz** SimpleFreeFieldHRIR datasets. SADIE's file
 is about 36.3 MB uncompressed. The old CIPIC asset is no longer packaged.
-`test/install-sadie-profile.py ARCHIVE LICENSE` verifies the official SADIE v2-2
+`doc/tests/install-sadie-profile.py ARCHIVE LICENSE` verifies the official SADIE v2-2
 archive and license before installing identical assets in both modules. The
 profile manager hash changes the extracted filename, avoiding reuse of the old
 profile. See bundled `NOTICE.txt` and `LICENSE-SADIE.txt`: SADIE is Apache 2.0;
@@ -267,34 +267,22 @@ output peak, clipped samples and non-finite convolution samples on the first
 block and every five seconds of PCM. These bounded logs help distinguish
 remaining clipping/format problems without per-frame log traffic.
 
-### Host regression commands
+### Test guide
 
-`python3 native/avos/test/run-mysofa-filter.py` builds local libmysofa and a
-minimal vendored FFmpeg without downloads, then exercises both actual assets
-and production wrappers. Existing host builds can be supplied with
-`--ffmpeg-build DIR --mysofa-prefix DIR`.
+[TEST.md](TEST.md) is the maintained guide for all Sonic/SOFA test commands,
+dependencies, sanitizer options, coverage, and device checks. In particular:
 
-Regenerate the TV coefficients with NumPy and a host libmysofa:
-`python3 native/avos/test/design-sofa-tv.py --libmysofa /path/to/libmysofa.dylib`
-(or the corresponding `.so`). Optional `--spacing`, `--distance` and `--height`
-parameters change the assumed geometry; regenerated coefficients require a
-native rebuild and evaluation. This is an offline design tool, not an app setting.
+- [SOFA filter and speed composition](TEST.md#sofa-filter-and-speed-composition)
+  exercises both real profiles and the production atempo/Sonic wrappers.
+- [Host regression suites](TEST.md#host-regression-suites) covers the Sonic wrapper,
+  shared presentation ledger, and SOFA signal-delay accounting.
+- [SOFA model tools](TEST.md#sofa-model-tools) documents verified profile installation
+  and TV coefficient regeneration.
+- [Device validation](TEST.md#sonic-and-sofa-device-validation) covers acoustics,
+  loudness, low-end TV CPU, AudioTrack speed, mode/track changes, pause/seek,
+  route changes, and system spatialization.
 
-`python3 native/avos/test/run-sofa-sync.py` exercises production presentation
-helpers for signal-delay correction across speed boundaries, mixer/DAC sources,
-startup, PlaybackParams scaling and SOFA-off behavior. The existing
-`run-speed-transitions.py` and `run-sonic-filter.py` remain regression checks.
-
-Coverage: mono/stereo/5.1 input, 8/44.1/48/96/192 kHz timing references,
-44.1/48 kHz format changes, exact frame counts,
-1-sample through 1024-sample partition invariance, seek reset, EOF accounting,
-left-ear directionality, malformed input/missing profiles, and actual atempo
-and Sonic transitions through 1x/0.5x/1.5x/2x/1x with partial-write media lookups.
-The existing Sonic/shared-ledger regressions remain applicable.
-
-Still requires device testing: TV/headphone acoustics and loudness, CPU on
-low-end TVs, AudioTrack PlaybackParams, rapid mode/track switches, pause/seek,
-HDMI/headset route changes, and coexistence with system spatialization.
+The host suites and model tools are in `doc/tests/`.
 
 Local validation for this integration: ARMv7 and ARM64 AVOS/JNI and patched
 FFmpeg libraries built successfully; the resulting libraries were copied to

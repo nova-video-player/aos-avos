@@ -208,24 +208,15 @@ At 1.5x, the old renderer projected a 40 ms source-frame interval as approximate
 Agreement between those incorrect internal clocks was not evidence of lipsync;
 the earlier `avos-237.log` claim must not be used as validation of physical sync.
 
-Host regressions cover wrapper lifecycle, unchanged live-transition PCM versus
-a direct Sonic stream, blended checkpoints, exact split-write media accounting,
-short terminal tails, queued playback, retries, pause, manual-delay holds, and
-seek/reset. The presentation tests compile the production ledger and commit
-functions with a fake sink/playhead.
+See [TEST.md](TEST.md#host-regression-suites) for the Sonic wrapper and shared
+presentation regression commands, coverage, sanitizer options, and device
+validation procedure. Tests and model tools are under `doc/tests/`.
 
-```sh
-python3 test/run-sonic-filter.py
-python3 test/run-speed-transitions.py
-CFLAGS='-fsanitize=undefined -g' python3 test/run-sonic-filter.py
-CFLAGS='-fsanitize=undefined -g' python3 test/run-speed-transitions.py
-```
-
-Both suites pass normally and with UndefinedBehaviorSanitizer. Android builds
-for armeabi-v7a and arm64-v8a also pass with `LIBAV_CONFIG=full`. The older
-`test/pause_resume_sync.py` cannot currently run because it extracts a removed
-`_stream_audio_apply_preload` helper; the new presentation suite exercises the
-current pause/reset path. No physical lip-sync validation is claimed.
+Both Sonic suites previously passed normally and with UndefinedBehaviorSanitizer.
+Android builds for armeabi-v7a and arm64-v8a also passed with `LIBAV_CONFIG=full`.
+The older `test/pause_resume_sync.py` has stale function-extraction assumptions;
+its status is documented in [other native tests](TEST.md#other-native-tests).
+No physical lip-sync validation is claimed.
 
 **Document version:** 1.2  
 **Last updated:** 2026-09-20

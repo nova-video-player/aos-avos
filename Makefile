@@ -63,7 +63,7 @@ all: avos-compile
 include common.mk
 
 CFLAGS += -g -O2
-ifeq ($(ARCH),i586)
+ifeq ($(TGT_BASE),sim)
 CFLAGS += -fPIC
 endif
 CFLAGS += $(DEFINES)

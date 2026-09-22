@@ -45,7 +45,7 @@ ifeq ($(AUDIO),ON)
  		DEFINES += -DCONFIG_AMR
        endif
 	
-	ifeq ($(ARCH),i586)
+	ifeq ($(TGT_BASE),sim)
 		DEFINES += -DCONFIG_DTS			# DTS
 		DEFINES += -DCONFIG_FF_MP3
 		DEFINES += -DCONFIG_FF_AAC
@@ -202,7 +202,7 @@ ifeq ($(VIDEO),ON)
 		DEFINES += -DCONFIG_OMX_VP9
 	endif
 
-	ifeq ($(ARCH),i586)
+	ifeq ($(TGT_BASE),sim)
 		DEFINES += -DCONFIG_FF_MPEG2
 		DEFINES += -DCONFIG_FF_MPEG4
 		DEFINES += -DCONFIG_FF_H264

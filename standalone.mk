@@ -18,7 +18,8 @@ ifeq (,$(CONFIGMAKEFILE))
 	BUILD_DIR      = build
 	TOOLCHAIN_PATH = /
 	BUILD          = DEBUG
-	ARCH           = i586
+	# host arch (arm64, x86_64, ...); "arm" is reserved for the cross/Android target
+	ARCH           = $(shell uname -m)
 	PRODUCT        = G9L
 	FLAVOR         = LEGACY
 	LIBAVOS        = NO

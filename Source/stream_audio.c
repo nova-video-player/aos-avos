@@ -1195,6 +1195,7 @@ static void _stream_audio_apply_preload( STREAM *s )
 
 void stream_audio_prepare_resume( STREAM *s )
 {
+	__atomic_store_n( &s->audio_resume_write_committed, 0, __ATOMIC_RELEASE );
 	s->audio_resume_pending = 1;
 	s->audio_resume_valid_pending = 0;
 	// Seek preview must not wait for audio: its decoder is intentionally idle.
@@ -3094,6 +3095,15 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							// recode assigns the next unit's value at the top of the loop.
 							audio_frame.fakeSize = 0;
 						}
+					}
+					if( !passthrough_active && !s->paused &&
+						!__atomic_load_n( &s->audio_resume_write_committed, __ATOMIC_ACQUIRE ) ) {
+						// Publish proof only after positive output and its media clock
+						// are committed. The pre-write resume flag and video hold can
+						// both clear earlier. Retry anchor publication now so even a
+						// very short final write can acknowledge the renderer's resume.
+						__atomic_store_n( &s->audio_resume_write_committed, 1, __ATOMIC_RELEASE );
+						stream_sync_audio( s, s->audio_time );
 					}
 					if( compressed_unit ) {
 						// Pair the AudioTrack presentation frontier with the exact same

@@ -155,6 +155,7 @@ typedef struct priv {
 	int prev_paused;
 	int pause_start_ms;
 	int pause_armed;
+	int pcm_resume_pending; // renderer-owned; acknowledged by a committed audio clock
 	int slew_active;
 	int mode2_dynamic_slew;
 	int mode2_dynamic_fast_slew;
@@ -597,6 +598,17 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 		p->last_audio_resume_pending = s->audio_resume_pending;
 	}
+	// The writer consumes audio_resume_pending before write(), so its edge is
+	// normally gone by the time put_time() publishes the accepted output. Keep
+	// our own notification until a real post-resume clock reaches this sink.
+	// Seek/speed changes own a new timeline and supersede the pause correction.
+	if( epoch_changed || speed_changed || passthrough_mode )
+		p->pcm_resume_pending = 0;
+	int pcm_resume = p->pcm_resume_pending && s && !s->paused &&
+		!s->seek_paused && !s->audio_start_pending &&
+		!s->audio_resume_pending &&
+		__atomic_load_n( &s->audio_resume_write_committed, __ATOMIC_ACQUIRE ) &&
+		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0;
 
 	int expected = p->venc_put_time + dr;
 	int diff = time - expected;
@@ -651,7 +663,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 	}
 
-	if( !speed_changed && !discontinuity && p->venc_put_time && time < p->venc_put_time ) {
+	if( !pcm_resume && !speed_changed && !discontinuity && p->venc_put_time && time < p->venc_put_time ) {
 		time = p->venc_put_time;
 		diff = time - expected;
 		abs_diff = diff < 0 ? -diff : diff;
@@ -668,8 +680,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// submitted-frontier heard clock can discard the established device/route
 	// phase when that frontier is ahead of physical presentation. Missing
 	// anchors and real discontinuities still take the normal reanchor path.
-	int resume_reanchor = resume_started &&
-		(passthrough_mode < 2 || p->render_offset_ns == -1);
+	int resume_reanchor = pcm_resume || (resume_started && !p->pcm_resume_pending &&
+		(passthrough_mode < 2 || p->render_offset_ns == -1));
 	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor ||
 		epoch_changed || resume_reanchor;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor &&
@@ -695,7 +707,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		reanchor_discontinuity,
 		in_grace,
 		no_sched_anchor,
-		resume_started,
+		resume_started || pcm_resume,
 		allow_reanchor);
 	p->venc_put_time = time;
 	p->venc_ref_time = atime();
@@ -712,8 +724,31 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->render_offset_ns    = -1; // Force immediate re-anchor on seek/resume/discontinuity/speed change.
 		p->render_offset_from_audio = 0;
 		p->pending_reanchor    = 1;
+		if( pcm_resume ) {
+			// Use this clock sample and its wall reference as one pair. Merely
+			// adding paused wall time assumes AudioTrack froze at exactly the
+			// same instant as video; small differences accumulate on each pause.
+			// Silence inserted for negative user delay deliberately leaves video
+			// ahead of heard audio. Preserve that phase instead of inserting it
+			// again or cancelling it by aligning both clocks to zero offset.
+			int manual_hold_ts = MAX(0, s->manual_audio_delay_applied_ms);
+			if( audio_interface_is_audio_speed_enabled() &&
+				!audio_interface_is_using_atempo() ) {
+				manual_hold_ts = RST_TO_TS_DELTA(manual_hold_ts, int);
+			}
+			p->render_offset_ns = p->sched_start_mono_ns -
+				((INT64)time + manual_hold_ts) * 1000000LL;
+			p->render_offset_from_audio = 1;
+			p->target_offset_ns = p->render_offset_ns;
+			p->slew_active = 0;
+			p->pcm_startup_slew = 0;
+			p->pending_reanchor = 0;
+			p->pcm_resume_pending = 0;
+			DBGSI serprintf("android_sync: PCM resume anchor heard=%d manual_hold=%d offset=%lld epoch=%d\n",
+				time, manual_hold_ts, (long long)p->render_offset_ns, s->seek_epoch);
+		}
 		DBGSI serprintf("videosink_put_time: reset sched and render anchors at time=%d, diff=%d (speed_changed=%d disc=%d no_sched=%d resume=%d)\n",
-			time, diff, speed_changed, discontinuity, no_sched_anchor, resume_started);
+			time, diff, speed_changed, discontinuity, no_sched_anchor, resume_started || pcm_resume);
 	}
 
 DBGSI2 serprintf("[[put %8d|%4d|%4d]]", time, dt, dr );
@@ -1832,6 +1867,7 @@ retry_decoder_open:
 	p->prev_paused = 0;
 	p->pause_start_ms = 0;
 	p->pause_armed = 0;
+	p->pcm_resume_pending = 0;
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
 	p->mode2_dynamic_fast_slew = 0;
@@ -2102,6 +2138,7 @@ DBGCV	CLOG();
 	p->hold_audio_applied_ms = 0;
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
+	p->pcm_resume_pending = 0;
 	while (p->locked.state & (THREAD_STATE_READING|THREAD_STATE_WRITING|THREAD_STATE_RENDERING)) {
 		pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
 	}
@@ -2239,6 +2276,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->sched_debt_ns = 0;
 
 	// Reset android_sync timeline offsets
+	p->pcm_resume_pending = 0;
 	p->render_offset_ns = -1;
 	p->render_offset_from_audio = 0;
 	p->slew_active = 0;
@@ -2292,6 +2330,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
 	if( paused ) {
+		p->pcm_resume_pending = 0;
 		p->pcm_startup_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;
@@ -2321,6 +2360,12 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		s->audio_time, s->video_time, s->video_time - s->audio_time);
 	DBGSI serprintf("android_sync: resume state offset=%lld pending=%d seek_epoch=%d\n",
 		(long long)p->render_offset_ns, p->pending_reanchor, s->seek_epoch);
+	int passthrough = s->audio_sink && s->audio_sink->get_passthrough ?
+		s->audio_sink->get_passthrough(s) : 0;
+	if( !passthrough && s->audio && s->audio->valid &&
+		!s->seek_paused && !s->audio_start_pending && !p->pending_seek_reanchor ) {
+		p->pcm_resume_pending = 1;
+	}
 
 	// If audio_time is stale vs video_time, invalidate audio timing and re-anchor on first post-resume audio.
 	if( s->audio_time >= 0 && s->video_time >= 0 && (s->video_time - s->audio_time) > 500 ) {

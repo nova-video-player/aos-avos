@@ -936,6 +936,7 @@ typedef struct STREAM {
 	int		warmup_video_frames;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;
+	int		audio_resume_write_committed; // atomic: PCM accepted since resume preparation
 	int		audio_resume_valid_pending;
 	int		pcm_reanchor_state;
 	int		pcm_reanchor_seek_epoch;

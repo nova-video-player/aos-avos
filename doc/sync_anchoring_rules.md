@@ -165,6 +165,20 @@ thread's last reported position, not the potentially stale `video_time`).
 It expires if `seek_epoch` changes mid-resume to prevent stale rebases.
 Android `put_time` sinks do not use this state machine: the first committed
 post-resume audio output republishes the centralized heard-time anchor.
+For decoded PCM, sfdec2 owns a separate pending-resume notification, armed by
+the explicit pause hook. The audio writer clears `audio_resume_pending` before
+writing, so that flag's edge cannot reliably notify `put_time()`. The renderer
+waits until playback is unpaused and the first resumed write has committed,
+then pairs the published heard timestamp with its current monotonic reference
+to replace the video render offset. This prevents small differences between
+AudioTrack's actual pause boundary and the wall-duration shift from accumulating
+over repeated pauses. It does not flush audio or change media/sample accounting.
+Any already inserted negative-delay silence remains an intentional video lead;
+its duration is retained in the new offset (scaled for PlaybackParams when
+applicable). Positive delay continues to be applied to video deadlines.
+Seek, decoder flush and speed-epoch changes supersede the pending correction.
+Passthrough retains its separate pause-phase policy; files without audio do not
+arm the PCM correction.
 
 ### Post-seek restart
 

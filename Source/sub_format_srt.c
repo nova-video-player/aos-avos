@@ -305,6 +305,13 @@ static int srt_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64
 static SUB_FRAME *srt_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) { return ((SRT_BACKEND *)be->priv)->ssa_backend->render_at(((SRT_BACKEND *)be->priv)->ssa_backend, pts_ms); }
 static void srt_free_frame(SUB_FORMAT_BACKEND *be, SUB_FRAME *frame) { ((SRT_BACKEND *)be->priv)->ssa_backend->free_frame(((SRT_BACKEND *)be->priv)->ssa_backend, frame); }
 static int srt_resize(SUB_FORMAT_BACKEND *be, int video_w, int video_h) { return ((SRT_BACKEND *)be->priv)->ssa_backend->resize(((SRT_BACKEND *)be->priv)->ssa_backend, video_w, video_h); }
+// SRT is rendered by an inner ASS backend; the video box has to reach it too or plain-text
+// subtitles keep sizing/placing against the whole (bar-extended) canvas.
+static int srt_set_video_box(SUB_FORMAT_BACKEND *be, int x, int y, int w, int h) {
+    SRT_BACKEND *ctx = (SRT_BACKEND *)be->priv;
+    SUB_FORMAT_BACKEND *inner = ctx ? ctx->ssa_backend : NULL;
+    return (inner && inner->set_video_box) ? inner->set_video_box(inner, x, y, w, h) : 0;
+}
 static int srt_flush(SUB_FORMAT_BACKEND *be) { return ((SRT_BACKEND *)be->priv)->ssa_backend->flush(((SRT_BACKEND *)be->priv)->ssa_backend); }
 static int srt_close(SUB_FORMAT_BACKEND *be) {
     SRT_BACKEND *ctx = (SRT_BACKEND *)be->priv;
@@ -332,6 +339,7 @@ SUB_FORMAT_BACKEND *sub_format_srt_create(void) {
     be->render_at = srt_render_at;
     be->free_frame = srt_free_frame;
     be->resize = srt_resize;
+    be->set_video_box = srt_set_video_box;
     be->flush = srt_flush;
     be->close = srt_close;
     be->get_timeout_ms = srt_get_timeout_ms; // <--- ADD THIS

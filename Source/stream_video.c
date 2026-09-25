@@ -21,6 +21,7 @@
 #include "device_config.h"
 #include "util.h"
 #include "stream.h"
+#include "stream_buffer_limits.h"
 #include "stream_alloc.h"
 #include "stream_rc.h"
 #include "stream_parser.h"
@@ -1968,7 +1969,8 @@ serprintf("RESIZE BUFFER!\n");
 serprintf("\n");
 
 	// resize, we can ignore if that fails, since in that case we just use the old buffer..
-	int new_size = stream_buffer_large * 1024 * 1024;
+	if (!stream_buffer_mib_valid(stream_buffer_large, 1, VIDEO_OVERLAP_SIZE)) return;
+	int new_size = stream_buffer_mib_bytes(stream_buffer_large);
 
 	stream_buffer_resize_and_rebuffer( s->buffer, new_size );
 }
@@ -2151,7 +2153,8 @@ DBGS serprintf("opening parser: [%s] with %d MB\r\n", s->parser->name, s->buffer
 			stream_parse_parts( s );
 		}
 		s->abort = s->user_abort;
-		if( s->parser->open( s, s->buffer_size * 1024 * 1024, flags ) ) {
+		int buffer_bytes = stream_buffer_mib_bytes(s->buffer_size);
+		if( buffer_bytes < 0 || s->parser->open( s, buffer_bytes, flags ) ) {
 serprintf("error opening parser: %d\r\n", s->video_error );
 			if ( !s->video_error ) {
 				stream_set_error( s, VE_FILE_ERROR );

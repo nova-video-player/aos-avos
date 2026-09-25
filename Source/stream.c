@@ -18,6 +18,7 @@
 #include "types.h"
 #include "global.h"
 #include "stream.h"
+#include "stream_buffer_limits.h"
 #include "debug.h"
 #include "util.h"
 #include "astdlib.h"
@@ -69,7 +70,7 @@ DECLARE_DEBUG_TOGGLE ("sfvs", 	stream_use_fake_video_sink );
 DECLARE_DEBUG_TOGGLE ("sfas", 	stream_use_fake_audio_sink );
 DECLARE_DEBUG_TOGGLE ("snvs", 	stream_use_new_video_sink );
 
-// buffer used as cache before parser to tackle buffering issues in MB
+// Compressed media budget in MiB: demuxed packets for FFmpeg, raw data for legacy parsers.
 // history 2015 12->24MB (20 NOK) for high bitrate 4k streaming
 static int default_stream_buffer_size = 24;
 // to cope with video frames size (can be HUGE, needs to be increased with resolution increase)
@@ -1221,7 +1222,7 @@ void stream_set_buffer_size( STREAM *s, int buffer_size )
 	if( !s )
 		return;
 DBGS serprintf("stream_set_buffer_size: %ld\r\n", buffer_size );
-	s->buffer_size = buffer_size;
+	s->buffer_size = stream_buffer_mib_valid(buffer_size, 1, VIDEO_OVERLAP_SIZE) ? buffer_size : 24;
 }
 
 // ************************************************************
@@ -1929,7 +1930,8 @@ static void _perform_stream_abort( void )
 void define_default_stream_buffer_size(int size)
 {
 	DBG serprintf("stream:define_default_stream_buffer_size %d\n", size);
-	default_stream_buffer_size = size;
+	// Preserve zero as the existing STREAM_DEFAULT_BUFFER_SIZE fallback.
+	default_stream_buffer_size = stream_buffer_mib_valid(size, 1, VIDEO_OVERLAP_SIZE) ? size : 24;
 }
 
 int get_default_stream_buffer_size()
@@ -1941,7 +1943,9 @@ int get_default_stream_buffer_size()
 void define_default_stream_max_iframe_size(int size)
 {
 	DBG serprintf("stream:define_default_stream_max_iframe_size %d\n", size);
-	default_video_mindata_size = size * 1024 * 1024;
+	// CBE allocates capacity plus an equally large overlap. Zero selects the default.
+	default_video_mindata_size = size > 0 && stream_buffer_mib_valid(size, 2, 0)
+		? stream_buffer_mib_bytes(size) : VIDEO_MINDATA_SIZE;
 }
 
 int get_default_stream_max_iframe_size()

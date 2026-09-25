@@ -227,7 +227,8 @@ serprintf("no mem for sub chunks!\r\n");
 	
 	if( !( flags & STREAM_PARSER_NO_PREBUFFER ) ) {
 		// read mindata + 50% into buffer so that we can parse file header
-		if( stream_parser_prebuffer( s, s->buffer, s->parser_mindata_size * 3 / 2 ) ) {
+		int prebuffer_bytes = (int)MIN((int64_t)INT_MAX, (int64_t)s->parser_mindata_size * 3 / 2);
+		if( stream_parser_prebuffer( s, s->buffer, prebuffer_bytes ) ) {
 serprintf("user abort in parser open!\n");
 			stream_parser_close( s );
 			return 1;

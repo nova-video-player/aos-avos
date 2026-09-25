@@ -156,26 +156,11 @@ static int register_libavos(JNIEnv *env)
     if (!fields.AvosBitmapHelper_createRGBBitmapMethod)
         return -1;
 
-    GET_CLASS(fields.SubtitleClazz, "com/archos/medialib/Subtitle");
-    fields.Subtitle_createTimedTextSubtitleMethod =
-            (*env)->GetStaticMethodID(env, fields.SubtitleClazz, "createTimedTextSubtitle",
-                    "(IILjava/lang/String;)"
-                    "Ljava/lang/Object;");
-    if (!fields.Subtitle_createTimedTextSubtitleMethod)
-        return -1;
-
-    fields.Subtitle_createTimedBitmapSubtitleMethod =
-            (*env)->GetStaticMethodID(env, fields.SubtitleClazz, "createTimedBitmapSubtitle",
-                    "(IIIIIILandroid/graphics/Bitmap;)"
-                    "Ljava/lang/Object;");
-    if (!fields.Subtitle_createTimedBitmapSubtitleMethod)
-        return -1;
-
     GET_CLASS(fields.ClassLoaderClazz, "java/lang/ClassLoader");
     //we use a dummy instance of one of our classes, not system one, to get correct classLoader
-    jclass instancewithLoader = (*env)->GetObjectClass(env, fields.SubtitleClazz);
+    jclass instancewithLoader = (*env)->GetObjectClass(env, fields.AvosMediaPlayerClazz);
     jmethodID ClassLoaderMethod = (*env)->GetMethodID(env, instancewithLoader, "getClassLoader", "()Ljava/lang/ClassLoader;");
-    fields.myClassLoader = (*env)->NewGlobalRef(env, (*env)->CallObjectMethod(env, fields.SubtitleClazz, ClassLoaderMethod));
+    fields.myClassLoader = (*env)->NewGlobalRef(env, (*env)->CallObjectMethod(env, fields.AvosMediaPlayerClazz, ClassLoaderMethod));
     myClassLoader = fields.myClassLoader;
     fields.FindClassMethod = (*env)->GetMethodID(env, fields.ClassLoaderClazz, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     myFindClassMethod = fields.FindClassMethod;
@@ -196,7 +181,6 @@ static int unregister_libavos(JNIEnv *env)
 {
     (*env)->DeleteGlobalRef(env, fields.AvosMediaPlayerClazz);
     (*env)->DeleteGlobalRef(env, fields.AvosBitmapHelperClazz);
-    (*env)->DeleteGlobalRef(env, fields.SubtitleClazz);
     if (fields.AudioTransformerObj) {
         (*env)->DeleteGlobalRef(env, fields.AudioTransformerObj);
         fields.AudioTransformerObj = NULL;

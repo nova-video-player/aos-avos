@@ -176,14 +176,7 @@ serprintf( "IDX: could not read file %s\n", subname );
 	line = subtitle_get_next_line( line, LINE_LEN, fd );
 
 	while ( line ) {
-		if (!strncmp(line, "size:", 5)) {
-			int w, h;
-			if (sscanf(line + 5, "%dx%d", &w, &h) == 2 &&
-			    w > 0 && h > 0 && w <= 16384 && h <= 16384) {
-				sub->canvas_width = w;
-				sub->canvas_height = h;
-			}
-		} else if( !strncmp( line, "time offset:", strlen("time offset:") ) ) {
+		if( !strncmp( line, "time offset:", strlen("time offset:") ) ) {
 DBG serprintf("%s", line );
 		} else if( !strncmp( line, "id:", strlen("id:") ) ) {
 DBG serprintf("%s", line );

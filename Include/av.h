@@ -548,6 +548,7 @@ enum {
 #define VIDEO_TRACK_MAX		6
 #define SUB_TRACK_MAX		128
 #define AV_NAME_LEN			256
+#define ATTACHED_FONT_MAX		64
 
 enum {
 	CRYPT_NONE = 0,
@@ -682,6 +683,29 @@ typedef struct _sub_props {
 	char lang[AV_NAME_LEN + 1];
 } SUB_PROPERTIES;
 
+// One font attachment found in the container (e.g. MKV AVMEDIA_TYPE_ATTACHMENT
+// streams whose mimetype/extension identifies them as an embeddable font --
+// see stream_parser_ffmpeg.c's is_font_attachment()/AVMEDIA_TYPE_ATTACHMENT
+// handling in _parse_format()). Consumed by stream_subtitle.c, which bridges
+// this array into sub_engine_open_track() -> SUB_FORMAT_OPEN_PARAMS::
+// embedded_fonts (see sub_format.h's SUB_EMBEDDED_FONT) so the SSA backend
+// can ass_add_font() it (see sub_format_ssa.c's load_embedded_fonts()).
+//
+// `data` ALIASES the demuxer's own AVCodecParameters::extradata buffer --
+// same "not owned, valid for the container's lifetime" contract SUB_PROPERTIES
+// already relies on for extraData2 (see the AVMEDIA_TYPE_SUBTITLE branch of
+// _parse_format(), a few lines below where this ends up being populated for
+// AVMEDIA_TYPE_ATTACHMENT streams). Not copied here to avoid holding a
+// second copy of (potentially many) embedded font files in memory for the
+// whole playback session.
+typedef struct _attached_font {
+	int  valid;
+	char filename[AV_NAME_LEN + 1];   // e.g. "arial.ttf", from the attachment's "filename" tag
+	char mimetype[AV_NAME_LEN + 1];   // e.g. "application/x-truetype-font", from its "mimetype" tag
+	unsigned char *data;              // alias into codecpar->extradata; NOT owned, do not free
+	int  size;
+} ATTACHED_FONT;
+
 void show_audio_props( AUDIO_PROPERTIES *audio );
 void show_video_props( VIDEO_PROPERTIES *video );
 void show_subtitle_props( SUB_PROPERTIES *sub  );
@@ -700,6 +724,12 @@ typedef struct _av_props {
 	int		subs;
 	int		subs_max;
 	SUB_PROPERTIES sub[SUB_TRACK_MAX];
+
+	int		fonts;          // unused today (no "current selection" concept for
+					// fonts, unlike audio/video/subs) -- kept alongside
+					// fonts_max for symmetry with the other tracks' counters
+	int		fonts_max;
+	ATTACHED_FONT	font[ATTACHED_FONT_MAX];
 
 } AV_PROPERTIES;
 

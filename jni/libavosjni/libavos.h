@@ -37,10 +37,6 @@ typedef struct fields_t {
 	jclass AvosBitmapHelperClazz;
 	jmethodID AvosBitmapHelper_createRGBBitmapMethod;
 
-	jclass SubtitleClazz;
-	jmethodID Subtitle_createTimedTextSubtitleMethod;
-	jmethodID Subtitle_createTimedBitmapSubtitleMethod;
-
 	jclass ClassLoaderClazz;
 	jobject myClassLoader;
 	jmethodID FindClassMethod;

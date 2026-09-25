@@ -4,6 +4,7 @@
 #include <string.h>
 #include <pthread.h>
 #include "debug.h"
+#include "ssa_geometry.h"
 
 #define DBG if(Debug[DBG_SUB])
 
@@ -25,6 +26,16 @@ typedef struct {
     ASS_Renderer   *renderer;
     ASS_Track      *track;
     pthread_mutex_t lock;
+    // Video's own on-screen box inside the canvas + the coded video size. Together with
+    // canvas_w/h these are the ONLY geometry inputs; ssa_apply_geometry() is the one place
+    // that turns them into libass frame size / margins / storage size, so resize(),
+    // set_video_box() and open() can never disagree about how they do it.
+    int             box_x, box_y, box_w, box_h;   // 0 w/h = not reported yet
+    int             real_video_w, real_video_h;
+    // Height of the region PlayResY is mapped onto (the video box, NOT the canvas). This is
+    // what the px -> PlayRes conversion in sync_styles() must divide by. Maintained by
+    // ssa_apply_geometry().
+    int             content_h;
     int             canvas_w, canvas_h;  // RENAMED from video_w/h -- what ass_set_frame_size()
                                         // was called with, i.e. the on-screen canvas, not the
                                         // decoded video's own size. Java now
@@ -43,6 +54,10 @@ typedef struct {
 
     int               orig_playres_x;
     int               orig_playres_y;
+    // The script's own ScaledBorderAndShadow, saved so a forced style can override it and
+    // an authored style can get it back (see sync_styles()).
+    int               orig_sbas;
+    int               orig_sbas_saved;
 
     // Persisted from SUB_FORMAT_OPEN_PARAMS at open() time so sync_styles()
     // (which re-runs on every feed()/style-change, not just at open) can
@@ -365,6 +380,10 @@ static int sync_styles(SSA_BACKEND *ctx) {
         ctx->orig_playres_x = ctx->track->PlayResX;
         ctx->orig_playres_y = ctx->track->PlayResY;
     }
+    if (!ctx->orig_sbas_saved) {
+        ctx->orig_sbas = ctx->track->ScaledBorderAndShadow;
+        ctx->orig_sbas_saved = 1;
+    }
 
     // 2. Restore everything to original ASS baseline first
     if (ctx->backups) {
@@ -387,18 +406,62 @@ static int sync_styles(SSA_BACKEND *ctx) {
             ctx->track->PlayResX = ctx->orig_playres_x;
             ctx->track->PlayResY = ctx->orig_playres_y;
         }
+        ctx->track->ScaledBorderAndShadow = ctx->orig_sbas;
     }
 
     // 3. Apply the Java Overrides!
     // 0 = ASS_OVERRIDE_NO, 1 = ASS_OVERRIDE_FORCE, 2 = ASS_OVERRIDE_SCALE
     int force_all = ctx->is_plain_text || (u.override_mode == 1);
 
-    if (force_all || u.override_mode == 2) {
+    // SCALE ONLY mode used to divide PlayResX/Y by the scale factor. That enlarges text, but it
+    // also rewrites the coordinate space every \pos/\move/\clip in the script was authored
+    // in, so typeset signs land in the wrong place (a \pos at the authored bottom-right corner
+    // ends up off-screen at 1.5x). libass has a dedicated knob that scales fonts only and
+    // leaves PlayRes -- and therefore authored positions -- untouched. By default (libass
+    // ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE) it applies to dialogue-style events and leaves
+    // positioned typesetting at its authored size.
+    ass_set_font_scale(ctx->renderer,
+        (!force_all && u.override_mode == 2 && u.font_scale > 0) ? (double)u.font_scale : 1.0);
+
+    if (force_all) {
+        // The forced outline/shadow/box-padding values below come from the UI in PlayRes
+        // units (see font_res_scale), so they need to scale with the video box the same way
+        // the font does -- that's only true when ScaledBorderAndShadow=yes. Without it,
+        // libass instead scales borders by (box height / storage height), and now that
+        // ssa_geometry.h sets a storage size, that would make a forced outline get thinner
+        // the higher the video's resolution (measured 5.5px -> 3.5px -> 1.5px going from no
+        // storage size to 1080p to 4K in testing). The SRT synthetic header has no
+        // ScaledBorderAndShadow line at all, so plain-text subs hit this by default.
+        ctx->track->ScaledBorderAndShadow = 1;
         for (int i = 0; i < ctx->track->n_styles; i++) {
             ASS_Style *style = &ctx->track->styles[i];
 
             if (force_all) {
+                // font_res_scale converts a "PlayRes-720-normalized" user setting (55 = 55px at
+                // PlayResY 720) into the current script's own PlayRes units, so libass's
+                // content_h/PlayResY scaling produces the right pixel count. libass always scales
+                // by content_h (the video box), never the canvas -- so on its own, the SAME
+                // setting renders at a different physical screen size depending on how much of
+                // the canvas the video box fills.
+                //
+                // The extra factor below cancels that out and re-targets the canvas's SHORT side
+                // (min(canvas_w, canvas_h)) instead of content_h or canvas_h alone. Canvas height
+                // on its own isn't a stable reference: rotating the same device swaps canvas_w
+                // and canvas_h, so "55" would render noticeably bigger in portrait than landscape
+                // on the same screen even with no video-box dependency left. The short side is
+                // exactly the dimension that DOESN'T change across that swap, so it's the one
+                // stable "how big is this screen" number available across orientations -- the
+                // same role content_h (video box height) plays for aspect ratio in
+                // ssa_geom_compute(), just one level up, for the physical screen instead of the
+                // video. Position (MarginV, \pos/\move) is untouched by this and stays
+                // video-box-relative, since that's about not overlapping the video, not about
+                // how big the text looks.
+                int short_side = (ctx->canvas_w > 0 && ctx->canvas_h > 0)
+                    ? (ctx->canvas_w < ctx->canvas_h ? ctx->canvas_w : ctx->canvas_h) : 0;
                 float font_res_scale = (ctx->orig_playres_y > 0) ? ((float)ctx->orig_playres_y / 720.0f) : 1.0f;
+                if (short_side > 0 && ctx->content_h > 0) {
+                    font_res_scale *= (float)short_side / (float)ctx->content_h;
+                }
                 if (u.font_size > 0) {
                     style->FontSize = u.font_size * font_res_scale;
                 }
@@ -469,11 +532,15 @@ static int sync_styles(SSA_BACKEND *ctx) {
                 // unconditionally pushed those styles' text down from the top instead of up from
                 // the bottom, which is what the vertical-offset slider visually looked like.
                     if (style->Alignment >= 1 && style->Alignment <= 3) {
-                        if (ctx->canvas_h > 0 && ctx->track->PlayResY > 0) {
-                            float scale_ratio = (float)ctx->track->PlayResY / (float)ctx->canvas_h;
+                        // libass maps PlayResY onto the VIDEO BOX (frame minus margins), not
+                        // the whole canvas, so the UI's physical-pixel offset must be converted
+                        // with the box height. Dividing by canvas_h here was only correct while
+                        // frame size == canvas == video.
+                        if (ctx->content_h > 0 && ctx->track->PlayResY > 0) {
+                            float scale_ratio = (float)ctx->track->PlayResY / (float)ctx->content_h;
                             style->MarginV = (int)(u.margin_bottom * scale_ratio);
-                            DBG serprintf("SUB_SURFACE: Margin translation: UI sent %d physical px -> libass mapped to %d logical px (Scale: %f, PlayResY: %d, SurfaceH: %d)\n",
-                                 u.margin_bottom, style->MarginV, scale_ratio, ctx->track->PlayResY, ctx->canvas_h);
+                            DBG serprintf("SUB_SURFACE: Margin translation: UI sent %d physical px -> libass mapped to %d logical px (Scale: %f, PlayResY: %d, VideoBoxH: %d)\n",
+                                 u.margin_bottom, style->MarginV, scale_ratio, ctx->track->PlayResY, ctx->content_h);
                         } else {
                             // Fallback just in case
                             style->MarginV = u.margin_bottom;
@@ -481,14 +548,6 @@ static int sync_styles(SSA_BACKEND *ctx) {
                     }
 
 
-            } else if (u.override_mode == 2) {
-                // SCALE ONLY MODE: Divide resolution by scale to enlarge everything proportionally
-                if (u.font_scale > 0 && u.font_scale != 1.0f) {
-                    if (ctx->orig_playres_x > 0 && ctx->orig_playres_y > 0) {
-                        ctx->track->PlayResX = (int)(ctx->orig_playres_x / u.font_scale);
-                        ctx->track->PlayResY = (int)(ctx->orig_playres_y / u.font_scale);
-                    }
-                }
             }
         }
     }
@@ -539,6 +598,25 @@ static void ass_msg_cb(int level, const char *fmt, va_list va, void *data) {
     }
 }
 
+// Single choke point for canvas/box -> libass geometry. Caller holds ctx->lock (or is still
+// inside ssa_open(), before the backend is published).
+static void ssa_apply_geometry(SSA_BACKEND *ctx) {
+    SSA_GEOM g = ssa_geom_compute(ctx->canvas_w, ctx->canvas_h,
+                                  ctx->box_x, ctx->box_y, ctx->box_w, ctx->box_h,
+                                  ctx->real_video_w, ctx->real_video_h);
+    DBG serprintf("SUB_SURFACE: libass geometry: frame %dx%d margins t=%d b=%d l=%d r=%d storage %dx%d (content %dx%d)\n",
+                  g.frame_w, g.frame_h, g.margin_t, g.margin_b, g.margin_l, g.margin_r,
+                  g.storage_w, g.storage_h, g.content_w, g.content_h);
+    ssa_geom_apply(ctx->renderer, &g);
+    if (g.content_h != ctx->content_h) {
+        ctx->content_h = g.content_h;
+        // sync_styles() bakes the user's pixel offset into style->MarginV in PlayRes units using
+        // content_h, and only re-runs when the style serial changes. A rotation/resize changes
+        // content_h without touching the serial, which left MarginV stale. Force a re-sync.
+        ctx->last_serial = 0;
+    }
+}
+
 static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params) {
     SSA_BACKEND *ctx = calloc(1, sizeof(SSA_BACKEND));
     if (!ctx) return -1;
@@ -546,6 +624,10 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
 
     ctx->canvas_w = params->video_w;
     ctx->canvas_h = params->video_h;
+    ctx->box_x = params->video_box_x;  ctx->box_y = params->video_box_y;
+    ctx->box_w = params->video_box_w;  ctx->box_h = params->video_box_h;
+    ctx->real_video_w = params->real_video_w;
+    ctx->real_video_h = params->real_video_h;
 
     ctx->library = ass_library_init();
     if (!ctx->library) {
@@ -564,10 +646,7 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
         return -1;
     }
 
-    int final_w = ctx->canvas_w > 0 ? ctx->canvas_w : 1920;
-    int final_h = ctx->canvas_h > 0 ? ctx->canvas_h : 1080;
-    DBG serprintf("SUB_SURFACE: Configured libass renderer frame size: %d x %d\n", final_w, final_h);
-    ass_set_frame_size(ctx->renderer, final_w, final_h);
+    ssa_apply_geometry(ctx);
 
     ctx->track = ass_new_track(ctx->library);
     if (!ctx->track) {
@@ -809,7 +888,19 @@ static int ssa_resize(SUB_FORMAT_BACKEND *be, int canvas_w, int canvas_h) {
     }
     ctx->canvas_w = canvas_w;
     ctx->canvas_h = canvas_h;
-    ass_set_frame_size(ctx->renderer, canvas_w, canvas_h);
+    ssa_apply_geometry(ctx);
+    pthread_mutex_unlock(&ctx->lock);
+    return 0;
+}
+
+// Where the video's own box sits inside the canvas (see sub_engine_set_video_box()). Until
+// this existed only the GFX backend consumed it; libass needs it to keep PlayRes scaling and
+// \pos placement tied to the video instead of the (possibly bar-extended) canvas.
+static int ssa_set_video_box(SUB_FORMAT_BACKEND *be, int x, int y, int w, int h) {
+    SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
+    pthread_mutex_lock(&ctx->lock);
+    ctx->box_x = x; ctx->box_y = y; ctx->box_w = w; ctx->box_h = h;
+    ssa_apply_geometry(ctx);
     pthread_mutex_unlock(&ctx->lock);
     return 0;
 }
@@ -883,6 +974,7 @@ SUB_FORMAT_BACKEND *sub_format_ssa_create(void) {
     be->render_at = ssa_render_at;
     be->free_frame = ssa_free_frame;
     be->resize = ssa_resize;
+    be->set_video_box = ssa_set_video_box;
     be->flush = ssa_flush;
     be->close = ssa_close;
     be->get_timeout_ms = ssa_get_timeout_ms;

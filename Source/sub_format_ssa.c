@@ -36,6 +36,13 @@ typedef struct {
     // what the px -> PlayRes conversion in sync_styles() must divide by. Maintained by
     // ssa_apply_geometry().
     int             content_h;
+    // The screen's short side (min(canvas_w, canvas_h)), cached for the same reason as
+    // content_h above: sync_styles() bakes it into forced FontSize/Outline/Shadow, so a
+    // change here has to invalidate the cache too, independently of content_h -- see
+    // ssa_apply_geometry(). The two can change one without the other, e.g. toggling
+    // "render in black bars" off with the video's own displayed height unchanged: content_h
+    // stays the same but canvas_h shrinks to match the video, changing the short side.
+    int             screen_short_side;
     int             canvas_w, canvas_h;  // RENAMED from video_w/h -- what ass_set_frame_size()
                                         // was called with, i.e. the on-screen canvas, not the
                                         // decoded video's own size. Java now
@@ -456,8 +463,7 @@ static int sync_styles(SSA_BACKEND *ctx) {
                 // video. Position (MarginV, \pos/\move) is untouched by this and stays
                 // video-box-relative, since that's about not overlapping the video, not about
                 // how big the text looks.
-                int short_side = (ctx->canvas_w > 0 && ctx->canvas_h > 0)
-                    ? (ctx->canvas_w < ctx->canvas_h ? ctx->canvas_w : ctx->canvas_h) : 0;
+                int short_side = ssa_geom_short_side(ctx->canvas_w, ctx->canvas_h);
                 float font_res_scale = (ctx->orig_playres_y > 0) ? ((float)ctx->orig_playres_y / 720.0f) : 1.0f;
                 if (short_side > 0 && ctx->content_h > 0) {
                     font_res_scale *= (float)short_side / (float)ctx->content_h;
@@ -608,11 +614,21 @@ static void ssa_apply_geometry(SSA_BACKEND *ctx) {
                   g.frame_w, g.frame_h, g.margin_t, g.margin_b, g.margin_l, g.margin_r,
                   g.storage_w, g.storage_h, g.content_w, g.content_h);
     ssa_geom_apply(ctx->renderer, &g);
-    if (g.content_h != ctx->content_h) {
+
+    int short_side = ssa_geom_short_side(ctx->canvas_w, ctx->canvas_h);
+
+    // sync_styles() bakes both of these into forced style state (MarginV from content_h,
+    // FontSize/Outline/Shadow from short_side) and only re-runs that when the style serial
+    // changes. A resize/rotation/box change can move either input -- or both, or just one --
+    // without the serial changing, which left the baked-in values stale until some unrelated
+    // style setting happened to change. Check both independently rather than assuming one
+    // implies the other: e.g. toggling "render in black bars" off can hold the video's own
+    // displayed height steady (content_h unchanged) while the canvas shrinks to match it
+    // (short_side changes), and a resize that keeps the video's aspect fit while growing the
+    // window can move content_h without changing which side is shorter.
+    if (g.content_h != ctx->content_h || short_side != ctx->screen_short_side) {
         ctx->content_h = g.content_h;
-        // sync_styles() bakes the user's pixel offset into style->MarginV in PlayRes units using
-        // content_h, and only re-runs when the style serial changes. A rotation/resize changes
-        // content_h without touching the serial, which left MarginV stale. Force a re-sync.
+        ctx->screen_short_side = short_side;
         ctx->last_serial = 0;
     }
 }

@@ -72,6 +72,19 @@ static inline SSA_GEOM ssa_geom_compute(int canvas_w, int canvas_h,
     return g;
 }
 
+// The screen (canvas) dimension text sizing scales off: the shorter of the two canvas sides.
+// Pulled out to its own function because it's needed in two places -- ssa_apply_geometry()
+// (to know when to invalidate the forced-style cache) and sync_styles() (to compute
+// font_res_scale) -- and those two MUST agree on the exact same value or the cache
+// invalidation check silently stops catching the case it exists for. min(w, h) rather than h
+// alone because it's the one canvas dimension that survives a device rotation unchanged
+// (canvas_w and canvas_h swap, but whichever one was smaller still is), so text sized off it
+// doesn't jump between portrait and landscape on the same physical screen.
+static inline int ssa_geom_short_side(int canvas_w, int canvas_h) {
+    if (canvas_w <= 0 || canvas_h <= 0) return 0;
+    return canvas_w < canvas_h ? canvas_w : canvas_h;
+}
+
 static inline void ssa_geom_apply(ASS_Renderer *r, const SSA_GEOM *g) {
     ass_set_frame_size(r, g->frame_w, g->frame_h);
     ass_set_margins(r, g->margin_t, g->margin_b, g->margin_l, g->margin_r);

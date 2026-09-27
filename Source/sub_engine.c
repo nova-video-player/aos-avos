@@ -72,7 +72,32 @@ struct SUB_ENGINE {
     uint64_t wakeup_generation; // <--- NEW: Predicate counter
     uint64_t track_generation;  // bumped by open_track()/close_track(); see
                                  // sub_engine_get_track_generation() in sub_engine.h
+
+    // Set by sub_engine_surface_resized()/sub_engine_set_video_box() (and by open_track()
+    // installing a fresh backend) whenever canvas_w/h or video_box_* changes; cleared by
+    // sub_engine_poll_frame() once it has pushed BOTH to active_backend together. This is
+    // what makes the backend immune to the order/timing the two setters are called in (see
+    // item #3 in the geometry bug list: canvas size and box arrive from Java through two
+    // genuinely different timing domains -- box synchronously out of updateSurface()'s own
+    // layout math, canvas asynchronously from Android's TextureView size-changed callback,
+    // which can fire frames later). Rather than each setter pushing into the backend
+    // immediately (which is exactly what let the backend see a canvas resize paired with a
+    // box computed for the OLD canvas, or vice versa, for however long the gap between the
+    // two calls happens to be), they only update the cache below and set this flag;
+    // poll_frame() is the single place that ever calls backend->resize()/set_video_box(),
+    // and it always applies whatever is CURRENTLY cached as one atomic pair, immediately
+    // before every render. That doesn't make Java's delivery atomic -- it makes the backend's
+    // view of geometry atomic, which is what actually matters for what gets rendered.
+    //
+    // A bitmask of SUB_GEOM_* rather than a plain bool: backend->resize() is the expensive
+    // direction (libass re-wraps every line), so it only runs when SUB_GEOM_CANVAS is set;
+    // set_video_box() is cheap and idempotent, so it runs whenever ANY bit is set -- which
+    // also means a canvas change always re-syncs the box against the new canvas.
+    int geometry_dirty;
 };
+
+#define SUB_GEOM_CANVAS 0x1  // canvas_w/h changed (or a fresh backend needs it)
+#define SUB_GEOM_BOX    0x2  // video_box_* changed (or a fresh backend needs it)
 
 // Internal helper for safe wakeups
 static void broadcast_wake_locked(SUB_ENGINE *eng) {
@@ -154,6 +179,24 @@ void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window) {
     pthread_mutex_lock(&eng->lock);
     eng->canvas_w = 0;
     eng->canvas_h = 0;
+    // Mirror the canvas invalidation above for the video box: a box computed for whatever
+    // surface was attached before describes THAT surface's geometry, not this new one's, and
+    // open_track()'s box_x/y/w/h snapshot reads this cache directly. SurfaceController hasn't
+    // had a chance to recompute and resend the real box for the new surface yet (see
+    // SurfaceController.setVideoBoxListener()'s replay fix for the Java side of this same
+    // handoff) -- until it does, falling back to "assume video fills canvas 1:1" (the same
+    // convention zero already carries at this struct's video_box_x/y/w/h declaration) is safer
+    // than silently keeping a stale box measured against a surface that's gone.
+    eng->video_box_x = 0; eng->video_box_y = 0;
+    eng->video_box_w = 0; eng->video_box_h = 0;
+    // The cache above was just invalidated, but the LIVE backend still holds whatever box it
+    // was last given. Mark the box dirty so poll_frame() pushes the (zeroed) cache into it;
+    // otherwise the cache says "video fills canvas" while the backend keeps rendering with the
+    // old surface's box until some later canvas change happens to re-sync it. The Java side
+    // (SubtitleEngine.resendVideoBox()) replays the real box right after this call, which
+    // just re-marks the same bit and coalesces into the same single apply.
+    eng->geometry_dirty |= SUB_GEOM_BOX;
+    broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
     sub_render_gl_attach_surface(eng->renderer, window);
 }
@@ -165,6 +208,18 @@ void sub_engine_detach_surface(SUB_ENGINE *eng) {
     pthread_mutex_lock(&eng->lock);
     eng->canvas_w = 0;
     eng->canvas_h = 0;
+    // See the matching comment in sub_engine_attach_surface(): the box is invalidated on
+    // detach for the same reason canvas_w/h already is -- so a gap between "surface gone" and
+    // "next surface attached" can't leave a stale box sitting around for open_track() to pick
+    // up in between.
+    eng->video_box_x = 0; eng->video_box_y = 0;
+    eng->video_box_w = 0; eng->video_box_h = 0;
+    // Keep the live backend consistent with the invalidated cache -- same reason as in
+    // sub_engine_attach_surface(). Callers that keep using the engine after a detach (the
+    // 2D->3D switch) must replay the real box right after this call
+    // (SubtitleEngine.resendVideoBox()); it coalesces with this bit into a single apply.
+    eng->geometry_dirty |= SUB_GEOM_BOX;
+    broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
     sub_render_gl_detach_surface(eng->renderer);
 }
@@ -173,11 +228,21 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
 
     DBG serprintf("SUB_SURFACE: Surface resized event received: %d x %d\n", width, height);
 
+    // Cache + mark dirty ONLY -- deliberately no backend->resize() here anymore. The format
+    // backend (libass frame size / GFX canvas) is updated by sub_engine_poll_frame(), which
+    // applies canvas and box to it together as one pair right before the next render. See
+    // the geometry_dirty doc comment on struct SUB_ENGINE (item #3): this call and
+    // sub_engine_set_video_box() arrive from Java through two different timing domains, so
+    // pushing each into the backend on arrival is what let the backend see mismatched pairs.
     pthread_mutex_lock(&eng->lock);
     eng->canvas_w = width;
     eng->canvas_h = height;
+    eng->geometry_dirty |= SUB_GEOM_CANVAS;
+    broadcast_wake_locked(eng); // wake the render thread so poll_frame() applies it promptly
     pthread_mutex_unlock(&eng->lock);
-    sub_engine_resize_canvas(eng, width, height); // Tells Libass to wrap text to the new 3D box!
+
+    // The GL renderer's own framebuffer/surface resize stays eager: that's the physical
+    // render target, not content layout, and has no pairing requirement with the box.
     sub_render_gl_resize(eng->renderer, width, height);
 }
 
@@ -187,21 +252,16 @@ void sub_engine_set_video_box(SUB_ENGINE *eng, int x, int y, int w, int h) {
 
     DBG serprintf("SUB_SURFACE: Video box set: (%d,%d) %dx%d\n", x, y, w, h);
 
-    // Call into the active backend -- and broadcast the wake -- while STILL HOLDING
-    // eng->lock, same discipline every other function in this file already uses for a
-    // live backend call (sub_engine_feed/flush/feed_bitmap/feed_raw/resize_canvas/
-    // poll_frame above and below). This used to read `be` under the lock, unlock, and
-    // only then call be->set_video_box() (plus a separate sub_engine_force_wake() call
-    // that re-locks). That gap is exactly the use-after-free shape
-    // sub_engine_close_track()'s own doc comment warns about: a concurrent track switch
-    // (open_track()/close_track() -- e.g. the user changing subtitle tracks between a
-    // GFX and a text format right as this fires) can close()+free() this exact backend
-    // in between, leaving `be` dangling by the time it's actually dereferenced below.
+    // Cache + mark dirty only; sub_engine_poll_frame() pushes it to the active backend
+    // together with the canvas size (see sub_engine_surface_resized() and the
+    // geometry_dirty doc comment on struct SUB_ENGINE -- item #3). This also retires the
+    // old use-after-free concern this function used to guard by calling into the backend
+    // under the lock: it no longer touches the backend at all, so there's no pointer to
+    // dangle -- poll_frame() reads active_backend under the same lock it renders under.
     pthread_mutex_lock(&eng->lock);
     eng->video_box_x = x; eng->video_box_y = y;
     eng->video_box_w = w; eng->video_box_h = h;
-    SUB_FORMAT_BACKEND *be = eng->active_backend;
-    if (be && be->set_video_box) be->set_video_box(be, x, y, w, h);
+    eng->geometry_dirty |= SUB_GEOM_BOX;
     broadcast_wake_locked(eng); // same pattern feed()/flush()/etc. already use
     pthread_mutex_unlock(&eng->lock);
 }
@@ -332,6 +392,17 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
                               // hold as the bump above -- see this param's
                               // doc comment in sub_engine.h for why that
                               // atomicity is the whole point
+
+    // Force the very next poll_frame() to push the CURRENT canvas/box into this fresh backend
+    // before its first render (item #4). A surface_resized()/set_video_box() call landing
+    // between the target_w/target_h/box_* snapshot taken above and this swap (backend->open()
+    // can be slow: it scans a fonts folder) already updated the cache correctly, but had no
+    // active backend to reach. Marking both bits dirty here reuses the same apply-at-render
+    // mechanism as item #3 instead of a second, parallel push. poll_frame() skips the
+    // resize() if no real canvas is known yet (canvas_w==0), in which case open() already got
+    // the video_w/h fallback via target_w/target_h.
+    eng->geometry_dirty |= (SUB_GEOM_CANVAS | SUB_GEOM_BOX);
+    broadcast_wake_locked(eng); // same pattern every other mutator in this file uses
     pthread_mutex_unlock(&eng->lock);
 
     if (old_backend) {
@@ -436,8 +507,11 @@ void sub_engine_flush_gen(SUB_ENGINE *eng, uint64_t token) {
     pthread_mutex_unlock(&eng->lock);
 }
 
-// RENAMED from sub_engine_resize_video() -- see sub_engine.h's doc comment. Only ever
-// called from sub_engine_surface_resized() above, always with the canvas size.
+// RENAMED from sub_engine_resize_video() -- see sub_engine.h's doc comment. NOTE: no longer
+// called from sub_engine_surface_resized() -- that now only caches + marks geometry dirty,
+// and sub_engine_poll_frame() applies backend->resize() paired with the box (item #3). This
+// still resizes the backend immediately when called directly, so any other external caller
+// keeps its old eager behavior; it bypasses the paired-apply path and clears nothing.
 void sub_engine_resize_canvas(SUB_ENGINE *eng, int canvas_w, int canvas_h) {
     if (!eng) return;
     pthread_mutex_lock(&eng->lock);
@@ -514,6 +588,25 @@ SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
     if (!eng->active_backend || !eng->clock_fn) {
         pthread_mutex_unlock(&eng->lock);
         return NULL;
+    }
+    // Apply any pending canvas/box change to the backend as ONE pair, right before
+    // rendering (item #3). This is the only place backend->resize()/set_video_box() are
+    // called for live geometry now: whatever is CURRENTLY cached is applied together under
+    // the same lock hold that renders, so the backend can never observe a canvas resize and
+    // a box update as separate, independently-ordered mutations, no matter how far apart
+    // Java's two calls landed. Rapid back-to-back calls also coalesce into a single apply.
+    // (If the clock isn't running yet we returned above and the bits simply stay set.)
+    if (eng->geometry_dirty) {
+        SUB_FORMAT_BACKEND *be = eng->active_backend;
+        if ((eng->geometry_dirty & SUB_GEOM_CANVAS) &&
+                eng->canvas_w > 0 && eng->canvas_h > 0 && be->resize) {
+            be->resize(be, eng->canvas_w, eng->canvas_h);
+        }
+        if (be->set_video_box) {
+            be->set_video_box(be, eng->video_box_x, eng->video_box_y,
+                              eng->video_box_w, eng->video_box_h);
+        }
+        eng->geometry_dirty = 0;
     }
     int64_t pts = eng->clock_fn(eng->clock_ctx);
     // render_at() now runs with eng->lock still held (see sub_engine_close_track)

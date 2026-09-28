@@ -88,6 +88,18 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
 - Audio seek preroll waits for the video decoder to reach the epoch-tagged seek
   target. Renderer reanchoring and this video-target handshake are separate from
   audio latency estimation.
+- A queued frame is only peeked until presentation is committed. Every
+  passthrough startup wait returns to the queue/epoch checks, and unlocked
+  latency queries revalidate the frame handle, queue head and renderer
+  generation before changing anchors. Seek, decoder flush and clock reanchor
+  invalidate outstanding queries even if the entire transition completes while
+  the renderer is unlocked. Only output release/render calls hold the rendering
+  state that flush waits for; waiting for audio must not block flush.
+- Renderer audio-clock references, pause/grace intervals and passthrough hold
+  deadlines use 64-bit monotonic milliseconds. Hold activity is explicit, so a
+  cancelled deadline cannot become an active wait when device uptime exceeds
+  the signed 32-bit millisecond range. Seek preview remains exempt from the
+  audio-start hold.
 - Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
   incorrect snapping after a speed change, causing jitter in scheduled timestamps.
 - MediaCodec output-buffer indices belong to one codec generation. After a

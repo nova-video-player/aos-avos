@@ -929,7 +929,8 @@ typedef struct STREAM {
 	int		seek_skip_initial_play;
 	int		seek_preview_refining;	// exact preview pass after the immediate keyframe preview
 	int		seek_preview_superseded;	// atomically set when a newer async seek is queued
-	int64_t		seek_preview_refine_deadline_ms;	// wall-clock deadline for partial preview fallback
+	// x86 aligns int64_t to 4 bytes by default; atomic access requires 8.
+	int64_t		seek_preview_refine_deadline_ms __attribute__((aligned(8))); // wall-clock deadline for partial preview fallback
 	int		seek_use_target_sync;
 	int		seek_target_sync_time;
 	int		seek_frame;

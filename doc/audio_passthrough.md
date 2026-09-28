@@ -137,18 +137,20 @@ Native determines IEC support by inspecting codec flags set by Java:
   parser lookahead and partial EAC3/TrueHD assembly. Ordinary pause preserves them.
 - EOF drains buffered parser output through normal compressed writes and duration
   accounting before ending the sink. Incomplete IEC assembly is not submitted.
-- Passthrough `can_write()` may use exact capacity gating when playback-head
-  accounting is usable, but falls back to the previous permissive behavior if
-  the exact gate stalls on a given track instance.
+- Mode 1 on API 23+ bypasses the preliminary `can_write()` capacity gate,
+  matching the nonblocking `AudioTrack.write()` path. Actual accepted bytes
+  provide backpressure; zero yields and retries the same bytes, and a positive
+  short write retains the suffix under the complete-unit transaction above.
+  Requiring room for the entire IEC burst can otherwise prevent the partial
+  refill needed to start or restart playback. Mode 2 keeps its existing bypass.
+- Legacy blocking Mode 1 writes retain the playback-head capacity gate and its
+  permissive fallback. If the playhead stops advancing while the gate rejects
+  writes, the timeout is `pipeline_latency + 250ms` (using scheduler latency
+  if pipeline latency is unavailable), clamped to `250..1500ms`, including
+  during startup. Flush resets the fallback state.
 - After a passthrough flush, `play()` is deferred until the first successful
   post-flush write. This avoids starting an empty direct/compressed AudioTrack
   while still ensuring the track restarts after seek/resume.
-- The permissive fallback is startup-aware:
-  - before the passthrough playhead has ever advanced, the stall threshold is
-    `250ms` so routes with frozen startup playhead accounting do not starve;
-  - after the playhead has advanced, the threshold is `latency + 250ms`,
-    clamped to `250..1500ms`, so high-latency full-buffer stalls get time to
-    recover before blind writes resume.
 
 ### Output reconfiguration failures
 

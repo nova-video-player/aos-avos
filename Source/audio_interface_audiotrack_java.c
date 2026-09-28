@@ -1659,6 +1659,17 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 		return 1;
 	}
 
+	// Match audiotrack_write()'s nonblocking path. Waiting for an entire IEC
+	// burst to fit can prevent the partial refill needed to start the track.
+	// Let write() report actual capacity; stream_audio retains short-write
+	// suffixes, commits only complete units, and bounds no-progress retries.
+	// Keep the capacity gate below for legacy blocking Mode 1 writes.
+	if (at->passthrough == 1 && device_get_android_api() >= 23) {
+		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (mode1 nonblocking bypass=true)",
+			at->format, at->passthrough, len);
+		return 1;
+	}
+
 	if (at->passthrough_can_write_blind) {
 		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (blind fallback=true)",
 			at->format, at->passthrough, len);

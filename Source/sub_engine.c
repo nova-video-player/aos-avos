@@ -194,7 +194,9 @@ void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window) {
     // otherwise the cache says "video fills canvas" while the backend keeps rendering with the
     // old surface's box until some later canvas change happens to re-sync it. The Java side
     // (SubtitleEngine.resendVideoBox()) replays the real box right after this call, which
-    // just re-marks the same bit and coalesces into the same single apply.
+    // just re-marks the same bit and coalesces into the same single apply. (poll_frame()
+    // resolves a zero box to "fills canvas" and skips the push while the canvas is also
+    // zero, as it is right now, so this never hands the backend a raw zero box.)
     eng->geometry_dirty |= SUB_GEOM_BOX;
     broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
@@ -603,8 +605,19 @@ SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
             be->resize(be, eng->canvas_w, eng->canvas_h);
         }
         if (be->set_video_box) {
-            be->set_video_box(be, eng->video_box_x, eng->video_box_y,
-                              eng->video_box_w, eng->video_box_h);
+            int bx = eng->video_box_x, by = eng->video_box_y;
+            int bw = eng->video_box_w, bh = eng->video_box_h;
+            if (bw <= 0 || bh <= 0) {
+                // No box known (never reported, or invalidated by attach/detach): by
+                // contract that means "video fills canvas 1:1" -- the same fallback
+                // open_track()/gfx_open() apply. Resolve it HERE rather than handing the
+                // backend zeros: gfx_set_video_box() stores whatever it's given, so a raw
+                // zero box would collapse every PGS/VobSub bitmap to zero size (invisible)
+                // -- overriding the fallback gfx_open() had just installed.
+                bx = 0; by = 0; bw = eng->canvas_w; bh = eng->canvas_h;
+            }
+            // Still unresolved (no canvas either): leave the backend on its open() fallback.
+            if (bw > 0 && bh > 0) be->set_video_box(be, bx, by, bw, bh);
         }
         eng->geometry_dirty = 0;
     }

@@ -101,7 +101,7 @@ typedef struct STREAM_COMPRESSED_LEDGER_ENTRY {
 	UINT32	logical_sample_rate;
 	int	codec;
 	int	framing;
-	int	submitted_wall_ms;
+	int64_t	submitted_wall_ms;
 } STREAM_COMPRESSED_LEDGER_ENTRY;
 
 typedef struct STREAM_COMPRESSED_LEDGER {
@@ -135,16 +135,16 @@ typedef struct STREAM_PRESENTATION_OBSERVATION {
 	int	latency_ms;
 	int	fixed_latency_ms;
 	int	underrun_count;
-	int	observed_wall_ms;
-	int	last_advance_wall_ms;
+	int64_t	observed_wall_ms;
+	int64_t	last_advance_wall_ms;
 	int	direct_rate_hz;
 	int	direct_rate_streak;
 	int	direct_delay_ms;
 	int	direct_heard_ts;
-	int	direct_heard_wall_ms;
+	int64_t	direct_heard_wall_ms;
 	int	direct_stable_streak;
 	int	direct_trusted;
-	int	direct_last_sample_wall_ms;
+	int64_t	direct_last_sample_wall_ms;
 } STREAM_PRESENTATION_OBSERVATION;
 
 typedef struct STREAM_ATEMPO_LEDGER_ENTRY {
@@ -179,7 +179,7 @@ typedef struct STREAM_ATEMPO_COMMIT {
 	float	speed;        // clamped target speed
 	float	prev_speed;   // mapping speed in effect before this checkpoint (diag)
 	UINT64	boundary;     // ledger-domain output frame boundary
-	int	wall_ms;      // request time (timeout safety)
+	int64_t	wall_ms;      // request time (timeout safety)
 } STREAM_ATEMPO_COMMIT;
 
 typedef enum
@@ -608,7 +608,7 @@ typedef struct STREAM {
 	int		manual_audio_hold_pending_ms;   // wall-clock gap intentionally inserted before next burst (PCM silence)
 	int		manual_delay_fmh_last;          // latest frame_minus_heard observed by the video scheduler
 	int		manual_delay_fmh_baseline;      // frame_minus_heard snapshot at the last av_delay set
-	int		manual_delay_log_until_ms;      // atime() until which to emit manual_delay_applied diagnostics
+	int64_t		manual_delay_log_until_ms;      // atime64() until which to emit manual_delay_applied diagnostics
 	// PCM accumulation buffer to coalesce tiny decoder output chunks.
 	unsigned char	*pcm_accum_data;
 	int		pcm_accum_size;
@@ -872,7 +872,7 @@ typedef struct STREAM {
 	int 		audio_error_qualifier;
 
 	int		paused;
-	int		pause_started_ms;          // start of the current playback pause
+	int64_t		pause_started_ms;          // start of the current playback pause
 	int		pause_timing_valid;
 	int		paused_internal;
 	int		speed;
@@ -894,23 +894,23 @@ typedef struct STREAM {
 	UINT64		mode2_heard_epoch;	// increments whenever the Mode 2 heard-clock state is reset
 	int		mode2_heard_interp_valid;	// direct-mode2 continuous heard clock seeded from submitted frontier
 	int		mode2_heard_interp_ts;	// last interpolated heard TS
-	int		mode2_heard_interp_wall_ms;	// monotonic wall sample for interpolation
+	int64_t		mode2_heard_interp_wall_ms;	// monotonic wall sample for interpolation
 	int		mode2_heard_interp_raw_ts;	// latest submitted heard endpoint
 	int		mode2_heard_interp_delay_ms;	// selected delay used for the current epoch
-	int		mode2_heard_interp_last_log_ms;
+	int64_t		mode2_heard_interp_last_log_ms;
 	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
 	int		mode2_heard_frontier_seed_pending;	// passthrough sink was recreated mid-playback (empty buffer): seed heard interp at the frontier
 	STREAM_COMPRESSED_LEDGER compressed_ledger;	// complete compressed units submitted in this clock epoch
 	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence
-	int		mode2_shadow_last_log_ms;
+	int64_t		mode2_shadow_last_log_ms;
 	int		mode2_dynamic_clock_active;	// trusted AudioTimestamp currently bounds the heard clock
 	int		mode2_dynamic_clock_ready;	// measured frontier caught the monotonic phase; renderer may reanchor
 	int		mode2_dynamic_clock_ts;
-	int		mode2_dynamic_clock_wall_ms;
+	int64_t		mode2_dynamic_clock_wall_ms;
 	int		mode2_dynamic_clock_last_delay_ms;
-	int		mode2_dynamic_clock_grace_until_wall_ms;
-	int		mode2_dynamic_clock_last_log_ms;
-	int		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
+	int64_t		mode2_dynamic_clock_grace_until_wall_ms;
+	int64_t		mode2_dynamic_clock_last_log_ms;
+	int64_t		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
 	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
 	int		ac3_recode_pacer_max_lead_ms;	// bounded write-ahead reservoir to subtract from heard time
 
@@ -929,7 +929,7 @@ typedef struct STREAM {
 	int		seek_skip_initial_play;
 	int		seek_preview_refining;	// exact preview pass after the immediate keyframe preview
 	int		seek_preview_superseded;	// atomically set when a newer async seek is queued
-	int		seek_preview_refine_deadline_ms;	// wall-clock deadline for partial preview fallback
+	int64_t		seek_preview_refine_deadline_ms;	// wall-clock deadline for partial preview fallback
 	int		seek_use_target_sync;
 	int		seek_target_sync_time;
 	int		seek_frame;
@@ -965,17 +965,17 @@ typedef struct STREAM {
 	float		at_speed_epoch_speed;           // applied speed at checkpoint
 	UINT64		at_speed_epoch_presented_frames;// AT presented frame position at checkpoint
 	int		at_speed_epoch_rate;            // AT sample rate at checkpoint
-	int		at_speed_epoch_wall_ms;         // wall time at checkpoint (diagnostics)
+	int64_t		at_speed_epoch_wall_ms;         // wall time at checkpoint (diagnostics)
 	UINT64		at_speed_epoch_frames_cached;   // last playhead sample read during epoch
-	int		at_speed_epoch_cache_wall_ms;   // wall time of last playhead sample
+	int64_t		at_speed_epoch_cache_wall_ms;   // wall time of last playhead sample
 	int		atempo_ledger_active;
 	int		atempo_ledger_count;
 	int		atempo_ledger_write;
 	UINT64		atempo_ledger_output_frames;
 	UINT64		atempo_ledger_base_written_frames;
 	int64_t		atempo_ledger_next_ts_us;
-	int		atempo_ledger_last_log_ms;
-	int		atempo_ledger_dense_until_ms;
+	int64_t		atempo_ledger_last_log_ms;
+	int64_t		atempo_ledger_dense_until_ms;
 	// RST(media) baseline captured ONCE per ledger epoch (arm/seek/flush), NOT per
 	// speed step.  The commit poll anchors the timeline to this filter-paced media
 	// clock instead of the TS_TO_RST_TIME() projection, which lags the audible
@@ -992,7 +992,7 @@ typedef struct STREAM {
 	int64_t		atempo_ledger_lat_frames;
 	int		atempo_ledger_lat_samples;
 	int		atempo_ledger_lat_valid;
-	int		atempo_ledger_lat_last_ms;
+	int64_t		atempo_ledger_lat_last_ms;
 	// Playhead-gated video commits shared by atempo and Sonic speed changes.
 	// The filter switches speed immediately, but ~300-400ms of old-speed output
 	// is still queued in the sink; switching the video timeline at write time

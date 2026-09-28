@@ -149,7 +149,7 @@ struct ctx {
     int output_buffer_size;             // Size of temporary buffer in bytes
 
 	int last_delay_ms;                  // Last reported delay (ms)
-	int last_speed_change_ms;           // Timestamp of last speed change (ms)
+	int64_t last_speed_change_ms;       // Monotonic timestamp of last speed change
 	int delay_log_count;                // throttle noisy delay diagnostics
 	int last_fifo_ms;                   // FIFO depth at last _delay() call (ms)
 	int last_fifo_samples;              // FIFO depth at last _delay() call (samples)
@@ -385,7 +385,7 @@ static int atempo_update_speed(struct ctx *ctx, float speed)
 	// commit boundary already accounts for it via flt_fifo).
 	atempo_reset_runtime_baseline(ctx, "speed_change");
 	// Re-arm the post-speed-change window after the reset clears it.
-	ctx->last_speed_change_ms = atime();
+	ctx->last_speed_change_ms = atime64();
 	return 0;
 }
 
@@ -851,7 +851,7 @@ static int atempo_filter_input(STREAM_FILTER_AUDIO *f, AUDIO_FRAME *frame)
 				ctx->current_speed, speed, ctx->fifo ? av_audio_fifo_size(ctx->fifo) : -1);
 			if (atempo_update_speed(ctx, speed) < 0)
 				return -1;
-			ctx->last_speed_change_ms = atime();
+			ctx->last_speed_change_ms = atime64();
 			ctx->delay_log_count = 0;
 		}
 	}
@@ -1077,14 +1077,14 @@ static int _delay_locked(STREAM_FILTER_AUDIO *f)
 	// Preserve the old stabilization guard for any future real downstream delay
 	// source.  With FIFO and WSOLA window excluded, this is normally a no-op.
 	if (ctx->last_speed_change_ms > 0 && ctx->last_delay_ms >= 0) {
-		int now_ms = atime();
-		int elapsed_ms = now_ms - ctx->last_speed_change_ms;
+		int64_t now_ms = atime64();
+		int64_t elapsed_ms = MAX(0, now_ms - ctx->last_speed_change_ms);
 		int min_stable_ms = atempo_internal_ms;
 		if (min_stable_ms < 1) {
 			min_stable_ms = 1;
 		}
 		if (elapsed_ms < min_stable_ms && delay_ms < ctx->last_delay_ms) {
-			int max_drop = (ctx->last_delay_ms * elapsed_ms) / min_stable_ms;
+			int max_drop = (int)((ctx->last_delay_ms * elapsed_ms) / min_stable_ms);
 			int floor = ctx->last_delay_ms - max_drop;
 			if (delay_ms < floor) {
 				delay_ms = floor;
@@ -1101,10 +1101,10 @@ static int _delay_locked(STREAM_FILTER_AUDIO *f)
 		int fifo_samples = ctx->fifo ? av_audio_fifo_size(ctx->fifo) : 0;
 		int delta_fifo_ms = (ctx->last_fifo_ms >= 0) ? (fifo_ms - ctx->last_fifo_ms) : 0;
 		int delta_fifo_samples = (ctx->last_fifo_samples >= 0) ? (fifo_samples - ctx->last_fifo_samples) : 0;
-		int now_ms = atime();
+		int64_t now_ms = atime64();
 		const char *reason = "steady";
 		if (ctx->last_speed_change_ms > 0) {
-			int elapsed_ms = now_ms - ctx->last_speed_change_ms;
+			int64_t elapsed_ms = now_ms - ctx->last_speed_change_ms;
 			if (elapsed_ms >= 0 && elapsed_ms < 1500) {
 				reason = "post_speed_change";
 			}

@@ -66,7 +66,7 @@ typedef struct priv {
 	int 		padded_width;
 	int 		padded_height;
 	int hal_format;
-	int presentation_end_ms;
+	int64_t presentation_end_ms;
 	int		ofs_x;
 	int		ofs_y;
 	int		interlaced;
@@ -81,7 +81,7 @@ typedef struct priv {
 	int		venc_flushing;
 	
 	int 		venc_put_time;
-	int 		venc_ref_time;
+	int64_t		venc_ref_time;
 	int 		venc_time;
 	
 	int		out_time;
@@ -108,8 +108,9 @@ static int _get_time( priv_t *p )
 	if (p->venc_ref_time == 0) {
 		DBGSI serprintf("venc_time: ref not set (put_time not called yet)\n");
 	}
-	int diff = atime() - p->venc_ref_time;
-	p->venc_time = p->venc_put_time + diff;
+	int64_t diff = p->venc_ref_time ? atime64() - p->venc_ref_time : 0;
+	int64_t time = p->venc_put_time + diff;
+	p->venc_time = (int)MAX(INT_MIN, MIN(INT_MAX, time));
 //serprintf("get %8d + %8d = %8d\n", p->venc_put_time, diff, p->venc_time );	
 	
 	return p->venc_time;
@@ -270,7 +271,7 @@ static void *venc_thread(void *ctx)
 //		p->frames_state[frame->index] = FRAME_STATE_OUT;
 
 		int venc_time = _get_time(p);
-		DBGSI serprintf("venc: put=%d ref=%d now=%d\n", p->venc_put_time, p->venc_ref_time, venc_time);
+		DBGSI serprintf("venc: put=%d ref=%lld now=%d\n", p->venc_put_time, (long long)p->venc_ref_time, venc_time);
 		
 		p->venc_flushing = 0;
 
@@ -343,7 +344,7 @@ DBGSI serprintf("<BLIT %8d >", frame->time);
 				if (s) stream_set_error(s, VE_VIDEO_CODEC_ERROR);
 			} else {
 				p->blit_frames_state[blit_frame->index] = FRAME_STATE_QUEUED;
-				p->presentation_end_ms = atime() + MAX(0, frame->blit_time - _get_time(p)) + MAX(0, frame->duration);
+				p->presentation_end_ms = atime64() + MAX(0, (int64_t)frame->blit_time - _get_time(p)) + MAX(0, frame->duration);
 			}
 
 			frame_q_put(&p->get_q, frame);
@@ -720,7 +721,7 @@ static int sink_drained(STREAM_SINK_VIDEO *sink)
 	priv_t *p = sink->priv;
 	pthread_mutex_lock(&p->venc_mutex);
 	int done = !p->frame_out && !frame_q_count(&p->venc_q) &&
-		atime() >= p->presentation_end_ms;
+		(!p->presentation_end_ms || atime64() >= p->presentation_end_ms);
 	pthread_mutex_unlock(&p->venc_mutex);
 	return done;
 }
@@ -741,8 +742,8 @@ static int sink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	pthread_mutex_lock(&p->venc_mutex);
 	p->venc_put_time = time;
-	p->venc_ref_time = atime();
-	DBGSI serprintf("sink_put_time: time=%d ref=%d\n", p->venc_put_time, p->venc_ref_time);
+	p->venc_ref_time = atime64();
+	DBGSI serprintf("sink_put_time: time=%d ref=%lld\n", p->venc_put_time, (long long)p->venc_ref_time);
 	pthread_cond_broadcast(&p->venc_cond);
 	pthread_mutex_unlock(&p->venc_mutex);
 	return 0;

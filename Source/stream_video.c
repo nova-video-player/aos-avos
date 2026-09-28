@@ -2934,7 +2934,7 @@ DBGS serprintf("stream_pause\r\n");
 		if ( s->parser && s->parser->pause ) {
 			s->parser->pause( s, 1 );
 		}
-		s->pause_started_ms = atime();
+		s->pause_started_ms = atime64();
 		s->pause_timing_valid = 1;
 		s->paused = 1;
 		sfdec2_android_sync_on_pause( s, 1 );
@@ -3026,11 +3026,11 @@ DBGS serprintf("stream_un_pause\r\n");
 			// Preserve running time already spent waiting for each checkpoint.
 			// A checkpoint created (or reset by seek) during pause starts with
 			// zero elapsed time. Repeated pauses must not renew the timeout.
-			int resume_ms = atime();
+			int64_t resume_ms = atime64();
 			for( int i = 0; i < s->atempo_commit_count; i++ ) {
 				int slot = (s->atempo_commit_head + i) % STREAM_ATEMPO_COMMIT_MAX;
 				STREAM_ATEMPO_COMMIT *cp = &s->atempo_commit_q[slot];
-				int elapsed_ms = s->pause_started_ms - cp->wall_ms;
+				int64_t elapsed_ms = s->pause_started_ms - cp->wall_ms;
 				cp->wall_ms = resume_ms - MAX( 0, elapsed_ms );
 			}
 			s->pause_timing_valid = 0;
@@ -3353,7 +3353,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 		// Track the realized A/V phase so stream_set_av_delay() can baseline it,
 		// and report the applied shift while a manual-delay window is open.
 		s->manual_delay_fmh_last = frame_minus_heard;
-		if( s->manual_delay_log_until_ms && atime() <= s->manual_delay_log_until_ms ) {
+		if( s->manual_delay_log_until_ms && atime64() <= s->manual_delay_log_until_ms ) {
 			DBG serprintf("manual_delay_applied: av_user=%d baseline_fmh=%d now_fmh=%d delta=%d applied=%d\n",
 				s->av_delay, s->manual_delay_fmh_baseline, frame_minus_heard,
 				frame_minus_heard - s->manual_delay_fmh_baseline,
@@ -4652,12 +4652,12 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 					// deadline, admit the closest newer frame reached so a long GOP does
 					// not leave the original keyframe as the final scrub preview.
 					int below_target = out_frame->time < s->play_n_video_time;
-					int deadline_ms = __atomic_load_n(
+					int64_t deadline_ms = __atomic_load_n(
 						&s->seek_preview_refine_deadline_ms, __ATOMIC_ACQUIRE );
 					int accept_partial = below_target && deadline_ms > 0 &&
 						out_frame->epoch == s->seek_epoch &&
 						!__atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) &&
-						atime() >= deadline_ms - SEEK_PREVIEW_PARTIAL_MARGIN_MS &&
+						atime64() >= deadline_ms - SEEK_PREVIEW_PARTIAL_MARGIN_MS &&
 						out_frame->time >= s->video_time;
 					if( accept_partial ) {
 						DBG serprintf("SEEK_PREVIEW_REFINE_PARTIAL: frame=%d target=%d remaining=%d epoch=%d\n",
@@ -4931,13 +4931,13 @@ static void _seek_un_pause( STREAM *s, int was_paused )
 static int _stream_wait_for_idle( STREAM *s, int timeout )
 {
 	if( !s->engine_thread_started ) return 0;
-	timeout += atime(); 
+	int64_t deadline_ms = atime64() + timeout;
 
 	while( 1 ) { 
 		if( !s->video->valid || s->video_state == VID_CALL_DECODER ) {
 			return 0;
 		}
-		if( atime() >= timeout ) {
+		if( atime64() >= deadline_ms ) {
 serprintf("can't idle!\r\n");
 			return 1;
 		}
@@ -5437,7 +5437,7 @@ static int _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
 	DBG serprintf("_stream_play_n_frames: target_ts=%d old_ts=%d\n", time, old_time);
 
-	int timeout = atime() + 1000; // 1 second before we stop waiting
+	int64_t timeout = atime64() + 1000; // 1 second before we stop waiting
 serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
 	
 	if( !s || !s->open ) {
@@ -5465,7 +5465,7 @@ serprintf("PNF: not open!\r\n");
 	
 	// wait for it to play
 	int refine_superseded = 0;
-	while( s->play_n_video_frames && atime() < timeout ) {
+	while( s->play_n_video_frames && atime64() < timeout ) {
 		if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) &&
 		    __atomic_load_n( &s->seek_preview_superseded, __ATOMIC_ACQUIRE ) ) {
 			refine_superseded = 1;

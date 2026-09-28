@@ -109,8 +109,8 @@ typedef struct AUDIO_PRESENTATION_SNAPSHOT {
 	int latency_ms;
 	int fixed_latency_ms;
 	int underrun_count;
-	int observed_wall_ms;
-	int last_advance_wall_ms;
+	int64_t observed_wall_ms;
+	int64_t last_advance_wall_ms;
 	int direct_rate_hz;
 	int direct_rate_streak;
 } AUDIO_PRESENTATION_SNAPSHOT;

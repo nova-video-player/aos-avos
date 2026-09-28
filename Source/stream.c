@@ -626,7 +626,7 @@ int stream_set_av_delay( STREAM *s, int av_delay )
 	// so the applied shift is unmistakable in the log: manual_delay_applied lines
 	// report frame_minus_heard against this baseline as the hold takes effect.
 	s->manual_delay_fmh_baseline = s->manual_delay_fmh_last;
-	s->manual_delay_log_until_ms = atime() + 5000;
+	s->manual_delay_log_until_ms = atime64() + 5000;
 DBG serprintf("stream_set_av_delay: av_delay=%d manual_target=%d applied=%d baseline_fmh=%d\r\n",
 		av_delay, s->manual_audio_delay_target_ms, s->manual_audio_delay_applied_ms,
 		s->manual_delay_fmh_baseline);
@@ -822,7 +822,7 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 		// Set the global speed — the atempo filter reads it on its next filter() call.
 		audio_interface_set_audio_speed( clamped_speed );
 		if( speed_changed ) {
-			s->atempo_ledger_dense_until_ms = atime() + 2000;
+			s->atempo_ledger_dense_until_ms = atime64() + 2000;
 		}
 		DBG serprintf( "stream:stream_set_av_speed apply atempo speed=%.3f (audio_time=%d video_time=%d)\n",
 			clamped_speed, s->audio_time, s->video_time );
@@ -857,7 +857,7 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 					DBG serprintf( "at_speed_epoch_arm: skipped no_playhead audio=%d anchor_ts=%d speed=%.3f\n",
 						s->audio_time, anchor_ts, av_speed );
 				} else {
-					int epoch_wall_ms = atime();
+					int64_t epoch_wall_ms = atime64();
 					s->at_speed_epoch_active            = 1;
 					s->at_speed_epoch_audio_time_ts     = s->audio_time;
 					s->at_speed_epoch_heard_ts          = anchor_ts;
@@ -1002,9 +1002,9 @@ int stream_atempo_commit_queue( STREAM *s, float speed, UINT64 boundary )
 	s->atempo_commit_q[slot].speed = speed;
 	s->atempo_commit_q[slot].prev_speed = previous;
 	s->atempo_commit_q[slot].boundary = boundary;
-	s->atempo_commit_q[slot].wall_ms = atime();
+	s->atempo_commit_q[slot].wall_ms = atime64();
 	s->atempo_commit_count++;
-	s->atempo_ledger_dense_until_ms = atime() + 2000;
+	s->atempo_ledger_dense_until_ms = atime64() + 2000;
 	DBG serprintf("atempo_commit_arm: prev=%.3f target=%.3f boundary=%llu qlen=%d\n",
 		previous, speed, (unsigned long long)boundary, s->atempo_commit_count);
 	return 0;
@@ -1042,7 +1042,7 @@ static void _stream_atempo_commit_poll( STREAM *s, int drained )
 	while( s->atempo_commit_count > 0 ) {
 		int idx = s->atempo_commit_head;
 		STREAM_ATEMPO_COMMIT *cp = &s->atempo_commit_q[idx];
-		int waited_ms = atime() - cp->wall_ms;
+		int64_t waited_ms = atime64() - cp->wall_ms;
 		int crossed;
 		if( cp->boundary == STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER ) {
 			// Post-reset collapsed commit: the old ledger frame domain is gone, so a
@@ -1067,10 +1067,10 @@ static void _stream_atempo_commit_poll( STREAM *s, int drained )
 		s->atempo_commit_count--;
 		applied_speed = cp->speed;
 		applied_any = 1;
-		DBG serprintf( "atempo_commit_apply: prev=%.3f speed=%.3f boundary=%llu playhead=%llu crossed=%d waited=%d anchor_ts=%d anchor_rst=%d audio=%d video=%d qlen=%d\n",
+		DBG serprintf( "atempo_commit_apply: prev=%.3f speed=%.3f boundary=%llu playhead=%llu crossed=%d waited=%lld anchor_ts=%d anchor_rst=%d audio=%d video=%d qlen=%d\n",
 			cp->prev_speed, cp->speed,
 			(unsigned long long)cp->boundary,
-			(unsigned long long)playhead, crossed, waited_ms,
+			(unsigned long long)playhead, crossed, (long long)waited_ms,
 			anchor_ts, anchor_rst, s->audio_time, s->video_time,
 			s->atempo_commit_count );
 	}

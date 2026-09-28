@@ -100,6 +100,14 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   cancelled deadline cannot become an active wait when device uptime exceeds
   the signed 32-bit millisecond range. Seek preview remains exempt from the
   audio-start hold.
+- The same 64-bit monotonic domain is used by AudioTrack observation/cache
+  timestamps, Mode 2 interpolation and resume grace, AC3 write pacing, atempo
+  commit/pause accounting, and seek-preview/idle deadlines. Producers and
+  consumers must both use `atime64()`; widening storage alone still preserves
+  an already-wrapped `atime()` value. These wall clocks are distinct from media
+  timestamps and bounded durations, which retain their existing units/types.
+  The software Android sink also uses 64-bit presentation deadlines; a cleared
+  deadline means there is no outstanding presentation to drain.
 - Accurate `video->frame_rate_{num,den}` metadata is important. Bad values yield
   incorrect snapping after a speed change, causing jitter in scheduled timestamps.
 - MediaCodec output-buffer indices belong to one codec generation. After a

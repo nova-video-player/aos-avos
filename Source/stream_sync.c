@@ -325,7 +325,7 @@ static void _stream_pcm_delay_memory_reset( STREAM *s, int preserve_speed_timing
 		int last = ( s->atempo_commit_head + s->atempo_commit_count - 1 ) % STREAM_ATEMPO_COMMIT_MAX;
 		STREAM_ATEMPO_COMMIT collapsed = s->atempo_commit_q[last];
 		collapsed.boundary = STREAM_ATEMPO_COMMIT_BOUNDARY_DEFER;
-		collapsed.wall_ms = atime();
+		collapsed.wall_ms = atime64();
 		s->atempo_commit_head = 0;
 		s->atempo_commit_count = 1;
 		s->atempo_commit_q[0] = collapsed;
@@ -696,7 +696,7 @@ void stream_sync_compressed_unit_commit( STREAM *s, int encoded_bytes,
 	entry->logical_sample_rate = logical_sample_rate;
 	entry->codec = codec;
 	entry->framing = framing;
-	entry->submitted_wall_ms = atime();
+	entry->submitted_wall_ms = atime64();
 	ledger->total_encoded_bytes += encoded_bytes;
 	ledger->total_logical_samples += logical_samples;
 	ledger->count++;
@@ -766,10 +766,10 @@ void stream_sync_compressed_shadow_observe( STREAM *s )
 	int frame_heard;
 	int counter_advancing;
 	int logical_rate;
-	int now_ms;
+	int64_t now_ms;
 	UINT64 old_generation;
 	int old_underrun_count;
-	int old_sample_wall_ms;
+	int64_t old_sample_wall_ms;
 	int old_direct_delay_ms;
 	int old_direct_stable_streak;
 	int new_sample;
@@ -782,7 +782,7 @@ void stream_sync_compressed_shadow_observe( STREAM *s )
 		!audio_interface_get_presentation_snapshot( s->audio_ctx, &sample ) ) {
 		return;
 	}
-	now_ms = atime();
+	now_ms = atime64();
 	if( sample.passthrough < 1 || sample.rate <= 0 ||
 		now_ms - sample.observed_wall_ms > 500 ) {
 		return;
@@ -937,14 +937,14 @@ void stream_sync_compressed_shadow_observe( STREAM *s )
 		const char *tag = sample.passthrough == 1 ?
 			"mode1_iec_occupancy_shadow" : "mode2_occupancy_shadow";
 		s->mode2_shadow_last_log_ms = now_ms;
-		DBG serprintf("%s: epoch=%llu generation=%llu pt=%d framing=%d state=%d src=%d age=%d ts_age=%d advance_age=%d counter_advancing=%d rate_hz=%d rate_streak=%d stable_streak=%d trusted=%d fmt=%04X track_rate=%d logical_rate=%d frame_size=%d buffer=%d ledger_count=%d logical=%llu encoded=%llu presented=%llu direct_ms=%d byte_ms=%d frame_ms=%d capacity_ms=%d direct_minus_capacity=%d byte_minus_capacity=%d frame_minus_capacity=%d direct_minus_selected=%d byte_minus_selected=%d frame_minus_selected=%d static_residual_ms=%d candidate_residual_ms=%d selected_latency=%d selected_heard=%d direct_heard=%d byte_heard=%d frame_heard=%d underruns=%d\n",
+		DBG serprintf("%s: epoch=%llu generation=%llu pt=%d framing=%d state=%d src=%d age=%lld ts_age=%d advance_age=%lld counter_advancing=%d rate_hz=%d rate_streak=%d stable_streak=%d trusted=%d fmt=%04X track_rate=%d logical_rate=%d frame_size=%d buffer=%d ledger_count=%d logical=%llu encoded=%llu presented=%llu direct_ms=%d byte_ms=%d frame_ms=%d capacity_ms=%d direct_minus_capacity=%d byte_minus_capacity=%d frame_minus_capacity=%d direct_minus_selected=%d byte_minus_selected=%d frame_minus_selected=%d static_residual_ms=%d candidate_residual_ms=%d selected_latency=%d selected_heard=%d direct_heard=%d byte_heard=%d frame_heard=%d underruns=%d\n",
 			tag,
 			(unsigned long long)s->mode2_heard_epoch,
 			(unsigned long long)sample.generation,
 			sample.passthrough, framing, observation->state, sample.source,
-			now_ms - sample.observed_wall_ms,
+			(long long)(now_ms - sample.observed_wall_ms),
 			timestamp_age_ns >= 0 ? (int)(timestamp_age_ns / 1000000LL) : -1,
-			sample.last_advance_wall_ms > 0 ? now_ms - sample.last_advance_wall_ms : -1,
+			(long long)(sample.last_advance_wall_ms > 0 ? now_ms - sample.last_advance_wall_ms : -1),
 			counter_advancing, sample.direct_rate_hz, sample.direct_rate_streak,
 			observation->direct_stable_streak, observation->direct_trusted,
 			sample.format, sample.rate, logical_rate, sample.frame_size,
@@ -1045,12 +1045,12 @@ int stream_sync_restart_after_pause( STREAM *s )
 	int interp_ts;
 	int interp_raw_ts;
 	int interp_delay_ms;
-	int interp_last_log_ms;
+	int64_t interp_last_log_ms;
 	int dynamic_active;
 	int dynamic_ready;
 	int dynamic_ts;
 	int dynamic_last_delay_ms;
-	int dynamic_last_log_ms;
+	int64_t dynamic_last_log_ms;
 
 	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
@@ -1075,7 +1075,7 @@ int stream_sync_restart_after_pause( STREAM *s )
 	if( keep_mode2_phase ) {
 		s->mode2_heard_interp_valid = 1;
 		s->mode2_heard_interp_ts = interp_ts;
-		s->mode2_heard_interp_wall_ms = atime();
+		s->mode2_heard_interp_wall_ms = atime64();
 		s->mode2_heard_interp_raw_ts = interp_raw_ts;
 		s->mode2_heard_interp_delay_ms = interp_delay_ms;
 		s->mode2_heard_interp_last_log_ms = interp_last_log_ms;
@@ -1085,9 +1085,9 @@ int stream_sync_restart_after_pause( STREAM *s )
 		s->mode2_dynamic_clock_active = 1;
 		s->mode2_dynamic_clock_ready = dynamic_ready;
 		s->mode2_dynamic_clock_ts = dynamic_ts;
-		s->mode2_dynamic_clock_wall_ms = atime();
+		s->mode2_dynamic_clock_wall_ms = atime64();
 		s->mode2_dynamic_clock_last_delay_ms = dynamic_last_delay_ms;
-		s->mode2_dynamic_clock_grace_until_wall_ms = atime() +
+		s->mode2_dynamic_clock_grace_until_wall_ms = atime64() +
 			STREAM_MODE2_DIRECT_GRACE_MS;
 		s->mode2_dynamic_clock_last_log_ms = dynamic_last_log_ms;
 		s->mode2_heard_prevideo_phase_active = 1;
@@ -1295,14 +1295,14 @@ static int _stream_ac3_recode_pacer_lead_ms( STREAM *s )
 	if( !s || !s->ac3_recode_pacer_valid || s->ac3_recode_pacer_max_lead_ms <= 0 ) {
 		return 0;
 	}
-	int lead_ms = s->ac3_recode_next_write_wall_ms - atime();
+	int64_t lead_ms = s->ac3_recode_next_write_wall_ms - atime64();
 	if( lead_ms < 0 ) {
 		return 0;
 	}
 	if( lead_ms > s->ac3_recode_pacer_max_lead_ms ) {
 		lead_ms = s->ac3_recode_pacer_max_lead_ms;
 	}
-	return lead_ms;
+	return (int)lead_ms; // Bounded by the configured write-ahead reservoir.
 }
 
 static int _stream_current_heard_delay( STREAM *s,
@@ -1453,7 +1453,7 @@ int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate,
 // submitted-minus-presented frontier. For AC3 recode, that frontier already
 // includes the bursts admitted by the wall-clock pacer, so pacer lead must not
 // be subtracted from the dynamic target a second time.
-static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
+static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int64_t wall_now,
 	int static_heard_ts, int ac3_recoding )
 {
 	STREAM_PRESENTATION_OBSERVATION *observation = &s->presentation_observation;
@@ -1495,7 +1495,7 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
 		return static_heard_ts;
 	}
 
-	int elapsed_ms = wall_now - s->mode2_dynamic_clock_wall_ms;
+	int64_t elapsed_ms = wall_now - s->mode2_dynamic_clock_wall_ms;
 	if( elapsed_ms < 0 ) {
 		elapsed_ms = 0;
 	}
@@ -1505,8 +1505,8 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
 		// The presentation frontier and its wall epoch are an atomic observation.
 		// Recombining a new submitted frontier with an old occupancy sample makes
 		// compressed write bursts appear as heard progress.
-		dynamic_target = observation->direct_heard_ts +
-			(wall_now - observation->direct_heard_wall_ms);
+		dynamic_target = (int)MIN(INT_MAX, observation->direct_heard_ts +
+			(wall_now - observation->direct_heard_wall_ms));
 		s->mode2_dynamic_clock_last_delay_ms = dynamic_delay;
 		s->mode2_dynamic_clock_grace_until_wall_ms = 0;
 	} else if( s->mode2_dynamic_clock_last_delay_ms >= 0 &&
@@ -1528,10 +1528,10 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
 	if( s->paused || s->paused_internal ) {
 		s->mode2_dynamic_clock_wall_ms = wall_now;
 	} else if( dynamic_target > s->mode2_dynamic_clock_ts ) {
-		int extra_ms = dynamic_source == 3 ? MAX(elapsed_ms / 4, 1) : 25;
-		int maximum_advance = elapsed_ms + extra_ms;
+		int64_t extra_ms = dynamic_source == 3 ? MAX(elapsed_ms / 4, 1) : 25;
+		int64_t maximum_advance = elapsed_ms + extra_ms;
 		int gap = dynamic_target - s->mode2_dynamic_clock_ts;
-		s->mode2_dynamic_clock_ts += MIN(gap, maximum_advance);
+		s->mode2_dynamic_clock_ts += (int)MIN(gap, maximum_advance);
 		s->mode2_dynamic_clock_wall_ms = wall_now;
 	} else {
 		// A larger measured delay would move heard time backward. Hold phase until
@@ -1558,8 +1558,8 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int wall_now,
 	}
 	if( wall_now - s->mode2_dynamic_clock_last_log_ms >= 500 ) {
 		s->mode2_dynamic_clock_last_log_ms = wall_now;
-		DBG serprintf("mode2_dynamic_clock: wall=%d source=%d target=%d heard=%d gap=%d delay=%d static=%d audio=%d paused=%d recode=%d\n",
-			wall_now, dynamic_source, dynamic_target, heard_ts,
+		DBG serprintf("mode2_dynamic_clock: wall=%lld source=%d target=%d heard=%d gap=%d delay=%d static=%d audio=%d paused=%d recode=%d\n",
+			(long long)wall_now, dynamic_source, dynamic_target, heard_ts,
 			dynamic_target == STREAM_NO_PTS_VALUE ? 0 : dynamic_target - heard_ts,
 			dynamic_delay, static_heard_ts, s->audio_time,
 			s->paused || s->paused_internal, ac3_recoding);
@@ -1593,7 +1593,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		heard_delay += ac3_pacer_lead;
 	}
 
-	int wall_now = atime();
+	int64_t wall_now = atime64();
 
 	if (!delay_valid && !is_mode2_sync) {
 #ifdef CONFIG_ANDROID
@@ -1715,12 +1715,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 					// not credit the pause duration as elapsed audio.
 					s->mode2_heard_interp_wall_ms = wall_now;
 				} else {
-					int elapsed_ms = wall_now - s->mode2_heard_interp_wall_ms;
+					int64_t elapsed_ms = wall_now - s->mode2_heard_interp_wall_ms;
 					if( elapsed_ms < 0 ) {
-						// atime() wrap or an invalid epoch: preserve phase and restart.
+						// An invalid epoch: preserve phase and restart.
 						elapsed_ms = 0;
 					}
-					int candidate = s->mode2_heard_interp_ts + elapsed_ms;
+					int64_t candidate = s->mode2_heard_interp_ts + elapsed_ms;
 					// Free-run ahead of the frontier: between accepted batches the
 					// buffer drains while playback continues, so physical presentation
 					// legitimately exceeds raw. The physical bound is the buffered
@@ -1733,11 +1733,9 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 					int capacity_lead = heard_delay - fixed_latency;
 					int max_lead = capacity_lead > STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS ?
 						capacity_lead : STREAM_MODE2_HEARD_INTERP_MAX_LEAD_MS;
-					if( candidate > raw_heard_ts + max_lead ) {
-						candidate = raw_heard_ts + max_lead;
-					}
+					candidate = MIN(candidate, MIN(INT_MAX, (int64_t)raw_heard_ts + max_lead));
 					if( candidate > s->mode2_heard_interp_ts ) {
-						s->mode2_heard_interp_ts = candidate;
+						s->mode2_heard_interp_ts = (int)candidate;
 					}
 					s->mode2_heard_interp_wall_ms = wall_now;
 				}
@@ -1777,8 +1775,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		pthread_mutex_unlock( &s->mode2_heard_mutex );
 
 		if( do_log ) {
-			DBG serprintf("mode2_heard_interp: wall=%d raw=%d interp=%d ceiling_gap=%d audio=%d delay=%d reset=%d paused=%d\n",
-				wall_now, raw_heard_ts, heard_ts, raw_heard_ts - heard_ts,
+			DBG serprintf("mode2_heard_interp: wall=%lld raw=%d interp=%d ceiling_gap=%d audio=%d delay=%d reset=%d paused=%d\n",
+				(long long)wall_now, raw_heard_ts, heard_ts, raw_heard_ts - heard_ts,
 				s->audio_time, heard_delay, reset_interp,
 				s->paused || s->paused_internal);
 		}
@@ -1851,13 +1849,13 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				? (int)(delta_media_ms / s->at_speed_epoch_speed) : delta_media_ms;
 			int checkpoint_heard = s->at_speed_epoch_heard_ts + delta_ts;
 			DBG {
-				static int last_epoch_log_ms = 0;
+				static int64_t last_epoch_log_ms = 0;
 				if( wall_now - last_epoch_log_ms >= 500 ) {
 					last_epoch_log_ms = wall_now;
-					serprintf( "at_epoch_clock: checkpoint=%d old=%d diff=%d audio=%d delta_media=%d speed=%.3f epoch_age=%d\n",
+					serprintf( "at_epoch_clock: checkpoint=%d old=%d diff=%d audio=%d delta_media=%d speed=%.3f epoch_age=%lld\n",
 						checkpoint_heard, heard_ts, checkpoint_heard - heard_ts,
 						s->audio_time, delta_media_ms, s->at_speed_epoch_speed,
-						wall_now - s->at_speed_epoch_wall_ms );
+						(long long)(wall_now - s->at_speed_epoch_wall_ms) );
 				}
 			}
 			heard_ts = checkpoint_heard;
@@ -1925,7 +1923,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 			}
 
 			if( raw.heard != STREAM_NO_PTS_VALUE ) {
-				int now_ms = wall_now;
+				int64_t now_ms = wall_now;
 				int dense = s->atempo_ledger_dense_until_ms > 0 &&
 					now_ms <= s->atempo_ledger_dense_until_ms;
 				if( dense || now_ms - s->atempo_ledger_last_log_ms >= 500 ) {
@@ -1952,11 +1950,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		}
 	}
 
-	static int last_diag_wall = 0;
+	static int64_t last_diag_wall = 0;
 	if (wall_now > last_diag_wall + 2000) {
 		last_diag_wall = wall_now;
-		DBG serprintf("heard_ts_diag: wall=%d audio=%d heard=%d h_delay=%d eff=%d delay_valid=%d source=%s tag=%s\n",
-			wall_now, s->audio_time, heard_ts, heard_delay,
+		DBG serprintf("heard_ts_diag: wall=%lld audio=%d heard=%d h_delay=%d eff=%d delay_valid=%d source=%s tag=%s\n",
+			(long long)wall_now, s->audio_time, heard_ts, heard_delay,
 			delay_status.effective_delay_ms, delay_status.is_delay_valid,
 			_stream_delay_source_name(delay_status.source),
 			delay_status.source_tag ? delay_status.source_tag : "none");
@@ -1967,8 +1965,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 			if( s->sync_v_time != STREAM_NO_PTS_VALUE ) {
 				diff = (s->sync_v_time - heard_ts) + RST_TO_TS_DELTA( user_av_delay, int );
 			}
-			DBG serprintf("mode2_timeline: wall=%d fmt=%04X passthrough=%d ac3=%d audio=%d heard=%d heard_no_pacer=%d pacer_lead=%d video=%d sync_v=%d diff=%d latency=%d latency_no_pacer=%d source=%s tag=%s\n",
-				wall_now, s->audio ? s->audio->format : 0, passthrough_mode,
+			DBG serprintf("mode2_timeline: wall=%lld fmt=%04X passthrough=%d ac3=%d audio=%d heard=%d heard_no_pacer=%d pacer_lead=%d video=%d sync_v=%d diff=%d latency=%d latency_no_pacer=%d source=%s tag=%s\n",
+				(long long)wall_now, s->audio ? s->audio->format : 0, passthrough_mode,
 				ac3_recoding, s->audio_time, heard_ts, heard_no_pacer,
 				ac3_pacer_lead, s->video_time, s->sync_v_time, diff, heard_delay,
 				heard_delay - ac3_pacer_lead, _stream_delay_source_name(delay_status.source),

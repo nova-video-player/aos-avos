@@ -133,14 +133,14 @@ struct audio_ctx {
 	int last_underrun_count;
 	int ts_success_streak;           // consecutive good AudioTrack timestamps
 	int ts_use_timestamp;            // 0 until getTimestamp is proven stable
-	int ts_last_query_ms;            // last time we queried AudioTrack timing
+	int64_t ts_last_query_ms;            // last time we queried AudioTrack timing
 	int ts_cached_delay_ms;          // cached delay in ms
 	int ts_cached_valid;             // cached delay validity
 	int last_good_dynamic_delay_ms;  // last trusted dynamic delay
-	int last_good_dynamic_ms;        // last time we got a trusted dynamic delay
+	int64_t last_good_dynamic_ms;        // last time we got a trusted dynamic delay
 	int last_good_dynamic_valid;     // last dynamic delay validity
 	int last_fallback_delay_ms;      // last fallback delay (playhead/static) for heard-time only
-	int last_fallback_ms;            // time of last fallback delay sample
+	int64_t last_fallback_ms;            // time of last fallback delay sample
 	int last_delay_ret;              // last delay returned by get_delay
 	int last_delay_fallback_ms;      // last fallback used in get_delay
 	int last_delay_ms;               // last computed dynamic delay (pre-return)
@@ -154,7 +154,7 @@ struct audio_ctx {
 	uint64_t headpos_last_frames;    // last raw playback head position
 	int headpos_smooth_valid;        // smoothed headpos validity
 	int startup_hold_active;         // clamp to static latency during initial timing warmup
-	int startup_hold_start_ms;       // when startup_hold was last armed (for timeout)
+	int64_t startup_hold_start_ms;       // when startup_hold was last armed (for timeout)
 	int frozen_ts_streak;            // consecutive getTimestamp calls with non-advancing framePosition
 	int startup_latency_log_count;   // cap initial latency diagnostics
 	int startup_delay_log_count;     // cap initial get_delay diagnostics
@@ -165,7 +165,7 @@ struct audio_ctx {
 	int delay_diag_last_ts_use;      // last reported ts_use_timestamp
 	int playbackparams_speed_rejected;       // set when HW silently ignores setPlaybackParams speed
 	uint64_t can_write_last_playback_frames; // last playhead seen by passthrough can_write gate
-	int can_write_stall_start_ms;            // when passthrough can_write stopped making progress
+	int64_t can_write_stall_start_ms;            // when passthrough can_write stopped making progress
 	int passthrough_can_write_blind;         // disable exact gate after proven-stuck passthrough accounting
 	int passthrough_restart_after_flush;     // restart paused passthrough track on first post-flush write
 	int force_recreate;                      // force set_output_params to rebuild the track even when the config is unchanged
@@ -177,7 +177,7 @@ struct audio_ctx {
 	uint64_t mode2_latency_samples_accum;     // paired cumulative logical samples
 	int mode2_latency_corrected;
 	int mode2_latency_correction_delta_ms;
-	int mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
+	int64_t mode2_audit_last_ms;                 // last mode2_playhead_audit log timestamp
 	uint64_t compressed_encoded_bytes;       // all complete compressed bytes, independent of latency warmup
 	pthread_t presentation_thread;
 	pthread_mutex_t presentation_mutex;
@@ -208,8 +208,8 @@ extern int stream_audio_ac3_mode2_plain_policy( void );
 extern int stream_audio_ac3_mode2_force_pipeline( void );
 
 static int audiotrack_delay_from_playhead(struct audio_ctx *at, JNIEnv *env_local);
-static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out);
-static int audiotrack_playhead_promotion_ready(audio_ctx_t *at, int now_ms);
+static int audiotrack_last_good_dynamic(audio_ctx_t *at, int64_t now_ms, int *delay_out);
+static int audiotrack_playhead_promotion_ready(audio_ctx_t *at, int64_t now_ms);
 static int audiotrack_get_latency(audio_ctx_t *at);
 static void audiotrack_reset_timing(audio_ctx_t *at);
 static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64_t raw_frames);
@@ -1543,7 +1543,7 @@ ERR		LOG("audiotrack_start: track not valid, error");
 	// delay is better evidence than static latency and avoids storm-induced
 	// startup_hold loops.
 	at->startup_hold_active = at->last_good_dynamic_valid ? 0 : 1;
-	at->startup_hold_start_ms = atime();
+	at->startup_hold_start_ms = atime64();
 	at->frozen_ts_streak = 0;
 
 	JNIEnv *env_local = attach_thread_current_vm();
@@ -1699,7 +1699,7 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	int64_t frames_requested = ((int64_t)len + (int64_t)at->frame_size - 1) / (int64_t)at->frame_size;
 	int64_t frames_available = (int64_t)at->frame_count - frames_pending;
 	int can_write = (frames_available >= frames_requested);
-	int now_ms = atime();
+	int64_t now_ms = atime64();
 	int passthrough_stall_fallback_ms = passthrough_stall_fallback_min_ms;
 	if (frames_presented > 0) {
 		at->passthrough_playhead_ever_advanced = 1;
@@ -1723,9 +1723,9 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 			at->can_write_stall_start_ms = now_ms;
 		} else if (now_ms - at->can_write_stall_start_ms >= passthrough_stall_fallback_ms) {
 			at->passthrough_can_write_blind = 1;
-			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled for %dms (threshold=%d scheduler=%d pipeline=%d pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
+			DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d exact gate stalled for %lldms (threshold=%d scheduler=%d pipeline=%d pending=%lld available=%lld requested=%lld) -> enabling blind fallback",
 				at->format, at->passthrough, len,
-				now_ms - at->can_write_stall_start_ms, passthrough_stall_fallback_ms, at->latency, at->pipeline_latency,
+				(long long)(now_ms - at->can_write_stall_start_ms), passthrough_stall_fallback_ms, at->latency, at->pipeline_latency,
 				(long long)frames_pending, (long long)frames_available, (long long)frames_requested);
 			return 1;
 		}
@@ -1859,7 +1859,7 @@ static void *audiotrack_presentation_thread(void *arg)
 		}
 		(*env)->DeleteGlobalRef(env, track);
 
-		sample.observed_wall_ms = atime();
+		sample.observed_wall_ms = atime64();
 		sample.source = sample.timestamp_frames > 0 ?
 			AT_PRESENTED_FRAMES_SRC_TIMESTAMP :
 			(sample.playback_head_frames > 0 ? AT_PRESENTED_FRAMES_SRC_PLAYHEAD : 0);
@@ -1939,7 +1939,7 @@ static void *audiotrack_presentation_thread(void *arg)
 static void audiotrack_mode2_playhead_audit(audio_ctx_t *at)
 {
 	if (!audiotrack_mode2_audit) return;
-	int now_ms = atime();
+	int64_t now_ms = atime64();
 	if (now_ms - at->mode2_audit_last_ms < 2000) return;
 	at->mode2_audit_last_ms = now_ms;
 
@@ -2227,7 +2227,7 @@ DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 		AUD_RETURN("static(bad_rate)", at->latency);
 	}
 
-	int now_ms = atime();
+	int64_t now_ms = atime64();
 	int timing_query_interval_ms = at->ts_use_timestamp ? 2000 : 100;
 	if (at->ts_last_query_ms > 0 && now_ms - at->ts_last_query_ms < timing_query_interval_ms) {
 		// Throttle timing queries; reuse cached values during the stable window.
@@ -2253,7 +2253,7 @@ DBG3		LOG("Invalid sample rate, using static latency: %d ms", at->latency);
 				at->last_good_dynamic_ms = now_ms;
 				at->last_good_dynamic_valid = 1;
 				at->delay_valid = 1;
-				DBG2 LOG("playhead(stable_throttle) t=%d", atime());
+				DBG2 LOG("playhead(stable_throttle) t=%lld", (long long)atime64());
 				AUD_RETURN("playhead(stable_throttle)", at->last_fallback_delay_ms);
 			}
 			at->delay_valid = 0;
@@ -2723,7 +2723,7 @@ ERR		LOG("track not valid, error");
 	}
 }
 
-static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_out)
+static int audiotrack_last_good_dynamic(audio_ctx_t *at, int64_t now_ms, int *delay_out)
 {
 	const int last_good_stale_ms = 5000;
 
@@ -2740,7 +2740,7 @@ static int audiotrack_last_good_dynamic(audio_ctx_t *at, int now_ms, int *delay_
 	return 1;
 }
 
-static int audiotrack_playhead_promotion_ready(audio_ctx_t *at, int now_ms)
+static int audiotrack_playhead_promotion_ready(audio_ctx_t *at, int64_t now_ms)
 {
 	const int startup_playhead_grace_ms = 1500;
 	if (!at || !at->startup_hold_active) {
@@ -2863,7 +2863,7 @@ static void audiotrack_invalidate_delay_cache(audio_ctx_t *at)
 		if (at->ts_use_timestamp) {
 			at->startup_hold_active = 0;
 		}
-		at->startup_hold_start_ms = atime();
+		at->startup_hold_start_ms = atime64();
 	}
 }
 
@@ -3017,7 +3017,7 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->headpos_last_frames = 0;
 	at->headpos_smooth_valid = 0;
 	at->startup_hold_active = 1;
-	at->startup_hold_start_ms = atime();
+	at->startup_hold_start_ms = atime64();
 	at->frozen_ts_streak = 0;
 	at->last_fallback_delay_ms = 0;
 	at->last_fallback_ms = 0;
@@ -3252,12 +3252,12 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 
 	// Stale-cache fallback for callers that do not need a fresh sample.
 	if (!prefer_fresh && at->ts_use_timestamp && at->last_timestamp_frames > 0 && at->ts_last_query_ms > 0) {
-		int ts_age = atime() - at->ts_last_query_ms;
-		if (ts_age < 500) {
+		int64_t ts_age = atime64() - at->ts_last_query_ms;
+		if (ts_age >= 0 && ts_age < 500) {
 			*frames = audiotrack_epoch_adjust_presented_frames(at, at->last_timestamp_frames);
 			*rate = at->rate;
 			if (source) *source = AT_PRESENTED_FRAMES_SRC_TIMESTAMP;
-			if (age_ms) *age_ms = ts_age;
+			if (age_ms) *age_ms = (int)ts_age;
 			return 1;
 		}
 	}

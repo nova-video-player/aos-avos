@@ -231,7 +231,7 @@ static void _stream_atempo_ledger_append_hold(STREAM *s, int nframes, int sample
 			cp->boundary += nframes;
 	}
 	s->atempo_ledger_output_frames += (UINT64)nframes;
-	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+	if( s->atempo_ledger_dense_until_ms > 0 && atime64() <= s->atempo_ledger_dense_until_ms ) {
 		DBG serprintf("at_ledger_hold: out_start=%llu ts=%d nframes=%d rate=%d out_next=%llu\n",
 			(unsigned long long)entry->output_frames_start, entry->block_ts_start,
 			nframes, sample_rate, (unsigned long long)s->atempo_ledger_output_frames);
@@ -307,7 +307,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 				}
 				block_rst_span_us = ((int64_t)b_span_frames * 1000000) / b_rate;
 				span_source = 2;
-				if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+				if( s->atempo_ledger_dense_until_ms > 0 && atime64() <= s->atempo_ledger_dense_until_ms ) {
 					DBG serprintf("at_ledger_omap: w_start=%llu nframes=%d b_span_us=%lld a_span_us=%lld diff_us=%lld\n",
 						(unsigned long long)w_start, nframes,
 						(long long)block_rst_span_us, (long long)a_span_us,
@@ -325,7 +325,7 @@ static int _stream_atempo_ledger_reserve(STREAM *s, int nframes, int sample_rate
 	}
 	s->atempo_ledger_output_frames += (UINT64)nframes;
 	s->atempo_ledger_next_ts_us += _stream_atempo_ledger_frames_to_us(nframes, sample_rate);
-	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+	if( s->atempo_ledger_dense_until_ms > 0 && atime64() <= s->atempo_ledger_dense_until_ms ) {
 		DBG serprintf("at_ledger_reserve: out_start=%llu ts=%d nframes=%d rate=%d out_next=%llu ts_next=%lld\n",
 			(unsigned long long)entry->output_frames_start, entry->block_ts_start,
 			nframes, sample_rate, (unsigned long long)s->atempo_ledger_output_frames,
@@ -355,7 +355,7 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 		if( s->atempo_ledger_media_valid ) {
 			s->atempo_ledger_media_cursor -= entry->block_media_frames;
 		}
-		if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+		if( s->atempo_ledger_dense_until_ms > 0 && atime64() <= s->atempo_ledger_dense_until_ms ) {
 			DBG serprintf("at_ledger_cancel: reserved=%d out_next=%llu ts_next=%lld\n",
 				reserved_frames, (unsigned long long)s->atempo_ledger_output_frames,
 				(long long)(s->atempo_ledger_next_ts_us / 1000));
@@ -395,7 +395,7 @@ static void _stream_atempo_ledger_finalize(STREAM *s, int reserved_frames, int w
 			entry->block_media_frames = new_media_frames;
 		}
 	}
-	if( s->atempo_ledger_dense_until_ms > 0 && atime() <= s->atempo_ledger_dense_until_ms ) {
+	if( s->atempo_ledger_dense_until_ms > 0 && atime64() <= s->atempo_ledger_dense_until_ms ) {
 		DBG serprintf("at_ledger_append: out_start=%llu ts=%d reserved=%d nframes=%d rate=%d out_next=%llu ts_next=%lld\n",
 			(unsigned long long)entry->output_frames_start, entry->block_ts_start,
 			reserved_frames, written_frames, sample_rate,
@@ -939,10 +939,10 @@ static compressed_write_result_t _stream_write_compressed_unit(
 	AUDIO_FRAME pending = *frame;
 	int can_write_retries = 0;
 	int zero_write_retries = 0;
-	int zero_write_start_ms = -1;
-	int zero_write_last_log_ms = -1;
+	int64_t zero_write_start_ms = -1;
+	int64_t zero_write_last_log_ms = -1;
 	int zero_write_reported = 0;
-	int last_progress_ms = atime();
+	int64_t last_progress_ms = atime64();
 	*accepted_bytes = 0;
 
 	while( pending.size > 0 ) {
@@ -964,9 +964,9 @@ static compressed_write_result_t _stream_write_compressed_unit(
 				}
 				stream_yield_RT();
 			}
-			last_progress_ms = atime();
+			last_progress_ms = atime64();
 		}
-		if( atime() - last_progress_ms >= COMPRESSED_WRITE_STALL_MS ) {
+		if( atime64() - last_progress_ms >= COMPRESSED_WRITE_STALL_MS ) {
 			return COMPRESSED_WRITE_STALLED;
 		}
 
@@ -975,7 +975,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 				__atomic_load_n( &s->audio_pause_requested, __ATOMIC_ACQUIRE ) ) {
 				return COMPRESSED_WRITE_PAUSED;
 			}
-			if( atime() - last_progress_ms >= COMPRESSED_WRITE_STALL_MS ) {
+			if( atime64() - last_progress_ms >= COMPRESSED_WRITE_STALL_MS ) {
 				return COMPRESSED_WRITE_STALLED;
 			}
 			can_write_retries++;
@@ -1006,18 +1006,18 @@ static compressed_write_result_t _stream_write_compressed_unit(
 			// API 23+ compressed AudioTrack writes are non-blocking. Zero is
 			// ordinary queue backpressure; retain the same unit and retry after
 			// yielding; the no-progress deadline also bounds a stalled route.
-			int now_ms = atime();
+			int64_t now_ms = atime64();
 			if( zero_write_start_ms < 0 ) {
 				zero_write_start_ms = now_ms;
 				zero_write_last_log_ms = now_ms;
 			}
 			zero_write_retries++;
-			int blocked_ms = now_ms - zero_write_start_ms;
+			int64_t blocked_ms = now_ms - zero_write_start_ms;
 			if( blocked_ms >= 1000 &&
 				now_ms - zero_write_last_log_ms >= 1000 ) {
-				DBG serprintf("stream_audio: compressed write backpressure remaining=%d accepted=%d/%d retries=%d blocked=%dms\n",
+				DBG serprintf("stream_audio: compressed write backpressure remaining=%d accepted=%d/%d retries=%d blocked=%lldms\n",
 					pending.size, *accepted_bytes, frame->size,
-					zero_write_retries, blocked_ms);
+					zero_write_retries, (long long)blocked_ms);
 				zero_write_last_log_ms = now_ms;
 				zero_write_reported = 1;
 			}
@@ -1037,9 +1037,9 @@ static compressed_write_result_t _stream_write_compressed_unit(
 			return COMPRESSED_WRITE_ERROR;
 		}
 		if( zero_write_reported ) {
-			DBG serprintf("stream_audio: compressed write backpressure cleared remaining=%d accepted=%d/%d retries=%d blocked=%dms\n",
+			DBG serprintf("stream_audio: compressed write backpressure cleared remaining=%d accepted=%d/%d retries=%d blocked=%lldms\n",
 				pending.size, *accepted_bytes, frame->size,
-				zero_write_retries, atime() - zero_write_start_ms);
+				zero_write_retries, (long long)(atime64() - zero_write_start_ms));
 		}
 		zero_write_retries = 0;
 		zero_write_start_ms = -1;
@@ -1047,7 +1047,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 		zero_write_reported = 0;
 
 		*accepted_bytes += written;
-		last_progress_ms = atime();
+		last_progress_ms = atime64();
 		if( written < pending.size ) {
 			DBG serprintf("stream_audio: compressed short write %d/%d fmt=%04X, continuing unit at %d/%d\n",
 				written, pending.size, frame->format, *accepted_bytes, frame->size);
@@ -1587,10 +1587,10 @@ DBGS {					static int _nopts_target   = 0;
 					cdata.time >= s->seek_audio_target_ts ) {
 					int wait_epoch = s->seek_epoch;
 					int wait_target = s->seek_audio_target_ts;
-					int wait_start_ms = atime();
+					int64_t wait_start_ms = atime64();
 					while( s->seek_video_target_pending && s->seek_epoch == wait_epoch &&
 						s->seek_audio_target_ts == wait_target &&
-						!s->video_end && !_abort( s ) && atime() - wait_start_ms < 5000 ) {
+						!s->video_end && !_abort( s ) && atime64() - wait_start_ms < 5000 ) {
 						msec_sleep( 2 );
 					}
 					if( s->seek_epoch != wait_epoch || s->seek_audio_target_ts != wait_target ) {
@@ -1598,8 +1598,8 @@ DBGS {					static int _nopts_target   = 0;
 							wait_epoch, s->seek_epoch, wait_target, s->seek_audio_target_ts, cdata.time);
 						continue;
 					}
-					DBG serprintf("AUDIO_SEEK_TARGET_READY: time=%d target=%d wait_ms=%d video_pending=%d video_end=%d epoch=%d\n",
-						cdata.time, s->seek_audio_target_ts, atime() - wait_start_ms,
+					DBG serprintf("AUDIO_SEEK_TARGET_READY: time=%d target=%d wait_ms=%lld video_pending=%d video_end=%d epoch=%d\n",
+						cdata.time, s->seek_audio_target_ts, (long long)(atime64() - wait_start_ms),
 						s->seek_video_target_pending, s->video_end, wait_epoch);
 					DBG serprintf("AUDIO_SEEK_HIT: time=%d target=%d\n",
 						cdata.time, s->seek_audio_target_ts);
@@ -2595,11 +2595,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						ac3_pace_lead_ms = ac3_pace_chunk_ms * AC3_RECODE_WRITE_AHEAD_BURSTS;
 						s->ac3_recode_pacer_max_lead_ms = ac3_pace_lead_ms;
 						if( s->ac3_recode_pacer_valid ) {
-							int wait_ms = s->ac3_recode_next_write_wall_ms - ac3_pace_lead_ms - atime();
+							int64_t wait_ms = s->ac3_recode_next_write_wall_ms - ac3_pace_lead_ms - atime64();
 							while( wait_ms > 0 && !_abort( s ) ) {
-								msec_sleep( wait_ms > 10 ? 10 : wait_ms );
+								msec_sleep( (unsigned long)MIN(10, wait_ms) );
 								stream_yield_RT();
-								wait_ms = s->ac3_recode_next_write_wall_ms - ac3_pace_lead_ms - atime();
+								wait_ms = s->ac3_recode_next_write_wall_ms - ac3_pace_lead_ms - atime64();
 							}
 							if( _abort( s ) ) {
 								return;
@@ -2837,9 +2837,9 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 					// headroom instead. Rebase only after a large discontinuity such as
 					// pause/seek/long stall.
 					if( ac3_recoding && passthrough_active && ac3_pace_chunk_ms > 0 ) {
-						int now_ms = atime();
-						int old_next_ms = s->ac3_recode_next_write_wall_ms;
-						int late_ms = s->ac3_recode_pacer_valid ? now_ms - old_next_ms : 0;
+						int64_t now_ms = atime64();
+						int64_t old_next_ms = s->ac3_recode_next_write_wall_ms;
+						int64_t late_ms = s->ac3_recode_pacer_valid ? now_ms - old_next_ms : 0;
 						int rebase_ms = MAX( 200, ac3_pace_lead_ms * 3 );
 						if( !s->ac3_recode_pacer_valid || late_ms > rebase_ms ) {
 							s->ac3_recode_next_write_wall_ms = now_ms + ac3_pace_chunk_ms;
@@ -2847,11 +2847,11 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 							s->ac3_recode_next_write_wall_ms += ac3_pace_chunk_ms;
 						}
 						s->ac3_recode_pacer_valid = 1;
-						DBG2 serprintf("ac3_recode_pacer: chunk_ms=%d lead_ms=%d cur_lead=%d now=%d old_next=%d next=%d late=%d fake=%d bps=%lld\n",
+						DBG2 serprintf("ac3_recode_pacer: chunk_ms=%d lead_ms=%d cur_lead=%lld now=%lld old_next=%lld next=%lld late=%lld fake=%d bps=%lld\n",
 							ac3_pace_chunk_ms, ac3_pace_lead_ms,
-							s->ac3_recode_next_write_wall_ms - now_ms,
-							now_ms, old_next_ms,
-							s->ac3_recode_next_write_wall_ms, late_ms,
+							(long long)(s->ac3_recode_next_write_wall_ms - now_ms),
+							(long long)now_ms, (long long)old_next_ms,
+							(long long)s->ac3_recode_next_write_wall_ms, (long long)late_ms,
 							audio_frame.fakeSize, (long long)bytes_per_sec);
 					}
 					// Apply one-shot reanchor now that bytes are confirmed committed.

@@ -134,6 +134,56 @@ typedef struct {
  *                (addresses the per-frame alloc-thrash concern raised
  *                earlier with the Java-bitmap path).
  */
+/* ------------------------------------------------------------------
+ * TIMING CONTRACT -- the single definition of "which clock" for the whole
+ * subtitle pipeline. Everything below the stream layer works in RST.
+ *
+ *   RST  real stream time: media position in ms, the domain of the UI seek
+ *        bar and of any external .srt/.ass/.idx file. It does NOT move when
+ *        playback speed changes.
+ *   TS   the player's internal time-scaled domain (ts = rst / speed). Its
+ *        anchor is rewritten by timeline_map_apply() on every speed change,
+ *        so a cue converted to TS once and held (an external file is fed in
+ *        full at open; libass keeps its events; VobSub keeps a deadline)
+ *        would silently go stale. TS therefore never crosses the engine
+ *        boundary.
+ *
+ *   clock      sub_engine_clock_fn returns TS_TO_RST_TIME(video_time) minus
+ *              the user's subtitle delay, in rst ms, or < 0 for "no clock
+ *              yet" (seek/init). The delay is applied here and nowhere else.
+ *              For external TEXT tracks it is additionally scaled by the
+ *              user's subtitle ratio (t * d / n), so those cues are fed at
+ *              raw file times and a ratio change is live.
+ *   feed*()    pts_ms / duration_ms are rst ms and UNDELAYED. Callers that
+ *              hold TS values (stream_subtitle.c) convert at the call site,
+ *              at feed time. duration_ms: > 0 finite; 0 = clear (GFX only);
+ *              < 0 = unknown / until the next cue.
+ *   render_at  pts_ms is the clock above; a cue is visible iff
+ *              start <= pts < start + duration.
+ *   schedule   get_schedule() reports WHEN output can next change on its
+ *              own, as an absolute rst deadline. sub_engine_wait_event()
+ *              converts that to a wall-clock wait (delta_wc == delta_ts ==
+ *              RST_TO_TS_DELTA(delta_rst)) against the speed in force at
+ *              wait time, so backends never see speed.
+ *
+ * A delay change or speed change therefore needs no re-feed: the clock moves,
+ * the engine is woken (sub_engine_force_wake), and every cue is re-evaluated
+ * declaratively against the new clock.
+ * ------------------------------------------------------------------ */
+
+/* Filled by get_schedule(). */
+typedef struct {
+    int64_t next_rst_ms;  /* absolute rst time of the next moment the rendered
+                           * output changes by itself (a cue starts or ends);
+                           * -1 = nothing pending, sleep until woken. Always
+                           * strictly greater than the pts of the render_at()
+                           * call it describes. */
+    int     animating;    /* nonzero: output changes continuously while this
+                           * holds (libass fade / karaoke / scroll), so the
+                           * engine ticks at ~16 ms of WALL time regardless of
+                           * playback speed. */
+} SUB_SCHEDULE;
+
 struct SUB_FORMAT_BACKEND {
     void *priv;
 
@@ -149,7 +199,10 @@ struct SUB_FORMAT_BACKEND {
     int  (*set_video_box)(struct SUB_FORMAT_BACKEND *be, int x, int y, int w, int h); /* NEW, optional */
     int  (*flush)     (SUB_FORMAT_BACKEND *be);
     int  (*close)     (SUB_FORMAT_BACKEND *be);
-    int (*get_timeout_ms)(struct SUB_FORMAT_BACKEND *be, int64_t pts_ms);
+    /* Reports what should wake the render thread next (see SUB_SCHEDULE). Called
+     * with eng->lock held, right after render_at(); must be cheap and must not
+     * block. pts_rst_ms is the current clock, for backends that want it. */
+    void (*get_schedule)(struct SUB_FORMAT_BACKEND *be, int64_t pts_rst_ms, SUB_SCHEDULE *out);
 };
 
 /* ------------------------------------------------------------------

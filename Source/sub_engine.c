@@ -5,9 +5,20 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
 #include "debug.h"
+#include "util.h"   // rst_to_ts_delta()
 
 #define DBG if(Debug[DBG_SUB])
+
+// Wait tuning for sub_engine_wait_event() -- all WALL-clock milliseconds.
+#define SUB_ANIM_TICK_MS      16   // cadence while a backend reports "animating"
+#define SUB_WAIT_CAP_MS      250   // longest single wait while a deadline is pending. The rst->wall
+                                   // conversion uses the speed in force when the wait starts; capping
+                                   // bounds how long a speed change (incl. a deferred atempo commit)
+                                   // can leave a stale wall deadline in place.
+#define SUB_NO_CLOCK_POLL_MS  50   // no valid clock (seek/init): nothing broadcasts when it comes back
 
 extern SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 extern SUB_FORMAT_BACKEND *sub_format_srt_create(void);
@@ -116,7 +127,13 @@ SUB_ENGINE *sub_engine_create(void) {
 
     // FIX: Initialize mutex and cond BEFORE spawning the thread
     pthread_mutex_init(&eng->lock, NULL);
-    pthread_cond_init(&eng->wake_cond, NULL);
+    // Timed waits are computed from a wall-clock DURATION, so wait on CLOCK_MONOTONIC: a
+    // CLOCK_REALTIME deadline stretches or collapses when the system time is adjusted.
+    pthread_condattr_t cattr;
+    pthread_condattr_init(&cattr);
+    pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+    pthread_cond_init(&eng->wake_cond, &cattr);
+    pthread_condattr_destroy(&cattr);
 
     // Pass eng straight into create() so r->engine is set before the render
     // thread is spawned -- see sub_render_gl_create()'s doc comment. The old
@@ -605,7 +622,7 @@ void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out) {
 //
 // Deliberately does NOT bail out just because eng->is_paused is set.
 // sub_engine_wait_event() already stops TIMED polling while paused (it
-// hardcodes timeout_ms = -1 instead of consulting get_timeout_ms(), so the
+// hardcodes timeout_ms = -1 instead of consulting get_schedule(), so the
 // 16ms libass animation tick and PGS/VobSub's normal wake schedule never
 // fire while paused) -- the ONLY way this thread wakes while paused is an
 // explicit broadcast_wake_locked() call: a style/resize setter, a
@@ -661,6 +678,12 @@ int sub_engine_poll_and_publish(SUB_ENGINE *eng, SUB_RENDERER *r) {
         eng->geometry_dirty = 0;
     }
     int64_t pts = eng->clock_fn(eng->clock_ctx);
+    if (pts < 0) {
+        // No valid clock yet (seek/init: video_time is -1). Rendering at a made-up pts would
+        // flash cues from the wrong position; the wait side re-polls until the clock returns.
+        pthread_mutex_unlock(&eng->lock);
+        return 0;
+    }
     // render_at() now runs with eng->lock still held (see sub_engine_close_track)
     // instead of releasing the lock first and calling through a copied pointer —
     // this was the main use-after-free window: close_track() on another thread
@@ -776,6 +799,30 @@ void sub_frame_unref(SUB_FRAME *frame) {
     }
 }
 
+// Turns a backend's SUB_SCHEDULE (absolute rst deadline + animating flag) into a WALL-clock wait.
+// Returns -1 = sleep until broadcast, otherwise >= 1. Never 0: a zero wait would skip the wait
+// entirely and spin the render loop if a backend ever reported a deadline that is already due.
+static int schedule_to_wall_ms(int64_t pts_rst, const SUB_SCHEDULE *sc) {
+    int wall = -1;
+    if (sc->next_rst_ms >= 0) {
+        int64_t d = sc->next_rst_ms - pts_rst;
+        // delta_wc == delta_ts (audio_speed_*_architecture.md), and rst_to_ts_delta() applies the
+        // CURRENT slope of the timeline mapping -- so this is right at any speed, including one
+        // whose commit was deferred (atempo).
+        // Known, accepted inexactness: for an external text track with a subtitle ratio the clock
+        // runs at d/n (0.959x / 1.043x) of rst, which this conversion does not model. Waking up to 4%
+        // early is harmless (the loop just re-polls); up to 4% late is bounded by the wait cap to
+        // ~10 ms, well under one video frame.
+        double w = d > 0 ? ceil(rst_to_ts_delta((double)d)) : 1.0;
+        if (w < 1.0) w = 1.0;
+        if (w > SUB_WAIT_CAP_MS) w = SUB_WAIT_CAP_MS;
+        wall = (int)w;
+    }
+    if (sc->animating && (wall < 0 || wall > SUB_ANIM_TICK_MS))
+        wall = SUB_ANIM_TICK_MS;
+    return wall;
+}
+
 // --- ADD THE WAIT FUNCTION ---
 void sub_engine_wait_event(SUB_ENGINE *eng, uint64_t last_generation) {
     if (!eng) return;
@@ -792,9 +839,15 @@ void sub_engine_wait_event(SUB_ENGINE *eng, uint64_t last_generation) {
     // FIX: Hard sleep if paused. Completely bypasses Libass 16ms polling.
     if (eng->is_paused) {
         timeout_ms = -1;
-    } else if (eng->active_backend && eng->active_backend->get_timeout_ms && eng->clock_fn) {
-        int64_t pts_ms = eng->clock_fn(eng->clock_ctx);
-        timeout_ms = eng->active_backend->get_timeout_ms(eng->active_backend, pts_ms);
+    } else if (eng->active_backend && eng->clock_fn) {
+        int64_t pts = eng->clock_fn(eng->clock_ctx);
+        if (pts < 0) {
+            timeout_ms = SUB_NO_CLOCK_POLL_MS;
+        } else if (eng->active_backend->get_schedule) {
+            SUB_SCHEDULE sc = { -1, 0 };
+            eng->active_backend->get_schedule(eng->active_backend, pts, &sc);
+            timeout_ms = schedule_to_wall_ms(pts, &sc);
+        }
     }
 
     if (timeout_ms < 0) {
@@ -803,7 +856,7 @@ void sub_engine_wait_event(SUB_ENGINE *eng, uint64_t last_generation) {
     } else if (timeout_ms > 0) {
         // Sleep until timeout OR a broadcast
         struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
+        clock_gettime(CLOCK_MONOTONIC, &ts);   // matches the condattr set in sub_engine_create()
         long long nsec = ts.tv_nsec + ((long long)timeout_ms * 1000000LL);
         ts.tv_sec += nsec / 1000000000LL;
         ts.tv_nsec = nsec % 1000000000LL;

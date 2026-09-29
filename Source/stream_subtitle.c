@@ -101,6 +101,32 @@ static inline int _cue_expired(int start, int duration, int now) {
 }
 
 // *****************************************************************************
+// Engine boundary: TS -> RST.
+//
+// Everything in this file lives in TS (time-scaled, ts = rst / speed) -- packet times, frame times,
+// video_time. The subtitle engine works in RST (media time) and applies the user's delay itself, in
+// its clock; see the TIMING CONTRACT in sub_format.h. Every value handed to sub_engine_feed*() must
+// therefore go through these two helpers, AT FEED TIME (cues are fed just-in-time, so the anchor
+// they are mapped with is the current one) and UNDELAYED.
+// *****************************************************************************
+static inline int64_t _sub_time_to_engine( int ts_time )
+{
+	if( ts_time < 0 ) return ts_time;                 // "no timestamp": keep the sentinel untouched
+	return TS_TO_RST_TIME( ts_time, int64_t );
+}
+
+// Engine duration convention: > 0 finite, 0 = clear (bitmap tracks), < 0 = unbounded/unknown.
+static inline int64_t _sub_dur_to_engine( int ts_start, int ts_dur )
+{
+	if( ts_dur <= 0 ) return ts_dur;                  // 0 (clear) and <0 (unknown) pass through
+	// "Until the next cue" is encoded as an end pinned at INT_MAX (codec_ffsub: PGS and DVD cues
+	// without an end time). Detect it BEFORE scaling -- converting it would overflow the int cast
+	// inside the DELTA macros at speeds != 1.0 -- and hand the engine the explicit sentinel.
+	if( (int64_t)MAX( 0, ts_start ) + ts_dur >= (int64_t)INT_MAX - 1 ) return -1;
+	return TS_TO_RST_DELTA( ts_dur, int64_t );
+}
+
+// *****************************************************************************
 //
 //	stream_open_sub_dec
 //
@@ -204,9 +230,10 @@ static void _feed_bitmap_to_engine( STREAM *s, VIDEO_FRAME *f )
 	if( f->duration > 0 && f->time >= 0 && (int64_t)f->time + f->duration <= now )
 		return;
 
-	// Apply subtitle offset to the decoded frame time
-	int64_t delayed = (int64_t)f->time + RST_TO_TS_DELTA(s->subtitle_offset, int64_t);
-	f->time = (int)MAX(0, MIN(delayed, INT_MAX));
+	// NOTE: the subtitle delay is NOT added to the time handed to the engine any more. The engine
+	// clock already subtracts it (engine_clock_cb), and the cue window is now evaluated against
+	// that clock (sub_format_gfx.c), so pre-delaying here would apply the delay twice.
+	// The gate above (f->time <= now, with now already delay-corrected) is what decides WHEN to feed.
 
 DBG serprintf("sub int GFX->engine: video %8d  start %8d  dur %8d  [%dx%d]\r\n",
 			  s->video_time, f->time, f->duration, f->window.width, f->window.height);
@@ -220,8 +247,8 @@ DBG serprintf("sub int GFX->engine: video %8d  start %8d  dur %8d  [%dx%d]\r\n",
 		f->colorspace,
 		f->window.x,
 		f->window.y,
-		f->time,
-		f->duration
+		_sub_time_to_engine( f->time ),
+		_sub_dur_to_engine( f->time, f->duration )
 	);
 }
 
@@ -378,7 +405,8 @@ serprintf("cannot allocate subtitle frame!\r\n");
 					payload_size -= sizeof(int);
 				}
 				if( !( replay && _cue_expired( s->cdata_sub.time, duration, time ) ) )
-					sub_engine_feed((SUB_ENGINE*)s->sub_engine, payload, payload_size, s->cdata_sub.time, duration);
+					sub_engine_feed((SUB_ENGINE*)s->sub_engine, payload, payload_size,
+							_sub_time_to_engine( s->cdata_sub.time ), _sub_dur_to_engine( s->cdata_sub.time, duration ));
 			}
 			s->cdata_sub.valid = 0;
 
@@ -392,7 +420,8 @@ serprintf("cannot allocate subtitle frame!\r\n");
 					f->duration = s->cdata_sub.subtitle_duration;
 				int text_len = strlen((char*)f->data[0]);
 				if( text_len > 0 && !( replay && _cue_expired( f->time, f->duration, time ) ) ) {
-					sub_engine_feed((SUB_ENGINE*)s->sub_engine, f->data[0], text_len, f->time, f->duration);
+					sub_engine_feed((SUB_ENGINE*)s->sub_engine, f->data[0], text_len,
+						_sub_time_to_engine( f->time ), _sub_dur_to_engine( f->time, f->duration ));
 				}
 			}
 
@@ -1019,6 +1048,11 @@ void stream_set_subtitle_offset( STREAM *s, int offset )
 {
 	if( s ) { 
 		s->subtitle_offset = offset;
+		// The engine clock subtracts this value. A render thread parked at a timeout computed
+		// with the old delay (or asleep with nothing pending, e.g. while paused) must re-evaluate
+		// against the new clock now, not whenever it next happens to wake.
+		if( s->sub_engine )
+			sub_engine_force_wake( (SUB_ENGINE*)s->sub_engine );
 	}
 }
 
@@ -1032,6 +1066,10 @@ void stream_set_subtitle_ratio( STREAM *s, int n, int d )
 	if( s ) {
 		s->subtitle_ratio_n = n;
 		s->subtitle_ratio_d = d;
+		// The engine clock applies the ratio to external text tracks; wake a parked render thread
+		// so the change shows immediately, including while paused.
+		if( s->sub_engine )
+			sub_engine_force_wake( (SUB_ENGINE*)s->sub_engine );
 	}
 }
 

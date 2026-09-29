@@ -23,6 +23,7 @@
 #include "global.h"
 #include "image.h"
 #include "stream.h"
+#include "util.h"
 #include "sub_engine_registry.h"
 
 extern int libavos_get_ac3_recoding_enabled(void);
@@ -32,20 +33,38 @@ extern int libavos_get_ac3_recoding_enabled(void);
 
 #define MPLOG(fmt, ...) serprintf("%p|%s: " fmt "\n", mp, __FUNCTION__, ##__VA_ARGS__)
 
+// Subtitle engine clock. Returns the engine's own timeline (see the TIMING CONTRACT in sub_format.h):
+// RST ms (real stream / media time -- the domain of the UI seek bar, stream_get_time_default()) with
+// the user's subtitle delay applied, or -1 when there is no valid clock yet.
+//
+// s->video_time / s->audio_time are TS (time-scaled: ts = rst / speed), so they are mapped back
+// through the timeline anchor -- reading them raw made external cues drift at any speed other than 1x.
+// subtitle_offset is in rst ms, so it is subtracted here, in rst, exactly once (the same expression
+// stream_parser_ffmpeg.c's _subtitle_switch_time() uses).
+//
+// EXTERNAL TEXT tracks (srt/vtt/smi/sub/mpl2/ass) are fed with their raw file times, and the user's
+// subtitle ratio (Player.setSubtitleRatio: 1 = 25025/24000, 2 = 24000/25025) is applied HERE, to the
+// clock: a cue whose scaled start is t*n/d is shown once (rst - delay) >= t*n/d, i.e. once
+// (rst - delay) * d/n >= t. That is the same visibility rule the old per-cue scaling gave, but it is
+// live (a change takes effect immediately, no re-feed) and it covers ASS, which cannot be scaled cue
+// by cue. Internal tracks carry no ratio, and external BITMAP tracks (VobSub/PGS) are scaled at
+// lookup time in stream_sub_ext_get_gfx_data(), so neither is touched here.
 static int64_t engine_clock_cb(void *ctx) {
-	STREAM *s = (STREAM *)ctx; // Cast the context directly to the STREAM pointer
-	if (!s) return 0;
+	STREAM *s = (STREAM *)ctx;
+	if (!s) return -1;
 
-	// 1. Get the raw video/audio PTS directly to slave the subtitle engine to the internal media clock
-	int64_t time = (s->video && s->video->valid) ? s->video_time : s->audio_time;
+	int ts = (s->video && s->video->valid) ? s->video_time : s->audio_time;
+	if (ts < 0) return -1;  // stream_sync_init() / seek reset: no clock yet
 
-	// 2. Apply the exact same correction as _sub_decode
-	time -= s->subtitle_offset;
-	if (time < 0) {
-		time = 0;
-	}
+	int64_t t = TS_TO_RST_TIME(ts, int64_t) - s->subtitle_offset;
+	if (t < 0) t = 0;
 
-	return time;
+	const int n = s->subtitle_ratio_n, d = s->subtitle_ratio_d;
+	if (n > 0 && d > 0 && n != d &&
+	    s->subtitle && s->subtitle->valid && s->subtitle->ext && !s->subtitle->gfx)
+		t = t * d / n;
+
+	return t;
 }
 
 static int stream_buffer_size = 24;

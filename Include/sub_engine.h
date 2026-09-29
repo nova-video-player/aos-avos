@@ -89,6 +89,9 @@ uint64_t sub_engine_get_track_generation(SUB_ENGINE *eng);
 int  sub_engine_feed_gen(SUB_ENGINE *eng, uint64_t token, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms);
 void sub_engine_flush_gen(SUB_ENGINE *eng, uint64_t token);
 
+// Engine clock. MUST return rst ms with the user's subtitle delay already applied, or < 0 when
+// there is no valid clock yet -- see the TIMING CONTRACT in sub_format.h. Every pts_ms /
+// duration_ms passed to sub_engine_feed*() is in the same rst domain, undelayed.
 typedef int64_t (*sub_engine_clock_fn)(void *ctx);
 void sub_engine_start(SUB_ENGINE *eng, sub_engine_clock_fn clock_fn, void *clock_ctx);
 void sub_engine_stop(SUB_ENGINE *eng);

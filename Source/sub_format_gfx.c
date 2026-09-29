@@ -5,8 +5,13 @@
 
 typedef struct {
     SUB_FRAME *current_frame; // owned here — never freed by the GL renderer
-    int        is_cleared;    // 1 = no subtitle currently visible (PGS clear signal received)
     int        is_dirty;
+    // Cue window, in rst ms (see the TIMING CONTRACT in sub_format.h). current_frame is shown iff
+    // cue_start <= pts and (cue_end < 0 || pts < cue_end); cue_end < 0 = unbounded (PGS: until
+    // the next clear/cue). This is what gives finite-duration VobSub cues their expiry.
+    int64_t    cue_start;
+    int64_t    cue_end;
+    int        shown;         // what the renderer currently holds: 1 = current_frame, 0 = empty/clear
     int        delivered;     // 1 = current_frame has already been handed to the renderer (which
                               // now holds its own ref). Reset whenever current_frame is replaced.
     int        canvas_w, canvas_h;           // on-screen GL surface size. NOT the space
@@ -67,7 +72,6 @@ static int gfx_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     ctx->video_box_y  = params->video_box_h > 0 ? params->video_box_y : 0;
     ctx->video_box_w  = params->video_box_w > 0 ? params->video_box_w : ctx->canvas_w;
     ctx->video_box_h  = params->video_box_h > 0 ? params->video_box_h : ctx->canvas_h;
-    ctx->is_cleared = 1; // nothing to show yet
     be->priv = ctx;
     return 0;
 }
@@ -103,7 +107,6 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     // PGS clear signal: codec_ffsub sends a 1x1 zero-rect frame with
     // duration=0 to signal "hide the current subtitle". Honour it.
     if (duration_ms == 0 || !pixels || width <= 0 || height <= 0) {
-        ctx->is_cleared = 1;
         ctx->is_dirty = 1;
         return 0;
     }
@@ -113,12 +116,14 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     atomic_int *pixel_refs = NULL;
     uint8_t *rgba = gfx_pixels_alloc((size_t)width * (size_t)height * 4, &pixel_refs);
     if (!rgba) {
-        ctx->is_cleared = 1;
         ctx->is_dirty = 1;
         return -1;
     }
 
-    ctx->is_cleared = 0;
+    // pts_ms/duration_ms are rst and undelayed (the engine clock applies the delay).
+    // duration_ms < 0 = unbounded; > 0 = finite, expires on its own.
+    ctx->cue_start = pts_ms;
+    ctx->cue_end   = duration_ms > 0 ? pts_ms + duration_ms : -1;
     ctx->is_dirty = 1;
 
     // Build the stored frame
@@ -188,10 +193,9 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
 // call free_frame on the returned pointer.  ctx->current_frame must survive
 // intact for the next poll.
 //
-// We do NOT do a time-window check here.  PGS subtitles don't carry reliable
-// duration; the real end is signalled by the zero-rect clear packet handled
-// in gfx_feed_bitmap above.  VobSub does have durations but they are also
-// unreliable — keeping it simple: show until cleared.
+// The cue is shown iff cue_start <= pts < cue_end (cue_end < 0 = unbounded). A frame is only
+// handed out on a TRANSITION (cue starts, cue expires, geometry changes, new feed, flush), never
+// per poll, so an idle poll costs two compares.
 // ---------------------------------------------------------------------------
 // True if the cached frame's baked-in geometry no longer matches what the backend
 // currently knows (canvas size / video box).
@@ -234,15 +238,26 @@ static SUB_FRAME *gfx_clone_with_geometry(const GFX_BACKEND *ctx, const SUB_FRAM
     return f;
 }
 
+static int gfx_visible_at(const GFX_BACKEND *ctx, int64_t pts_ms) {
+    return ctx->current_frame && pts_ms >= ctx->cue_start &&
+           (ctx->cue_end < 0 || pts_ms < ctx->cue_end);
+}
+
 static SUB_FRAME *gfx_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
     GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
 
-    // 1. If nothing changed, return NULL (Triggers the GL Bypass)
-    if (!ctx->is_dirty) return NULL;
-    // Consume the dirty flag
+    // 1. Nothing changed since the last poll: neither the state we were told about (feed, flush,
+    //    resize, video box) nor the cue's visibility at this pts. NULL triggers the GL bypass.
+    int want = gfx_visible_at(ctx, pts_ms);
+    if (!ctx->is_dirty && want == ctx->shown) return NULL;
     ctx->is_dirty = 0;
-    // 2. If it changed to a CLEAR state, return an empty frame to wipe the screen
-    if (ctx->is_cleared || !ctx->current_frame) {
+    ctx->shown = want;
+
+    // 2. Cue not (or no longer) visible: hand back an empty frame to wipe the screen. The
+    //    renderer will now hold that empty frame instead of current_frame, so current_frame
+    //    must be re-delivered if it becomes visible again (e.g. the delay was changed).
+    if (!want) {
+        ctx->delivered = 0;
         SUB_FRAME *empty_frame = calloc(1, sizeof(SUB_FRAME));
         atomic_init(&empty_frame->refcount, 1);
         return empty_frame; // No events attached = clear screen
@@ -327,7 +342,6 @@ static int gfx_flush(SUB_FORMAT_BACKEND *be) {
         sub_frame_unref(ctx->current_frame);
         ctx->current_frame = NULL;
     }
-    ctx->is_cleared = 1;
     ctx->delivered = 0;
     ctx->is_dirty = 1;
     return 0;
@@ -346,10 +360,27 @@ static int gfx_close(SUB_FORMAT_BACKEND *be) {
 }
 
 // ---------------------------------------------------------------------------
-// gfx_get_timeout_ms
+// gfx_get_schedule
+//
+// Wake the engine at the cue's start (if it has not begun yet) and at its end (if finite).
+// An unbounded cue, or no cue, sleeps until a feed/flush broadcasts.
 // ---------------------------------------------------------------------------
-static int gfx_get_timeout_ms(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
-    return -1; // Infinite sleep. Only wakes when a feed/clear signals the engine.
+static void gfx_get_schedule(SUB_FORMAT_BACKEND *be, int64_t pts_rst_ms, SUB_SCHEDULE *out) {
+    GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
+    out->next_rst_ms = -1;
+    out->animating   = 0;
+    if (!ctx->current_frame) return;
+
+    // The clock may have crossed a boundary between the last render_at() and this call (the
+    // engine samples it again). Report "due now" instead of sleeping on stale pixels.
+    if (ctx->is_dirty || gfx_visible_at(ctx, pts_rst_ms) != ctx->shown) {
+        out->next_rst_ms = pts_rst_ms + 1;
+        return;
+    }
+    if (pts_rst_ms < ctx->cue_start)
+        out->next_rst_ms = ctx->cue_start;
+    else if (ctx->cue_end >= 0 && pts_rst_ms < ctx->cue_end)
+        out->next_rst_ms = ctx->cue_end;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +396,6 @@ SUB_FORMAT_BACKEND *sub_format_gfx_create(void) {
     be->set_video_box = gfx_set_video_box;
     be->flush       = gfx_flush;
     be->close       = gfx_close;
-    be->get_timeout_ms = gfx_get_timeout_ms;
+    be->get_schedule = gfx_get_schedule;
     return be;
 }

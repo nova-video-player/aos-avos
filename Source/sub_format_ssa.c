@@ -79,7 +79,12 @@ typedef struct {
     // would be wasteful for something that cannot change mid-track.
     char             *fonts_dir;
     char              resolved_default_family[256];
-    int               has_on_screen_text; // Tracks if libass is currently rendering anything
+    // Wake-up scheduling, recomputed by every render_at() in the same lock hold as the render
+    // itself (ssa_compute_schedule()); get_schedule() only reports it. Derived from the EVENT
+    // TABLE, not from whether libass produced pixels: a \fad that is still fully transparent
+    // renders nothing but is very much in progress.
+    int64_t           sched_next_rst;     // next event start/end (rst ms) after the last render, -1 = none
+    int               sched_active;       // an event covered the last render's pts
 } SSA_BACKEND;
 
 // --- CUSTOM FONTS FOLDER (MX Player / mpv-android style) + MKV-EMBEDDED FONTS ---
@@ -636,6 +641,7 @@ static void ssa_apply_geometry(SSA_BACKEND *ctx) {
 static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params) {
     SSA_BACKEND *ctx = calloc(1, sizeof(SSA_BACKEND));
     if (!ctx) return -1;
+    ctx->sched_next_rst = -1;
     pthread_mutex_init(&ctx->lock, NULL);
 
     ctx->canvas_w = params->video_w;
@@ -806,6 +812,29 @@ static int ssa_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64
     return 0;
 }
 
+// Recomputes the wake-up schedule from the event table. Mirrors libass's own visibility test in
+// ass_render_frame(): an event is on screen iff Start <= pts < Start + Duration. Every deadline
+// produced here is strictly greater than pts (a start is only "next" if > pts, an end only if the
+// event is still active), so the engine can never be handed a due-now deadline it cannot consume.
+// Caller holds ctx->lock. O(events); called once per render_at().
+static void ssa_compute_schedule(SSA_BACKEND *ctx, int64_t pts_ms) {
+    int active = 0;
+    int64_t next = -1;
+    const ASS_Track *t = ctx->track;
+    for (int i = 0; i < t->n_events; i++) {
+        int64_t start = t->events[i].Start;
+        int64_t end   = start + t->events[i].Duration;
+        if (start > pts_ms) {
+            if (next < 0 || start < next) next = start;
+        } else if (end > pts_ms) {
+            active = 1;
+            if (next < 0 || end < next) next = end;
+        }
+    }
+    ctx->sched_next_rst = next;
+    ctx->sched_active   = active;
+}
+
 static SUB_FRAME *ssa_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
     SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
     pthread_mutex_lock(&ctx->lock);
@@ -822,7 +851,7 @@ static SUB_FRAME *ssa_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
 
     int change = 0;
     ASS_Image *imgs = ass_render_frame(ctx->renderer, ctx->track, pts_ms, &change);
-    ctx->has_on_screen_text = (imgs != NULL);
+    ssa_compute_schedule(ctx, pts_ms);   // before the !change early-out: schedule must track every render
 
     if (!change) {
         pthread_mutex_unlock(&ctx->lock);
@@ -925,6 +954,8 @@ static int ssa_flush(SUB_FORMAT_BACKEND *be) {
     SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
     pthread_mutex_lock(&ctx->lock);
     ass_flush_events(ctx->track);
+    ctx->sched_next_rst = -1;
+    ctx->sched_active   = 0;
     pthread_mutex_unlock(&ctx->lock);
     return 0;
 }
@@ -949,38 +980,18 @@ static int ssa_close(SUB_FORMAT_BACKEND *be) {
     return 0;
 }
 
-static int ssa_get_timeout_ms(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
+// Reports what the LAST render_at() computed (see ssa_compute_schedule). Reading the cached
+// result instead of re-scanning at the caller's pts closes a race: if an event ended between
+// render_at() and this call, a fresh scan would say "nothing active" while the frame on screen
+// still shows it -- and the render thread would sleep on stale pixels. With the cached absolute
+// deadline that case just reads as "already due" and the engine re-renders within a millisecond.
+static void ssa_get_schedule(SUB_FORMAT_BACKEND *be, int64_t pts_rst_ms, SUB_SCHEDULE *out) {
+    (void)pts_rst_ms;
     SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
-
-    // Safety lock because we are reading track data
     pthread_mutex_lock(&ctx->lock);
-
-    // If text is visible, tick at 16ms to smoothly process active \fad or karaoke animations
-    if (ctx->has_on_screen_text) {
-        pthread_mutex_unlock(&ctx->lock);
-        return 16;
-    }
-
-    // Screen is empty. Peek at the linked list to find how far away the next
-    // line starts. ass_step_sub() already returns a DELTA relative to pts_ms
-    // (best->Start - now), not an absolute timestamp -- do not subtract
-    // pts_ms again here, or this collapses to "event is right now" for any
-    // non-trivial playback position and silently degrades to 16ms polling.
-    long long delta = ass_step_sub(ctx->track, pts_ms, 1);
+    out->next_rst_ms = ctx->sched_next_rst;
+    out->animating   = ctx->sched_active;   // conservative: tick for as long as any event is active
     pthread_mutex_unlock(&ctx->lock);
-
-    if (delta == 0) {
-        // ass_step_sub() returns 0 both when the track has no events at all
-        // and when nothing was found in this direction -- either way there's
-        // nothing to wait for. Sleep indefinitely until feed()/flush() wakes us.
-        return -1;
-    }
-
-    int delta_ms = (int)delta;
-    if (delta_ms <= 0) return 16; // Edge case: event is right now
-
-    // Cap the max sleep at 1 second so we remain somewhat responsive to sudden track changes
-    return (delta_ms > 1000) ? 1000 : delta_ms;
 }
 
 SUB_FORMAT_BACKEND *sub_format_ssa_create(void) {
@@ -993,6 +1004,6 @@ SUB_FORMAT_BACKEND *sub_format_ssa_create(void) {
     be->set_video_box = ssa_set_video_box;
     be->flush = ssa_flush;
     be->close = ssa_close;
-    be->get_timeout_ms = ssa_get_timeout_ms;
+    be->get_schedule = ssa_get_schedule;
     return be;
 }

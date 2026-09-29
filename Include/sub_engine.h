@@ -3,6 +3,7 @@
 #include "sub_types.h"
 #include "sub_style.h"
 #include "sub_format.h"
+#include "sub_render_gl.h"   // SUB_RENDERER, SUB_FILL_RESULT
 #include <android/native_window.h>
 #include <stdint.h>
 
@@ -92,6 +93,15 @@ typedef int64_t (*sub_engine_clock_fn)(void *ctx);
 void sub_engine_start(SUB_ENGINE *eng, sub_engine_clock_fn clock_fn, void *clock_ctx);
 void sub_engine_stop(SUB_ENGINE *eng);
 void sub_engine_set_paused(SUB_ENGINE *eng, int paused);
+int  sub_engine_is_paused(SUB_ENGINE *eng);
+
+// Registers the native->Java "subtitle content changed" push for the 3D path; see
+// sub_render_change_cb in sub_render_gl.h for exactly when and where it fires. Call once, right
+// after sub_engine_create(). sub_engine_get_change_ctx() returns the registered ctx so the
+// owner can free it AFTER sub_engine_destroy() (which joins the render thread, after which
+// the callback can no longer be running).
+void  sub_engine_set_change_callback(SUB_ENGINE *eng, sub_render_change_cb cb, void *ctx);
+void *sub_engine_get_change_ctx(SUB_ENGINE *eng);
 
 void sub_engine_attach_surface(SUB_ENGINE *eng, ANativeWindow *window);
 void sub_engine_detach_surface(SUB_ENGINE *eng);
@@ -129,7 +139,13 @@ typedef struct {
 
 void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out);
 
-SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng);
+// Render-thread entry point. Renders the active backend at the clock's pts AND publishes the
+// result to `r` in ONE engine-lock hold, so a frame from a track can only be installed while
+// that track is still the open one (open_track()/close_track() swap the backend and clear the
+// renderer in that same lock). Returns 1 if visible content changed, 0 if unchanged.
+// Replaces sub_engine_poll_frame(), which returned the frame for the caller to install later
+// across an unlocked gap.
+int sub_engine_poll_and_publish(SUB_ENGINE *eng, SUB_RENDERER *r);
 void sub_engine_free_frame(SUB_FRAME *frame);                          // static global free — for internal use only
 void sub_engine_release_frame(SUB_ENGINE *eng, SUB_FRAME *frame);      // backend-aware release — use this in sub_render_gl.c
 int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int height, int pitch, int colorspace, int x_offset, int y_offset, int64_t pts_ms, int64_t duration_ms);
@@ -137,16 +153,17 @@ int sub_engine_feed_bitmap(SUB_ENGINE *eng, uint8_t *pixels, int width, int heig
 void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode);
 
 // --- HYBRID 3D BRIDGE ---
-int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride, uint64_t *out_generation);
+// Single pull for the 3D CPU-blend path; see SUB_FILL_RESULT and
+// sub_render_gl_fill_bitmap() in sub_render_gl.h for the full contract.
+SUB_FILL_RESULT sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride,
+                                       uint64_t last_generation, int force, uint64_t *out_generation);
 int sub_engine_feed_raw(SUB_ENGINE *eng, const uint8_t *data, int size); // for external ASS/SSA raw file buffer
 void sub_engine_wait_for_render(SUB_ENGINE *eng, uint64_t target_generation, int timeout_ms);
 uint64_t sub_engine_force_wake_and_get_generation(SUB_ENGINE *eng);
 
-// Current content-change generation for the 3D CPU-blend path -- see
-// sub_render_gl_get_frame_generation() for the exact semantics (bumps only on
-// genuinely new subtitle content, not on every poll/wake). Callers on the Java/JNI
-// side can check this cheaply before paying for a fill_bitmap() call at all, when
-// they only care whether anything changed since their last draw.
+// Current content-change generation -- see sub_render_gl_get_frame_generation(). NOTE: a
+// separate read here is NOT safe to record as "the generation of the pixels I just copied";
+// use the out_generation that sub_engine_fill_bitmap() returns with them instead.
 uint64_t sub_engine_get_frame_generation(SUB_ENGINE *eng);
 
 void sub_frame_ref(SUB_FRAME *frame);

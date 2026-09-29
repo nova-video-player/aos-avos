@@ -34,6 +34,11 @@
  *     the real sub_frame_unref() instead). Not switched to a real/stub
  *     toggle because sub_engine.c is a large file that would pull this
  *     backend-isolation test into the rest of the engine's dependencies.
+ *     SSA_TEST_STUB_SKIP_FRAME_UNREF exists for the opposite situation: a
+ *     test (see test/run-race-harness.sh and friends) that links
+ *     sub_engine.c ON PURPOSE, which defines sub_frame_unref() itself --
+ *     pass that flag there to skip THIS file's definition instead of
+ *     getting a duplicate-symbol link error.
  *
  * Everything here is intentionally the simplest correct implementation for
  * THIS test's call pattern, not a general-purpose fake of the real
@@ -77,6 +82,7 @@ int font_name_resolve_family(const char *fonts_dir, const char *file_name,
     return 0; /* "not resolved" -- correct answer if this ever actually ran */
                              }
 
+#ifndef SSA_TEST_STUB_SKIP_FRAME_UNREF
                              void sub_frame_unref(SUB_FRAME *frame) {
                                  if (!frame) return;
                                  /* SSA frames never set pixel_refs (see file header comment above) --
@@ -101,3 +107,4 @@ int font_name_resolve_family(const char *fonts_dir, const char *file_name,
                                  }
                                  free(frame);
                              }
+#endif /* SSA_TEST_STUB_SKIP_FRAME_UNREF */

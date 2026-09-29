@@ -21,10 +21,11 @@ extern "C" {
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetVideoBox(JNIEnv *env, jobject thiz, jlong handle, jint x, jint y, jint w, jint h);
 
     /* ── 3D Hybrid Render Bridge ── */
-    JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject bitmap);
+    /* Single pull: returns SUB_FILL_* (UNCHANGED/CLEAR/FRAME/ERROR) and reports, in
+     * outGeneration[0], the generation of exactly what that result describes. Replaces the old
+     * nativeFillBitmap / nativeSyncFillBitmap / nativeGetSubtitleGeneration trio. */
+    JNIEXPORT jint    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject bitmap, jlong lastGeneration, jboolean sync, jlongArray outGeneration);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetUIMode(JNIEnv *env, jobject thiz, jlong handle, jint mode);
-    JNIEXPORT jboolean JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSyncFillBitmap(JNIEnv *env, jobject thiz, jlong handle, jobject jbitmap);
-    JNIEXPORT jlong    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeGetSubtitleGeneration(JNIEnv *env, jobject thiz, jlong handle);
     /* ── Typography & Master Control ── */
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontSize(JNIEnv *env, jobject thiz, jlong handle, jfloat pt);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetFontScale(JNIEnv *env, jobject thiz, jlong handle, jfloat scale);

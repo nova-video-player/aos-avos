@@ -897,6 +897,9 @@ static int _poll_parse_state( uni_sub *sub )
 	return subtitle_ensure_parsed_async_priority( sub );
 }
 
+// Applies the user's subtitle ratio (time * n / d) to one external time. Now used ONLY by the
+// external bitmap lookup (stream_sub_ext_get_gfx_data): external TEXT cues are fed raw and the ratio
+// is applied by the engine clock instead (see engine_clock_cb in avos_mp_video.c).
 static int scale_time( STREAM *s, int time )
 {
 	int ratio_n = s->subtitle_ratio_n;
@@ -1318,10 +1321,12 @@ static void _cue_to_engine_gen( STREAM *s, uint64_t token, const char *text, int
 	if( !s || !s->sub_engine || !text || !text[0] ) return;
 	int duration = end_ms - start_ms;
 	if( duration < 0 ) duration = 0;
+	// Raw file times: the user's subtitle ratio is applied by the engine clock (engine_clock_cb in
+	// avos_mp_video.c), so a ratio change is live and needs no re-feed.
 	sub_engine_feed_gen( (SUB_ENGINE*)s->sub_engine, token,
 	                 (const uint8_t*)text, strlen(text),
-	                 scale_time( s, start_ms ),
-	                 scale_time( s, duration ) );
+	                 start_ms,
+	                 duration );
 }
 
 // sub_feed_poll_cb implementation behind feed_SRT()/feed_VTT()'s periodic checkpoint. Checked first: track-switch staleness -- bails and flushes if the user selected a different track while this job was queued/mid-feed (safe unconditionally, since the FIFO worker guarantees nothing else is writing to the engine at this point). Then the normal pause/seek/close check via thread_state_asked(), which also flushes and marks the track for a full refeed (feed_SRT/feed_VTT always restart from the top of their in-memory buffer, so "refeed" means redo the whole file, not resume). Otherwise calls stream_yield_RT() on every non-stopping checkpoint to relieve eng->lock contention with the render thread.
@@ -1418,10 +1423,11 @@ DBG serprintf("sub_ext_feed_engine: stream %d  engine_fmt %d  is_ssa %d  is_stre
 					snprintf( merged, sizeof(merged), "%s", node->top ? node->top : "" );
 				}
 				if( merged[0] && s->sub_engine ) {
-					int duration = scale_time( s, node->end ) - scale_time( s, node->start );
+					// Raw file times -- the subtitle ratio is applied by the engine clock.
+					int duration = node->end - node->start;
 					sub_engine_feed( (SUB_ENGINE*)s->sub_engine,
 					                 (uint8_t*)merged, strlen(merged),
-					                 scale_time( s, node->start ),
+					                 node->start,
 				                 duration );
 				}
 				node = node->next;
@@ -1497,7 +1503,10 @@ int stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 				return 1;
 			}
 			frame->time     = RST_TO_TS_TIME(start, int);
-			frame->duration = RST_TO_TS_DELTA(end - start, int);
+			// end == INT_MAX marks the unknown end of the last DVD cue (see scale_time());
+			// scaling it would overflow the int conversion at speeds < 1.0. Only debug output
+			// reads this value today, but keep it well-defined.
+			frame->duration = ( end == INT_MAX ) ? -1 : RST_TO_TS_DELTA(end - start, int);
 			return 0;
 		}
 		node = node->next;

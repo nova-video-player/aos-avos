@@ -324,12 +324,14 @@ static int srt_close(SUB_FORMAT_BACKEND *be) {
     return 0;
 }
 
-static int srt_get_timeout_ms(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
+static void srt_get_schedule(SUB_FORMAT_BACKEND *be, int64_t pts_rst_ms, SUB_SCHEDULE *out) {
     SRT_BACKEND *ctx = (SRT_BACKEND *)be->priv;
-    if (ctx && ctx->ssa_backend && ctx->ssa_backend->get_timeout_ms) {
-        return ctx->ssa_backend->get_timeout_ms(ctx->ssa_backend, pts_ms);
+    if (ctx && ctx->ssa_backend && ctx->ssa_backend->get_schedule) {
+        ctx->ssa_backend->get_schedule(ctx->ssa_backend, pts_rst_ms, out);
+        return;
     }
-    return 16; // Fallback
+    out->next_rst_ms = -1;   // no libass behind us: nothing can change on its own
+    out->animating   = 0;
 }
 
 SUB_FORMAT_BACKEND *sub_format_srt_create(void) {
@@ -342,6 +344,6 @@ SUB_FORMAT_BACKEND *sub_format_srt_create(void) {
     be->set_video_box = srt_set_video_box;
     be->flush = srt_flush;
     be->close = srt_close;
-    be->get_timeout_ms = srt_get_timeout_ms; // <--- ADD THIS
+    be->get_schedule = srt_get_schedule;
     return be;
 }

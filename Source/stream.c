@@ -25,6 +25,7 @@
 #include "browse.h"
 #include "power_hdd.h"
 #include "stream_sync.h"
+#include "sub_engine.h"   // sub_engine_force_wake()
 
 #include "athread.h"
 #include "atime.h"
@@ -661,6 +662,16 @@ DBG serprintf("stream_set_av_delay: av_delay=%d manual_target=%d applied=%d base
 // ************************************************************
 extern void _stream_resync( STREAM *s );
 
+// Every new timeline mapping changes the rst->wall conversion the subtitle engine used to size its
+// current sleep (RST_TO_TS_DELTA in sub_engine_wait_event). Wake it so it re-derives the wait at the
+// new speed now, instead of finishing a wait that was computed at the old one. Call right after
+// timeline_map_apply(). The engine's own 250 ms wait cap remains as a backstop.
+static void _timeline_map_changed( STREAM *s )
+{
+	if( s && s->sub_engine )
+		sub_engine_force_wake( (SUB_ENGINE*)s->sub_engine );
+}
+
 static void _stream_anchor_video_sink_to_audio_clock( STREAM *s, int audio_time_ts )
 {
 	if( !s || audio_time_ts < 0 )
@@ -858,8 +869,10 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 		// Sonic supplies its effective blended speed; the shared writer translates
 		// those boundaries into accepted sink frames before the playhead gate.
 		defer_commit = stream_get_audio_speed_filter(s) && s->audio && s->audio->valid;
-		if( !defer_commit )
+		if( !defer_commit ) {
 			timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, clamped_speed );
+			_timeline_map_changed( s );
+		}
 		applied_speed = clamped_speed;
 	} else {
 		s->atempo_commit_count = 0;
@@ -912,6 +925,7 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 			DBG serprintf( "stream:stream_set_av_speed no audio hw change required (speed=%f)\n", applied_speed );
 		}
 		timeline_map_apply( (double)stream_current_time_rst, (double)speed_anchor_ts, applied_speed );
+		_timeline_map_changed( s );
 	}
 
 	int applied_num = (int)( applied_speed * 100 + 0.5f );
@@ -1114,6 +1128,7 @@ static void _stream_atempo_commit_poll( STREAM *s, int drained )
 		(unsigned long long)playhead, have_ph);
 
 	timeline_map_apply( (double)anchor_rst_use, (double)anchor_ts, applied_speed );
+	_timeline_map_changed( s );   // deferred atempo commit: the mapping only changes HERE, not at the request
 
 	pthread_mutex_lock(&s->video_control_mutex);
 	int num = (int)( applied_speed * 100 + 0.5f );

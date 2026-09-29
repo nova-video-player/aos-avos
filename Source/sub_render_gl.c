@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 #include "debug.h"
 #include <time.h>
 
@@ -21,13 +22,20 @@ struct SUB_RENDERER {
     const SUB_FRAME *current_frame;
     int              pending_redraw; // unified "something changed, redraw regardless"
     uint64_t         applied_generation; // highest wakeup_generation this thread has finished a poll+store pass for
-    uint64_t         frame_generation;   // bumped only when current_frame is swapped for genuinely new content -- see sub_render_gl_get_frame_generation()
+    uint64_t         frame_generation;   // identity of what current_frame currently means: bumped, under
+                                         // lock, on EVERY visible change -- a new frame, a clear of
+                                         // visible content (empty frame or track close/open). Never
+                                         // bumped for "still the same thing". Always read together
+                                         // with current_frame in one critical section; see
+                                         // sub_render_gl_fill_bitmap().
     pthread_cond_t   frame_cond;         // broadcast whenever applied_generation advances
     GLuint           gl_program;
     GLuint           gl_texture;
     GLint            attrib_pos;
     GLint            attrib_tex;
     void            *engine;
+    sub_render_change_cb change_cb;   // see sub_render_gl.h; both under r->lock
+    void            *change_ctx;
 };
 
 static GLuint compile_shader(GLenum type, const char *source) {
@@ -84,6 +92,9 @@ static void* egl_render_thread(void* arg) {
     EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
 
     EGLSurface surface = EGL_NO_SURFACE;
+    // Last frame_generation announced through change_cb. UINT64_MAX = "never": generations
+    // never reach it, so the first paused pass with a callback set always announces once.
+    uint64_t notified_generation = UINT64_MAX;
     ANativeWindow *current_window = NULL;
 
     while (1) {
@@ -189,9 +200,15 @@ static void* egl_render_thread(void* arg) {
         // --- HYBRID FIX: ALWAYS POLL THE ENGINE ---
         // Even if the 3D Mode deactivated the GPU Surface, we MUST continue
         // to poll the clock so the memory frames update for the CPU Blender!
-        SUB_FRAME *new_frame = NULL;
+        //
+        // Poll and publish are ONE step now, done inside the engine under the engine lock
+        // (see sub_engine_poll_and_publish()): a frame rendered from track T can only ever be
+        // installed while T is still the open track, because open_track()/close_track() swap
+        // the backend and clear the renderer under that same lock. Nothing is handed back
+        // across an unlocked gap for this thread to install later.
+        int content_changed = 0;
         if (r->engine) {
-            new_frame = sub_engine_poll_frame((SUB_ENGINE*)r->engine);
+            content_changed = sub_engine_poll_and_publish((SUB_ENGINE*)r->engine, r);
         }
 
         pthread_mutex_lock(&r->lock);
@@ -199,22 +216,24 @@ static void* egl_render_thread(void* arg) {
             r->pending_redraw = 0;
             needs_redraw = 1;
         }
-        if (new_frame != NULL && new_frame != r->current_frame) {
-            if (r->current_frame) {
-                sub_engine_release_frame((SUB_ENGINE*)r->engine, (SUB_FRAME*)r->current_frame);
-            }
-            r->current_frame = new_frame;
-            r->frame_generation++; // content genuinely changed -- see field doc in the struct
-            needs_redraw = 1; // <--- 3. FORCE REDRAW ON NEW FRAME
+        if (content_changed) {
+            needs_redraw = 1; // <--- 3. FORCE REDRAW ON NEW FRAME / CLEAR
         }
 
-        // This iteration's poll_frame() (above) has now run and r->current_frame reflects
+        // This iteration's poll+publish (above) has now run and r->current_frame reflects
         // its result, so anything that was true when loop_generation was sampled at the top
         // of this iteration -- e.g. a style change whose force_wake() bump was already
         // visible at that point -- is guaranteed to be reflected here. Stamp and broadcast so
         // sub_render_gl_wait_for_generation() callers (the 3D pull path) can unblock.
         r->applied_generation = loop_generation;
         pthread_cond_broadcast(&r->frame_cond);
+
+        // Snapshot for the content-changed notification below, taken in this same lock hold
+        // as the poll's result so the generation announced is one this thread actually saw.
+        uint64_t gen_now = r->frame_generation;
+        sub_render_change_cb change_cb = r->change_cb;
+        void *change_ctx = r->change_ctx;
+        int mode_3d = (r->ui_mode != 0);
 
         int w = r->surface_width;
         int h = r->surface_height;
@@ -234,6 +253,15 @@ static void* egl_render_thread(void* arg) {
             sub_frame_ref((SUB_FRAME *)frame_to_draw);
         }
         pthread_mutex_unlock(&r->lock);
+
+        // --- CONTENT-CHANGED PUSH (3D path, paused only) -- see sub_render_gl.h ---
+        // No lock held here. The paused check takes the engine lock, so it is only evaluated
+        // once we already know there is something new to announce.
+        if (change_cb && mode_3d && gen_now != notified_generation && r->engine &&
+            sub_engine_is_paused((SUB_ENGINE*)r->engine)) {
+            notified_generation = gen_now;
+            change_cb(change_ctx);
+        }
 
         // If EGL is offline (e.g. we are in 3D Canvas mode), sleep and skip drawing.
         // The Java onFrameAvailable() callback will extract frames via RAM instead.
@@ -357,6 +385,22 @@ static void* egl_render_thread(void* arg) {
     return NULL;
 }
 
+void sub_render_gl_set_change_callback(SUB_RENDERER *r, sub_render_change_cb cb, void *ctx) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->change_cb  = cb;
+    r->change_ctx = ctx;
+    pthread_mutex_unlock(&r->lock);
+}
+
+void *sub_render_gl_get_change_ctx(SUB_RENDERER *r) {
+    if (!r) return NULL;
+    pthread_mutex_lock(&r->lock);
+    void *ctx = r->change_ctx;
+    pthread_mutex_unlock(&r->lock);
+    return ctx;
+}
+
 SUB_RENDERER *sub_render_gl_create(void *engine) {
     SUB_RENDERER *r = calloc(1, sizeof(SUB_RENDERER));
     pthread_mutex_init(&r->lock, NULL);
@@ -451,17 +495,77 @@ uint64_t sub_render_gl_get_frame_generation(SUB_RENDERER *r) {
     return gen;
 }
 
-void sub_render_gl_clear(SUB_RENDERER *r) {
+// ---------------------------------------------------------------------------------------
+// Publication. The ONLY two ways current_frame changes are sub_render_gl_publish() and
+// sub_render_gl_clear_nowake() below, and both are called with the ENGINE lock held --
+// the same lock hold that renders from / swaps / closes the backend. Lock order is always
+// engine -> renderer; nothing that holds r->lock may ever take the engine lock.
+// ---------------------------------------------------------------------------------------
+
+// Takes ownership of `frame` (the reference render_at() handed back), which may be NULL.
+// Returns 1 if visible content changed. Classifies the backend's answer explicitly:
+//   NULL                          -> UNCHANGED: nothing new; current content stays valid.
+//   same object as current        -> UNCHANGED (previous behaviour; see note below).
+//   no events, nothing showing    -> UNCHANGED: "clear" of an already-clear screen is not news.
+//   no events, something showing  -> CLEAR:     install the empty frame, bump generation.
+//   anything else                 -> NEW FRAME: install it, bump generation.
+// Frames displaced here are released AFTER r->lock is dropped (sub_frame_unref can free
+// pixel buffers), but still under the engine lock -- brief, and nobody else can be waiting
+// on r->lock for it: fill_bitmap() only holds r->lock long enough to pin+read.
+//
+// Note on the same-pointer case: if a backend's render_at() ever returns an already-owned
+// cached frame WITH a fresh reference, that reference is dropped on the floor here exactly
+// as it was before this change. That contract lives in the backends, not here.
+int sub_render_gl_publish(SUB_RENDERER *r, SUB_FRAME *frame) {
+    if (!r) return 0;
+    SUB_FRAME *drop_old = NULL, *drop_new = NULL;
+    int changed = 0;
+
+    pthread_mutex_lock(&r->lock);
+    SUB_FRAME *cur = (SUB_FRAME *)r->current_frame;
+    if (!frame || frame == cur) {
+        // UNCHANGED
+    } else if (!frame->events && !(cur && cur->events)) {
+        drop_new = frame;               // empty frame over an already-empty screen
+    } else {
+        drop_old = cur;                 // NEW FRAME, or CLEAR of visible content
+        r->current_frame = frame;
+        r->frame_generation++;
+        changed = 1;
+    }
+    pthread_mutex_unlock(&r->lock);
+
+    if (drop_old) sub_engine_release_frame((SUB_ENGINE*)r->engine, drop_old);
+    if (drop_new) sub_engine_release_frame((SUB_ENGINE*)r->engine, drop_new);
+    return changed;
+}
+
+// Drops whatever is showing. Caller MUST hold the engine lock, and is responsible for waking
+// the render thread (broadcast_wake_locked) -- this deliberately does NOT call
+// sub_engine_force_wake(), which would re-take the (non-recursive) engine lock.
+// Bumps the generation iff something was actually showing, so a 3D-path puller sees
+// "clear" as a real change, and a clear of an already-clear screen as nothing.
+void sub_render_gl_clear_nowake(SUB_RENDERER *r) {
     if (!r) return;
     pthread_mutex_lock(&r->lock);
     SUB_FRAME *to_free = (SUB_FRAME*)r->current_frame;
     r->current_frame = NULL;
+    if (to_free) r->frame_generation++;
+    r->pending_redraw = 1;
     pthread_mutex_unlock(&r->lock);
 
     if (to_free) {
         sub_engine_release_frame((SUB_ENGINE*)r->engine, to_free);
     }
-    sub_render_gl_invalidate_cache(r);
+}
+
+// Public variant for callers that do NOT hold the engine lock.
+void sub_render_gl_clear(SUB_RENDERER *r) {
+    if (!r) return;
+    sub_render_gl_clear_nowake(r);
+    if (r->engine) {
+        sub_engine_force_wake((SUB_ENGINE*)r->engine);
+    }
 }
 
 void sub_render_gl_invalidate_cache(SUB_RENDERER *r) {
@@ -503,20 +607,10 @@ void sub_render_gl_wait_for_generation(SUB_RENDERER *r, uint64_t target_generati
 }
 
 // --- HYBRID 3D BRIDGE FAST CPU BLENDER ---
-int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_h, int dst_stride, uint64_t *out_generation) {
-    if (!r) return 0;
-    int has_subs = 0;
 
-    pthread_mutex_lock(&r->lock);
-    const SUB_FRAME *frame = r->current_frame;
-    // Stamped in the same critical section as the blend below, so a concurrent frame
-    // swap (egl_render_thread bumping frame_generation and replacing current_frame)
-    // can't land between "we blended frame X" and "we reported X's generation" --
-    // the caller always gets the generation of the exact frame it just read.
-    if (out_generation) *out_generation = r->frame_generation;
-
-    if (frame && frame->events) {
-        has_subs = 1;
+// Blends one frame's bitmap events into `pixels`. Pure function of its arguments: it reads
+// only the frame, which the caller has pinned (sub_frame_ref), so it needs no renderer lock.
+static void blend_frame(const SUB_FRAME *frame, void *pixels, int dst_w, int dst_h, int dst_stride) {
         SUB_EVENT *ev = frame->events;
 
         while (ev) {
@@ -614,7 +708,53 @@ int sub_render_gl_fill_bitmap(SUB_RENDERER *r, void* pixels, int dst_w, int dst_
             }
             ev = ev->next;
         }
+}
+
+// Hands the 3D path exactly one of four answers about "what should be on screen", together
+// with the generation that answer belongs to:
+//
+//   SUB_FILL_UNCHANGED  generation == last_generation (and !force): what the caller last
+//                       posted is still right. `pixels` is untouched.
+//   SUB_FILL_CLEAR      nothing should be showing (no frame, or an empty one). `pixels` is
+//                       untouched -- the caller clears its own surface; this is NOT an error
+//                       and NOT "unchanged".
+//   SUB_FILL_FRAME      `pixels` was cleared and the frame blended into it.
+//   SUB_FILL_ERROR      bad arguments; nothing was decided, so the caller must not record
+//                       *out_generation as posted.
+//
+// *out_generation is written for every non-ERROR result and is the generation of the exact
+// frame (or absence of one) this call decided on: the frame pointer, its generation and the
+// pin on it are all taken in ONE critical section. The blend then runs outside the lock on
+// the pinned frame -- frames are immutable once published, which is the same assumption the
+// GL thread already relies on for glTexImage2D -- so a long blend can't stall publication
+// (which now happens under the engine lock and would otherwise stall feed()). A frame swap
+// or track close landing mid-blend just means the NEXT call sees a newer generation and
+// answers CLEAR/FRAME; the caller has recorded the generation of what it actually posted.
+//
+// last_generation: pass UINT64_MAX (Java: -1) for "I have posted nothing valid" -- a generation
+// never reaches it. force: skip the UNCHANGED shortcut (style-change redraws, where pixels
+// differ even if the frame identity does not).
+SUB_FILL_RESULT sub_render_gl_fill_bitmap(SUB_RENDERER *r, void *pixels, int dst_w, int dst_h, int dst_stride,
+                                          uint64_t last_generation, int force, uint64_t *out_generation) {
+    if (!r || !pixels || !out_generation || dst_w <= 0 || dst_h <= 0) return SUB_FILL_ERROR;
+
+    pthread_mutex_lock(&r->lock);
+    uint64_t gen = r->frame_generation;
+    if (!force && gen == last_generation) {
+        *out_generation = gen;
+        pthread_mutex_unlock(&r->lock);
+        return SUB_FILL_UNCHANGED;
     }
+    SUB_FRAME *frame = (SUB_FRAME *)r->current_frame;
+    int has_subs = (frame && frame->events) ? 1 : 0;
+    if (has_subs) sub_frame_ref(frame);
+    *out_generation = gen;
     pthread_mutex_unlock(&r->lock);
-    return has_subs;
+
+    if (!has_subs) return SUB_FILL_CLEAR;
+
+    memset(pixels, 0, (size_t)dst_stride * (size_t)dst_h);
+    blend_frame(frame, pixels, dst_w, dst_h, dst_stride);
+    sub_engine_release_frame((SUB_ENGINE*)r->engine, frame);
+    return SUB_FILL_FRAME;
 }

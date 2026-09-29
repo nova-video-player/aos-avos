@@ -38,6 +38,12 @@ SUB_FMT_ID sub_fmt_from_format(int fmt) {
     }
 }
 
+// LOCK ORDER: eng->lock is always taken BEFORE the renderer's lock (r->lock), never after.
+// Everything that changes what the renderer considers "current" -- publishing a polled frame,
+// and clearing on open_track()/close_track() -- runs inside a single eng->lock hold together
+// with the render_at()/backend swap it belongs to. That is what makes "this frame's track is
+// still the open track" and "install this frame" one atomic step. Code holding r->lock must
+// therefore never call anything that takes eng->lock (force_wake, get_generation, ...).
 struct SUB_ENGINE {
     SUB_RENDERER         *renderer;
     SUB_USER_STYLE       *style;
@@ -404,6 +410,15 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     // resize() if no real canvas is known yet (canvas_w==0), in which case open() already got
     // the video_w/h fallback via target_w/target_h.
     eng->geometry_dirty |= (SUB_GEOM_CANVAS | SUB_GEOM_BOX);
+
+    // Drop whatever the previous track had published, in THIS lock hold -- not after it.
+    // poll_and_publish() renders and publishes under eng->lock, so once the backend is
+    // swapped above no frame from the old track can be published afterwards, and no frame
+    // from the NEW track can be published until we release the lock -- meaning this clear
+    // can neither miss a stale frame nor discard a fresh one. (It used to run after the
+    // unlock: the render thread could poll a frame from the old backend, lose the race to
+    // this clear, and then install it -- a stale cue on screen for the new track.)
+    sub_render_gl_clear_nowake(eng->renderer);
     broadcast_wake_locked(eng); // same pattern every other mutator in this file uses
     pthread_mutex_unlock(&eng->lock);
 
@@ -411,9 +426,6 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
         old_backend->close(old_backend);
         free(old_backend);
     }
-
-    // Drop any cached frame from the previous track
-    sub_render_gl_clear(eng->renderer);
 
     return 0;
 }
@@ -437,10 +449,11 @@ void sub_engine_close_track(SUB_ENGINE *eng) {
         backend->close(backend);
         free(backend);
     }
+    // Clear in the same lock hold as the close -- see open_track() for why this must not be
+    // a separate step after the unlock. No-wake variant: we hold eng->lock, so wake directly.
+    sub_render_gl_clear_nowake(eng->renderer);
+    broadcast_wake_locked(eng);
     pthread_mutex_unlock(&eng->lock);
-
-    // Command the GL thread to dump memory and clear the screen safely
-    sub_render_gl_clear(eng->renderer);
 }
 
 int sub_engine_feed(SUB_ENGINE *eng, const uint8_t *data, int size, int64_t pts_ms, int64_t duration_ms) {
@@ -562,6 +575,24 @@ void sub_engine_set_paused(SUB_ENGINE *eng, int paused) {
     pthread_mutex_unlock(&eng->lock);
 }
 
+int sub_engine_is_paused(SUB_ENGINE *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->lock);
+    int paused = eng->is_paused;
+    pthread_mutex_unlock(&eng->lock);
+    return paused;
+}
+
+void sub_engine_set_change_callback(SUB_ENGINE *eng, sub_render_change_cb cb, void *ctx) {
+    if (!eng) return;
+    sub_render_gl_set_change_callback(eng->renderer, cb, ctx);
+}
+
+void *sub_engine_get_change_ctx(SUB_ENGINE *eng) {
+    if (!eng) return NULL;
+    return sub_render_gl_get_change_ctx(eng->renderer);
+}
+
 void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out) {
     if (!out) return;
     out->frames_rendered = 0;
@@ -584,12 +615,20 @@ void sub_engine_get_stats(const SUB_ENGINE *eng, SUB_ENGINE_STATS *out) {
 // paused) pts -- e.g. so a font-size change while paused is visible
 // immediately instead of only appearing after the user unpauses. Bailing
 // out here unconditionally, as before, silently dropped that render.
-SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
-    if (!eng) return NULL;
+//
+// Renders AND publishes to the renderer in one eng->lock hold (this used to return the frame
+// and let the render thread install it later, across an unlocked gap in which close_track()/
+// open_track() could complete -- see open_track()). Returns 1 if visible content changed
+// (new frame, or a clear of something that was showing), 0 for "unchanged" -- including the
+// no-track / no-clock cases, where nothing was polled at all. `r` is passed in by the render
+// thread rather than read from eng->renderer: the thread is spawned inside
+// sub_render_gl_create(), before sub_engine_create() has stored that pointer.
+int sub_engine_poll_and_publish(SUB_ENGINE *eng, SUB_RENDERER *r) {
+    if (!eng || !r) return 0;
     pthread_mutex_lock(&eng->lock);
     if (!eng->active_backend || !eng->clock_fn) {
         pthread_mutex_unlock(&eng->lock);
-        return NULL;
+        return 0;
     }
     // Apply any pending canvas/box change to the backend as ONE pair, right before
     // rendering (item #3). This is the only place backend->resize()/set_video_box() are
@@ -627,9 +666,10 @@ SUB_FRAME *sub_engine_poll_frame(SUB_ENGINE *eng) {
     // this was the main use-after-free window: close_track() on another thread
     // (e.g. the next video opening) could free the backend in between.
     SUB_FRAME *frame = eng->active_backend->render_at(eng->active_backend, pts);
+    int changed = sub_render_gl_publish(r, frame); // takes ownership of `frame`; lock order eng -> r
     pthread_mutex_unlock(&eng->lock);
 
-    return frame;
+    return changed;
 }
 
 // A global free that doesn't rely on backends, preventing UAF during teardowns
@@ -671,9 +711,10 @@ void sub_engine_set_ui_mode(SUB_ENGINE *eng, int mode) {
     sub_render_gl_set_ui_mode(eng->renderer, mode);
 }
 
-int sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride, uint64_t *out_generation) {
-    if (!eng || !eng->renderer) return 0;
-    return sub_render_gl_fill_bitmap(eng->renderer, pixels, w, h, stride, out_generation);
+SUB_FILL_RESULT sub_engine_fill_bitmap(SUB_ENGINE *eng, void* pixels, int w, int h, int stride,
+                                       uint64_t last_generation, int force, uint64_t *out_generation) {
+    if (!eng || !eng->renderer) return SUB_FILL_ERROR;
+    return sub_render_gl_fill_bitmap(eng->renderer, pixels, w, h, stride, last_generation, force, out_generation);
 }
 
 uint64_t sub_engine_get_frame_generation(SUB_ENGINE *eng) {

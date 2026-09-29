@@ -4926,7 +4926,7 @@ static void _seek_init( STREAM *s )
 		} else {
 			// Still need to nudge the render thread — it may be parked
 			// asleep at the pre-seek pts's computed timeout, and nothing
-			// else will wake it to re-evaluate get_timeout_ms()/render_at()
+			// else will wake it to re-evaluate get_schedule()/render_at()
 			// at the new position. Flush used to do this as a side effect;
 			// skipping it means we have to ask explicitly.
 			sub_engine_force_wake( (SUB_ENGINE*)s->sub_engine );

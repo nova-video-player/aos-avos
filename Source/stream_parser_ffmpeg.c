@@ -899,6 +899,24 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 				sub->extraData2     = codecpar->extradata;
 				sub->extraDataSize2 = codecpar->extradata_size;
 
+				// Bitmap tracks (PGS/VobSub): the stream's own coordinate frame. FFmpeg fills
+				// codecpar->width/height for these while probing (avformat_find_stream_info) -- the
+				// PGS decoder takes it from the PCS segment, the DVD subtitle decoder from the idx
+				// "size:" -- which is the "pgssub, 1920x1080" / "dvdsub, 720x480" ffprobe prints.
+				// Hand it on as a "size: WxH" line in extraData, exactly what external tracks get
+				// from stream_sub_ext.c, so codec_ffsub.c's open() has ONE source for both formats
+				// and both track kinds. No line when probing gave no size: open() then uses the
+				// format's standard plane (see _gfx_frame_size()).
+				if (sub->gfx) {
+					sub->extraDataSize = 0;
+					if (codecpar->width > 0 && codecpar->height > 0) {
+						int n = snprintf((char *)sub->extraData, sizeof(sub->extraData), "size: %dx%d\n",
+						                 codecpar->width, codecpar->height);
+						if (n > 0 && n < (int)sizeof(sub->extraData))
+							sub->extraDataSize = n;
+					}
+				}
+
 				if (title) {
 					int n = snprintf(sub->name, AV_NAME_LEN, "%s", title->value);
 					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN - 1] = '\0';

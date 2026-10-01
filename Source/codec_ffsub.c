@@ -40,7 +40,52 @@ typedef struct {
 	STREAM_DEC_SUB base;
 	AVCodecContext* avcontext;
 	uint8_t *bitmap; // decoder-owned bitmap, replaced only after successful allocation
+	int eng_w, eng_h;    // frame size the engine track was opened with (see _open()); 0 = no engine track
 } my_dec_sub;
+
+// Reads the "size: WxH" line from a bitmap track's init data (SUB_PROPERTIES.extraData). `extra`
+// is not necessarily NUL-terminated. Returns 1 and fills *w/*h, else 0 leaving them untouched.
+static int _extra_size( const uint8_t *extra, int n, int *w, int *h )
+{
+	for( int i = 0; extra && i < n; ) {
+		int j = i;
+		while( j < n && extra[j] != '\n' ) j++;
+		if( j - i > 5 && !memcmp( extra + i, "size:", 5 ) ) {
+			char line[64];
+			int len = j - i - 5;
+			if( len > (int)sizeof( line ) - 1 ) len = (int)sizeof( line ) - 1;
+			memcpy( line, extra + i + 5, len );
+			line[len] = '\0';
+			int ww = 0, hh = 0;
+			if( sscanf( line, " %dx%d", &ww, &hh ) == 2 && ww >= 16 && ww <= 8192 && hh >= 16 && hh <= 8192 ) {
+				*w = ww;
+				*h = hh;
+				return 1;
+			}
+			return 0;
+		}
+		i = j + 1;
+	}
+	return 0;
+}
+
+// The track's own coordinate frame -- the space its bitmap x/y/w/h are in -- for PGS and VobSub
+// alike. ONE pipeline, one source: a "size: WxH" line in the track's init data (extraData),
+// written by whoever first learns the size:
+//   external tracks: stream_sub_ext.c, from the size read at detect time (subtitle_formats.c:
+//                    the idx "size:" line / the .sup's first PCS segment);
+//   internal tracks: stream_parser_ffmpeg.c, from FFmpeg's probed codecpar->width/height (the
+//                    DVD decoder's idx "size:", the PGS decoder's PCS -- what ffprobe prints as
+//                    "pgssub, 1920x1080" / "dvdsub, 720x480").
+// If no line exists the format's standard plane is used: BD 1920x1080 for PGS, DVD 720x576 for
+// VobSub. The decoded VIDEO's size is deliberately never used: it is unrelated to the
+// subtitle's frame (a cropped 1920x800 video still carries 1920x1080 PGS / 720x480 VobSub).
+static void _gfx_frame_size( int is_dvd, const uint8_t *extra, int n, int *w, int *h )
+{
+	*w = is_dvd ? 720 : 1920;
+	*h = is_dvd ? 576 : 1080;
+	_extra_size( extra, n, w, h );
+}
 
 static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 {
@@ -73,52 +118,14 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	if (!myCodec)
 		return 1;
 	self->avcontext = avcodec_alloc_context3(myCodec);
-	// --- NATIVE OPENGL UPGRADE ---
-	// Safely initialize the hardware GFX track for PGS and DVD subtitles
-	//extern SUB_ENGINE *g_sub_engine;
-	STREAM *stream = (STREAM *)ctx;
-	if (stream && stream->sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
-		int w = 1920;
-		int h = 1080;
-		STREAM *stream = (STREAM *)ctx;
-		// Must mirror _decode()'s own per-format reference-size logic below exactly --
-		// this value becomes real_video_w/h (the space PGS/VobSub bitmap x/y/w/h are
-		// assumed to be relative to), and _decode() is what actually produces those
-		// coordinates, so the two must agree on what space they're in.
-		if (sub->format == SUB_FORMAT_DVD_GFX) {
-			// VobSub has no canvas of its own -- its coordinates are always relative to
-			// the DVD video's own real resolution (matches _decode()'s
-			// SUB_FORMAT_DVD_GFX branch, base_width/base_height defaulting 720x576).
-			w = 720;
-			h = 576;
-			if (stream && stream->video) {
-				if (stream->video->width > 0) w = stream->video->width;
-				if (stream->video->height > 0) h = stream->video->height;
-			}
-		}
-		// else: SUB_FORMAT_PGS keeps the 1920x1080 default above, unconditionally --
-		// PGS bitmap coordinates are relative to the Presentation Graphics plane's own
-		// resolution, fixed by the BD-ROM spec (virtually always 1920x1080) and
-		// independent of the actual encoded video's resolution. These can genuinely
-		// differ -- e.g. a video with its letterbox bars physically cropped out of the
-		// encode (video_h < 1080) while the PGS plane keeps its original 1080-tall
-		// canvas -- and using the video's own dimensions here instead, as this branch
-		// used to unconditionally do, put real_video_w/h in the wrong coordinate space
-		// for exactly that (fairly common) case, silently offsetting every PGS bitmap.
-		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, sub_fmt_from_format(sub->format), w, h, NULL, 0, NULL, 0, NULL);
-		// GFX/bitmap track (PGS/VobSub), opened synchronously here off the codec's own open() call --
-		// fed via sub_engine_feed_bitmap(), not the checkpointed _gen() token system, so there's no
-		// long-lived job to pin a generation token to; see sub_engine_open_track()'s doc comment
-		// in sub_engine.h and the matching internal-track call sites in stream_subtitle.c.
-	}
-
 	if (!self->avcontext)
 		return 1;
 	// Reopening a track must install that track's codec initialization data
 	// (notably mov_text configuration and DVD subtitle palettes).
 	const uint8_t *extra = sub->extraDataSize2 > 0 ? sub->extraData2 : sub->extraData;
 	int extra_size = sub->extraDataSize2 > 0 ? sub->extraDataSize2 : sub->extraDataSize;
-	if (extra && extra_size > 0) {
+	// PGS has no codec init data; anything here is just our "size:" line, not for the decoder.
+	if (extra && extra_size > 0 && sub->format != SUB_FORMAT_PGS) {
 		self->avcontext->extradata = av_mallocz((size_t)extra_size + AV_INPUT_BUFFER_PADDING_SIZE);
 		if (!self->avcontext->extradata) {
 			avcodec_free_context(&self->avcontext);
@@ -132,6 +139,25 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 		avcodec_free_context(&self->avcontext);
 		return 1;
 	}
+
+	// --- NATIVE OPENGL UPGRADE ---
+	// Initialize the hardware GFX track for PGS and DVD subtitles. Done AFTER avcodec_open2() so a
+	// decoder that fails to open never leaves an engine track behind.
+	STREAM *stream = (STREAM *)ctx;
+	self->eng_w = self->eng_h = 0;
+	if (stream && stream->sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
+		// This becomes real_video_w/h: the space PGS/VobSub bitmap x/y/w/h are relative to.
+		int w, h;
+		_gfx_frame_size(sub->format == SUB_FORMAT_DVD_GFX, sub->extraData, sub->extraDataSize, &w, &h);
+		self->eng_w = w;
+		self->eng_h = h;
+		sub_engine_open_track((SUB_ENGINE*)stream->sub_engine, sub_fmt_from_format(sub->format), w, h, NULL, 0, NULL, 0, NULL);
+		// GFX/bitmap track (PGS/VobSub), opened synchronously here off the codec's own open() call --
+		// fed via sub_engine_feed_bitmap(), not the checkpointed _gen() token system, so there's no
+		// long-lived job to pin a generation token to; see sub_engine_open_track()'s doc comment
+		// in sub_engine.h and the matching internal-track call sites in stream_subtitle.c.
+	}
+
 	dec->is_open = 1;
 	return 0;
 }
@@ -468,6 +494,10 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 		// Coordinates belong to the subtitle canvas, not the video surface.
 		int canvas_width = self->avcontext->width;
 		int canvas_height = self->avcontext->height;
+		if (self->eng_w > 0 && self->eng_h > 0) { // the engine's frame (PGS and VobSub alike)
+			canvas_width = self->eng_w;
+			canvas_height = self->eng_h;
+		}
 		if (canvas_width <= 0) canvas_width = dec->_subtitle.format == SUB_FORMAT_PGS ? 1920 : 720;
 		if (canvas_height <= 0) canvas_height = dec->_subtitle.format == SUB_FORMAT_PGS ? 1080 : 576;
 		frame->width = MAX(canvas_width, right);

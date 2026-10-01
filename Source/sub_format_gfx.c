@@ -16,10 +16,11 @@ typedef struct {
                               // now holds its own ref). Reset whenever current_frame is replaced.
     int        canvas_w, canvas_h;           // on-screen GL surface size. NOT the space
                                               // ev->x/y/w/h are expressed in -- see below.
-    int        real_video_w, real_video_h;   // decoded video's own coded size -- fixed for
-                                              // the track's lifetime. THIS is the space
-                                              // codec_ffsub's x_offset/y_offset/width/height
-                                              // are expressed in.
+    int        real_video_w, real_video_h;   // the subtitle stream's own coordinate frame --
+                                              // fixed for the track's lifetime. THIS is the
+                                              // space codec_ffsub's x_offset/y_offset/width/
+                                              // height are expressed in (PGS: its PCS plane;
+                                              // VobSub: the DVD canvas from the idx "size:").
     int        video_box_x, video_box_y;     // where the video's own on-screen box sits
     int        video_box_w, video_box_h;     // within the canvas (post letterbox/pillarbox/
                                               // zoom-crop/stretch), as reported by

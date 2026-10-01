@@ -992,14 +992,33 @@ static void _add_menu_entries( STREAM *s, SUB_PRIV *p, int start_idx )
 		sub->ext            = 1;
 		sub->stream         = i;
 		sub->valid          = 1;
-		if( sub->gfx && conv->has_palette ) {
-DBGS serprintf("has palette!\n");
+		// Init data for bitmap tracks, in the same "key: value" form as a VobSub idx header (and
+		// as an embedded VobSub track's extradata): "palette:" (VobSub) and "size:" (VobSub and
+		// PGS). The size is the space the bitmap coordinates are in; codec_ffsub.c's open() reads
+		// it and opens the engine track with it.
+		int has_size = conv->spex && conv->spex->size_w > 0 && conv->spex->size_h > 0;
+		if( sub->gfx && ( conv->has_palette || has_size ) ) {
 			char *extra = (char *)sub->extraData;
 			int cap = (int)sizeof( sub->extraData );
-			int len = snprintf( extra, cap, "palette: " );
-			for( int c = 0; c < 16 && len < cap; ++c )
-				len += snprintf( extra + len, cap - len, "%06x%s",
-				                 (unsigned int)( conv->palette[c] & 0xffffff ), c == 15 ? "\n" : ", " );
+			int len = 0;
+			if( conv->has_palette ) {
+DBGS serprintf("has palette!\n");
+				len = snprintf( extra, cap, "palette: " );
+				for( int c = 0; c < 16 && len < cap; ++c )
+					len += snprintf( extra + len, cap - len, "%06x%s",
+					                 (unsigned int)( conv->palette[c] & 0xffffff ), c == 15 ? "\n" : ", " );
+			}
+			if( has_size && len < cap ) {
+				// Strictly additive: if the size line doesn't fit, drop just it -- never the palette.
+				int add = snprintf( extra + len, cap - len, "size: %dx%d\n",
+				                    conv->spex->size_w, conv->spex->size_h );
+				if( len + add < cap ) {
+DBGS serprintf("has size %dx%d\n", conv->spex->size_w, conv->spex->size_h );
+					len += add;
+				} else {
+					extra[len] = '\0';
+				}
+			}
 			sub->extraDataSize = len < cap ? len : 0;
 		}
 		s->av.subs_max ++;

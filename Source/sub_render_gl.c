@@ -73,6 +73,71 @@ static GLuint create_program(const char *vertex_src, const char *fragment_src) {
     return program;
 }
 
+// GFX (PGS/VobSub) placement: ev->x/y/w/h are in the subtitle coordinate frame
+// (real_video_w/h); place them on the canvas.
+//
+// Where that frame comes from (codec_ffsub.c's open(), from the track's "size:" init data): PGS
+// uses the plane size carried in its own PCS segment, independent of the video (usually
+// 1920x1080 even when the video's letterbox bars were cropped to 1920x800, but 1280x720 /
+// 3840x2160 etc. occur). VobSub uses the DVD subtitle canvas (idx "size:", e.g. 720x480). The
+// bitmap x/y are FFmpeg's rect coords in that same space.
+//
+// One rule for both: the frame is scaled UNIFORMLY (aspect ratio always preserved, never
+// stretched) to fit inside a target area, then centred on the video's on-screen box. Whatever the
+// frame doesn't fill is left as margin on both sides: left/right for a frame narrower than the
+// area (a 3:2 DVD frame on a 16:9 picture), top/bottom for one that is wider. The only thing that
+// changes between modes is the target area:
+//
+//   * "Render in black bars" ON and bars exist (canvas taller than the video box -- the canvas
+//     is what SurfaceController extends into the bars): the FULL canvas.
+//       - PGS, landscape, 1920x1080 frame on a 1920x1080 screen with a 1920x800 picture: s = 1,
+//         the frame fills the screen and the bottom band falls in the black bar.
+//       - portrait: s is set by the screen width; the frame is centred on the picture, so the
+//         part of it that extends past the picture renders just below/above the video.
+//   * Option OFF (or no bars to use: canvas == box): just the VIDEO BOX. A 1920x1080 frame in a
+//     1920x800 box scales down to s = 0.74 -- smaller, but not stretched.
+//
+// Consequence for anamorphic DVD VobSub: it is NOT stretched with the picture's pixel aspect, so
+// on a 16:9 picture it is ~16% narrower than the picture-relative size, centred with side margins.
+// The frame is assumed centred on the picture (a symmetric crop); the container/decoder give no
+// crop offset, so an asymmetric crop would shift subs by half the difference.
+//
+// Left/right bars are never used: the canvas is always exactly as wide as the box.
+// Outputs the destination rect and the src->dst scale on each axis (the CPU blender resamples
+// with it). Shared by the GL path and the CPU blender (3D) so they can't drift apart.
+static void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
+                              float *out_x, float *out_y, float *out_w, float *out_h,
+                              float *out_sx, float *out_sy) {
+    const float ch = (float)f->video_h;                                   // canvas height
+    const float fw = (float)f->real_video_w, fh = (float)f->real_video_h; // sub coordinate frame
+    const float bx = (float)f->video_box_x,  by = (float)f->video_box_y;
+    const float bw = (float)f->video_box_w,  bh = (float)f->video_box_h;  // video box in canvas
+
+    const float bottom_bar = ch - (by + bh);
+    const int   uses_bars  = by > 1.0f || bottom_bar > 1.0f;
+
+    const float area_w = bw;                       // == canvas width whenever bars are used
+    const float area_h = uses_bars ? ch : bh;      // full canvas vs. just the picture
+
+    float s = area_w / fw;                         // contain
+    if (area_h / fh < s) s = area_h / fh;
+
+    // Centre the (scaled) frame on the video box.
+    const float frame_w = fw * s, frame_h = fh * s;
+    const float x0 = bx + (bw - frame_w) * 0.5f;
+    float       y0 = by + (bh - frame_h) * 0.5f;
+    if (uses_bars) {                               // keep it on the canvas (cutout asymmetry)
+        if (y0 + frame_h > ch) y0 = ch - frame_h;
+        if (y0 < 0.0f) y0 = 0.0f;
+    }
+
+    *out_x = x0 + ev->x * s;
+    *out_y = y0 + ev->y * s;
+    *out_w = ev->w * s;
+    *out_h = ev->h * s;
+    *out_sx = s; *out_sy = s;
+}
+
 static void* egl_render_thread(void* arg) {
     SUB_RENDERER *r = (SUB_RENDERER*)arg;
 
@@ -313,16 +378,17 @@ static void* egl_render_thread(void* arg) {
 
                 float x1, y1, x2, y2;
                 if (frame_to_draw->real_video_w > 0 && frame_to_draw->real_video_h > 0) {
-                    // GFX (PGS/VobSub) frame: ev->x/y/w/h are in the decoded video's own
-                    // pixel space (real_video_w/h -- see codec_ffsub.c), not the canvas's.
-                    // Map into the video's actual on-screen box (video_box_x/y/w/h,
-                    // reported by sub_engine_set_video_box()) before touching the canvas
-                    // size at all. gfx_open()'s fallbacks guarantee video_box_w/h are
-                    // never 0 whenever real_video_w/h are set, so no extra guard needed.
-                    float box_x = frame_to_draw->video_box_x + (ev->x / (float)frame_to_draw->real_video_w) * frame_to_draw->video_box_w;
-                    float box_y = frame_to_draw->video_box_y + (ev->y / (float)frame_to_draw->real_video_h) * frame_to_draw->video_box_h;
-                    float box_w = (ev->w / (float)frame_to_draw->real_video_w) * frame_to_draw->video_box_w;
-                    float box_h = (ev->h / (float)frame_to_draw->real_video_h) * frame_to_draw->video_box_h;
+                    // GFX (PGS/VobSub) frame: placement (incl. black-bar usage) is decided by
+                    // gfx_map_to_canvas().
+                    DBG serprintf("SUB_GFX: real_video=%dx%d canvas=%dx%d box=(%d,%d %dx%d) ev=(%d,%d %dx%d)\n",
+                                  frame_to_draw->real_video_w, frame_to_draw->real_video_h,
+                                  frame_to_draw->video_w, frame_to_draw->video_h,
+                                  frame_to_draw->video_box_x, frame_to_draw->video_box_y,
+                                  frame_to_draw->video_box_w, frame_to_draw->video_box_h,
+                                  ev->x, ev->y, ev->w, ev->h);
+                    float box_x, box_y, box_w, box_h, unused_sx, unused_sy;
+                    gfx_map_to_canvas(frame_to_draw, ev, &box_x, &box_y, &box_w, &box_h,
+                                      &unused_sx, &unused_sy);
 
                     x1 = (box_x / (float)frame_to_draw->video_w) * 2.0f - 1.0f;
                     y1 = 1.0f - (box_y / (float)frame_to_draw->video_h) * 2.0f;
@@ -632,12 +698,13 @@ static void blend_frame(const SUB_FRAME *frame, void *pixels, int dst_w, int dst
                     // above. Nearest-neighbor sampling is a deliberate first pass -- fine
                     // for subtitle bitmaps, much cheaper than a proper filter for a CPU
                     // blend path.
-                    float scale_x = (float)frame->video_box_w / (float)frame->real_video_w;
-                    float scale_y = (float)frame->video_box_h / (float)frame->real_video_h;
-                    int box_x0 = frame->video_box_x + (int)(src_x * scale_x);
-                    int box_y0 = frame->video_box_y + (int)(src_y * scale_y);
-                    int box_w  = (int)(src_w * scale_x);
-                    int box_h  = (int)(src_h * scale_y);
+                    // Same placement (incl. black-bar usage) as the GL path.
+                    float fx, fy, fw, fh, scale_x, scale_y;
+                    gfx_map_to_canvas(frame, ev, &fx, &fy, &fw, &fh, &scale_x, &scale_y);
+                    int box_x0 = (int)fx;
+                    int box_y0 = (int)fy;
+                    int box_w  = (int)fw;
+                    int box_h  = (int)fh;
 
                     for (int dy = 0; dy < box_h; dy++) {
                         int py = box_y0 + dy;

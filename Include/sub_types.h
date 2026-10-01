@@ -118,13 +118,21 @@ typedef struct {
                                  * subtitle canvas (letterbox/pillarbox bars included), NOT
                                  * necessarily the decoded video's own pixel size. */
     int         video_h;
-    int         real_video_w;  /* NEW: decoded video's own coded pixel size, fixed for the
-                                 * track's lifetime. THIS is the space GFX-backend
-                                 * (PGS/VobSub) SUB_EVENT_BITMAP x/y/w/h are expressed in --
-                                 * see codec_ffsub.c's frame->width/height. Left 0 for SSA/
-                                 * SRT frames, which don't need it -- their events are
-                                 * already positioned in video_w/video_h space directly. The
-                                 * renderer's "is this a GFX frame?" check is real_video_w > 0. */
+    int         real_video_w;   /* GFX (PGS/VobSub) frames ONLY -- 0 on SSA/SRT frames, which is
+                                 * exactly the renderer's "is this a GFX frame?" check
+                                 * (real_video_w > 0).
+                                 * It is the subtitle stream's own coordinate frame, fixed for the
+                                 * track's lifetime: the space the SUB_EVENT_BITMAP x/y/w/h are
+                                 * expressed in. codec_ffsub.c's open() reads it from the track's
+                                 * "size: WxH" init-data line (PGS = the PCS plane, VobSub = the DVD
+                                 * subtitle canvas; same pipeline for internal and external tracks);
+                                 * with no such line, the format's standard plane (PGS 1920x1080,
+                                 * VobSub 720x576). Never the decoded video's size.
+                                 * Not to be confused with SUB_FORMAT_OPEN_PARAMS.real_video_w/h:
+                                 * sub_engine_open_track() hands every backend its video_w/video_h
+                                 * argument under that name. For GFX that is the frame above; for
+                                 * SSA/SRT it is the decoded video's size, used only to set up
+                                 * libass's geometry -- those backends never stamp it on a frame. */
     int         real_video_h;
     int         video_box_x;   /* NEW: where the video's own on-screen box sits within the
                                  * canvas (video_w x video_h above) -- e.g. the visible video

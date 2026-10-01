@@ -206,6 +206,15 @@ DBG serprintf("lang count %d\r\n", new_title->lan_count );
 				new_title = 0;
 			}
 		}
+
+		// Bitmap tracks: the track's own coordinate frame (VobSub idx "size:", PGS first-PCS
+		// plane size), kept alongside the palette so it can reach the decoder (stream_sub_ext.c)
+		// without waiting for the async parse.
+		if( new_title && new_title->sub_class == SUBT_CLASS_VOBSUB ) {
+			subtitle_idx_read_size( file, &new_title->size_w, &new_title->size_h );
+		} else if( new_title && new_title->sub_class == SUBT_CLASS_PGS ) {
+			subtitle_pgs_read_size( file, &new_title->size_w, &new_title->size_h );
+		}
 	}
 	fclose( file );
 	return new_title;

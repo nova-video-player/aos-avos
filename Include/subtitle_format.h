@@ -75,6 +75,8 @@ typedef struct subt_orig_t
 	int has_palette;
 	uint32_t palette[16];
 
+	int size_w, size_h;	// The bitmap track's own coordinate frame, 0 when unknown/not a bitmap track: VobSub = idx "size: WxH" (subtitle_idx_read_size()), PGS = first PCS plane size (subtitle_pgs_read_size()). Read at detect time, so it's known before parse(), like the palette.
+
 	int sub_class;		// one of SUBT_CLASS_* above, set at detect time
 	int is_new_scan;	// set by subtitle_check_files_incremental() on
 				// entries it just created this call (not reused
@@ -191,6 +193,12 @@ typedef struct converted_subs_t
         uni_sub **converted;
         int cnt;
 } converted_subs;
+
+// Reads the "size: WxH" line from a VobSub .idx header (subtitle_idx.c). Returns 1 and fills *w/*h if found and sane, else 0 with both zeroed. Rewinds `file` itself; stops at the first "id:"/"timestamp:" line, so it never scans the cue list.
+int subtitle_idx_read_size( FILE *file, int *w, int *h );
+
+// Reads the plane size from a PGS .sup's first PCS segment (subtitle_pgs.c). Same contract as subtitle_idx_read_size().
+int subtitle_pgs_read_size( FILE *file, int *w, int *h );
 
 char *subtitle_clean_formatter( char *line, int clean_tags );
 void subtitle_clean_error(uni_sub* subs);

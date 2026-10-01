@@ -80,6 +80,45 @@ DBG serprintf( "SUP: found!\n" );
 }
 
 // ---------------------------------------------------------------------------
+// subtitle_pgs_read_size
+//
+// Reads the plane size from the first Presentation Composition Segment (PCS, 0x16). Its payload
+// starts with video_width(2) video_height(2), big-endian -- the space every bitmap of the display
+// set is positioned in (usually 1920x1080, but 1280x720, 3840x2160, ... occur). Called at detect
+// time by subtitle_formats.c, so the size is known before parse() and rides to the decoder the
+// same way the VobSub idx "size:" does. A display set opens with its PCS, so it is the first or
+// nearly first segment; the scan is bounded and never reads payload beyond the 4 size bytes.
+// Returns 1 and fills *w/*h on success, else 0 with both zeroed. Rewinds `file` itself.
+// ---------------------------------------------------------------------------
+int subtitle_pgs_read_size( FILE *file, int *w, int *h )
+{
+	if ( !file || !w || !h ) return 0;
+	*w = *h = 0;
+	fseek( file, 0, SEEK_SET );
+
+	unsigned char hdr[13];
+	for ( int i = 0; i < 16; i++ ) {
+		if ( fread( hdr, 1, sizeof(hdr), file ) != sizeof(hdr) ) return 0;
+		if ( hdr[0] != 'P' || hdr[1] != 'G' ) return 0;
+		int seg_type = hdr[10];
+		int seg_size = (hdr[11] << 8) | hdr[12];
+		if ( seg_type == PGS_SEG_PCS ) {
+			unsigned char v[4];
+			if ( seg_size < 4 || fread( v, 1, sizeof(v), file ) != sizeof(v) ) return 0;
+			int ww = (v[0] << 8) | v[1];
+			int hh = (v[2] << 8) | v[3];
+			if ( ww < 16 || ww > 8192 || hh < 16 || hh > 8192 ) return 0;
+DBG serprintf( "SUP: plane size %dx%d\n", ww, hh );
+			*w = ww;
+			*h = hh;
+			return 1;
+		}
+		if ( seg_size > 0 && fseek( file, seg_size, SEEK_CUR ) != 0 ) return 0;
+	}
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
 // parse_SUP
 //
 // Walks the whole file once, recording one sub_line per Display Set:

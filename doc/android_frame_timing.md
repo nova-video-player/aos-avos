@@ -36,9 +36,13 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   correction. Later transition and resume corrections remain bounded per frame.
 - A PCM resume on a backend that preserves queued output keeps the pause-shifted
   renderer anchor until the first accepted write publishes its clock. With an established audio anchor,
-  corrections up to 350ms use the PCM 1ms-per-frame slew (8ms deadband) instead
-  of an abrupt scheduling jump. The correction is still applied, preventing
-  cumulative pause/resume phase error. Missing anchors, seek/speed transitions,
+  corrections up to 350ms use a slew with an 8ms initial deadband instead of an
+  abrupt scheduling jump. Each distinct video frame adjusts the offset by at
+  most 10% of its speed-adjusted duration, capped at 4ms (1ms fallback if the
+  duration is unavailable). A 201ms correction at 24fps therefore takes about
+  51 frames, rather than 201 frames at the cold-start correction rate. The
+  correction is still applied, preventing cumulative pause/resume phase error.
+  Missing anchors, seek/speed transitions,
   and larger discontinuities retain the hard reset. A new pause cancels the
   current slew and the next resume computes a fresh target. Passthrough resume
   policy is unchanged.

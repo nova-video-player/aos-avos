@@ -165,6 +165,7 @@ typedef struct priv {
 	int mode2_slew_frame_time;
 	int mode2_slew_frame_epoch;
 	int pcm_startup_slew; // bounded PCM startup/resume correction, once per frame
+	int pcm_resume_slew; // faster correction only for a retained-output resume
 	const void *pcm_startup_slew_frame_handle;
 	int pcm_startup_slew_frame_time;
 	int pcm_startup_slew_frame_epoch;
@@ -722,12 +723,13 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		INT64 target = _get_monotonic_ns() -
 			((INT64)time + manual_hold_ts) * 1000000LL;
 		INT64 correction = target - p->render_offset_ns;
-		// Correct a bounded resume phase at the existing PCM rate (1 ms per
-		// distinct video frame). Large discontinuities still use the hard reset.
+		// Correct a bounded resume phase once per distinct video frame.
+		// Large discontinuities still use the hard reset.
 		if( llabs(correction) <= 350000000LL ) {
 			p->target_offset_ns = llabs(correction) > 8000000LL ? target : p->render_offset_ns;
 			p->slew_active = p->target_offset_ns != p->render_offset_ns;
 			p->pcm_startup_slew = p->slew_active;
+			p->pcm_resume_slew = p->slew_active;
 			p->pcm_startup_slew_frame_handle = NULL;
 			p->pcm_startup_slew_frame_time = INT_MIN;
 			p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -791,6 +793,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			s->seek_epoch);
 	}
 	if (allow_reanchor) {
+		p->pcm_resume_slew = 0;
 		if( epoch_changed ) {
 			p->pending_seek_reanchor = 1;
 		}
@@ -821,6 +824,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->target_offset_ns = p->render_offset_ns;
 			p->slew_active = 0;
 			p->pcm_startup_slew = 0;
+			p->pcm_resume_slew = 0;
 			p->pending_reanchor = 0;
 			p->pcm_resume_pending = 0;
 			DBGSI serprintf("android_sync: PCM resume anchor heard=%d manual_hold=%d offset=%lld epoch=%d\n",
@@ -869,6 +873,7 @@ static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
 	if( p->render_offset_ns != -1 && p->render_offset_from_audio ) {
 		p->pending_reanchor = 1;
 		p->pcm_startup_slew = 1;
+		p->pcm_resume_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;
 		p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -1397,6 +1402,7 @@ static void *videosink_thread(void *ctx)
 						p->target_offset_ns = p->render_offset_ns;
 						p->slew_active = 0;
 						p->pcm_startup_slew = 0;
+						p->pcm_resume_slew = 0;
 						p->pcm_startup_slew_frame_handle = NULL;
 						p->pcm_startup_slew_frame_time = INT_MIN;
 						p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -1421,6 +1427,14 @@ static void *videosink_thread(void *ctx)
 				// temporary phase at 5ms/frame produces visible cadence reversals.
 				INT64 step = p->mode2_dynamic_fast_slew ? 5000000 :
 					(p->pcm_startup_slew ? 1000000 : 200000);
+				if( p->pcm_startup_slew && p->pcm_resume_slew ) {
+					// Rapid pauses can accumulate a phase that takes seconds to
+					// remove at the startup rate. Limit resume correction to 10%
+					// of the speed-adjusted frame interval, capped at 4ms, so
+					// high frame rates/speeds do not get large cadence changes.
+					step = f->duration > 0 ? MIN(4000000LL,
+						(INT64)f->duration * 100000LL) : 1000000LL;
+				}
 				if (delta > step) {
 					delta = step;
 				} else if (delta < -step) {
@@ -1441,7 +1455,12 @@ static void *videosink_thread(void *ctx)
 						p->mode2_slew_frame_epoch = INT_MIN;
 					}
 					if( p->pcm_startup_slew ) {
+						if( p->pcm_resume_slew ) {
+							DBGSI serprintf("android_sync: PCM resume slew complete offset=%lld\n",
+								(long long)p->render_offset_ns);
+						}
 						p->pcm_startup_slew = 0;
+						p->pcm_resume_slew = 0;
 						p->pcm_startup_slew_frame_handle = NULL;
 						p->pcm_startup_slew_frame_time = INT_MIN;
 						p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -1986,6 +2005,7 @@ retry_decoder_open:
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
+	p->pcm_resume_slew = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
 	p->pcm_startup_slew_frame_time = INT_MIN;
 	p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -2243,6 +2263,7 @@ DBGCV	CLOG();
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
+	p->pcm_resume_slew = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
 	p->pcm_startup_slew_frame_time = INT_MIN;
 	p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -2416,6 +2437,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
+	p->pcm_resume_slew = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
 	p->pcm_startup_slew_frame_time = INT_MIN;
 	p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -2469,6 +2491,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 			p->pending_reanchor = 0;
 		}
 		p->pcm_startup_slew = 0;
+		p->pcm_resume_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;
 		p->pcm_startup_slew_frame_epoch = INT_MIN;

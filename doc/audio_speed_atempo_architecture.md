@@ -557,11 +557,20 @@ and is cleared with the ledger on seek, output reset, or stop. Before calibratio
 the existing fresh-timestamp/fallback policy remains in effect. This policy is
 shared by atempo and Sonic; passthrough does not use the software-speed ledger.
 
+At 1.0x, playback-head calibration also accepts trusted live dynamic evidence
+carried alongside a selected last-good delay. That selection intentionally does
+not authorize renderer reanchoring, but must not prevent rebuilding calibration
+after seek. The existing four-sample, 250ms spacing and fresh-playhead checks
+remain in force; a last-good value alone does not qualify. Once calibrated,
+speed commits can follow the playback head between AudioTimestamp queries.
+
 PCM resume retains the shifted renderer clock through the first accepted write.
-A bounded residual correction uses a one-shot slew of at most 1ms per distinct
-video frame rather than a scheduling jump; larger discontinuities and missing
-anchors retain hard reanchoring. The correction includes any inserted manual
-audio delay, so smoothing it does not discard the intended A/V phase.
+A bounded residual correction uses a one-shot slew capped at 4ms per distinct
+video frame and 10% of its speed-adjusted duration (1ms fallback for unknown
+duration), rather than a scheduling jump. Cold-start correction remains at
+1ms per frame; larger discontinuities and missing anchors retain hard
+reanchoring. The correction includes any inserted manual audio delay, so
+smoothing it does not discard the intended A/V phase.
 
 ### Video Sink Pacing (`codec_sfdec2.c`)
 

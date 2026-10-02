@@ -1896,9 +1896,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 
 			// Calibrate the post-playhead latency (in output frames) at 1.0x against
 			// the legacy heard model.  Only meaningful for the mixer playhead source.
+			// A stable last-good selection deliberately clears is_delay_valid to
+			// avoid renderer reanchoring, but can still carry trusted live dynamic
+			// evidence. Use that evidence too: after seek the calibration is empty,
+			// and rejecting it here leaves speed commits waiting for the brief
+			// fresh-timestamp windows instead of following the calibrated playhead.
 			if( !playhead_is_dac &&
 				raw.heard != STREAM_NO_PTS_VALUE && raw.state == 0 &&
-				delay_valid && cur_speed > 0.999f && cur_speed < 1.001f &&
+				(delay_valid || delay_status.has_dynamic_evidence) &&
+				cur_speed > 0.999f && cur_speed < 1.001f &&
 				playhead_age <= 100 &&
 				wall_now - s->atempo_ledger_lat_last_ms >= 250 ) {
 				s->atempo_ledger_lat_last_ms = wall_now;
@@ -1912,8 +1918,12 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 					s->atempo_ledger_lat_frames += (target - s->atempo_ledger_lat_frames) / 4;
 				if( s->atempo_ledger_lat_samples < 1000 )
 					s->atempo_ledger_lat_samples++;
-				if( s->atempo_ledger_lat_samples >= 4 )
+				if( s->atempo_ledger_lat_samples >= 4 && !s->atempo_ledger_lat_valid ) {
 					s->atempo_ledger_lat_valid = 1;
+					DBG serprintf("at_ledger: playhead calibration ready latency_frames=%lld rate=%d samples=%d dynamic_evidence=%d\n",
+						(long long)s->atempo_ledger_lat_frames, playhead_rate,
+						s->atempo_ledger_lat_samples, delay_status.has_dynamic_evidence);
+				}
 			}
 
 			// Use the atempo ledger heard clock in place of the legacy delay model.

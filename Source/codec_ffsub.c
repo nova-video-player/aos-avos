@@ -146,7 +146,8 @@ static int _open( STREAM_DEC_SUB *dec, SUB_PROPERTIES *sub, void *ctx )
 	STREAM *stream = (STREAM *)ctx;
 	self->eng_w = self->eng_h = 0;
 	if (stream && stream->sub_engine && (sub->format == SUB_FORMAT_PGS || sub->format == SUB_FORMAT_DVD_GFX)) {
-		// This becomes real_video_w/h: the space PGS/VobSub bitmap x/y/w/h are relative to.
+		// Note: this is the SUBTITLE coordinate frame, not the video size. It travels through open_track()'s video_w/h
+		// slot (OPEN_PARAMS.real_video_w/h) and becomes SUB_FRAME.gfx_stream_w/h: the space PGS/VobSub bitmap x/y/w/h are relative to.
 		int w, h;
 		_gfx_frame_size(sub->format == SUB_FORMAT_DVD_GFX, sub->extraData, sub->extraDataSize, &w, &h);
 		self->eng_w = w;

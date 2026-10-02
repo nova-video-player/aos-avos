@@ -54,13 +54,18 @@ typedef struct {
                                      * yet — backend must handle a later resize() call.
                                      * NOT the decoded video's own size -- see
                                      * real_video_w/h below. */
-    int real_video_w, real_video_h;  /* NEW: decoded video's own coded pixel size --
-                                     * fixed for the track's lifetime, never touched by
-                                     * resize(). Only meaningful to the GFX backend
-                                     * (PGS/VobSub bitmap coordinates are expressed in
-                                     * this space -- see codec_ffsub.c); SSA/SRT backends
-                                     * can ignore it. 0 if genuinely unknown, in which
-                                     * case the backend should fall back to video_w/h. */
+    int real_video_w, real_video_h;  /* The video-size argument passed to
+                                     * sub_engine_open_track() (its video_w/video_h): the
+                                     * decoded video's own coded pixel size. Fixed for the
+                                     * track's lifetime, never touched by resize(). SSA uses it
+                                     * for libass storage size (ssa_geom_compute()).
+                                     * CAVEAT: for GFX tracks codec_ffsub.c currently passes the
+                                     * SUBTITLE stream's coordinate frame (PGS plane / VobSub
+                                     * canvas, from _gfx_frame_size()) through this slot instead,
+                                     * and gfx_open() takes it as SUB_FRAME.gfx_stream_w/h. That
+                                     * is a subtitle size, not a video size, despite the name.
+                                     * 0 if genuinely unknown, in which case the backend should
+                                     * fall back to video_w/h. */
     int video_box_x, video_box_y;    /* NEW: where the video's own on-screen box sits
                                      * within the canvas (video_w x video_h) -- e.g. the
                                      * visible video rect when the canvas was extended to

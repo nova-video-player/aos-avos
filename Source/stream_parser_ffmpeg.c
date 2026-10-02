@@ -1467,16 +1467,21 @@ extern int stream_drive_wake_sleep;
 
 // ************************************************************
 //
-//	_get_video_time
-//	returns the video timestamp in milliseconds in ts domain
+//	_get_video_media_time / _get_video_time
+//	Preserve original RST for video reordering; expose TS to the engine.
 //
 // ************************************************************
-static int _get_video_time( STREAM *s, AVPacket *packet )
+static int _get_video_media_time( STREAM *s, AVPacket *packet )
 {
 	int t = ( use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
 	if (t == -1) return -1;
-	t -= ff_p->start_time;
-	return RST_TO_TS_TIME(t, int);
+	return t - ff_p->start_time;
+}
+
+static int _get_video_time( STREAM *s, AVPacket *packet )
+{
+	int t = _get_video_media_time(s, packet);
+	return t == -1 ? -1 : RST_TO_TS_TIME(t, int);
 }
 
 // ************************************************************
@@ -2082,7 +2087,10 @@ static int _get_video_cdata( STREAM *s, CBE *cbe, STREAM_CDATA *cdata )
 	// copy relevant chunk info:
 	cdata->type 	  = 0;
 	cdata->key   	  = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
-	cdata->time       = _get_video_time( s, packet );
+	cdata->video_media_time = _get_video_media_time(s, packet);
+	cdata->video_media_time_valid = cdata->video_media_time != -1;
+	cdata->time = cdata->video_media_time_valid ?
+		RST_TO_TS_TIME(cdata->video_media_time, int) : -1;
 	cdata->frame      = 0;
 	cdata->pos        = packet->pos;
 DBGC8  serprintf("V    siz %6d  pos %8lld %d tim %8d  pkt %6d  %8d\r\n", packet->size, packet->pos, cdata->key, cdata->time, ff_p->vq.packets, ff_p->vq.mem_used );

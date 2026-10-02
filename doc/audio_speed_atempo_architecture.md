@@ -81,6 +81,25 @@ A stock-FFmpeg strategy
 would require a less precise tempo-schedule estimate or proper filter PTS
 ownership and is a separate design goal.
 
+### Buffered MediaCodec video across speed changes
+
+The FFmpeg parser retains original video media/RST timestamps alongside the TS
+values used by the engine. The MediaCodec (`sfdec2`) path submits and reorders
+RST timestamps, retains them on decoded frames, and remaps pending frames when
+they leave the engine display queue and each time the renderer peeks its queue.
+A frame buffered before a speed commit therefore uses the new mapping when it
+is scheduled, including when returning to 1x.
+
+`videosink_put_time()` adopts one coherent committed timeline snapshot under the
+renderer lock, together with its audio anchor and snap cadence. Requested filter
+speed does not reset the renderer while old-speed audio remains queued. Cadence
+uses the committed ratio directly, including Sonic's blended ratios; a decoder
+speed callback only forwards the platform hint. Mapping changes wake a waiting
+renderer and invalidate calculations made before it dropped the queue lock.
+This applies to atempo, Sonic and AudioTrack PlaybackParams with MediaCodec video.
+Software video decoders retain their existing timestamp handling. Frames already
+released to the Android compositor cannot be rescheduled by this change.
+
 ### Why the atempo ledger exists
 
 The atempo filter does not transform audio in a strict one-input-frame to

@@ -805,6 +805,10 @@ typedef struct vfr_str {
 	int 		flags;
 	
 	int		time;
+	// Original media timestamp for decoders that retain it through reordering.
+	// time remains TS for the engine; sinks remap media_time at presentation.
+	int             media_time;
+	int             media_time_valid;
 	int		blit_time;
 	int		audio_skip;
 	int		video_skip;

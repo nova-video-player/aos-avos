@@ -35,16 +35,17 @@ It is important to understand that wall clock progresses at ts rate: `delta_wc =
 
 ### Parser Interaction (Creating the `ts` Domain)
 
-The `ts` domain is created at the earliest possible stage: the parser. In `stream_parser_ffmpeg.c`, every packet's timestamp (`pts`, `dts`) and `duration` is immediately scaled after being read from the source file:
+The FFmpeg parser retains packet timestamps in their original domain and exposes
+mapped TS timestamps through the chunk interface. Video chunks additionally
+carry the original media/RST time. MediaCodec (`sfdec2`) submits and reorders
+these original timestamps, then exposes mapped TS to the engine while retaining
+RST on the frame. Pending display/renderer frames are remapped after speed
+commits, rather than keeping the mapping from before they were decoded.
 
-```c
-// Simplified from the parser
-packet.pts = RST_TO_TS_TIME(packet.pts, int64_t);
-packet.dts = RST_TO_TS_TIME(packet.dts, int64_t);
-packet.duration = RST_TO_TS_DELTA(packet.duration, int64_t);
-```
-
-This means that any component that receives data from the parser (e.g., `cdata->time`, `frame->time`, `s->video_time`) operates in the `ts` domain.
+The MediaCodec renderer adopts the committed mapping, snap cadence and audio
+anchor together in `videosink_put_time()`. A requested speed alone cannot reset
+its scheduling clock. See [buffered MediaCodec video across speed changes](audio_speed_atempo_architecture.md#buffered-mediacodec-video-across-speed-changes)
+for the shared atempo, Sonic and PlaybackParams behavior and scope.
 
 ### Timeline Mapping (Anchors)
 

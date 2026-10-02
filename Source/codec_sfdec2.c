@@ -145,8 +145,7 @@ typedef struct priv {
 	int dropped;
 	int video_frame_rate_num;
 	int video_frame_rate_den;
-	int playback_speed_num;
-	int playback_speed_den;
+	timeline_state_t video_timeline; // adopted with the heard-clock anchor under locked.mtx
 	INT64 sched_start_off_ns;
 	INT64 sched_start_mono_ns;
 	INT64 sched_last_off_ns;
@@ -222,9 +221,9 @@ static INT64 _snap_timestamp_ns(priv_t *p, int frame_time, int frame_epoch)
 			frame_time, frame_epoch);
 	}
 	INT64 timestamp_us = (INT64)frame_time * 1000LL;
-	if( p->video_frame_rate_den && p->playback_speed_den ) {
-		INT64 rendering_num = (INT64)p->video_frame_rate_num * p->playback_speed_num;
-		INT64 rendering_den = (INT64)p->video_frame_rate_den * p->playback_speed_den;
+	if( p->video_frame_rate_den ) {
+		double rendering_num = p->video_frame_rate_num * p->video_timeline.speed;
+		int rendering_den = p->video_frame_rate_den;
 		if( rendering_num && rendering_den ) {
 			// Preserve the stream's timestamp phase. Absolute snapping around zero
 			// aliases a half-frame stream offset into duplicate/skipped deadlines.
@@ -293,7 +292,7 @@ static int _update_effective_av_delay_ts(priv_t *p, STREAM *s)
 	}
 
 	p->effective_av_delay_ms = effective_av_delay;
-	return RST_TO_TS_DELTA( effective_av_delay, int );
+	return (int)(effective_av_delay * p->video_timeline.inv_speed);
 }
 
 // Reproduce MediaCodec-style WC pacing locally so reordered frames still map to
@@ -568,7 +567,6 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 
 	// Query other subsystems before taking the codec-private lock. The lock
 	// serializes this sink's clock/scheduler state only.
-	float current_speed = audio_interface_get_audio_speed();
 	int passthrough_mode = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 		s->audio_sink->get_passthrough( s ) : 0;
 
@@ -576,13 +574,26 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	if (!p->s && s)
 		p->s = s;
 
+	// The global requested speed can lead presentation by the entire audio queue.
+	// Adopt the committed mapping, cadence and anchor together. Pending video
+	// frames retain RST and are remapped each time the renderer peeks the queue.
+	timeline_state_t timeline = timeline_snapshot();
+	int timeline_changed = timeline.speed != p->video_timeline.speed ||
+		timeline.rst_anchor != p->video_timeline.rst_anchor ||
+		timeline.ts_anchor != p->video_timeline.ts_anchor;
+	float current_speed = timeline.speed;
+	if (timeline_changed) {
+		p->video_timeline = timeline;
+		p->snap_origin_time = 0;
+		p->snap_origin_epoch = INT_MIN;
+	}
 	int64_t now_ms = atime64();
 	int dt = time - p->venc_put_time;
 	int64_t dr = p->venc_ref_time ? now_ms - p->venc_ref_time : 0;
 
 	// Detect speed change (explicit discontinuity)
 	int speed_changed = 0;
-	if (fabsf(current_speed - p->last_av_speed) > 0.001f) {
+	if (timeline_changed || fabsf(current_speed - p->last_av_speed) > 0.001f) {
 		speed_changed = 1;
 		p->last_av_speed = current_speed;
 		DBGSI serprintf("videosink_put_time: speed changed to %.2f\n", current_speed);
@@ -739,7 +750,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			int manual_hold_ts = MAX(0, s->manual_audio_delay_applied_ms);
 			if( audio_interface_is_audio_speed_enabled() &&
 				!audio_interface_is_using_atempo() ) {
-				manual_hold_ts = RST_TO_TS_DELTA(manual_hold_ts, int);
+				manual_hold_ts = (int)(manual_hold_ts * p->video_timeline.inv_speed);
 			}
 			p->render_offset_ns = p->sched_start_mono_ns -
 				((INT64)time + manual_hold_ts) * 1000000LL;
@@ -756,6 +767,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			time, (long long)diff, speed_changed, discontinuity, no_sched_anchor, resume_started || pcm_resume);
 	}
 
+	if (timeline_changed)
+		pthread_cond_broadcast(&p->locked.cond);
 DBGSI2 serprintf("[[put %8d|%4d|%4lld]]", time, dt, (long long)dr );
 	pthread_mutex_unlock(&p->locked.mtx);
 	return 0;
@@ -957,6 +970,12 @@ static void *videosink_thread(void *ctx)
 				DBGSI serprintf("android_sync: stale epoch frame drop f_time=%d frame_epoch=%d seek_epoch=%d\n",
 					f->time, f->epoch, s->seek_epoch);
 				break;
+			}
+
+			if (f->media_time_valid) {
+				f->time = (int)timeline_rst_to_ts(p->video_timeline, f->media_time);
+				if (s && s->video)
+					f->duration = (int)(s->video->msPerFrame * p->video_timeline.inv_speed);
 			}
 
 			if (s && !stream_audio_read_acquire(s)) {
@@ -1376,7 +1395,7 @@ static void *videosink_thread(void *ctx)
 				p->pcm_startup_slew_frame_epoch = f->epoch;
 			}
 
-			INT64 av_delay_ns = (INT64)RST_TO_TS_DELTA(p->effective_av_delay_ms, int) * 1000000LL;
+			INT64 av_delay_ns = (INT64)(int)(p->effective_av_delay_ms * p->video_timeline.inv_speed) * 1000000LL;
 			render_ts_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
 				p->render_offset_ns + av_delay_ns;
 			INT64 delta_ns = render_ts_ns - now_ns;
@@ -1620,7 +1639,9 @@ DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.
 		}
 		ret = XDM_id_get( &p->XDM_ctx, time, &out_type, &out_ID );
 
-		f->time    = out_time;
+		f->media_time = out_time;
+		f->media_time_valid = out_time != -1;
+		f->time = out_time == -1 ? -1 : RST_TO_TS_TIME(out_time, int);
 		f->user_ID = out_ID;
 		f->type    = out_type;
 
@@ -1670,8 +1691,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->dec = dec;
 	p->video_frame_rate_num = video->frame_rate_num;
 	p->video_frame_rate_den = video->frame_rate_den;
-	p->playback_speed_num = 100;
-	p->playback_speed_den = 100;
+	p->video_timeline = timeline_snapshot();
 	p->sched_start_off_ns = 0;
 	p->sched_start_mono_ns = 0;
 	p->sched_last_off_ns = 0;
@@ -2049,7 +2069,11 @@ CLOG("error!");
 	add_state_l(p, THREAD_STATE_WRITING);
 	pthread_mutex_unlock(&p->locked.mtx);
 
-	ret = sfdec_send_input(p->sfdec, d->data[0], d->size, (int64_t)d->time * 1000, d->type == I_VOP ? 1 : 0, 0);
+	// MediaCodec must reorder original PTS, not values mapped at different
+	// speeds while older access units were still buffered in the decoder.
+	int media_time = d->media_time_valid ? d->media_time :
+		(d->time == -1 ? -1 : TS_TO_RST_TIME(d->time, int));
+	ret = sfdec_send_input(p->sfdec, d->data[0], d->size, (int64_t)media_time * 1000, d->type == I_VOP ? 1 : 0, 0);
 	pthread_mutex_lock(&p->locked.mtx);
 	if (ret < 0 || (ret > 0 && ret != d->size)) {
 		p->locked.error = 1;
@@ -2057,16 +2081,16 @@ CLOG("error!");
 	}
 	if( ret == d->size && ret > 0 ) {
 DBGCV CLOG("%c %8d: %d/%d", frame_type(d->type), d->time, ret, d->size);
-		XDM_id_put( &p->XDM_ctx,  d->time, d->type, d->user_ID );
+		XDM_id_put( &p->XDM_ctx,  media_time, d->type, d->user_ID );
 		if( p->repair_decode_order_pts ) {
-			if( p->pts_input_seen > 0 && d->time < p->pts_input_last ) {
+			if( p->pts_input_seen > 0 && media_time < p->pts_input_last ) {
 				p->pts_input_monotonic = 0;
 			}
-			p->pts_input_last = d->time;
+			p->pts_input_last = media_time;
 			p->pts_input_seen++;
 		}
 		if( !p->reorder_pts || p->repair_decode_order_pts ) {
-			XDM_ts_put( &p->XDM_ctx, d->time );
+			XDM_ts_put( &p->XDM_ctx, media_time );
 		}
 	}
 	rm_state_l(p, THREAD_STATE_WRITING);
@@ -2108,8 +2132,12 @@ static int videodec_get_out(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **pout_frame)
 	pthread_mutex_lock(&p->locked.mtx);
 	*pout_frame = frame_q_get(&p->locked.out_q);
 	pthread_mutex_unlock(&p->locked.mtx);
-	if (*pout_frame)
-		(*pout_frame)->valid = 1;
+	if (*pout_frame) {
+		VIDEO_FRAME *f = *pout_frame;
+		if (f->media_time_valid)
+			f->time = RST_TO_TS_TIME(f->media_time, int);
+		f->valid = 1;
+	}
 	return 0;
 }
 
@@ -2232,25 +2260,10 @@ static int videodec_destroy(STREAM_DEC_VIDEO *dec)
 
 static int videodec_set_playback_speed(struct STREAM_DEC_VIDEO *dec, int den, int num) {
 	priv_t *p = (priv_t*)dec->priv;
-	int changed = 0;
-	pthread_mutex_lock(&p->locked.mtx);
-	if( den && den != p->playback_speed_den ) {
-		p->playback_speed_den = den;
-		changed = 1;
-	}
-	if( num && num != p->playback_speed_num ) {
-		p->playback_speed_num = num;
-		changed = 1;
-	}
-	if( changed ) {
-		p->snap_origin_time = 0;
-		p->snap_origin_epoch = INT_MIN;
-	}
-	pthread_mutex_unlock(&p->locked.mtx);
-
+	// This is only a platform hint. Scheduler cadence/snap changes belong to
+	// videosink_put_time(), alongside the committed timeline and audio anchor.
 	int rc = sfdec_set_playback_speed(p->sfdec, den, num);
-	DBGSI serprintf("sfdec2: set_playback_speed den=%d num=%d rc=%d snap_reset=%d\n",
-		den, num, rc, changed);
+	DBGSI serprintf("sfdec2: set_playback_speed den=%d num=%d rc=%d\n", den, num, rc);
 	return rc;
 }
 

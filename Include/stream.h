@@ -246,6 +246,8 @@ typedef struct STREAM_CDATA
 	int  		type;
 	int		frame;
 	int		time;
+	int             video_media_time; // original RST, before speed mapping
+	int             video_media_time_valid;
 	int		subtitle_duration; // container cue duration in TS ms; 0 if unknown
 	int		size;
 	int		key;

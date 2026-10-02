@@ -548,19 +548,7 @@ int alog2( unsigned int v )
 	return n;
 }
 
-typedef struct {
-	double rst_anchor;
-	double ts_anchor;
-	double speed;
-	double inv_speed;
-} timeline_state_t;
-
-static timeline_state_t timeline_states[2] = {
-	{ 0.0, 0.0, 1.0, 1.0 },
-	{ 0.0, 0.0, 1.0, 1.0 },
-};
-
-static volatile int timeline_active_index = 0;
+static timeline_state_t timeline_state = { 0.0, 0.0, 1.0, 1.0 };
 static pthread_mutex_t timeline_update_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static __thread int timeline_local_identity;
@@ -572,15 +560,14 @@ int timeline_set_local_identity(int enabled)
 	return old;
 }
 
-static inline timeline_state_t timeline_snapshot(void)
+timeline_state_t timeline_snapshot(void)
 {
 	if (timeline_local_identity) return (timeline_state_t){0.0, 0.0, 1.0, 1.0};
-#if defined(__GNUC__)
-	int idx = __atomic_load_n(&timeline_active_index, __ATOMIC_ACQUIRE);
-#else
-	int idx = timeline_active_index;
-#endif
-	return timeline_states[idx];
+	// A double buffer alone cannot protect a reader against two quick updates.
+	pthread_mutex_lock(&timeline_update_mutex);
+	timeline_state_t state = timeline_state;
+	pthread_mutex_unlock(&timeline_update_mutex);
+	return state;
 }
 
 float get_effective_audio_speed( void )
@@ -605,18 +592,7 @@ void timeline_map_apply( double rst_anchor_ms, double ts_anchor_ms, float speed 
 	new_state.inv_speed = 1.0 / speed;
 
 	pthread_mutex_lock( &timeline_update_mutex );
-#if defined(__GNUC__)
-	int current_idx = __atomic_load_n( &timeline_active_index, __ATOMIC_ACQUIRE );
-#else
-	int current_idx = timeline_active_index;
-#endif
-	int next_idx = 1 - current_idx;
-	timeline_states[next_idx] = new_state;
-#if defined(__GNUC__)
-	__atomic_store_n( &timeline_active_index, next_idx, __ATOMIC_RELEASE );
-#else
-	timeline_active_index = next_idx;
-#endif
+	timeline_state = new_state;
 	pthread_mutex_unlock( &timeline_update_mutex );
 }
 
@@ -624,7 +600,7 @@ void timeline_map_apply( double rst_anchor_ms, double ts_anchor_ms, float speed 
 double rst_to_ts_time( double time_ms )
 {
 	timeline_state_t state = timeline_snapshot();
-	return state.ts_anchor + ( time_ms - state.rst_anchor ) * state.inv_speed;
+	return timeline_rst_to_ts(state, time_ms);
 }
 
 // Scale RST duration to TS duration

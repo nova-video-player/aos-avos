@@ -4080,6 +4080,7 @@ DBGS serprintf("video end\r\n");
 		s->cdata_now = s->cdata_next;
 		s->cdata_next.valid = 0;
 
+		int original_time = s->cdata_now.time;
 		if( !stream_fake_ts_post && stream_fake_ts_num && stream_fake_ts_den ) {
 			s->cdata_now.time = (UINT64)stream_fake_ts_num * stream_fake_ts_count++ / stream_fake_ts_den;
 		}
@@ -4095,7 +4096,9 @@ DBGS serprintf("video end\r\n");
 		// is there a pre_mangler, then call it!
 		if( s->video_mangler ) {
 			s->video_mangler->pre( s, s->cbe, &s->cdata_now );
-		}	
+		}
+		if (s->cdata_now.time != original_time)
+			s->cdata_now.video_media_time_valid = 0;
 	}
 }
 
@@ -4150,7 +4153,10 @@ static int output_frames( STREAM *s )
 	VIDEO_FRAME *output_frame = frame_q_get( &s->disp_q );
 	
 	while( output_frame ) {
+		if (output_frame->media_time_valid)
+			output_frame->time = RST_TO_TS_TIME(output_frame->media_time, int);
 		if( stream_fake_ts_post && stream_fake_ts_num && stream_fake_ts_den ) {
+			output_frame->media_time_valid = 0;
 			output_frame->time = (UINT64)stream_fake_ts_num * stream_fake_ts_count++ / stream_fake_ts_den;
 		}
 	
@@ -4329,6 +4335,7 @@ cdata_time  = s->cdata_now.time;
 
 	//  Call the Decoder (non-blocking)    
 	//-----------------------------------   
+	s->decode_frame->media_time_valid = 0;
 	s->decode_frame->time       = draining ? -1 : s->cdata_now.time;
 	s->decode_frame->epoch      = s->seek_epoch;
 	s->decode_frame->user_ID    = s->cdata_now.user_ID;
@@ -4641,7 +4648,10 @@ DBGQ  serprintf("put_out: %08X -> %08X \n", in_frame, s->decode_frame );
 		if( out_frame ) {
 			// is there a post mangler, then call it!
 			if( s->video_mangler ) {
+				int original_time = out_frame->time;
 				s->video_mangler->post( s, &out_frame );
+				if (out_frame && out_frame->time != original_time)
+					out_frame->media_time_valid = 0;
 			}	
 
 			if( s->play_n_video_frames && s->play_n_video_time != -1 ) {
@@ -4777,6 +4787,8 @@ serprintf("[%5d] siz %6d\n", s->fps_count, size );
 		d->data[0] = cbe_get_p( s->cbe );
 		d->size    = size;
 		d->time    = s->cdata_now.time;
+		d->media_time = s->cdata_now.video_media_time;
+		d->media_time_valid = s->cdata_now.video_media_time_valid;
 		d->user_ID = s->cdata_now.user_ID;
 		
 		// guess the frame type (I vs BP) by looking at the key flag (manglers and decoders will update that)

@@ -78,6 +78,20 @@ int adjust_oom(pid_t pid, int value);
 
 float get_effective_audio_speed( void );
 
+// One coherent committed mapping; requested filter speed may still be queued.
+typedef struct {
+	double rst_anchor;
+	double ts_anchor;
+	double speed;
+	double inv_speed;
+} timeline_state_t;
+timeline_state_t timeline_snapshot(void);
+
+static inline double timeline_rst_to_ts(timeline_state_t state, double time_ms)
+{
+	return state.ts_anchor + (time_ms - state.rst_anchor) * state.inv_speed;
+}
+
 double rst_to_ts_time( double time_ms );
 double rst_to_ts_delta( double time_ms );
 double ts_to_rst_time( double time_ms );

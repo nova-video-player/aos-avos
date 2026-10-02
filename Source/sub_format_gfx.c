@@ -16,7 +16,7 @@ typedef struct {
                               // now holds its own ref). Reset whenever current_frame is replaced.
     int        canvas_w, canvas_h;           // on-screen GL surface size. NOT the space
                                               // ev->x/y/w/h are expressed in -- see below.
-    int        real_video_w, real_video_h;   // the subtitle stream's own coordinate frame --
+    int        gfx_stream_w, gfx_stream_h;   // the subtitle stream's own coordinate frame --
                                               // fixed for the track's lifetime. THIS is the
                                               // space codec_ffsub's x_offset/y_offset/width/
                                               // height are expressed in (PGS: its PCS plane;
@@ -63,8 +63,8 @@ static int gfx_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     GFX_BACKEND *ctx = calloc(1, sizeof(GFX_BACKEND));
     ctx->canvas_w     = params->video_w > 0 ? params->video_w : 1920;
     ctx->canvas_h     = params->video_h > 0 ? params->video_h : 1080;
-    ctx->real_video_w = params->real_video_w > 0 ? params->real_video_w : ctx->canvas_w;
-    ctx->real_video_h = params->real_video_h > 0 ? params->real_video_h : ctx->canvas_h;
+    ctx->gfx_stream_w = params->real_video_w > 0 ? params->real_video_w : ctx->canvas_w;
+    ctx->gfx_stream_h = params->real_video_h > 0 ? params->real_video_h : ctx->canvas_h;
     // Until sub_engine_set_video_box() has reported an actual box, assume the video fills
     // the canvas 1:1 -- this is today's (buggy) behavior, kept as the fallback so a track
     // opened before Java's first box report still renders (just not correctly positioned
@@ -135,8 +135,8 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     frame->duration_ms = duration_ms;
     frame->video_w        = ctx->canvas_w;
     frame->video_h        = ctx->canvas_h;
-    frame->real_video_w   = ctx->real_video_w;
-    frame->real_video_h   = ctx->real_video_h;
+    frame->gfx_stream_w   = ctx->gfx_stream_w;
+    frame->gfx_stream_h   = ctx->gfx_stream_h;
     frame->video_box_x    = ctx->video_box_x;
     frame->video_box_y    = ctx->video_box_y;
     frame->video_box_w    = ctx->video_box_w;
@@ -228,7 +228,7 @@ static SUB_FRAME *gfx_clone_with_geometry(const GFX_BACKEND *ctx, const SUB_FRAM
     f->pts_ms       = src->pts_ms;
     f->duration_ms  = src->duration_ms;
     f->video_w      = ctx->canvas_w;       f->video_h      = ctx->canvas_h;
-    f->real_video_w = ctx->real_video_w;   f->real_video_h = ctx->real_video_h;
+    f->gfx_stream_w = ctx->gfx_stream_w;   f->gfx_stream_h = ctx->gfx_stream_h;
     f->video_box_x  = ctx->video_box_x;    f->video_box_y  = ctx->video_box_y;
     f->video_box_w  = ctx->video_box_w;    f->video_box_h  = ctx->video_box_h;
 
@@ -303,7 +303,7 @@ static void gfx_free_frame(SUB_FORMAT_BACKEND *be, SUB_FRAME *frame) {
 // ---------------------------------------------------------------------------
 static int gfx_resize(SUB_FORMAT_BACKEND *be, int canvas_w, int canvas_h) {
     GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
-    // Canvas resize only (rotation, surface recreate) -- real_video_w/h and the video's
+    // Canvas resize only (rotation, surface recreate) -- gfx_stream_w/h and the video's
     // own box don't change just because the GL surface did; those come from
     // gfx_set_video_box() below, driven independently by SurfaceController.
     ctx->canvas_w = canvas_w;

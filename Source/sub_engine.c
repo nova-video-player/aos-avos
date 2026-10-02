@@ -313,10 +313,11 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     // which is exactly the intended mpv-style "use the margins" behavior -- it does not change
     // the proportions of anything the author actually authored.
     //
-    // For GFX, target_w/target_h below is ONLY the canvas -- video_w/video_h (this function's
-    // own params, the real decoded video size) are passed through separately as
-    // real_video_w/h, since PGS/VobSub bitmap coordinates are in that space, not the canvas's.
-    // See sub_format_gfx.c's gfx_open().
+    // target_w/target_h below is ONLY the canvas. video_w/video_h (this function's own params,
+    // the decoded video size) are passed through separately as real_video_w/h. Exception: for
+    // GFX the caller passes the subtitle stream's own coordinate frame in this slot (PGS/VobSub
+    // bitmap coordinates are in that space, not the canvas's or the video's) -- see
+    // sub_format_gfx.c's gfx_open(), which stamps it on frames as gfx_stream_w/h.
     //
     // Falls back to the raw video_w/video_h when no canvas size is known yet (e.g. before the
     // first onSurfaceTextureAvailable/onSurfaceTextureSizeChanged callback has fired).

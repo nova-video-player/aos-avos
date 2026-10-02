@@ -74,7 +74,7 @@ static GLuint create_program(const char *vertex_src, const char *fragment_src) {
 }
 
 // GFX (PGS/VobSub) placement: ev->x/y/w/h are in the subtitle coordinate frame
-// (real_video_w/h); place them on the canvas.
+// (gfx_stream_w/h); place them on the canvas.
 //
 // Where that frame comes from (codec_ffsub.c's open(), from the track's "size:" init data): PGS
 // uses the plane size carried in its own PCS segment, independent of the video (usually
@@ -109,7 +109,7 @@ static void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
                               float *out_x, float *out_y, float *out_w, float *out_h,
                               float *out_sx, float *out_sy) {
     const float ch = (float)f->video_h;                                   // canvas height
-    const float fw = (float)f->real_video_w, fh = (float)f->real_video_h; // sub coordinate frame
+    const float fw = (float)f->gfx_stream_w, fh = (float)f->gfx_stream_h; // sub coordinate frame
     const float bx = (float)f->video_box_x,  by = (float)f->video_box_y;
     const float bw = (float)f->video_box_w,  bh = (float)f->video_box_h;  // video box in canvas
 
@@ -377,11 +377,11 @@ static void* egl_render_thread(void* arg) {
                              ev->data.bitmap.rgba);
 
                 float x1, y1, x2, y2;
-                if (frame_to_draw->real_video_w > 0 && frame_to_draw->real_video_h > 0) {
+                if (frame_to_draw->gfx_stream_w > 0 && frame_to_draw->gfx_stream_h > 0) {
                     // GFX (PGS/VobSub) frame: placement (incl. black-bar usage) is decided by
                     // gfx_map_to_canvas().
-                    DBG serprintf("SUB_GFX: real_video=%dx%d canvas=%dx%d box=(%d,%d %dx%d) ev=(%d,%d %dx%d)\n",
-                                  frame_to_draw->real_video_w, frame_to_draw->real_video_h,
+                    DBG serprintf("SUB_GFX: gfx_stream=%dx%d canvas=%dx%d box=(%d,%d %dx%d) ev=(%d,%d %dx%d)\n",
+                                  frame_to_draw->gfx_stream_w, frame_to_draw->gfx_stream_h,
                                   frame_to_draw->video_w, frame_to_draw->video_h,
                                   frame_to_draw->video_box_x, frame_to_draw->video_box_y,
                                   frame_to_draw->video_box_w, frame_to_draw->video_box_h,
@@ -688,9 +688,9 @@ static void blend_frame(const SUB_FRAME *frame, void *pixels, int dst_w, int dst
                 int src_x = ev->x;
                 int src_y = ev->y;
 
-                if (frame->real_video_w > 0 && frame->real_video_h > 0) {
-                    // GFX (PGS/VobSub) frame: src_x/y/w/h are in the decoded video's own
-                    // pixel space, not this destination bitmap's (dst_w/h here is the
+                if (frame->gfx_stream_w > 0 && frame->gfx_stream_h > 0) {
+                    // GFX (PGS/VobSub) frame: src_x/y/w/h are in the subtitle stream's own
+                    // coordinate frame (gfx_stream_w/h), not this destination bitmap's (dst_w/h here is the
                     // on-screen canvas size -- SubtitleEngine.draw3DSubtitlesInternal()
                     // sizes mSoftBitmap to viewWidth x viewHeight and reports that same
                     // size via nativeSurfaceChanged() before this runs). Map through the

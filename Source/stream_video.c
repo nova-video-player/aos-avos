@@ -234,7 +234,12 @@ static void _video_init( STREAM *s, int time )
 	if( s->video_dec && !s->video_dec->async ) {
 		_free_all_frames( s );
 	} else {
-		frame_q_flush( &s->disp_q );
+		// These containers still belong to the engine. Dropping the queue
+		// head loses them permanently (sfdec2 normally has only two).
+		VIDEO_FRAME *frame;
+		while( (frame = frame_q_get( &s->disp_q )) ) {
+			frame_q_put( &s->decode_q, frame );
+		}
 		s->current_frame = NULL;
 		s->current_out_frame = NULL;
 	}
@@ -5117,6 +5122,12 @@ DBGS serprintf("\n----------> seek to time %d   pos  %d  dir  %d\n", time, pos, 
 		return 1;
 	}
 
+	// The async player still fetches packets and recycles frames while paused.
+	// VID_CALL_DECODER is not an idle acknowledgement for that player. Stop it
+	// before resetting parser/CBE state, queues, and the seek/flush generation.
+	int idle_engine = s->engine_thread_started && s->video_dec && s->video_dec->async;
+	int engine_state = idle_engine ? thread_state_set( &s->engine_tstate, THREAD_IDLE ) : THREAD_RUNNING;
+
 	_seek_init( s );
 
 	if( time != -1 ) {
@@ -5141,6 +5152,8 @@ DBGS serprintf("\nparser seeked to time %d\n", sc.time );
 		// state already. Do not reset playback clocks to sc's default zero.
 		if (!stream_abort(s)) stream_set_error(s, VE_FILE_ERROR);
 		s->seek = 0;
+		if( idle_engine )
+			thread_state_set( &s->engine_tstate, engine_state );
 		_seek_un_pause(s, was_paused);
 		return err;
 	}
@@ -5300,6 +5313,8 @@ serprintf("STUFF_ZERO!\n");
 DBGS serprintf("\nseeked to frame %d  time %d|%d   pos %lld|%lld <------------ took %3d/%3d\n", sc.frame, s->video_time, s->audio_time, s->video_pos, s->audio_pos, atime() - start1, atime()- start2 );
 	
 	// un_pause the stream
+	if( idle_engine )
+		thread_state_set( &s->engine_tstate, engine_state );
 	_seek_un_pause( s, was_paused );
 	
 	return err;	
@@ -5449,13 +5464,18 @@ static int _stream_play_n_frames( STREAM *s, int n, int time, int old_time )
 	DBG serprintf("_stream_play_n_frames(n=%d, time=%d (%s), old_time=%d)\n", n, time, ms_to_hms_string(time, hms_buf, sizeof(hms_buf)), old_time);
 	DBG serprintf("_stream_play_n_frames: target_ts=%d old_ts=%d\n", time, old_time);
 
-	int64_t timeout = atime64() + 1000; // 1 second before we stop waiting
 serprintf("stream_play_n_frames( %d, %d, %d )\r\n", n, time, old_time );
 	
 	if( !s || !s->open ) {
 serprintf("PNF: not open!\r\n");
 		return 0;
 	}
+	// Publish the complete preview request before the async player can run.
+	// A seek caller keeps it idle again until post-preview sync/drop setup is
+	// complete; standalone preview callers retain their original running state.
+	int idle_engine = s->engine_thread_started && s->video_dec && s->video_dec->async;
+	int engine_state = idle_engine ? thread_state_set( &s->engine_tstate, THREAD_IDLE ) : THREAD_RUNNING;
+	int64_t timeout = atime64() + 1000; // 1 second of preview work
 	if( __atomic_load_n( &s->seek_preview_refining, __ATOMIC_ACQUIRE ) ) {
 		__atomic_store_n( &s->seek_preview_refine_deadline_ms, timeout,
 			__ATOMIC_RELEASE );
@@ -5474,6 +5494,8 @@ serprintf("PNF: not open!\r\n");
 	} else {
 		s->play_n_old_time = 0;
 	}
+	if( idle_engine )
+		thread_state_set( &s->engine_tstate, THREAD_RUNNING );
 	
 	// wait for it to play
 	int refine_superseded = 0;
@@ -5486,6 +5508,8 @@ serprintf("PNF: not open!\r\n");
 		//serprintf("-");
 		stream_yield();
 	}
+	if( idle_engine )
+		thread_state_set( &s->engine_tstate, THREAD_IDLE );
 	int preview_shown = !s->play_n_video_frames;
 	if( !preview_shown ) {
 		if( refine_superseded ) {
@@ -5505,6 +5529,8 @@ serprintf("PNF: not open!\r\n");
 
 	_stream_wait_for_idle( s, 1000 );
 	__atomic_store_n( &s->seek_preview_refine_deadline_ms, 0, __ATOMIC_RELEASE );
+	if( idle_engine )
+		thread_state_set( &s->engine_tstate, engine_state );
 	return preview_shown;
 }
 

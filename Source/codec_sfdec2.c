@@ -2243,6 +2243,29 @@ DBGCV CLOG("MediaCodec seek reset");
 		} else {
 			frame_release(p->sfdec, p->frames[i]);
 		}
+		// No pre-flush output may masquerade as a decoded/presented frame.
+		p->frames[i]->valid = 0;
+		p->frames[i]->time = -1;
+		p->frames[i]->media_time_valid = 0;
+	}
+
+	// Keep ownership and sink accounting intact: unconsumed decoder output
+	// returns to the decoder, while submitted presentation frames return via
+	// the sink's get queue. Never re-enqueue the whole frame array: some of its
+	// containers belong to the engine's decode/display queues.
+	VIDEO_FRAME *frame;
+	while( (frame = frame_q_get(&p->locked.out_q)) ) {
+		frame_q_put(&p->locked.dec_q, frame);
+	}
+	while( (frame = frame_q_get(&p->locked.venc_q)) ) {
+		frame_q_put(&p->locked.get_q, frame);
+	}
+	// Empty containers retained by the decoder will only receive post-flush
+	// output. Tag them now; they need not pass through put_out() again first.
+	STREAM *s = dec->ctx;
+	if (codec_flushed && s) {
+		for (frame = frame_q_peek(&p->locked.dec_q); frame; frame = frame->next)
+			frame->epoch = s->seek_epoch;
 	}
 
 	rm_state_l(p, THREAD_STATE_FLUSHING);

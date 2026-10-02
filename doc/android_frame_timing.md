@@ -116,6 +116,19 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   returned concurrently with the flush receive the same treatment. This applies
   to seek and close teardown and prevents stale output callbacks from crossing a
   codec generation.
+- Async seek setup idles the engine before changing parser/CBE state and frame
+  queues. Preview target/epoch state is published before restarting it; after
+  preview it is idled again until seek drop floors and sync state are ready.
+  Pausing alone is insufficient because the async player still fetches packets
+  and recycles buffers while paused.
+- Seek initialization recycles engine-owned display containers instead of
+  dropping their queue head. MediaCodec flush invalidates frame metadata as well
+  as native handles, moves unconsumed decoder output back to the decode queue,
+  and returns cancelled presentation frames through the sink queue. This keeps
+  the small frame pool and sink count intact. Only empty decoder-owned containers
+  receive the new epoch; stale output is never admitted as a seek preview.
+  Audio flush/anchoring, passthrough preview exemptions and startup/resume holds
+  retain their existing policy in all passthrough modes.
 - Input submission, output dequeue, and timed output release belong to the same
   flush ownership contract. NDK output dequeue uses a bounded wait, so seek and
   close can wait for all three operations to finish before calling

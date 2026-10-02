@@ -44,7 +44,10 @@ commits, rather than keeping the mapping from before they were decoded.
 
 The MediaCodec renderer adopts the committed mapping, snap cadence and audio
 anchor together in `videosink_put_time()`. A requested speed alone cannot reset
-its scheduling clock. See [buffered MediaCodec video across speed changes](audio_speed_atempo_architecture.md#buffered-mediacodec-video-across-speed-changes)
+its scheduling clock. Once an audio-based wall anchor is established, ordinary
+PCM speed commits preserve it: TS-to-wall time remains continuous while the
+media-to-TS slope changes. Lifecycle transitions and hard drift still reanchor.
+See [buffered MediaCodec video across speed changes](audio_speed_atempo_architecture.md#buffered-mediacodec-video-across-speed-changes)
 for the shared atempo, Sonic and PlaybackParams behavior and scope.
 
 ### Timeline Mapping (Anchors)

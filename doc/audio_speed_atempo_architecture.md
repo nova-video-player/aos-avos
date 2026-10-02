@@ -97,6 +97,16 @@ uses the committed ratio directly, including Sonic's blended ratios; a decoder
 speed callback only forwards the platform hint. Mapping changes wake a waiting
 renderer and invalidate calculations made before it dropped the queue lock.
 This applies to atempo, Sonic and AudioTrack PlaybackParams with MediaCodec video.
+During ordinary PCM speed commits, an established audio-based renderer wall
+anchor is preserved: TS still advances at wall-clock rate, while the new
+mapping changes the media rate. This avoids copying burst-sized variations in
+audio presentation samples into video deadlines on every speed step. The
+renderer still adopts the new mapping/cadence, invalidates calculations made
+while unlocked, and wakes to remap pending frames. Seek, startup, missing/static
+anchors, resume and hard clock discontinuities retain their reanchor behavior.
+A speed commit during resume does not consume the pending first-write clock
+correction. This policy does not alter passthrough clock handling.
+
 Software video decoders retain their existing timestamp handling. Frames already
 released to the Android compositor cannot be rescheduled by this change.
 

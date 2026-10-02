@@ -616,8 +616,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// The writer consumes audio_resume_pending before write(), so its edge is
 	// normally gone by the time put_time() publishes the accepted output. Keep
 	// our own notification until a real post-resume clock reaches this sink.
-	// Seek/speed changes own a new timeline and supersede the pause correction.
-	if( epoch_changed || speed_changed || passthrough_mode )
+	// A speed commit can overlap resume; it must not consume the pending
+	// correction before the first accepted post-resume audio clock arrives.
+	if( epoch_changed || passthrough_mode )
 		p->pcm_resume_pending = 0;
 	int pcm_resume = p->pcm_resume_pending && s && !s->paused &&
 		!s->seek_paused && !s->audio_start_pending &&
@@ -651,8 +652,21 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	abs_diff = diff < 0 ? -diff : diff;
 	int discontinuity = p->venc_put_time && abs_diff >= drift_threshold_ms;
 	int reanchor_discontinuity = discontinuity;
+	// Committing a PCM speed changes the RST-to-TS mapping, not the rate of
+	// TS against wall time. Replacing a valid wall anchor with a bursty audio
+	// observation here introduces a pause/catch-up on each step of a ramp.
+	// Keep lifecycle transitions and missing/static anchors on the reset path.
+	int continuous_speed_commit = speed_changed && s && s->put_time_mode &&
+		!passthrough_mode && s->audio && s->audio->valid &&
+		s->audio_time >= 0 && time >= 0 &&
+		p->render_offset_ns != -1 && p->render_offset_from_audio &&
+		!epoch_changed && !p->pending_seek_reanchor &&
+		!s->paused && !s->seek_paused && !p->pause_armed &&
+		!s->audio_start_pending && !s->audio_resume_pending &&
+		!p->pcm_resume_pending && !resume_started;
 	int smooth_burst_mode = s && s->put_time_mode &&
-		(!passthrough_mode || passthrough_mode >= 2) && !speed_changed;
+		(!passthrough_mode || passthrough_mode >= 2) &&
+		(!speed_changed || continuous_speed_commit);
 	if( discontinuity && smooth_burst_mode ) {
 		int frame_ms = (s->video && s->video->msPerFrame > 0) ?
 			s->video->msPerFrame : 33;
@@ -697,8 +711,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// anchors and real discontinuities still take the normal reanchor path.
 	int resume_reanchor = pcm_resume || (resume_started && !p->pcm_resume_pending &&
 		(passthrough_mode < 2 || p->render_offset_ns == -1));
-	int allow_reanchor = speed_changed || reanchor_discontinuity || no_sched_anchor ||
-		epoch_changed || resume_reanchor;
+	int preserve_speed_anchor = continuous_speed_commit &&
+		!reanchor_discontinuity && !no_sched_anchor && !resume_reanchor;
+	int allow_reanchor = (speed_changed && !preserve_speed_anchor) ||
+		reanchor_discontinuity || no_sched_anchor || epoch_changed || resume_reanchor;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor &&
 		!epoch_changed && !resume_reanchor ) {
 		allow_reanchor = 0;
@@ -726,8 +742,16 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		allow_reanchor);
 	p->venc_put_time = time;
 	p->venc_ref_time = now_ms;
-	if (allow_reanchor) {
+	// A preserved wall anchor still has a new timestamp map/cadence. Invalidate
+	// renderer calculations made while its queue lock was temporarily dropped.
+	if (timeline_changed || allow_reanchor)
 		p->render_generation++;
+	if (preserve_speed_anchor) {
+		DBGSI serprintf("android_sync: speed commit preserves clock speed=%.3f offset=%lld sample_diff=%lld epoch=%d\n",
+			current_speed, (long long)p->render_offset_ns, (long long)diff,
+			s->seek_epoch);
+	}
+	if (allow_reanchor) {
 		if( epoch_changed ) {
 			p->pending_seek_reanchor = 1;
 		}
@@ -737,7 +761,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->sched_last_mono_ns  = p->sched_start_mono_ns;
 		p->sched_late          = 0;
 		p->sched_debt_ns       = 0;
-		p->render_offset_ns    = -1; // Force immediate re-anchor on seek/resume/discontinuity/speed change.
+		p->render_offset_ns    = -1; // Re-anchor lifecycle events, hard drift and speed changes without a valid clock.
 		p->render_offset_from_audio = 0;
 		p->pending_reanchor    = 1;
 		if( pcm_resume ) {

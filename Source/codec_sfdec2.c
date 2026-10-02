@@ -164,7 +164,7 @@ typedef struct priv {
 	const void *mode2_slew_frame_handle;
 	int mode2_slew_frame_time;
 	int mode2_slew_frame_epoch;
-	int pcm_startup_slew;
+	int pcm_startup_slew; // bounded PCM startup/resume correction, once per frame
 	const void *pcm_startup_slew_frame_handle;
 	int pcm_startup_slew_frame_time;
 	int pcm_startup_slew_frame_epoch;
@@ -569,6 +569,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// serializes this sink's clock/scheduler state only.
 	int passthrough_mode = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 		s->audio_sink->get_passthrough( s ) : 0;
+	int preserve_output = s && audio_interface_pause_preserves_output(s->audio_ctx);
 
 	pthread_mutex_lock(&p->locked.mtx);
 	if (!p->s && s)
@@ -704,6 +705,42 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
 	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
+	// A retained PCM queue already has a wall anchor shifted by the pause.
+	// Keep it through the first clock publication too: the resume write is
+	// acknowledged just after that call, so treating it as hard drift would
+	// destroy the anchor before the one-shot resume correction can use it.
+	int preserve_pcm_resume_anchor = p->pcm_resume_pending && s &&
+		preserve_output && !passthrough_mode && !epoch_changed && !speed_changed &&
+		!s->seek_paused && !s->audio_start_pending && !p->pending_seek_reanchor &&
+		p->render_offset_ns != -1 && p->render_offset_from_audio && !no_sched_anchor;
+	if( pcm_resume && preserve_pcm_resume_anchor ) {
+		int manual_hold_ts = MAX(0, s->manual_audio_delay_applied_ms);
+		if( audio_interface_is_audio_speed_enabled() &&
+			!audio_interface_is_using_atempo() ) {
+			manual_hold_ts = (int)(manual_hold_ts * p->video_timeline.inv_speed);
+		}
+		INT64 target = _get_monotonic_ns() -
+			((INT64)time + manual_hold_ts) * 1000000LL;
+		INT64 correction = target - p->render_offset_ns;
+		// Correct a bounded resume phase at the existing PCM rate (1 ms per
+		// distinct video frame). Large discontinuities still use the hard reset.
+		if( llabs(correction) <= 350000000LL ) {
+			p->target_offset_ns = llabs(correction) > 8000000LL ? target : p->render_offset_ns;
+			p->slew_active = p->target_offset_ns != p->render_offset_ns;
+			p->pcm_startup_slew = p->slew_active;
+			p->pcm_startup_slew_frame_handle = NULL;
+			p->pcm_startup_slew_frame_time = INT_MIN;
+			p->pcm_startup_slew_frame_epoch = INT_MIN;
+			p->pending_reanchor = 0;
+			p->pcm_resume_pending = 0;
+			p->render_generation++;
+			DBGSI serprintf("android_sync: PCM resume slew heard=%d correction=%lldus offset=%lld target=%lld epoch=%d\n",
+				time, (long long)(correction / 1000), (long long)p->render_offset_ns,
+				(long long)p->target_offset_ns, s->seek_epoch);
+		} else {
+			preserve_pcm_resume_anchor = 0;
+		}
+	}
 	// sfdec2_android_sync_on_pause() already shifts a valid Mode 2 render
 	// offset by the paused wall duration. Reanchoring it again from the
 	// submitted-frontier heard clock can discard the established device/route
@@ -715,6 +752,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		!reanchor_discontinuity && !no_sched_anchor && !resume_reanchor;
 	int allow_reanchor = (speed_changed && !preserve_speed_anchor) ||
 		reanchor_discontinuity || no_sched_anchor || epoch_changed || resume_reanchor;
+	if( preserve_pcm_resume_anchor )
+		allow_reanchor = 0;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor &&
 		!epoch_changed && !resume_reanchor ) {
 		allow_reanchor = 0;
@@ -1388,7 +1427,8 @@ static void *videosink_thread(void *ctx)
 					delta = -step;
 				}
 				p->render_offset_ns += delta;
-				if (llabs(p->target_offset_ns - p->render_offset_ns) <= step) {
+				INT64 remaining = llabs(p->target_offset_ns - p->render_offset_ns);
+				if (remaining == 0 || (!p->pcm_startup_slew && remaining <= step)) {
 					p->render_offset_ns = p->target_offset_ns;
 					p->slew_active = 0;
 					if (!p->mode2_dynamic_fast_slew) {
@@ -2422,6 +2462,12 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	pthread_mutex_lock( &p->locked.mtx );
 	if( paused ) {
 		p->pcm_resume_pending = 0;
+		// The next resume computes a fresh one-shot target. Do not leave an
+		// active PCM correction running without its once-per-frame limiter.
+		if( p->pcm_startup_slew ) {
+			p->slew_active = 0;
+			p->pending_reanchor = 0;
+		}
 		p->pcm_startup_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;

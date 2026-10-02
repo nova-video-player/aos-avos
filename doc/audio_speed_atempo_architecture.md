@@ -548,6 +548,21 @@ atempo delay when `speed != 1.0x`.
 
 ## Video Synchronization
 
+Once the software-speed ledger has calibrated the mixer playhead latency, both
+heard-time queries and speed-commit boundary lookups keep using that playhead
+for the output epoch. This avoids alternating a fresh AudioTimestamp with the
+calibrated fallback when the timestamp becomes older than 100ms during the
+normal two-second query interval. The calibration survives non-flushing pause
+and is cleared with the ledger on seek, output reset, or stop. Before calibration,
+the existing fresh-timestamp/fallback policy remains in effect. This policy is
+shared by atempo and Sonic; passthrough does not use the software-speed ledger.
+
+PCM resume retains the shifted renderer clock through the first accepted write.
+A bounded residual correction uses a one-shot slew of at most 1ms per distinct
+video frame rather than a scheduling jump; larger discontinuities and missing
+anchors retain hard reanchoring. The correction includes any inserted manual
+audio delay, so smoothing it does not discard the intended A/V phase.
+
 ### Video Sink Pacing (`codec_sfdec2.c`)
 
 Audio remains the master clock, but current `sfdec2` pacing is platform-timed

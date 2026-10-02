@@ -307,6 +307,10 @@ static void _stream_pcm_delay_memory_reset( STREAM *s, int preserve_speed_timing
 		s->atempo_ledger_next_rst_us = 0;
 		s->atempo_ledger_media_cursor = 0;
 		s->atempo_ledger_media_valid = 0;
+		s->atempo_ledger_lat_frames = 0;
+		s->atempo_ledger_lat_samples = 0;
+		s->atempo_ledger_lat_valid = 0;
+		s->atempo_ledger_lat_last_ms = 0;
 	}
 	s->pcm_startup_seed_delay_ms = 0;
 	s->pcm_startup_correction_pending = 0;
@@ -1423,6 +1427,19 @@ int stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_ra
 	return r.heard_rst;
 }
 
+static int _stream_atempo_presented_frames(STREAM *s, UINT64 *frames, int *rate,
+	int *source, int *age)
+{
+	// Once calibrated, keep the mixer playhead for this output epoch, including
+	// non-flushing resumes. Fresh timestamps are usable for only 100 ms but are
+	// normally polled every two seconds. Alternating them with a latency-adjusted
+	// playhead can jump the heard clock by the entire calibration at resume.
+	// Commits and heard-time queries must make the same source choice.
+	int prefer_fresh = s->atempo_ledger_lat_valid ? 2 : 1;
+	return audio_interface_get_presented_frames(s->audio_ctx, frames, rate,
+		source, age, prefer_fresh);
+}
+
 // Resolve both clocks and the commit boundary from one observation. Android
 // presentation evidence does not include unknown external receiver latency.
 int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate,
@@ -1430,7 +1447,7 @@ int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate,
 {
 	int source = 0, age = 0;
 	if( !s || !s->audio_ctx || !s->atempo_ledger_active || s->atempo_ledger_count <= 0 ||
-	    !audio_interface_get_presented_frames(s->audio_ctx, playhead, rate, &source, &age, 1) ||
+	    !_stream_atempo_presented_frames(s, playhead, rate, &source, &age) ||
 	    *rate <= 0 || age > 100 )
 		return 0;
 	if( source != AT_PRESENTED_FRAMES_SRC_TIMESTAMP ) {
@@ -1867,8 +1884,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		!passthrough_mode && !is_mode2_sync && s->audio_ctx ) {
 		UINT64 playhead = 0;
 		int playhead_rate = 0, playhead_src = 0, playhead_age = 0;
-		if( audio_interface_get_presented_frames( s->audio_ctx, &playhead, &playhead_rate,
-				&playhead_src, &playhead_age, 1 ) && playhead_rate > 0 ) {
+		if( _stream_atempo_presented_frames( s, &playhead, &playhead_rate,
+				&playhead_src, &playhead_age ) && playhead_rate > 0 ) {
 			ATEMPO_LEDGER_LOOKUP raw = _stream_atempo_ledger_lookup( s, playhead, playhead_rate );
 			float cur_speed = audio_interface_get_audio_speed();
 			// SRC_TIMESTAMP = extrapolated AudioTrack getTimestamp framePosition:

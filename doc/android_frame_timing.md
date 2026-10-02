@@ -34,6 +34,14 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   on its provisional anchor. Once the dynamic phase is ready, the renderer makes
   one explicit audio-based reanchor instead of stacking a second slew on that
   correction. Later transition and resume corrections remain bounded per frame.
+- A PCM resume on a backend that preserves queued output keeps the pause-shifted
+  renderer anchor until the first accepted write publishes its clock. With an established audio anchor,
+  corrections up to 350ms use the PCM 1ms-per-frame slew (8ms deadband) instead
+  of an abrupt scheduling jump. The correction is still applied, preventing
+  cumulative pause/resume phase error. Missing anchors, seek/speed transitions,
+  and larger discontinuities retain the hard reset. A new pause cancels the
+  current slew and the next resume computes a fresh target. Passthrough resume
+  policy is unchanged.
 - Manual A/V delay (`s->av_delay`) is also slewed in the render path through
   `effective_av_delay` (bounded per-frame step) so large UI jumps do not create
   a burst of ASAP renders ("fast video" transient).

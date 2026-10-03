@@ -276,9 +276,21 @@ The measured phase change sets a one-shot video correction, bounded to 4ms and
 10% of the playback interval per distinct frame. Repeated pauses restart the
 measurement window but retain the original phase reference, including when they
 interrupt a correction. Ordinary playback does not continuously chase this
-static clock. Seek, flush, hard reanchor and manual A/V delay changes invalidate
-the reference. This uses neither Mode 2's dynamic clock nor the diagnostic IEC
-occupancy observer and does not estimate downstream receiver latency.
+static clock. Hard reanchors, non-seek flushes, audio reconfiguration and manual
+A/V delay changes invalidate the reference. This uses neither Mode 2's dynamic
+clock nor the diagnostic IEC occupancy observer and does not estimate downstream
+receiver latency.
+
+A seek on the same Mode 1 audio output preserves only this relative phase,
+guarded by the audio lifecycle generation and manual delay. It still discards
+the old absolute timestamps, scheduler anchors, queue observations and active
+correction. Once the new audio clock is established and the refill measurement
+window completes, a one-shot correction restores the preserved phase. Otherwise
+the renderer's first observation of an incompletely filled IEC queue can leave
+a different persistent offset after each seek. Chained seeks and seeks while
+paused retain the reference without waiting for audio during preview. A seek
+before the initial reference exists simply establishes a new reference normally.
+Late-frame catch-up and genuine audio-gap handling retain their existing policy.
 
 Seek, missing anchors, discarded output, speed changes and genuine
 clock discontinuities still use the existing reanchor paths. Mode 2 and PCM

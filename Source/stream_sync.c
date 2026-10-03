@@ -1815,8 +1815,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		pthread_mutex_unlock( &s->mode2_heard_mutex );
 	}
 
-	// 3. STARTUP CLAMP (Non-Mode 2 only)
-	if( !is_mode2_sync && passthrough_mode && stream_sync_anchor_get_sink( s ) == -1 &&
+	// Legacy Mode 1 startup clamp. A put_time sink already gets its startup
+	// phase from the committed audio clock. Replacing its delay with 50ms
+	// while the sink reference is unset manufactures a clock jump when that
+	// reference is published, including every non-flushing pause/resume.
+	if( !s->put_time_mode && !is_mode2_sync && passthrough_mode && stream_sync_anchor_get_sink( s ) == -1 &&
 		heard_ts < s->audio_time - STREAM_MODE1_STARTUP_CLAMP_MS && s->audio_time > s->video_time ) {
 		int clamped = s->audio_time - STREAM_MODE1_STARTUP_CLAMP_MS;
 		DBG serprintf( "stream_get_heard_audio_ts: mode1 startup hold clamp: %d->%d (audio=%d video=%d)\n",

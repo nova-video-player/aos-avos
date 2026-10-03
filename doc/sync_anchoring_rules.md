@@ -230,7 +230,7 @@ used elsewhere (e.g. `pcm_audio_lead_gate`).
 
 ### `startup_anchor_commit` (mode 1)
 
-On the first mode-1 audio write after seek/resume, passthrough sets
+On the first mode-1 audio write at startup or after seek, passthrough sets
 `audio_time = video_time + anchor_delay` and calls
 `sfdec2_refresh_sched_anchor()`. This preserves the legacy mode-1 startup
 alignment after the timed-release scheduler refactoring. PCM is excluded: it
@@ -254,6 +254,35 @@ the demuxer audio PTS instead of applying the synthetic anchor. Later packet
 PTS values cannot publish an audio clock while this startup state owns the
 epoch. Ordinary near-zero starts and coarse seek landings retain the legacy
 synthetic anchor.
+
+For Mode 1 `put_time` playback, the centralized heard clock retains the full
+selected delay even while the sink reference is unset. The legacy 50ms startup
+clamp is restricted to sinks without `put_time`; enabling it on resume would
+manufacture a forward jump followed by a backward jump at anchor publication.
+The MediaCodec renderer uses the published Mode 1 clock after seek, without
+clamping it back to the preview frame during initialization or later reanchoring.
+
+An ordinary pause on a backend that preserves queued output retains the valid,
+pause-shifted Mode 1 renderer anchor. The resume-pending edge alone does not
+replace it. Queue preservation does not guarantee that audio presentation freezes
+at exactly the renderer's pause timestamp. Mode 1 therefore records its renderer
+phase relative to the full-queue static heard clock before the first pause. After
+resume, a measurement window must span at least one configured buffer duration
+(and at least 250ms) in both running wall time and accepted audio. Duplicate clock
+publications cannot complete the window. Its minimum wall-minus-heard offset
+selects the fullest queue observation, avoiding the first-burst refill transient.
+
+The measured phase change sets a one-shot video correction, bounded to 4ms and
+10% of the playback interval per distinct frame. Repeated pauses restart the
+measurement window but retain the original phase reference, including when they
+interrupt a correction. Ordinary playback does not continuously chase this
+static clock. Seek, flush, hard reanchor and manual A/V delay changes invalidate
+the reference. This uses neither Mode 2's dynamic clock nor the diagnostic IEC
+occupancy observer and does not estimate downstream receiver latency.
+
+Seek, missing anchors, discarded output, speed changes and genuine
+clock discontinuities still use the existing reanchor paths. Mode 2 and PCM
+policies are unchanged, as are IEC framing, latency selection and audio-gap holds.
 
 ### Pre-commit negative anchor guard
 

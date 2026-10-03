@@ -1,5 +1,6 @@
 #include "sub_engine.h"
 #include "sub_render_gl.h"
+#include "sub_kind.h"
 #include "av.h"
 #include <stdlib.h>
 #include <pthread.h>
@@ -46,6 +47,18 @@ SUB_FMT_ID sub_fmt_from_format(int fmt) {
         return SUB_FMT_SRT;
     default:
         return SUB_FMT_UNKNOWN;
+    }
+}
+
+/* What the rest of the app is told about a track. Deliberately a pure function
+ * of sub_fmt_from_format(): whichever backend native picks is, by construction,
+ * the kind that is reported. Do not add a second switch here. */
+SUB_KIND sub_kind_from_format(int fmt) {
+    switch (sub_fmt_from_format(fmt)) {
+    case SUB_FMT_SSA: return SUB_KIND_SSA;
+    case SUB_FMT_SRT: return SUB_KIND_PLAIN_TEXT;
+    case SUB_FMT_GFX: return SUB_KIND_GRAPHIC;
+    default:          return SUB_KIND_UNSUPPORTED;
     }
 }
 

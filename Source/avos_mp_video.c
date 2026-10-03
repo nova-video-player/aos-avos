@@ -23,7 +23,8 @@
 #include "global.h"
 #include "image.h"
 #include "stream.h"
-#include "stream_subtitle.h"
+#include "util.h"
+#include "sub_engine_registry.h"
 
 extern int libavos_get_ac3_recoding_enabled(void);
 
@@ -32,7 +33,39 @@ extern int libavos_get_ac3_recoding_enabled(void);
 
 #define MPLOG(fmt, ...) serprintf("%p|%s: " fmt "\n", mp, __FUNCTION__, ##__VA_ARGS__)
 
-#define SUBTITLE_SEND_OFFSET (-100)
+// Subtitle engine clock. Returns the engine's own timeline (see the TIMING CONTRACT in sub_format.h):
+// RST ms (real stream / media time -- the domain of the UI seek bar, stream_get_time_default()) with
+// the user's subtitle delay applied, or -1 when there is no valid clock yet.
+//
+// s->video_time / s->audio_time are TS (time-scaled: ts = rst / speed), so they are mapped back
+// through the timeline anchor -- reading them raw made external cues drift at any speed other than 1x.
+// subtitle_offset is in rst ms, so it is subtracted here, in rst, exactly once (the same expression
+// stream_parser_ffmpeg.c's _subtitle_switch_time() uses).
+//
+// EXTERNAL TEXT tracks (srt/vtt/smi/sub/mpl2/ass) are fed with their raw file times, and the user's
+// subtitle ratio (Player.setSubtitleRatio: 1 = 25025/24000, 2 = 24000/25025) is applied HERE, to the
+// clock: a cue whose scaled start is t*n/d is shown once (rst - delay) >= t*n/d, i.e. once
+// (rst - delay) * d/n >= t. That is the same visibility rule the old per-cue scaling gave, but it is
+// live (a change takes effect immediately, no re-feed) and it covers ASS, which cannot be scaled cue
+// by cue. Internal tracks carry no ratio, and external BITMAP tracks (VobSub/PGS) are scaled at
+// lookup time in stream_sub_ext_get_gfx_data(), so neither is touched here.
+static int64_t engine_clock_cb(void *ctx) {
+	STREAM *s = (STREAM *)ctx;
+	if (!s) return -1;
+
+	int ts = (s->video && s->video->valid) ? s->video_time : s->audio_time;
+	if (ts < 0) return -1;  // stream_sync_init() / seek reset: no clock yet
+
+	int64_t t = TS_TO_RST_TIME(ts, int64_t) - s->subtitle_offset;
+	if (t < 0) t = 0;
+
+	const int n = s->subtitle_ratio_n, d = s->subtitle_ratio_d;
+	if (n > 0 && d > 0 && n != d &&
+	    s->subtitle && s->subtitle->valid && s->subtitle->ext && !s->subtitle->gfx)
+		t = t * d / n;
+
+	return t;
+}
 
 static int stream_buffer_size = 24;
 
@@ -43,11 +76,11 @@ struct avos_mp_video {
 	int last_pauseable;
 	int last_duration;
 	int buffered_pos;
-	int send_sub;
 	int width;
 	int height;
 	int aspect_n;
 	int aspect_d;
+	int sub_enabled;
 };
 
 static void send_state_msg(avos_mp_t *mp, avos_mp_video_t *video)
@@ -107,28 +140,6 @@ static void send_metadata(avos_mp_t *mp, avos_mp_video_t *video, int notify)
 	}
 }
 
-static void send_subtitle(avos_mp_t *mp, avos_mp_video_t *video)
-{
-	int sub_time;
-	VIDEO_FRAME *sub_frame;
-	avos_msg_t *msg = NULL;
-
-	DBG MPLOG();
-
-	if (!video->send_sub)
-		return;
-	sub_frame = stream_get_current_subtitle(video->s);
-	sub_time = sub_frame->time - SUBTITLE_SEND_OFFSET;
-
-	if (video->s->av.sub[video->s->av.subs].gfx) {
-		msg = avos_msg_new_bitmap_subtitle(0, sub_time, sub_frame->duration, (IMAGE *)sub_frame);
-	} else {
-		msg = avos_msg_new_text_subtitle(0, sub_time, sub_frame->duration, sub_frame->data[0]);
-	}
-	if (msg)
-		avos_mp_sendevent_data(mp, MEDIA_SUBTITLE, 0, 0, msg);
-}
-
 static int is_stream_seekable(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	int new_seekable;
@@ -180,17 +191,6 @@ static void stream_msg_cb(STREAM *s, STREAM_MESSAGE message)
 	case STREAM_SUB_PROPS_CHANGED:
 	case STREAM_DECODER_CHANGED:
 		send_metadata(mp, video, 1);
-		break;
-	case STREAM_SUBTITLE_CLEARED: {
-		// Ordered before replay cues, including a bitmap-to-text transition.
-		avos_msg_t *msg = avos_msg_new_text_subtitle(0,
-			MAX(0, video->s->video_time), 0, "");
-		if (msg)
-			avos_mp_sendevent_data(mp, MEDIA_SUBTITLE, 0, 0, msg);
-		break;
-	}
-	case STREAM_SUBTITLE_CHANGED:
-		send_subtitle(mp, video);
 		break;
 	default:
 		break;
@@ -246,7 +246,6 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	const char *subtitle_path = device_config_get_subtitlepath();
 	int decoder = device_config_get_decoder();
 
-	video->send_sub = 1;
 	if (!(video->s = stream_new())) {
 		MPLOG("error: stream_new");
 		return AVOS_ERR;
@@ -296,7 +295,6 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 
 	stream_set_max_video_dimensions(video->s, VIDEO_MAX_WIDTH, VIDEO_MAX_HEIGHT);
 	stream_set_message_cb(video->s, stream_msg_cb);
-	stream_set_subtitle_offset(video->s, SUBTITLE_SEND_OFFSET);
 	stream_set_stop_handler(video->s, stream_stop_handler);
 	stream_set_abort_handler(video->s, stream_abort_handler);
 	stream_set_progress_handler(video->s, stream_progress_handler);
@@ -340,6 +338,19 @@ int avos_mp_video_open(avos_mp_t *mp, avos_mp_video_t *video, STREAM_URL *src, i
 	send_state_msg(mp, video);
 
 	stream_set_volume(video->s, 100, 100);
+	// Acquire a reference-counted handle to whatever SUB_ENGINE Java currently
+	// has published. Unlike the old raw g_sub_engine copy, this is guaranteed
+	// safe to hold for the STREAM's entire lifetime: nativeDestroy() on the
+	// Java side cannot free the underlying engine while this STREAM (or any
+	// other acquirer) still holds a reference -- see sub_engine_registry.h.
+	// Must be matched by exactly one sub_engine_registry_release() in
+	// avos_mp_video_close() below.
+	video->s->sub_engine = (void*)sub_engine_registry_acquire();
+
+	// Use the isolated instance
+	if (video->s->sub_engine) {
+		sub_engine_start((SUB_ENGINE*)video->s->sub_engine, engine_clock_cb, video->s);
+	}
 
 	return AVOS_ERR_OK;
 stream_err:
@@ -364,11 +375,44 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 {
 	MPLOG();
 
+	// Capture the engine pointer BEFORE stream_delete() below frees/nulls
+	// video->s -- stream_delete(&video->s) invalidates video->s itself, so
+	// reading video->s->sub_engine after that call is either a no-op (if it
+	// nulls the pointer, silently skipping sub_engine_close_track() and
+	// leaking the active backend -- SSA's ass_track/ass_renderer/ass_library
+	// and its style backups, or GFX's cached current_frame) or a
+	// use-after-free (if it doesn't). Snapshotting it here removes the
+	// dependency on video->s surviving past stream_delete() entirely.
+	SUB_ENGINE *sub_engine = (video->s && video->s->sub_engine) ? (SUB_ENGINE*)video->s->sub_engine : NULL;
+
+	// Stop the subtitle engine clock FIRST: its clock_ctx is the raw STREAM*
+	// (video->s) that stream_delete() frees below, so the render thread must
+	// stop dereferencing it (via engine_clock_cb) before that happens.
+	if (sub_engine) sub_engine_stop(sub_engine);
 	if (video->s) {
 		AV_set_state(AV_STOPPED, 0, 0, NULL, NULL);
 		stream_stop(video->s);
 		stream_delete(&video->s);
 	}
+	// Close the subtitle track only AFTER the stream -- and its background
+	// subtitle-decode thread (stream_sub_dec_thread in stream_subtitle.c) --
+	// is fully torn down. Closing it earlier (right after sub_engine_stop, as
+	// the first pass at this fix did) left a window where that thread could
+	// still be mid-loop and call back into sub_engine_open_track()/feed()
+	// with this video's own subtitle data, re-populating the (still-referenced)
+	// engine's active track right after we'd just cleared it -- so the next video
+	// could still inherit stale state. Waiting until the stream (and its
+	// thread) is actually gone removes that window. We use the snapshotted
+	// sub_engine pointer here (not video->s->sub_engine) since video->s is
+	// no longer valid at this point.
+	if (sub_engine) sub_engine_close_track(sub_engine);
+
+	// Release the reference acquired in avos_mp_video_open(). Must happen
+	// last, after every other use of `sub_engine` above -- this is what
+	// allows a concurrent nativeDestroy() on the Java side (blocked in
+	// sub_engine_registry_retract() if it got here first) to proceed and
+	// free the engine. Safe to call with sub_engine == NULL.
+	sub_engine_registry_release(sub_engine);
 
 	return AVOS_ERR_OK;
 }
@@ -383,6 +427,8 @@ void stream_un_pause_from_jni( STREAM *s, int was_paused );
 
 int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video)
 {
+	// NEW: Unpause the subtitle engine
+	if (video->s && video->s->sub_engine) sub_engine_set_paused((SUB_ENGINE*)video->s->sub_engine, 0);
 	if (stream_is_paused(video->s))
 		stream_un_pause_from_jni(video->s, 0);
 	else if (!is_stream_pauseable(mp, video))
@@ -392,6 +438,8 @@ int avos_mp_video_start(avos_mp_t *mp, avos_mp_video_t *video)
 
 int avos_mp_video_pause(avos_mp_t *mp, avos_mp_video_t *video)
 {
+	// NEW: Pause the subtitle engine
+	if (video->s && video->s->sub_engine) sub_engine_set_paused((SUB_ENGINE*)video->s->sub_engine, 1);
 	if (is_stream_pauseable(mp, video))
 		stream_pause(video->s);
 	else
@@ -475,26 +523,39 @@ int avos_mp_video_checksubtitles(avos_mp_t *mp, avos_mp_video_t *video)
 
 int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int track, int *ret)
 {
-	if (track < 0 || track >= video->s->av.subs_max) {
-		video->send_sub = 0;
+	// Locked snapshot of av.subs_max (subtitle_table_lock, stream.h) --
+	// stream_set_subtitle_stream() rechecks this itself, so a value gone
+	// stale by then is still caught there.
+	int subs_max;
+	pthread_mutex_lock( &video->s->subtitle_table_lock );
+	subs_max = video->s->av.subs_max;
+	pthread_mutex_unlock( &video->s->subtitle_table_lock );
+
+	if (track < 0 || track >= subs_max) {
+		video->sub_enabled = 0;
 		*ret = 1;
+		// Clear the screen if track is disabled
+		if (video->s && video->s->sub_engine) sub_engine_close_track((SUB_ENGINE*)video->s->sub_engine);
 	} else {
-		// Metadata refreshes can reapply an already active internal track.
-		// Keep its decoder state; enabling after "none" still needs cue replay.
-		if (video->send_sub && track == video->s->av.subs &&
+		if (video->sub_enabled && track == video->s->av.subs &&
 		    video->s->subtitle->valid && !video->s->subtitle->ext) {
 			*ret = 1;
 			return AVOS_ERR_OK;
 		}
-		video->send_sub = 1;
+		video->sub_enabled = 1;
 		*ret = stream_set_subtitle_stream(video->s, track) == 0 ? 1 : 0;
+		// DO NOT open the track here! stream_subtitle.c will natively open it
+		// when the first packet arrives. (Closing the *previous* track is no
+		// longer deferred, though -- stream_set_subtitle_stream() now closes
+		// the old engine backend itself before returning, instead of leaving
+		// it active until the new track's first packet shows up.)
 	}
 	return AVOS_ERR_OK;
 }
 
 int avos_mp_video_setsubtitledelay(avos_mp_t *mp, avos_mp_video_t *video, int delay)
 {
-	stream_set_subtitle_offset(video->s, delay + SUBTITLE_SEND_OFFSET);
+	stream_set_subtitle_offset(video->s, delay);
 	return AVOS_ERR_OK;
 }
 

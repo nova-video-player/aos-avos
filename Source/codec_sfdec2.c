@@ -688,6 +688,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->snap_origin_epoch = INT_MIN;
 	}
 	int64_t now_ms = atime64();
+	INT64 mode1_clock_ns = passthrough_mode == 1 ? _get_monotonic_ns() : 0;
 	int dt = time - p->venc_put_time;
 	int64_t dr = p->venc_ref_time ? now_ms - p->venc_ref_time : 0;
 
@@ -803,7 +804,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 	int in_grace = (p->grace_until_ms > 0 && now_ms < p->grace_until_ms);
 
-	int no_sched_anchor = (p->sched_start_off_ns == 0 || p->sched_start_mono_ns == 0);
+	// Zero is a valid first heard timestamp. Mode 1 publishes its renderer
+	// anchor here, so do not replace that anchor on the next IEC burst at 0ms.
+	int no_sched_anchor = (p->sched_start_mono_ns == 0 ||
+		(passthrough_mode != 1 && p->sched_start_off_ns == 0));
 	// A retained PCM queue already has a wall anchor shifted by the pause.
 	// Keep it through the first clock publication too: the resume write is
 	// acknowledged just after that call, so treating it as hard drift would
@@ -943,6 +947,30 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			DBGSI serprintf("android_sync: PCM resume anchor heard=%d manual_hold=%d offset=%lld epoch=%d\n",
 				time, manual_hold_ts, (long long)p->render_offset_ns, s->seek_epoch);
 		}
+		if( passthrough_mode == 1 && s && time >= 0 &&
+			!s->paused && !s->seek_paused ) {
+			// Publish the renderer anchor with the first clock sample, under
+			// the same lock. Deferring this to videosink_thread lets an arbitrary
+			// number of IEC refill bursts advance heard time before it anchors.
+			// That race changes the learned startup phase and forces a large
+			// compensating slew after seek. Use this sample's wall timestamp,
+			// not the later time at which the renderer happens to run.
+			// atime64 may have a process-relative origin; render deadlines
+			// must use the absolute CLOCK_MONOTONIC domain sampled above.
+			p->render_offset_ns = mode1_clock_ns - (INT64)time * 1000000LL;
+			p->render_offset_from_audio = 1;
+			p->target_offset_ns = p->render_offset_ns;
+			p->slew_active = 0;
+			p->pcm_startup_slew = 0;
+			p->mode2_dynamic_slew = 0;
+			p->mode2_dynamic_fast_slew = 0;
+			p->mode2_dynamic_settle_frames = 0;
+			p->last_mode2_dynamic_active = 0;
+			p->pending_reanchor = 0;
+			p->pending_seek_reanchor = 0;
+			DBGSI serprintf("android_sync: mode1 published anchor heard=%d wall_ns=%lld offset=%lld epoch=%d\n",
+				time, (long long)mode1_clock_ns, (long long)p->render_offset_ns, s->seek_epoch);
+		}
 		DBGSI serprintf("videosink_put_time: reset sched and render anchors at time=%d, diff=%lld (speed_changed=%d disc=%d no_sched=%d resume=%d)\n",
 			time, (long long)diff, speed_changed, discontinuity, no_sched_anchor, resume_started || pcm_resume);
 	}
@@ -960,7 +988,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		mode1_resume_observe_l(p, time, now_ms, mode1_window_ms);
 	}
 
-	if (timeline_changed)
+	if (timeline_changed || (allow_reanchor && passthrough_mode == 1))
 		pthread_cond_broadcast(&p->locked.cond);
 DBGSI2 serprintf("[[put %8d|%4d|%4lld]]", time, dt, (long long)dr );
 	pthread_mutex_unlock(&p->locked.mtx);

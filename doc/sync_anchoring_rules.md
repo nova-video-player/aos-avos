@@ -261,6 +261,13 @@ clamp is restricted to sinks without `put_time`; enabling it on resume would
 manufacture a forward jump followed by a backward jump at anchor publication.
 The MediaCodec renderer uses the published Mode 1 clock after seek, without
 clamping it back to the preview frame during initialization or later reanchoring.
+On a new Mode 1 clock anchor, `put_time` installs the renderer offset from that
+publication's heard timestamp and wall timestamp together, under the renderer
+lock. It does not wait for the renderer thread to sample a later refill burst.
+This prevents thread scheduling from selecting a different startup phase or
+creating a large compensating slew after seek. A heard timestamp of zero is
+valid; only the missing wall reference marks an unset Mode 1 scheduler anchor.
+Paused seek previews retain their existing behavior until audio resumes.
 
 An ordinary pause on a backend that preserves queued output retains the valid,
 pause-shifted Mode 1 renderer anchor. The resume-pending edge alone does not
@@ -296,10 +303,11 @@ A seek on the same Mode 1 audio output preserves only this relative phase,
 guarded by the audio lifecycle generation and manual delay. It still discards
 the old absolute timestamps, scheduler anchors, queue observations and active
 correction. Once the new audio clock is established and the refill measurement
-window completes, a one-shot correction restores the preserved phase. Otherwise
-the renderer's first observation of an incompletely filled IEC queue can leave
-a different persistent offset after each seek. Chained seeks and seeks while
-paused retain the reference without waiting for audio during preview. A seek
+window completes, a one-shot correction restores any remaining difference from
+the preserved phase. The first publication already anchors the new renderer,
+so this correction handles refill variation rather than renderer startup delay.
+Chained seeks and seeks while paused retain the reference without waiting for
+audio during preview. A seek
 before the initial reference exists simply establishes a new reference normally.
 Late-frame catch-up and genuine audio-gap handling retain their existing policy.
 

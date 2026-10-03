@@ -273,10 +273,21 @@ publications cannot complete the window. Its minimum wall-minus-heard offset
 selects the fullest queue observation, avoiding the first-burst refill transient.
 
 The measured phase change sets a one-shot video correction, bounded to 4ms and
-10% of the playback interval per distinct frame. Repeated pauses restart the
-measurement window but retain the original phase reference, including when they
-interrupt a correction. Ordinary playback does not continuously chase this
-static clock. Hard reanchors, non-seek flushes, audio reconfiguration and manual
+10% of the playback interval per distinct frame. Ordinary pauses retain both the
+original phase and an unfinished measurement window. Resume shifts the window's
+wall reference and minimum offset by the paused duration, so only playing time
+counts toward its completion. A window spanning pauses starts recovery and is
+then confirmed by a fresh window; an earlier minimum must not permanently hide
+a phase change in the other direction.
+
+Pause freezes an active correction instead of discarding it. At the next resume,
+before releasing the producers, the renderer applies its measured residual up
+to two video frames (capped at 100ms). Any remainder uses the normal per-frame
+slew. This prevents repeated short play intervals from indefinitely postponing
+measurement and repeatedly cancelling recovery. The resume step requires the
+same valid Mode 1 output and manual delay; seek/startup or invalid anchors bypass
+it. Ordinary playback does not continuously chase the static clock.
+Hard reanchors, non-seek flushes, audio reconfiguration and manual
 A/V delay changes invalidate the reference. This uses neither Mode 2's dynamic
 clock nor the diagnostic IEC occupancy observer and does not estimate downstream
 receiver latency.

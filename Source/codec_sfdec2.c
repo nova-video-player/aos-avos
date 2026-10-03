@@ -164,6 +164,7 @@ typedef struct priv {
 	int mode1_resume_pending;
 	int mode1_resume_slew;
 	int64_t mode1_sample_wall_ms;
+	int mode1_sample_crossed_pause;
 	int mode1_sample_start_ts;
 	int mode1_sample_last_ts;
 	INT64 mode1_sample_offset_ns;
@@ -591,6 +592,7 @@ static void mode1_resume_observe_l(priv_t *p, int time, int64_t now_ms, int wind
 	INT64 offset = now_ms * 1000000LL - (INT64)time * 1000000LL;
 	if( !p->mode1_sample_wall_ms ) {
 		p->mode1_sample_wall_ms = now_ms;
+		p->mode1_sample_crossed_pause = 0;
 		p->mode1_sample_start_ts = time;
 		p->mode1_sample_last_ts = time;
 		p->mode1_sample_offset_ns = offset;
@@ -607,6 +609,9 @@ static void mode1_resume_observe_l(priv_t *p, int time, int64_t now_ms, int wind
 	if( now_ms - p->mode1_sample_wall_ms < window_ms ||
 		(int64_t)time - p->mode1_sample_start_ts < window_ms )
 		return;
+	// A window spanning pauses can start recovery promptly, but confirm it
+	// with a fresh window: queue phase may have changed after its old minimum.
+	int confirm_after_pause = p->mode1_sample_crossed_pause && p->mode1_phase_valid;
 	if( !p->mode1_phase_valid ) {
 		p->mode1_phase_ns = p->render_offset_ns - p->mode1_sample_offset_ns;
 		p->mode1_phase_valid = 1;
@@ -622,12 +627,12 @@ static void mode1_resume_observe_l(priv_t *p, int time, int64_t now_ms, int wind
 		p->pcm_startup_slew_frame_epoch = INT_MIN;
 		p->pending_reanchor = 0;
 		p->render_generation++;
-		DBGSI serprintf("android_sync: mode1 %s slew correction=%lldus phase=%lldus window=%dms\n",
+		DBGSI serprintf("android_sync: mode1 %s slew correction=%lldus phase=%lldus window=%dms confirm=%d\n",
 			p->mode1_seek_pending ? "seek" : "resume",
 			(long long)((p->target_offset_ns - p->render_offset_ns) / 1000),
-			(long long)(p->mode1_phase_ns / 1000), window_ms);
+			(long long)(p->mode1_phase_ns / 1000), window_ms, confirm_after_pause);
 	}
-	p->mode1_resume_pending = 0;
+	p->mode1_resume_pending = confirm_after_pause;
 	p->mode1_seek_pending = 0;
 	p->mode1_sample_wall_ms = 0;
 }
@@ -1665,6 +1670,13 @@ static void *videosink_thread(void *ctx)
 		int do_render = 1;
 		int render_error = 0;
 		int presented = 0;
+		// Snapshot timing under the renderer lock. Diagnostics must not query
+		// AudioTrack or change the clock being measured.
+		INT64 diag_ref_ms = p->venc_ref_time;
+		int diag_heard = p->venc_put_time;
+		int diag_user_delay = s ? (int)(s->av_delay * p->video_timeline.inv_speed) : 0;
+		double diag_interval_ms = p->video_frame_rate_num > 0 && p->video_timeline.speed > 0 ?
+			1000.0 * p->video_frame_rate_den / (p->video_frame_rate_num * p->video_timeline.speed) : 0;
 		if( !p->locked.run || has_state_l(p, THREAD_STATE_FLUSHING)) {
 			do_render = 0;
 		}
@@ -1688,6 +1700,13 @@ static void *videosink_thread(void *ctx)
 				// Timed rendering (asap=0) using render_ts_ns computed under the lock
 				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 0, render_ts_ns);
 				presented = !render_error;
+				if (presented) {
+					DBGSI2 serprintf("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld\n",
+						f->time, f->epoch, (long long)render_ts_ns, (long long)now_ns,
+						diag_interval_ms, (long long)(now_ns / NSEC_PER_MSEC - diag_ref_ms),
+						(long long)f->time - diag_heard -
+						(render_ts_ns / NSEC_PER_MSEC - diag_ref_ms) + diag_user_delay);
+				}
 				int took = time_update_time() - start;
 				p->dropped = 0;
 				DBGCV CLOG("\t\t\t\t\t\t\trender %8d/%8d  took %3d", f->time, f->blit_time, took );
@@ -2633,14 +2652,22 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		audio_interface_pause_preserves_output(s->audio_ctx);
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
+	int preserve_mode1_phase = mode1_preserves_output &&
+		mode1_phase_matches_audio_l(p, s) && p->render_offset_ns != -1 &&
+		p->render_offset_from_audio && !s->seek_paused &&
+		!s->audio_start_pending && !p->pending_seek_reanchor && !p->mode1_seek_pending;
 	if( paused ) {
-		if( mode1_preserves_output && p->mode1_phase_valid &&
-			!s->seek_paused && !s->audio_start_pending && !p->pending_seek_reanchor ) {
+		if( preserve_mode1_phase ) {
 			p->mode1_resume_pending = 1;
+		} else {
+			p->mode1_sample_wall_ms = 0;
 		}
-		p->mode1_sample_wall_ms = 0;
 		if( p->mode1_resume_slew ) {
-			p->mode1_resume_slew = 0;
+			// Freeze an already measured correction while paused. Apply its
+			// residual at resume, before producers release new video frames.
+			// Discard it if a seek or output change has invalidated its phase.
+			if( !preserve_mode1_phase )
+				p->mode1_resume_slew = 0;
 			p->slew_active = 0;
 		}
 
@@ -2710,6 +2737,29 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		return;
 	}
 
+	if( p->mode1_resume_slew ) {
+		if( preserve_mode1_phase ) {
+			// Recover measured phase at the resume boundary, rather than
+			// repeatedly cancelling it. Bound the step to two video frames
+			// (at most 100ms); larger residuals keep the normal per-frame slew.
+			int frame_ms = s->video && s->video->msPerFrame > 0 ? s->video->msPerFrame : 33;
+			INT64 limit = MIN(100000000LL, (INT64)frame_ms * 2000000LL);
+			INT64 residual = p->target_offset_ns - p->render_offset_ns;
+			INT64 correction = MAX(-limit, MIN(limit, residual));
+			p->render_offset_ns += correction;
+			p->render_generation++;
+			p->mode1_resume_slew = p->target_offset_ns != p->render_offset_ns;
+			p->slew_active = p->mode1_resume_slew;
+			DBGSI serprintf("android_sync: mode1 resume applies paused correction=%lldus remaining=%lldus\n",
+				(long long)(correction / 1000), (long long)((residual - correction) / 1000));
+		} else {
+			p->mode1_resume_slew = 0;
+			p->slew_active = 0;
+		}
+	}
+	if( !preserve_mode1_phase )
+		p->mode1_sample_wall_ms = 0;
+
 	// Shift render_offset_ns by paused duration to avoid fast catch-up on resume.
 	if( p->pause_start_ms > 0 && p->render_offset_ns != -1 ) {
 		int64_t resume_ms = atime64();
@@ -2720,6 +2770,15 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 			// Otherwise its old target slews the preserved offset back toward
 			// the pre-pause wall clock.
 			p->target_offset_ns += (int64_t)pause_ms * 1000000LL;
+			if( preserve_mode1_phase && p->mode1_sample_wall_ms > 0 ) {
+				// Preserve running time and accepted media already observed. A
+				// sequence of short play intervals must not restart the refill
+				// window forever. Move its wall reference and minimum together
+				// so time spent paused cannot qualify as queue-refill evidence.
+				p->mode1_sample_wall_ms += pause_ms;
+				p->mode1_sample_offset_ns += pause_ms * 1000000LL;
+				p->mode1_sample_crossed_pause = 1;
+			}
 			if( p->venc_ref_time > 0 ) {
 				// put_time drift is measured from venc_ref_time. Exclude the
 				// same paused wall interval from that reference, otherwise the

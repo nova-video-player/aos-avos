@@ -3257,6 +3257,10 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 			*rate = at->rate;
 			if (source) *source = AT_PRESENTED_FRAMES_SRC_TIMESTAMP;
 			if (age_ms) *age_ms = (int)(age_ns / 1000000LL);
+			// Report the observed counter, never the extrapolated position.
+DBG2			LOG("audio_present_diag: presented=%llu source=timestamp age_ms=%lld sample_ns=%lld",
+				(unsigned long long)audiotrack_epoch_adjust_presented_frames(at, at->last_timestamp_frames),
+				(long long)(age_ns / 1000000LL), (long long)at->last_timestamp_ns);
 			return 1;
 		}
 	}
@@ -3279,6 +3283,9 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 	if (!env || !at->obj) return 0;
 
 	jint ph_frames = call_int_method_with_env(at, env, "getPlaybackHeadPosition", "()I");
+DBG2	LOG("audio_present_diag: presented=%llu source=playhead age_ms=0 sample_ns=%lld",
+		(unsigned long long)audiotrack_epoch_adjust_presented_frames(at, (uint64_t)(uint32_t)MAX(ph_frames, 0)),
+		(long long)atime64() * 1000000LL);
 	if (ph_frames <= 0) return 0;
 
 	*frames = audiotrack_epoch_adjust_presented_frames(

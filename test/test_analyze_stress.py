@@ -33,6 +33,75 @@ class AnalyzerTests(unittest.TestCase):
         for mode in ('seek', 'resume'):
             self.assertEqual(self.check(fixture(mode), mode)['healthy'], 1)
 
+    def queued_preview_fixture(self):
+        prefix = ('999.800 _stream_play_n_frames(n=10, time=0)\n'
+                  '999.900 SINK_REF_DEFERRED: frame_time=0 audio_time=-1 seek_epoch=1\n'
+                  '1000.000 WALLCLOCK_RESET: by pause resume\n')
+        return prefix + fixture('seek', sequence=True).replace(
+            'deadline_ns=1000110000000', 'deadline_ns=999968000000')
+
+    def test_queued_preview_survives_resume_without_hiding_lateness(self):
+        from analyze_stress_recording import analyze_recording
+        text = self.queued_preview_fixture()
+        live = self.check(text, 'seek')
+        self.assertEqual(live['healthy'], 1, live)
+        self.assertEqual(live['seek_preview_count'], 1)
+        self.assertEqual(live['seek_preview_max_lateness_ms'], 42)
+        self.assertEqual(live['max_lateness_ms'], 0)
+        self.assertEqual(live['render_count'], 75)
+        self.assertAlmostEqual(live['first_render_ms'], 50)
+        report = analyze_recording(text, config({}))
+        self.assertEqual(report['verdict'], 'NO_ISSUES_OBSERVED', report)
+        self.assertEqual(report['segments'][0]['findings'][0]['kind'], 'queued_seek_preview')
+        # The very next regular frame remains subject to the strict limit.
+        late = text.replace('deadline_ns=1000150000000', 'deadline_ns=999998000000')
+        self.assertIn('late_submission', self.check(late, 'seek')['reason'])
+        self.assertEqual(analyze_recording(late, config({}))['verdict'], 'ISSUES_OBSERVED')
+
+    def test_preview_requires_matching_evidence_and_is_consumed_once(self):
+        from analyze_stress_recording import analyze_recording
+        text = self.queued_preview_fixture()
+        for broken in (text.replace('seek_epoch=1\n', 'seek_epoch=2\n'),
+                       text.replace('frame_time=0', 'frame_time=40'),
+                       text.replace('_stream_play_n_frames(n=10, time=0)', 'unidentified seek'),
+                       text.replace('1000.000 WALLCLOCK_RESET', '999.950 stream_open:\n1000.000 WALLCLOCK_RESET')):
+            self.assertIn('late_submission', self.check(broken, 'seek')['reason'])
+            self.assertEqual(analyze_recording(broken, config({}))['verdict'], 'ISSUES_OBSERVED')
+        matched = [r for r in records(text) if r[2].get('_seek_preview')]
+        self.assertEqual(len(matched), 1)
+        duplicate = text + '\n' + matched[0][1]
+        self.assertEqual(sum(bool(r[2].get('_seek_preview')) for r in records(duplicate)), 1)
+
+    def test_preview_cannot_supply_coverage_or_mask_missing_sequence(self):
+        from analyze_stress_recording import analyze_recording
+        text = self.queued_preview_fixture()
+        missing = '\n'.join(r for r in text.splitlines() if not r.endswith('render_seq=2'))
+        self.assertIn('missing_render_records', self.check(missing, 'seek')['reason'])
+        self.assertEqual(analyze_recording(missing, config({}))['verdict'], 'INSUFFICIENT_EVIDENCE')
+        only_preview = '\n'.join(r for r in text.splitlines() if
+                                'video_render_diag:' not in r or r.endswith('render_seq=1'))
+        result = self.check(only_preview, 'seek')
+        self.assertIn('missing_render_timing', result['reason'])
+        self.assertIn('seek_startup_latency', result['reason'])
+        self.assertEqual(analyze_recording(only_preview, config({}))['verdict'], 'INSUFFICIENT_EVIDENCE')
+        overdue = text.replace('deadline_ns=999968000000', 'deadline_ns=998000000000')
+        self.assertIn('seek_preview_startup_late', self.check(overdue, 'seek')['reason'])
+        self.assertEqual(analyze_recording(overdue, config({}))['verdict'], 'ISSUES_OBSERVED')
+
+    def test_capture_filters_preserve_preview_identity(self):
+        from pathlib import Path
+        import re
+        import subprocess
+        for name, variable in (('stress_common.sh', 'LOGCAT_KEEP'), ('stress_campaign.sh', 'SESSION_KEEP')):
+            text = Path(__file__).with_name(name).read_text()
+            assignments = '\n'.join(line.strip() for line in text.splitlines()
+                                    if line.strip().startswith(variable + '='))
+            result = subprocess.run(['bash', '-c', assignments + '\nprintf "%s" "$' + variable + '"'],
+                                    check=True, capture_output=True, text=True)
+            for marker in ('_stream_play_n_frames(n=10, time=0)',
+                           'SINK_REF_DEFERRED: frame_time=0 seek_epoch=1'):
+                self.assertRegex(marker, re.compile(result.stdout))
+
     def test_delayed_logd_summary_is_not_playback_clock_reversal(self):
         text = fixture() + '\n1001.000 3677 3883 I chatty  : uid=1000(system) Binder identical 3 lines'
         self.assertEqual(self.check(text)['healthy'], 1)

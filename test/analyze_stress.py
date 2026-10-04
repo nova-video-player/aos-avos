@@ -35,6 +35,48 @@ FAULTS = {
 }
 
 
+class SeekPreview:
+    """Match deferred preview output by media timestamp and seek epoch.
+
+    A preview prepared while seeking can reach the renderer after resume. Do
+    not classify it from submission time alone, or infer it from lateness.
+    Missing identifying records leave the ordinary strict checks in force.
+    """
+    def __init__(self):
+        self.active = False
+        self.pending = set()
+
+    def annotate(self, line, fields):
+        if ('stream_open:' in line or 'stream_stop:' in line or
+                'libavos_set_passthrough:' in line or
+                'audiotrack_set_output_params: resolved' in line):
+            self.active = False
+            self.pending.clear()
+        if '_stream_play_n_frames(n=' in line:
+            if not self.active:
+                self.pending.clear()
+            self.active = True
+        if 'SINK_REF_DEFERRED:' in line and self.active:
+            try:
+                self.pending.add((int(fields['seek_epoch']), int(fields['frame_time'])))
+            except (KeyError, ValueError):
+                pass
+        if 'WALLCLOCK_RESET: by pause resume' in line or 'VIDEO_SEEK_TARGET_READY:' in line:
+            self.active = False
+        if 'video_render_diag:' in line:
+            try:
+                key = (int(fields['epoch']), int(fields['frame']))
+            except (KeyError, ValueError):
+                return
+            if key in self.pending:
+                fields['_seek_preview'] = True
+                self.pending.remove(key)
+            elif not self.active:
+                # Once regular output resumes, never borrow an old identity
+                # for a later frame, even if its timestamp happens to match.
+                self.pending.clear()
+
+
 class ResumeBoundary:
     """Account only for the wall shift/correction explicitly reported by the sink."""
     def __init__(self):
@@ -141,9 +183,11 @@ def config(env=None):
 def records(text):
     result = []
     resume = ResumeBoundary()
+    preview = SeekPreview()
     for line in text.splitlines():
         fields = dict(FIELDS.findall(line))
         resume.annotate(line, fields)
+        preview.annotate(line, fields)
         try:
             stamp = float(line.split()[0]) * 1000
         except (ValueError, IndexError):
@@ -260,7 +304,10 @@ def scheduled_metrics(renders, start, end, cfg, findings=None):
         if not ok and reason not in reasons:
             reasons.append(reason)
 
-    out['render_count'] = len(renders)
+    playback = [r for r in renders if not r[2].get('_seek_preview')]
+    out['render_count'] = len(playback)
+    out['seek_preview_count'] = len(renders) - len(playback)
+    out['seek_preview_max_lateness_ms'] = 0
     out['cadence_bad'] = 0
     out['max_cadence_error_ms'] = 0
     out['max_lateness_ms'] = 0
@@ -275,6 +322,14 @@ def scheduled_metrics(renders, start, end, cfg, findings=None):
     for r in renders:
         interval = number(r, 'interval_ms')
         late = (int(r[2]['submit_ns']) - int(r[2]['deadline_ns'])) / 1e6
+        if r[2].get('_seek_preview'):
+            out['seek_preview_max_lateness_ms'] = max(out['seek_preview_max_lateness_ms'], late)
+            finding('queued_seek_preview', r, r, lateness_ms=late)
+            require(late <= cfg['SEEK_STARTUP_MAX_MS'], 'seek_preview_startup_late')
+            if late > cfg['SEEK_STARTUP_MAX_MS']:
+                finding('seek_preview_startup_late', r, r, lateness_ms=late,
+                        limit_ms=cfg['SEEK_STARTUP_MAX_MS'])
+            continue
         out['max_lateness_ms'] = max(out['max_lateness_ms'], late)
         require(interval > 0, 'missing_frame_rate')
         require(late <= max(interval, cfg['CADENCE_TOLERANCE_MS']), 'late_submission')
@@ -292,6 +347,15 @@ def scheduled_metrics(renders, start, end, cfg, findings=None):
             continuity_run += 1
         b[2]['_render_continuity_run'] = continuity_run
         if a[2]['epoch'] != b[2]['epoch']:
+            continue
+        if a[2].get('_seek_preview') or b[2].get('_seek_preview'):
+            # Keep sequence-loss checks at this boundary, but preview deadlines
+            # do not describe ordinary playing cadence.
+            if evidence_gap:
+                out['missing_render_records'] += omitted
+                out['render_continuity_gaps'] += 1
+                require(False, evidence_gap)
+                finding(evidence_gap, a, b, omitted_records=omitted)
             continue
         # Changing cadence is expected during a speed ramp. Use the new cadence
         # and tolerate the larger adjacent interval only at the boundary.
@@ -323,10 +387,10 @@ def scheduled_metrics(renders, start, end, cfg, findings=None):
             finding('scheduled_judder', a, b, interval_ms=actual, expected_ms=expected,
                     previous_expected_ms=number(a, 'interval_ms'), error_ms=error)
     require(out['cadence_bad'] <= cfg['CADENCE_BAD_MAX'], 'scheduled_judder')
-    out['timing'] = 'scheduled' if len(renders) >= 3 else 'missing'
+    out['timing'] = 'scheduled' if len(playback) >= 3 else 'missing'
     if cfg['REQUIRE_RENDER_TIMING']:
-        require(len(renders) >= 3, 'missing_render_timing')
-        require(bool(renders) and end - renders[-1][0] <= cfg['VIDEO_GAP_MAX_MS'], 'stale_render_timing')
+        require(len(playback) >= 3, 'missing_render_timing')
+        require(bool(playback) and end - playback[-1][0] <= cfg['VIDEO_GAP_MAX_MS'], 'stale_render_timing')
         require(len(phase_rows) >= 3, 'missing_fresh_audio_anchor')
         require(bool(phase_rows) and end - phase_rows[-1][0] <= cfg['VIDEO_GAP_MAX_MS'], 'stale_audio_anchor')
     out['phase_raw_min_ms'] = min([number(r, 'phase_ms') for r in phase_rows] or [0])
@@ -479,7 +543,7 @@ def analyze(text, mode, cfg=None):
         startup_limit = cfg['SEEK_STARTUP_MAX_MS'] if mode == 'seek' else cfg['RESUME_LATENCY_MAX_MS']
         startup_items = [('write', writes), ('video', videos)]
         if mode == 'seek' and cfg['REQUIRE_RENDER_TIMING']:
-            startup_items.append(('render', renders))
+            startup_items.append(('render', [r for r in renders if not r[2].get('_seek_preview')]))
         for label, items in startup_items:
             latency = items[0][0] - start if items else -1
             out[f'first_{label}_ms'] = latency

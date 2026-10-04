@@ -258,6 +258,14 @@ both requested and achieved positions: a coarse keyframe landing seconds away
 from the request is distinct from spending those seconds recovering A/V sync.
 
 Exclude deliberate preview output from normal-playing cadence measurements.
+Submission after resume does not prove a frame belongs to ordinary playback:
+match its timestamp and epoch against `SINK_REF_DEFERRED` emitted during an
+explicit `_stream_play_n_frames` preview interval. Both analyzers carry that
+identity across resume and report `queued_seek_preview` separately, including its
+lateness. Preview lateness exceeding `SEEK_STARTUP_MAX_MS` still reports an issue.
+Preview output cannot supply healthy playback coverage or satisfy first-render
+recovery, and render sequence gaps remain evidence gaps. Without matching records,
+do not infer preview status from a late deadline or widen the normal-frame limit.
 Reject stale-epoch frames when checking progress. Verify that the final seek in
 a chained sequence establishes the active clock and that old absolute anchors
 or observations do not survive into it. Real audio gaps require their own

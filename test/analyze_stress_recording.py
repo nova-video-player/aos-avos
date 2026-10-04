@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import statistics
 
-from analyze_stress import (FIELDS, RESUME_APPLIED, ResumeBoundary, config, fault_signals, number,
+from analyze_stress import (FIELDS, RESUME_APPLIED, ResumeBoundary, SeekPreview, config, fault_signals, number,
                             render_sequence, scheduled_metrics, write_metrics)
 
 
@@ -19,6 +19,7 @@ BOUNDARY = re.compile(r'WALLCLOCK_RESET: by pause resume|VIDEO_SEEK_TARGET_READY
 
 def recovery_metrics(frames, cfg):
     """Recovery relative to the first render submission, not an unclocked key event."""
+    frames = [r for r in frames if not r[2].get('_seek_preview')]
     fresh = [r for r in frames if 0 <= number(r, 'anchor_age_ms') <= 100]
     good = []
     settled = None
@@ -61,6 +62,7 @@ def analyze_recording(text, cfg=None):
     invalid_records = []
     write_underruns = 0
     resume = ResumeBoundary()
+    preview = SeekPreview()
     transitions = []
     context_changes = []
     current_mode = None
@@ -77,6 +79,7 @@ def analyze_recording(text, cfg=None):
     for line_number, line in enumerate(text.splitlines(), 1):
         fields = dict(FIELDS.findall(line))
         resume.annotate(line, fields)
+        preview.annotate(line, fields)
         mode = re.search(r'libavos_set_passthrough: mode=(\d+)', line)
         changed = False
         pid = re.search(r'avos_player\(\s*(\d+)\)', line) or re.match(
@@ -98,6 +101,7 @@ def analyze_recording(text, cfg=None):
             changed |= output_signature is not None and signature != output_signature
             output_signature = signature
         if seen_render and (changed or 'stream_open:' in line):
+            preview = SeekPreview()
             finish()
             context_changes.append(line_number)
             boundary = 'playback_context_change'
@@ -155,7 +159,7 @@ def analyze_recording(text, cfg=None):
                                            re.search(r'passthrough=1\b|libavos_set_passthrough: mode=1\b', text)):
         reference_missing = True
         for _, frames in sections:
-            samples = [number(r, 'phase_ms') for r in frames if
+            samples = [number(r, 'phase_ms') for r in frames if not r[2].get('_seek_preview') and
                        cfg['AV_SETTLE_MS'] <= r[0] - frames[0][0] <= cfg['AV_SETTLE_MS'] + 1000 and
                        0 <= number(r, 'anchor_age_ms') <= 100]
             if len(samples) >= 3:
@@ -169,7 +173,8 @@ def analyze_recording(text, cfg=None):
             cfg['PHASE_REFERENCE'] = 'unavailable'
     reports = []
     for index, (boundary, frames) in enumerate(sections, 1):
-        start, end = frames[0][0], frames[-1][0]
+        playback = [r for r in frames if not r[2].get('_seek_preview')]
+        start, end = (playback[0][0] if playback else frames[0][0]), frames[-1][0]
         findings = []
         metrics, reasons = scheduled_metrics(frames, start, end, cfg, findings)
         # A route/session change needs a new capture reference. Keep cadence
@@ -181,7 +186,7 @@ def analyze_recording(text, cfg=None):
             reasons.append('missing_stable_phase_reference')
             metrics.update(expected_phase_ms=None, phase_reference='unavailable',
                            phase_max_ms=None, phase_bad_ms=None)
-        complete = end - start >= cfg['STABLE_MEDIA_MS'] and len(frames) >= 3
+        complete = end - start >= cfg['STABLE_MEDIA_MS'] and len(playback) >= 3
         gaps = [r for r in reasons if r.startswith('missing_') or r.startswith('stale_')]
         issues = [r for r in reasons if r not in gaps]
         reports.append(dict(segment=index, boundary=boundary,
@@ -274,7 +279,9 @@ def markdown_report(report, source):
         lines.append(f"| {segment['segment']} | {' | '.join(cells)} | {recovery['status']} |")
     lines += ['', '## Timing findings', '',
               'Threshold crossings use the configured event budgets. Resume-boundary adjustments '
-              'are shown separately from playback judder and do not consume its budget.', '',
+              'and identified queued seek previews are shown separately from playback judder. '
+              'Preview lateness retains the seek startup limit; ordinary submissions retain '
+              'the frame-interval limit.', '',
               '| Segment | Source lines | Finding | Measurements |', '|---|---|---|---|']
     for segment in report['segments']:
         for finding in segment['findings']:

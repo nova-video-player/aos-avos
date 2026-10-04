@@ -286,6 +286,18 @@ variable-frame-rate content needs a suitable tolerance or separate analysis.
 Submission later than one frame interval (or the cadence tolerance, whichever
 is larger) is reported as late even if the engine's 200ms drop limit is not hit.
 
+A seek preview can be queued while paused and submitted after resume. The
+analyzers match `SINK_REF_DEFERRED` frame timestamps and seek epochs inside an
+explicit `_stream_play_n_frames` preview interval. That identity survives resume
+until the preview is submitted or ordinary output begins. Such submissions are
+reported as `queued_seek_preview`, with `seek_preview_count` and
+`seek_preview_max_lateness_ms`, and use `SEEK_STARTUP_MAX_MS` for lateness.
+They do not establish ordinary playback cadence, phase, coverage or first-render
+recovery. Sequence gaps and subsequent late frames remain checked. Without the
+identifying records, strict ordinary-frame checks remain in force; older filtered
+captures may need replay from the raw session log. Both capture filters retain
+`SINK_REF_DEFERRED` for new runs.
+
 ### Internal A/V phase versus physical lipsync
 
 `video_render_diag.phase_ms` projects the last audio-owned anchor to the video

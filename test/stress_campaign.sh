@@ -46,6 +46,7 @@ SPEED_SCRIPT="$SCRIPT_DIR/stress_speed_validate.sh"
 SESSION_KEEP='mode1_iec_occupancy_shadow:|mode2_occupancy_shadow:|video_render_diag:|audio_present_diag:|playhead_delay:|playhead_streak:|PCM resume slew|AVOS_TEST_POLL|AVOS_TEST_BURST|chatty|dropped [0-9]+ lines|audiotrack_write: wrote|video_sched_diag:|put_time_calc:|late frame drop|AUDIO_STARVED:|AudioTrack underruns:|android_sync: PCM resume anchor|WALLCLOCK_RESET: by pause resume|audio_resume_route:|applying speed filter \[|VIDEO_SEEK_TARGET_READY:|SEEK_VIDEO_DROP|VIDEO_SEEK_DROP|seek watchdog|Fatal signal|FATAL EXCEPTION|ANR in|ERROR_DEAD_OBJECT|android_sync: (pause start|resume |mode1 )|_stream_play_n_frames|stream_open:|stream_stop:|libavos_set_passthrough: mode=|audiotrack_set_output_params: resolved|compressed (short write|write failed)|continuing unit at|Unexpected EOF|DEAD_OBJECT'
 
 SESSION_KEEP="$SESSION_KEEP|PCM resume applies paused correction="
+SESSION_KEEP="$SESSION_KEEP|SINK_REF_DEFERRED:"
 
 fail()
 {

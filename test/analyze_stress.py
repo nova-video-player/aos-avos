@@ -569,10 +569,24 @@ def analyze(text, mode, cfg=None):
     if not explicit and not shadows:
         present = [r for r in rows if 'playhead_delay:' in r[1] or 'playhead_streak:' in r[1]]
     streams = {}
+    ordered_present = []
+    newest_sample = {}
+    out['presentation_out_of_order'] = 0
     for r in present:
         domain = (r[2].get('source', r[2].get('src', 'playhead')),
                   r[2].get('generation', ''), r[2].get('epoch', ''))
+        sample_ns = r[2].get('sample_ns')
+        if sample_ns is not None:
+            sample_ns = int(sample_ns)
+            if sample_ns < newest_sample.get(domain, sample_ns):
+                # Concurrent queries can log an older observation after a newer
+                # one. It proves neither a counter reset nor fresh progress.
+                out['presentation_out_of_order'] += 1
+                continue
+            newest_sample[domain] = sample_ns
         streams.setdefault(domain, []).append(r)
+        ordered_present.append(r)
+    present = ordered_present
     advancing = False
     for samples in streams.values():
         advancing |= len(samples) >= 2 and span(samples, 'presented') > 0

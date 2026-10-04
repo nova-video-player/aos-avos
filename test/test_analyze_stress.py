@@ -33,6 +33,28 @@ class AnalyzerTests(unittest.TestCase):
         for mode in ('seek', 'resume'):
             self.assertEqual(self.check(fixture(mode), mode)['healthy'], 1)
 
+    def test_older_observation_is_not_a_presentation_reset(self):
+        text = fixture()
+        row = '1001.010 audio_present_diag: presented=48000 source=playhead age_ms=0 sample_ns=1001010000000'
+        older = '1001.010 audio_present_diag: presented=47744 source=playhead age_ms=0 sample_ns=1001008000000'
+        self.assertIn(row, text)
+        result = self.check(text.replace(row, row + '\n' + older))
+        self.assertEqual(result['healthy'], 1, result)
+        self.assertEqual(result['presentation_out_of_order'], 1)
+        # Equal/newer observation timestamps and unclocked reversals still fail.
+        for bad in (older.replace('1001008000000', '1001010000000'),
+                    older.replace('1001008000000', '1001011000000'),
+                    older.replace(' sample_ns=1001008000000', '')):
+            self.assertIn('presentation_reset', self.check(text.replace(row, row + '\n' + bad))['reason'])
+
+    def test_old_observations_cannot_prove_continued_presentation(self):
+        rows = fixture().splitlines()
+        for i, row in enumerate(rows):
+            if 'audio_present_diag:' in row and float(row.split()[0]) > 1001:
+                rows[i] = row.split('presented=')[0] + 'presented=0 source=playhead age_ms=0 sample_ns=1'
+        result = self.check('\n'.join(rows))
+        self.assertIn('stale_presentation', result['reason'])
+
     def queued_preview_fixture(self):
         prefix = ('999.800 _stream_play_n_frames(n=10, time=0)\n'
                   '999.900 SINK_REF_DEFERRED: frame_time=0 audio_time=-1 seek_epoch=1\n'

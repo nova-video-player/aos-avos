@@ -23,6 +23,7 @@ PY
 	LOGCAT_KEEP='mode1_iec_occupancy_shadow:|mode2_occupancy_shadow:|audiotrack_write: wrote|video_sched_diag:|video_render_diag:|audio_present_diag:|playhead_delay:|playhead_streak:|put_time_calc:|late frame drop|AUDIO_STARVED:|AudioTrack underruns:|PCM resume (anchor|slew)|WALLCLOCK_RESET: by pause resume|audio_resume_route:|applying speed filter \[|VIDEO_SEEK_TARGET_READY:|VIDEO_SEEK_DROP|seek watchdog|Fatal signal|FATAL EXCEPTION|ANR in|ERROR_DEAD_OBJECT|AVOS_TEST_POLL|AVOS_TEST_BURST|chatty|dropped [0-9]+ lines|Unexpected EOF|android_sync: (pause start|resume |mode1 )|_stream_play_n_frames|stream_open:|stream_stop:|libavos_set_passthrough: mode=|audiotrack_set_output_params: resolved|compressed (short write|write failed)|continuing unit at|DEAD_OBJECT'
 	LOGCAT_KEEP="$LOGCAT_KEEP|PCM resume applies paused correction="
 	LOGCAT_KEEP="$LOGCAT_KEEP|SINK_REF_DEFERRED:"
+	LOGCAT_KEEP="$LOGCAT_KEEP|at_speed_hw:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|android_sync anchor_diag|android_sync: (init render_offset|PCM startup correction)|pcm_startup_correction:|at_ledger:|startup_anchor_commit|audio_start_commit|heard_ts_diag:"
 	LOGCAT_ADB_PID=''
 	LOGCAT_PIPE=''

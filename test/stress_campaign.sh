@@ -47,6 +47,7 @@ SESSION_KEEP='mode1_iec_occupancy_shadow:|mode2_occupancy_shadow:|video_render_d
 
 SESSION_KEEP="$SESSION_KEEP|PCM resume applies paused correction="
 SESSION_KEEP="$SESSION_KEEP|SINK_REF_DEFERRED:"
+SESSION_KEEP="$SESSION_KEEP|at_speed_hw:"
 
 fail()
 {

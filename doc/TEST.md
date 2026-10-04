@@ -154,6 +154,61 @@ or report error. Interruptions stay nonzero, with partial reports when possible.
 The wrapper prints the report paths when finished. It records logs, not video
 of the screen; physical lipsync remains unmeasured.
 
+### Separate speed session with automatic setup
+
+Build and install a **debug APK** containing Video's `SpeedTestReceiver` first.
+The receiver is absent from release builds and accepts configuration broadcasts
+only from callers with Android's `DUMP` permission (including adb shell).
+
+```bash
+python3 test/run_speed_session.py \
+  --video /sdcard/Movies/test.mkv --backend atempo --cycles 5 --hold 8
+
+python3 test/run_speed_session.py \
+  --video 'smb://server/share/test.mkv' --backend sonic --cycles 5 --hold 8
+
+python3 test/run_speed_session.py \
+  --video /sdcard/Movies/test.mkv --backend audiotrack --cycles 5 --hold 8
+```
+
+`--video` accepts a device path or a URI Nova can already access. It does not
+upload a file from the host or configure network credentials. `--serial` selects
+an adb device; `--package` defaults to `org.courville.nova`. `--dry-run` prints
+the plan without contacting adb or changing playback.
+
+The launcher stops existing Nova playback, saves the speed-mode, decoder,
+passthrough and saved-speed preferences, then selects FFmpeg PCM and 1.00x.
+It enables `dbgs`, `dbgsink` and `dbga` at level 2 through AVSH before opening
+the video from the beginning. A matching configuration acknowledgement and
+native backend/filter, PCM writes, 1x and render records are required before
+starting the driver. Each ramp runs twelve key events in one adb shell, reaching
+1.60x from 1.00x in 0.05x steps; the default inter-key sleep is 20ms. `--hold`
+applies at both 1.60x and 1.00x. Input processing adds its own latency.
+
+The existing speed driver validates the filter actually used. AudioTrack runs
+require successful hardware speed readback and no software speed-filter records.
+The observed high-speed window must reach at least 1.59x and return to 1x.
+
+Artifacts live in `speed-session-TIMESTAMP/`: continuous raw `logcat-session.log`,
+`session.log`, `manifest.json`, `summary.md`, `speed-1/` per-cycle evidence,
+`recording-review.md/json` and `run-report.json`. Reports use the saved
+`speed-1/analyzer-config.json`, never an invented resume phase. Startup failures
+and interrupted runs retain their evidence and cannot produce a PASS.
+
+At completion, failure or Ctrl-C the launcher stops test playback and restores
+the saved preferences. If the host is killed or adb disconnects, the on-device
+backup remains; the recovery ID is printed and saved in `manifest.json`:
+
+```bash
+python3 test/run_speed_session.py --restore SESSION_ID
+```
+
+Use the same device/package for recovery. An outstanding backup blocks a new
+configuration so the original settings cannot be overwritten. This launcher
+does not run pause or seek phases. Physical lipsync remains unmeasured.
+
+### Individual drivers
+
 Individual drivers and the campaign without automatic report generation:
 
 ```bash
@@ -172,7 +227,7 @@ test/stress_seek_dpad_hold_validate.sh 10 8 2000
 # cycles, high-speed hold seconds, delay between keys, return-to-1x settle seconds
 LABEL=atempo REQUIRE_FILTER=atempo test/stress_speed_validate.sh 5 8 0.02 2
 LABEL=sonic REQUIRE_FILTER=sonic test/stress_speed_validate.sh 5 8 0.02 2
-LABEL=audiotrack REQUIRE_FILTER= test/stress_speed_validate.sh 5 8 0.02 2
+LABEL=audiotrack REQUIRE_FILTER=audiotrack test/stress_speed_validate.sh 5 8 0.02 2
 
 # Resume + seek; speed is optional and does not select/change the backend.
 DRY_RUN=1 SPEED_CYCLES=1 test/stress_campaign.sh

@@ -635,7 +635,14 @@ def analyze(text, mode, cfg=None):
         speed_rows = [r for r in all_rows if 'put_time_calc:' in r[1]]
         require(bool(speed_rows) and abs(number(speed_rows[-1], 'speed') - 1) <= .01, 'speed_not_restored')
         filters = set(re.findall(r'applying speed filter \[([^]]+)\]', text))
-        require(not cfg['REQUIRE_FILTER'] or filters == {cfg['REQUIRE_FILTER']}, 'wrong_filter')
+        if cfg['REQUIRE_FILTER'] == 'audiotrack':
+            hardware = [r for r in rows if 'at_speed_hw:' in r[1] and number(r, 'req') > 1.01]
+            require(not filters and bool(hardware), 'wrong_filter')
+            require(bool(hardware) and all(r[2].get('readback_ok') == '1' and
+                    abs(number(r, 'req') - number(r, 'applied')) < .01 for r in hardware),
+                    'audiotrack_speed_not_confirmed')
+        else:
+            require(not cfg['REQUIRE_FILTER'] or filters == {cfg['REQUIRE_FILTER']}, 'wrong_filter')
     for lo, hi in windows:
         window_v = [r for r in videos if lo <= r[0] <= hi]
         window_w = [r for r in writes if lo <= r[0] <= hi]

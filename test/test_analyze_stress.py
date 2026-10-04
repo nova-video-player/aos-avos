@@ -55,6 +55,22 @@ class AnalyzerTests(unittest.TestCase):
         result = self.check('\n'.join(rows))
         self.assertIn('stale_presentation', result['reason'])
 
+    def test_audiotrack_speed_backend_requires_hardware_readback(self):
+        text = fixture('speed', seconds=6, speed=1.6)
+        text += '\n1006.020 put_time_calc: speed=1.000 allow_reanchor=0 disc=0'
+        hw = '\n1001.020 at_speed_hw: req=1.600 applied=1.600 readback_ok=1'
+        def check_hardware(value):
+            ordered = '\n'.join(sorted(value.splitlines(), key=lambda row: float(row.split()[0])))
+            return self.check(ordered, 'speed', REQUIRE_FILTER='audiotrack')
+        good = check_hardware(text + hw)
+        self.assertEqual(good['healthy'], 1, good)
+        for bad in (text, text + hw.replace('readback_ok=1', 'readback_ok=0'),
+                    text + hw.replace('applied=1.600', 'applied=1.000')):
+            self.assertIn('audiotrack_speed_not_confirmed',
+                          check_hardware(bad)['reason'])
+        filtered = text + hw + '\n1001.030 stream_audio: applying speed filter [sonic]'
+        self.assertIn('wrong_filter', check_hardware(filtered)['reason'])
+
     def queued_preview_fixture(self):
         prefix = ('999.800 _stream_play_n_frames(n=10, time=0)\n'
                   '999.900 SINK_REF_DEFERRED: frame_time=0 audio_time=-1 seek_epoch=1\n'

@@ -12,9 +12,9 @@ from analyze_stress import config
 from analyze_stress_recording import analyze_recording, markdown_report
 
 
-def generate_reports(output, campaign_rc):
+def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-config.json'):
     log = output / 'logcat-session.log'
-    settings = output / 'resume-1' / 'analyzer-config.json'
+    settings = output / settings_relative
     report_error = None
     recording_verdict = 'UNAVAILABLE'
     try:
@@ -32,7 +32,7 @@ def generate_reports(output, campaign_rc):
         report_error = str(error)
         (output / 'recording-review.md').write_text(
             '# Recording review unavailable\n\n' + report_error +
-            '\n\nThe session log and original resume-1/analyzer-config.json are required.\n')
+            f'\n\nThe session log and original {settings_relative} are required.\n')
 
     if campaign_rc >= 128:
         status, result = 'INTERRUPTED', campaign_rc

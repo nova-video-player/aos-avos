@@ -18,6 +18,13 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   100ms and otherwise recomputes `stream_get_heard_audio_ts()`.
 - If audio has not started, initialization uses the static anchor delay once and
   reanchors to heard audio when it becomes available.
+- The renderer may already have adopted negative PCM heard time before the first
+  nonnegative `put_time` initializes scheduler bookkeeping. If it has submitted
+  a frame on the current audio epoch, a first-publication correction within 100ms
+  preserves that render offset and converges at 1ms per distinct frame. This
+  avoids a second startup deadline jump merely because the scheduler anchor was
+  still unset. Preview-only output, pending seeks/resumes, speed changes, missing
+  anchors and larger discontinuities retain the reset path; passthrough is excluded.
 - For reanchor windows, the sink prefers a **fresh** audio-thread
   `put_time` anchor (`venc_put_time`) and falls back to recomputed
   `stream_get_heard_audio_ts()` only when `put_time` is stale. This avoids

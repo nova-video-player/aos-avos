@@ -731,6 +731,26 @@ static void mode1_resume_observe_l(priv_t *p, int time, int64_t now_ms, int wind
 	p->mode1_sample_wall_ms = 0;
 }
 
+// The renderer can already be running on negative heard time before the first
+// nonnegative put_time initializes the scheduler. Keep that epoch's submitted
+// cadence for a small handoff; preview-only, lifecycle and large jumps reset.
+static int pcm_startup_anchor_target_l(priv_t *p, STREAM *s, int passthrough,
+	int time, int transition, INT64 now_ns, INT64 *target)
+{
+	if (passthrough || transition || !s || !s->put_time_mode ||
+		!s->audio || !s->audio->valid || s->audio_time < 0 || time < 0 ||
+		s->paused || s->seek_paused || s->play_n_video_frames > 0 ||
+		s->audio_start_pending || s->audio_resume_pending ||
+		p->pause_armed || p->pcm_resume_pending || p->pending_seek_reanchor ||
+		p->venc_ref_time || p->sched_start_mono_ns ||
+		p->render_offset_ns == -1 || !p->render_offset_from_audio ||
+		!p->speed_cadence.valid || p->speed_cadence.epoch != s->seek_epoch)
+		return 0;
+
+	*target = now_ns - (INT64)time * 1000000LL;
+	return llabs(*target - p->render_offset_ns) <= 100000000LL;
+}
+
 static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 {
 	priv_t *p = (priv_t *) sink->priv;
@@ -959,6 +979,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		!reanchor_discontinuity && !no_sched_anchor && !resume_reanchor;
 	int allow_reanchor = (speed_changed && !preserve_speed_anchor) ||
 		reanchor_discontinuity || no_sched_anchor || epoch_changed || resume_reanchor;
+	INT64 startup_target_ns = 0;
+	INT64 startup_offset_ns = p->render_offset_ns;
+	int preserve_pcm_startup_anchor = allow_reanchor &&
+		pcm_startup_anchor_target_l(p, s, passthrough_mode, time,
+			speed_changed || reanchor_discontinuity || resume_started || pcm_resume,
+			_get_monotonic_ns(), &startup_target_ns);
 	if( preserve_pcm_resume_anchor )
 		allow_reanchor = 0;
 	if( in_grace && !speed_changed && !discontinuity && !no_sched_anchor &&
@@ -1023,6 +1049,23 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->render_offset_ns    = -1; // Re-anchor lifecycle events, hard drift and speed changes without a valid clock.
 		p->render_offset_from_audio = 0;
 		p->pending_reanchor    = 1;
+		if (preserve_pcm_startup_anchor) {
+			// Initialize scheduler bookkeeping, but do not move deadlines that
+			// are already queued on this audio epoch. Repay the phase once per
+			// distinct frame using the existing PCM startup slew.
+			p->render_offset_ns = startup_offset_ns;
+			p->render_offset_from_audio = 1;
+			p->target_offset_ns = startup_target_ns;
+			p->slew_active = startup_target_ns != startup_offset_ns;
+			p->pcm_startup_slew = p->slew_active;
+			p->pcm_startup_slew_frame_handle = NULL;
+			p->pcm_startup_slew_frame_time = INT_MIN;
+			p->pcm_startup_slew_frame_epoch = INT_MIN;
+			p->pending_reanchor = 0;
+			p->pending_seek_reanchor = 0;
+			DBGSI serprintf("android_sync: PCM first clock slew heard=%d correction=%lldus epoch=%d\n",
+				time, (long long)((startup_target_ns - startup_offset_ns) / 1000), s->seek_epoch);
+		}
 		if( pcm_resume ) {
 			// Use this clock sample and its wall reference as one pair. Merely
 			// adding paused wall time assumes AudioTrack froze at exactly the

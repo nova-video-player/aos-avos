@@ -31,9 +31,13 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   threshold. Direct mode 2 normally keeps its render offset stable after
   initialization. A newly trusted dynamic
   clock first completes any monotonic heard-time hold while the renderer remains
-  on its provisional anchor. Once the dynamic phase is ready, the renderer makes
-  one explicit audio-based reanchor instead of stacking a second slew on that
-  correction. Later transition and resume corrections remain bounded per frame.
+  on its provisional anchor. Once the dynamic phase is ready, an established
+  audio-owned renderer anchor within 100ms of the trusted clock uses fast bounded
+  recovery, avoiding a deadline jump for a small remaining phase error. Missing
+  anchors, a pending seek reanchor, and larger errors retain the explicit
+  audio-based reanchor so startup does not acquire a second multi-second slew.
+  The smooth handoff preserves the per-frame guard across lookahead retries.
+  Later transition and resume corrections remain bounded per frame.
   Mode 2 applies at most 5ms per distinct frame during fast recovery and 0.2ms
   during steady tracking. Any remainder carries into a subsequent frame; the
   final step cannot snap through a second step's worth of correction.
@@ -65,6 +69,12 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
 The video thread limits submission to a 200ms lookahead window and releases a
 frame without rendering when it is already more than 200ms late. Frames inside
 that window are submitted to MediaCodec with the computed deadline.
+
+`video_render_diag` includes `render_seq`, a render-thread-owned counter advanced
+after every successful timed submission, even with diagnostic logging disabled.
+It persists across pause, seek and flush and resets with a new decoder instance.
+This distinguishes omitted timing records from deadline errors between adjacent
+submissions. A successful submission does not prove physical display timing.
 
 ## Frame Snapping and Wall-Clock Mapping (`Source/codec_sfdec2.c`)
 

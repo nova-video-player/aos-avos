@@ -143,6 +143,7 @@ typedef struct priv {
 	int64_t venc_ref_time;
 
 	int dropped;
+	UINT64 render_submit_seq; // render-thread owned; persists across pause/seek/flush
 	int video_frame_rate_num;
 	int video_frame_rate_den;
 	timeline_state_t video_timeline; // adopted with the heard-clock anchor under locked.mtx
@@ -1268,11 +1269,21 @@ static void *videosink_thread(void *ctx)
 				p->last_mode2_dynamic_active;
 			if( mode2_dynamic_changed ) {
 				p->last_mode2_dynamic_active = mode2_dynamic_active;
-				if( mode2_dynamic_active ) {
-					// The heard clock has already completed its monotonic catch-up.
-					// Rebuild the audio-owned anchor once at this explicit boundary;
-					// slewing from the provisional static anchor would apply a second,
-					// multi-second correction to the same phase change.
+				int smooth_entry = 0;
+				INT64 entry_delta_ns = 0;
+				if( mode2_dynamic_active && have_audio_time &&
+					p->render_offset_ns != -1 && p->render_offset_from_audio &&
+					!p->pending_seek_reanchor ) {
+					INT64 heard_ts = _get_render_heard_ts(p, s, 0, NULL, NULL);
+					entry_delta_ns = now_ns - heard_ts * 1000000LL - p->render_offset_ns;
+					// The heard clock has completed its monotonic catch-up. A
+					// small residual can converge at 5ms/frame without jumping
+					// deadlines. Bound this path to avoid another multi-second
+					// recovery when the provisional startup anchor was far off.
+					smooth_entry = llabs(entry_delta_ns) <= 100000000LL;
+				}
+				int hard_reanchor = mode2_dynamic_active && !smooth_entry;
+				if( hard_reanchor ) {
 					p->render_offset_ns = -1;
 					p->render_offset_from_audio = 0;
 					p->target_offset_ns = -1;
@@ -1281,17 +1292,20 @@ static void *videosink_thread(void *ctx)
 				} else {
 					p->pending_reanchor = 1;
 				}
-				// Keep both entry and exit corrections limited to one step per
-				// distinct video frame. Entry immediately rebuilds its anchor below;
-				// exit still uses the slow bounded fallback slew.
+				// Small entry corrections use fast recovery; exit retains the
+				// slow fallback slew. Preserve the frame guard on smooth entry
+				// so a lookahead retry cannot adjust the same frame twice.
 				p->mode2_dynamic_slew = 1;
-				p->mode2_dynamic_fast_slew = 0;
+				p->mode2_dynamic_fast_slew = smooth_entry;
 				p->mode2_dynamic_settle_frames = 0;
-				p->mode2_slew_frame_handle = NULL;
-				p->mode2_slew_frame_time = INT_MIN;
-				p->mode2_slew_frame_epoch = INT_MIN;
-				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d\n",
-					mode2_dynamic_active, mode2_dynamic_active);
+				if( !smooth_entry ) {
+					p->mode2_slew_frame_handle = NULL;
+					p->mode2_slew_frame_time = INT_MIN;
+					p->mode2_slew_frame_epoch = INT_MIN;
+				}
+				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d smooth_entry=%d delta_us=%lld\n",
+					mode2_dynamic_active, hard_reanchor, smooth_entry,
+					(long long)(entry_delta_ns / 1000LL));
 			}
 			int mode2_new_slew_frame = p->mode2_dynamic_slew &&
 				(f->android_handle != p->mode2_slew_frame_handle ||
@@ -1763,11 +1777,15 @@ static void *videosink_thread(void *ctx)
 				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 0, render_ts_ns);
 				presented = !render_error;
 				if (presented) {
-					DBGSI2 serprintf("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld\n",
+					// Count successful submissions independently of logging. A gap
+					// in this sequence identifies missing diagnostic records.
+					p->render_submit_seq++;
+					DBGSI2 serprintf("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu\n",
 						f->time, f->epoch, (long long)render_ts_ns, (long long)now_ns,
 						diag_interval_ms, (long long)(now_ns / NSEC_PER_MSEC - diag_ref_ms),
 						(long long)f->time - diag_heard -
-						(render_ts_ns / NSEC_PER_MSEC - diag_ref_ms) + diag_user_delay);
+						(render_ts_ns / NSEC_PER_MSEC - diag_ref_ms) + diag_user_delay,
+						(unsigned long long)p->render_submit_seq);
 				}
 				int took = time_update_time() - start;
 				p->dropped = 0;

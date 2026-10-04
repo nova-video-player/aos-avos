@@ -43,8 +43,17 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   51 frames, rather than 201 frames at the cold-start correction rate. The
   correction is still applied, preventing cumulative pause/resume phase error.
   Missing anchors, seek/speed transitions,
-  and larger discontinuities retain the hard reset. A new pause cancels the
-  current slew and the next resume computes a fresh target. Passthrough resume
+  and larger discontinuities retain the hard reset. Ordinary pauses freeze an
+  unfinished resume correction. The next resume applies at most two
+  speed-adjusted frame intervals (capped at 100ms) of that measured residual;
+  backward correction is also capped by the paused duration so the combined
+  pause shift cannot move deadlines backward. The target and renderer offset
+  then receive the same pause shift, and the remaining correction keeps its
+  per-frame limit until the fresh post-resume clock updates the target. This
+  prevents rapid taps from repeatedly cancelling convergence and accumulating
+  enough error to trigger the 350ms hard reset. The retained correction is
+  invalidated by an output-generation, seek-epoch, speed-mapping or manual-delay
+  change. Cold-start corrections still reset on pause. Passthrough resume
   policy is unchanged.
 - Manual A/V delay (`s->av_delay`) is also slewed in the render path through
   `effective_av_delay` (bounded per-frame step) so large UI jumps do not create

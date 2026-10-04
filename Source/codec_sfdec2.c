@@ -96,6 +96,72 @@ enum {
 	SEEK_STATE_OUTPUT_SENT,
 };
 
+// Renderer-local speed-boundary compensation. Audio's committed map remains
+// authoritative; only a short-lived presentation correction is carried here.
+typedef struct {
+	unsigned int generation;
+	int enabled;
+	int valid;
+	int epoch;
+	int media_time;
+	timeline_state_t timeline;
+	INT64 deadline_ns;
+	INT64 correction_ns;
+} speed_cadence_t;
+
+static void speed_cadence_reset(speed_cadence_t *c)
+{
+	c->generation++;
+	c->enabled = 0;
+	c->valid = 0;
+	c->correction_ns = 0;
+}
+
+// Pure preview: a lookahead wait must not spend the correction again. Commit
+// the result only after a successful submission, using the captured generation.
+static INT64 speed_cadence_time(const speed_cadence_t *c, timeline_state_t timeline,
+	int epoch, int media_time, int media_valid, INT64 nominal_interval_ns,
+	INT64 raw_ns, INT64 *correction_ns)
+{
+	*correction_ns = 0;
+	if (!c->enabled || !c->valid || !media_valid || epoch != c->epoch ||
+		media_time <= c->media_time || nominal_interval_ns <= 0 || timeline.speed <= 0)
+		return raw_ns;
+
+	INT64 correction = c->correction_ns;
+	if (timeline.speed != c->timeline.speed || timeline.rst_anchor != c->timeline.rst_anchor ||
+		timeline.ts_anchor != c->timeline.ts_anchor) {
+		// Start the new map from the last frame actually submitted, not from
+		// the current heard sample (video may already be queued 200ms ahead).
+		// Keep real source gaps; do not manufacture one frame for every packet.
+		INT64 delta_ns = (INT64)llround(((double)media_time - c->media_time) *
+			timeline.inv_speed * 1000000.0);
+		correction = c->deadline_ns + delta_ns - raw_ns;
+	}
+	// Return to the audio-derived schedule without leaving permanent phase
+	// debt. Cap convergence at 1ms / 10% of a frame, including the last step.
+	INT64 step = MIN(1000000LL, nominal_interval_ns / 10);
+	correction -= MAX(-step, MIN(step, correction));
+	*correction_ns = correction;
+	return raw_ns + correction;
+}
+
+static void speed_cadence_commit(speed_cadence_t *c, unsigned int generation,
+	timeline_state_t timeline, int epoch, int media_time, int media_valid,
+	INT64 deadline_ns, INT64 correction_ns)
+{
+	// A seek/pause/flush may have invalidated the state during buffer release.
+	// A speed commit alone does not invalidate the last submitted frame.
+	if (generation != c->generation)
+		return;
+	c->valid = media_valid;
+	c->epoch = epoch;
+	c->media_time = media_time;
+	c->timeline = timeline;
+	c->deadline_ns = deadline_ns;
+	c->correction_ns = correction_ns;
+}
+
 typedef struct priv {
 	sfdec_t *sfdec;
 	void *surface_handle;
@@ -147,6 +213,7 @@ typedef struct priv {
 	int video_frame_rate_num;
 	int video_frame_rate_den;
 	timeline_state_t video_timeline; // adopted with the heard-clock anchor under locked.mtx
+	speed_cadence_t speed_cadence;
 	INT64 sched_start_off_ns;
 	INT64 sched_start_mono_ns;
 	INT64 sched_last_off_ns;
@@ -926,11 +993,13 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	if (timeline_changed || allow_reanchor)
 		p->render_generation++;
 	if (preserve_speed_anchor) {
+		p->speed_cadence.enabled = 1;
 		DBGSI serprintf("android_sync: speed commit preserves clock speed=%.3f offset=%lld sample_diff=%lld epoch=%d\n",
 			current_speed, (long long)p->render_offset_ns, (long long)diff,
 			s->seek_epoch);
 	}
 	if (allow_reanchor) {
+		speed_cadence_reset(&p->speed_cadence);
 		// Rebuild all absolute seek anchors as before. Keep only a matching
 		// output's relative phase until the new queue has refilled; otherwise
 		// whichever IEC burst the renderer first sees becomes a lasting bias.
@@ -1195,6 +1264,7 @@ static void *videosink_thread(void *ctx)
 
 		VIDEO_FRAME *f = NULL;
 		INT64 render_ts_ns = 0;
+		INT64 speed_correction_ns = 0;
 		int consumed = 0;
 		int stale_epoch_drop = 0;
 		int audio_lease = 0;
@@ -1263,6 +1333,8 @@ static void *videosink_thread(void *ctx)
 			int have_audio_time = (s && s->audio_time >= 0);
 			int passthrough = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 				s->audio_sink->get_passthrough( s ) : 0;
+			if (passthrough && p->speed_cadence.enabled)
+				speed_cadence_reset(&p->speed_cadence);
 			int mode2_dynamic_active = passthrough == 2 ?
 				stream_sync_mode2_dynamic_active( s ) : 0;
 			int mode2_dynamic_changed = mode2_dynamic_active !=
@@ -1692,6 +1764,12 @@ static void *videosink_thread(void *ctx)
 			INT64 av_delay_ns = (INT64)(int)(p->effective_av_delay_ms * p->video_timeline.inv_speed) * 1000000LL;
 			render_ts_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
 				p->render_offset_ns + av_delay_ns;
+			INT64 cadence_interval_ns = p->video_frame_rate_num > 0 && p->video_timeline.speed > 0 ?
+				(INT64)(1000000000.0 * p->video_frame_rate_den /
+				(p->video_frame_rate_num * p->video_timeline.speed)) : 0;
+			render_ts_ns = speed_cadence_time(&p->speed_cadence, p->video_timeline,
+				f->epoch, f->media_time, f->media_time_valid, cadence_interval_ns,
+				render_ts_ns, &speed_correction_ns);
 			INT64 delta_ns = render_ts_ns - now_ns;
 			const INT64 k_max_lookahead_ns = 200 * 1000000LL; // 200ms lookahead
 
@@ -1722,6 +1800,9 @@ static void *videosink_thread(void *ctx)
 			}
 			render_ts_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
 				p->render_offset_ns + av_delay_ns;
+			render_ts_ns = speed_cadence_time(&p->speed_cadence, p->video_timeline,
+				f->epoch, f->media_time, f->media_time_valid, cadence_interval_ns,
+				render_ts_ns, &speed_correction_ns);
 			break;
 	retry_frame:
 			if (audio_lease) {
@@ -1746,6 +1827,8 @@ static void *videosink_thread(void *ctx)
 		int do_render = 1;
 		int render_error = 0;
 		int presented = 0;
+		unsigned int cadence_generation = p->speed_cadence.generation;
+		timeline_state_t submitted_timeline = p->video_timeline;
 		// Snapshot timing under the renderer lock. Diagnostics must not query
 		// AudioTrack or change the clock being measured.
 		INT64 diag_ref_ms = p->venc_ref_time;
@@ -1780,12 +1863,12 @@ static void *videosink_thread(void *ctx)
 					// Count successful submissions independently of logging. A gap
 					// in this sequence identifies missing diagnostic records.
 					p->render_submit_seq++;
-					DBGSI2 serprintf("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu\n",
+					DBGSI2 serprintf("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu speed_correction_us=%lld\n",
 						f->time, f->epoch, (long long)render_ts_ns, (long long)now_ns,
 						diag_interval_ms, (long long)(now_ns / NSEC_PER_MSEC - diag_ref_ms),
 						(long long)f->time - diag_heard -
 						(render_ts_ns / NSEC_PER_MSEC - diag_ref_ms) + diag_user_delay,
-						(unsigned long long)p->render_submit_seq);
+						(unsigned long long)p->render_submit_seq, (long long)(speed_correction_ns / 1000));
 				}
 				int took = time_update_time() - start;
 				p->dropped = 0;
@@ -1801,9 +1884,13 @@ static void *videosink_thread(void *ctx)
 			p->locked.error = 1;
 			pthread_cond_broadcast(&p->locked.cond);
 		}
-		if (presented)
+		if (presented) {
+			speed_cadence_commit(&p->speed_cadence, cadence_generation,
+				submitted_timeline, f->epoch, f->media_time, f->media_time_valid,
+				render_ts_ns, speed_correction_ns);
 			p->presentation_end_ns = MAX(p->presentation_end_ns,
 				render_ts_ns + (INT64)MAX(f->duration, 0) * NSEC_PER_MSEC);
+		}
 	endloop:
 		if (audio_lease) stream_audio_read_release(s);
 		if (f) {
@@ -2250,6 +2337,7 @@ retry_decoder_open:
 	p->last_audio_resume_pending = 0;
 	p->snap_origin_time = 0;
 	p->snap_origin_epoch = INT_MIN;
+	speed_cadence_reset(&p->speed_cadence);
 	p->hold_audio_active = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
@@ -2508,6 +2596,7 @@ DBGCV	CLOG();
 	p->last_audio_resume_pending = 0;
 	p->snap_origin_time = 0;
 	p->snap_origin_epoch = INT_MIN;
+	speed_cadence_reset(&p->speed_cadence);
 	p->hold_audio_active = 0;
 	p->hold_audio_until_ms = 0;
 	p->hold_audio_start_ms = 0;
@@ -2695,6 +2784,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->last_audio_resume_pending = 0;
 	p->snap_origin_time = 0;
 	p->snap_origin_epoch = INT_MIN;
+	speed_cadence_reset(&p->speed_cadence);
 	p->grace_until_ms = 0;
 	p->hold_audio_active = 0;
 	p->hold_audio_until_ms = 0;
@@ -2740,6 +2830,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	int preserve_pcm_slew = !passthrough && preserves_output &&
 		pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
+		speed_cadence_reset(&p->speed_cadence);
 		if( preserve_mode1_phase ) {
 			p->mode1_resume_pending = 1;
 		} else {

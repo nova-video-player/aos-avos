@@ -96,6 +96,16 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   the snapping rate and invalidates its phase origin under the codec lock. The
   first subsequent frame establishes the phase for the new time mapping; no
   MediaCodec reset is required.
+- A continuous PCM speed commit also preserves spacing from the last submitted
+  frame. Video can already be scheduled up to 200ms ahead of heard audio, so
+  retaining the wall offset alone does not prevent a gap when queued frames are
+  remapped. The renderer carries a temporary deadline correction at that boundary,
+  then converges to the audio-derived schedule by at most 1ms (or 10% of a frame)
+  per successful submission. Lookahead retries do not spend this correction;
+  original media timestamp gaps remain intact. This applies to atempo, Sonic and
+  PlaybackParams PCM commits, not passthrough. Open, seek, flush, reanchor and pause
+  clear it, including when they overlap an unlocked buffer release.
+  `video_render_diag` reports the residual as `speed_correction_us`.
 
 ## Operational Notes and Caveats
 

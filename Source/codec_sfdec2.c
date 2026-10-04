@@ -1631,7 +1631,10 @@ static void *videosink_thread(void *ctx)
 				}
 				p->render_offset_ns += delta;
 				INT64 remaining = llabs(p->target_offset_ns - p->render_offset_ns);
-				if (remaining == 0 || (!(p->pcm_startup_slew || p->mode1_resume_slew) && remaining <= step)) {
+				// Bounded per-frame slews must carry the remainder to the next
+				// frame. Snapping here can double the Mode 2 correction to 10ms.
+				if (remaining == 0 || (!(p->pcm_startup_slew || p->mode1_resume_slew ||
+					p->mode2_dynamic_slew) && remaining <= step)) {
 					p->render_offset_ns = p->target_offset_ns;
 					p->slew_active = 0;
 					if (!p->mode2_dynamic_fast_slew) {

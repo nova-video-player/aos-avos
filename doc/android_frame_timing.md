@@ -34,6 +34,9 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   on its provisional anchor. Once the dynamic phase is ready, the renderer makes
   one explicit audio-based reanchor instead of stacking a second slew on that
   correction. Later transition and resume corrections remain bounded per frame.
+  Mode 2 applies at most 5ms per distinct frame during fast recovery and 0.2ms
+  during steady tracking. Any remainder carries into a subsequent frame; the
+  final step cannot snap through a second step's worth of correction.
 - A PCM resume on a backend that preserves queued output keeps the pause-shifted
   renderer anchor until the first accepted write publishes its clock. With an established audio anchor,
   corrections up to 350ms use a slew with an 8ms initial deadband instead of an

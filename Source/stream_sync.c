@@ -1584,6 +1584,18 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int64_t wall_now
 	return heard_ts;
 }
 
+double stream_get_audiotrack_epoch_ts( STREAM *s, UINT64 frames, int rate, double fallback_ts )
+{
+	if( !s->at_speed_epoch_active || rate <= 0 || rate != s->at_speed_epoch_rate ||
+		frames < s->at_speed_epoch_presented_frames || s->at_speed_epoch_speed <= 0.0f ) {
+		return fallback_ts;
+	}
+	// Keep fractional milliseconds through every checkpoint. Rounding the
+	// frame delta, then the speed conversion, loses time on each speed tap.
+	double delta_ms = (double)(frames - s->at_speed_epoch_presented_frames) * 1000.0 / rate;
+	return s->at_speed_epoch_heard_ts + delta_ms / s->at_speed_epoch_speed;
+}
+
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 	int renderer_locked )
 {
@@ -1861,13 +1873,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 		}
 
 		UINT64 frames_now = s->at_speed_epoch_frames_cached;
-		if( ep_frames > 0 && ep_rate > 0 && frames_now >= ep_frames ) {
+		if( ep_rate > 0 && frames_now >= ep_frames ) {
 			// Use this checkpoint's confirmed rate, even while the global map changes.
 			UINT64 frames_delta = frames_now - ep_frames;
 			int delta_media_ms = (int)((frames_delta * 1000) / (UINT64)ep_rate);
-			int delta_ts = s->at_speed_epoch_speed > 0.0f
-				? (int)(delta_media_ms / s->at_speed_epoch_speed) : delta_media_ms;
-			int checkpoint_heard = s->at_speed_epoch_heard_ts + delta_ts;
+			int checkpoint_heard = (int)stream_get_audiotrack_epoch_ts( s, frames_now, ep_rate, heard_ts );
 			DBG {
 				static int64_t last_epoch_log_ms = 0;
 				if( wall_now - last_epoch_log_ms >= 500 ) {

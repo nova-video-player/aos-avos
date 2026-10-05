@@ -89,8 +89,10 @@ checkpoint at every speed change, including a return to 1.0x:
 1. Compute `anchor_ts`, the same continuity anchor used for the video sink.
 2. Before calling `audio_interface_change_audio_speed()`, read a fresh
    `getPlaybackHeadPosition()` sample.
-3. Store:
-   - `at_speed_epoch_heard_ts = anchor_ts`
+3. Evaluate the previous epoch at that same playhead sample, keeping fractional
+   milliseconds. Use `anchor_ts` only when no compatible epoch exists (initial
+   startup, reset, backwards playhead, or sample-rate change). Store:
+   - `at_speed_epoch_heard_ts = fractional checkpoint time`
    - `at_speed_epoch_presented_frames = playback_head`
    - `at_speed_epoch_rate = AudioTrack sample rate`
    - `at_speed_epoch_speed = requested speed`, then patch it to the hardware
@@ -102,6 +104,10 @@ frames_delta = current_playback_head - at_speed_epoch_presented_frames
 delta_media_ms = frames_delta * 1000 / at_speed_epoch_rate
 heard_ts = at_speed_epoch_heard_ts + delta_media_ms / at_speed_epoch_speed
 ```
+
+Both the delta calculation and the saved checkpoint use double precision.
+Convert to integer milliseconds only when returning the public heard timestamp;
+feeding that rounded value into each new checkpoint accumulates drift over ramps.
 
 This is the same checkpoint idea used by players that derive the audible media
 position from the hardware playhead. It makes speed changes continuous in the

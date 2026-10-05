@@ -857,10 +857,13 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 					DBG serprintf( "at_speed_epoch_arm: skipped no_playhead audio=%d anchor_ts=%d speed=%.3f\n",
 						s->audio_time, anchor_ts, av_speed );
 				} else {
+					// Rebase the previous epoch at this exact playhead sample, without
+					// feeding the integer heard-clock result back into the checkpoint.
+					double epoch_ts = stream_get_audiotrack_epoch_ts( s, ep_frames, ep_rate, anchor_ts );
 					int64_t epoch_wall_ms = atime64();
 					s->at_speed_epoch_active            = 1;
 					s->at_speed_epoch_audio_time_ts     = s->audio_time;
-					s->at_speed_epoch_heard_ts          = anchor_ts;
+					s->at_speed_epoch_heard_ts          = epoch_ts;
 					s->at_speed_epoch_speed             = av_speed;
 					s->at_speed_epoch_presented_frames  = ep_frames;
 					s->at_speed_epoch_rate              = ep_rate;
@@ -870,7 +873,7 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 					DBG {
 						int live_delay_ms = stream_sync_av_delay( s );
 						serprintf( "at_speed_epoch_arm: audio=%d anchor_ts=%d live_delay=%d speed=%.3f frames=%llu rate=%d src=%d age=%d\n",
-							s->audio_time, anchor_ts, live_delay_ms, av_speed,
+							s->audio_time, (int)epoch_ts, live_delay_ms, av_speed,
 							(unsigned long long)ep_frames, ep_rate, ep_src, ep_age );
 					}
 				}

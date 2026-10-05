@@ -964,7 +964,7 @@ typedef struct STREAM {
 	// delta rather than from the write-burst clock (audio_time - last_good_delay_ms).
 	int		at_speed_epoch_active;
 	int		at_speed_epoch_audio_time_ts;   // audio_time (TS) at checkpoint
-	int		at_speed_epoch_heard_ts;        // heard_ts (TS) at checkpoint
+	double		at_speed_epoch_heard_ts;        // fractional heard_ts (TS) at checkpoint
 	float		at_speed_epoch_speed;           // applied speed at checkpoint
 	UINT64		at_speed_epoch_presented_frames;// AT presented frame position at checkpoint
 	int		at_speed_epoch_rate;            // AT sample rate at checkpoint
@@ -1103,6 +1103,7 @@ void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );
 int	stream_get_heard_audio_ts( STREAM *s, int fallback_ts );
+double	stream_get_audiotrack_epoch_ts( STREAM *s, UINT64 frames, int rate, double fallback_ts );
 int	stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts );
 int	stream_atempo_ledger_lookup_rst( STREAM *s, UINT64 playhead, int playhead_rate, int *state );
 int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate, int *ts, int *rst, int *state);

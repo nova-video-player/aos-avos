@@ -1123,7 +1123,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	         track_format, track_chanmask, channelConfig, at->format, at->passthrough, channels );
 
 	if(is_audio_speed_enabled && !using_atempo && at->passthrough == 0 && device_get_android_api() >= 23) {
-		buffer_scale = 2; // for 2.0x max audio speed (when using PlaybackParams)
+		// PlaybackParams checks the selected output's buffer requirements,
+		// which can exceed the generic getMinBufferSize() estimate. Twice that
+		// estimate rejected 1.55x on Pixel's deep-buffer route; reserve more
+		// headroom for the intended 2x range and still verify speed readback.
+		buffer_scale = 3;
 	} else {
 		buffer_scale = 1;
 	}
@@ -1148,8 +1152,7 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// Ensure minimum of 32KB for compatibility, but respect larger system requirements
 		at->buf_size = (min_buffer_size > 32768) ? min_buffer_size : 32768;
 	} else {
-		// Use scaled minimum (buffer_scale=2 for audio speed support)
-		// Let Android's getMinBufferSize() determine the requirements
+		// Reserve extra capacity only for hardware PlaybackParams speed changes.
 		at->buf_size = buffer_scale * min_buffer_size;
 	}
 

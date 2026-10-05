@@ -34,6 +34,51 @@ class SpeedSessionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 speed.configure('org.courville.nova', 'configure', 'test', 'sonic')
 
+    def test_pending_restore_reports_original_session_on_same_device(self):
+        with patch.dict(speed.os.environ, {'ANDROID_SERIAL': 'pixel'}), \
+                patch.object(speed, 'shell', side_effect=[
+                    'Broadcast completed: result=0, data="speed-test:error:invalid-operation-or-pending-restore"',
+                    '<map><string name="session">old-session</string></map>']) as shell:
+            with self.assertRaises(speed.SetupRejected) as raised:
+                speed.configure('org.courville.nova', 'configure', 'new-session', 'atempo')
+        self.assertIn('--serial pixel --restore old-session', str(raised.exception))
+        self.assertNotIn('install the debug APK', str(raised.exception))
+        self.assertEqual(shell.call_args.args, ('run-as', 'org.courville.nova', 'cat',
+                                              'shared_prefs/speed_test_preferences.xml'))
+
+    def test_partial_configuration_failure_still_requires_cleanup(self):
+        with patch.object(speed, 'shell', return_value=
+                          'Broadcast completed: result=0, data="speed-test:error:configure-failed"'):
+            with self.assertRaises(RuntimeError) as raised:
+                speed.configure('org.courville.nova', 'configure', 'test', 'atempo')
+        self.assertNotIsInstance(raised.exception, speed.SetupRejected)
+
+    def test_setup_failure_cleanup_depends_on_whether_settings_may_have_changed(self):
+        for failure in (speed.SetupRejected('pending restore'), RuntimeError('lost acknowledgement')):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / 'session'
+                argv = ['run_speed_session.py', '--video', '/sdcard/clip.mkv', '--backend', 'atempo',
+                        '--output-dir', str(output)]
+                receiver = Mock(side_effect=[failure, 'restored'])
+                with patch('sys.argv', argv), patch.object(speed, 'shell'), \
+                        patch.object(speed, 'configure', receiver), \
+                        patch.object(speed.subprocess, 'Popen'), \
+                        patch.object(speed.subprocess, 'run', return_value=SimpleNamespace(
+                            returncode=0, stdout='', stderr='')), \
+                        patch.object(speed, 'stop_process'), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(speed.main(), 2)
+                operations = [c.args[1] for c in receiver.call_args_list]
+                self.assertEqual(operations, ['configure'] if isinstance(failure, speed.SetupRejected)
+                                 else ['configure', 'restore'])
+                if len(operations) == 2:
+                    self.assertEqual(receiver.call_args_list[0].args[2], receiver.call_args_list[1].args[2])
+                report = json.loads((output / 'run-report.json').read_text())
+                self.assertEqual(report['verdict'], 'ERROR')
+                self.assertEqual(report['recording_verdict'], 'UNAVAILABLE')
+                self.assertIn(str(failure), report['report_error'])
+                self.assertNotIn('No such file', report['report_error'])
+
     def test_ready_checks_native_backend_filter_pcm_and_initial_speed(self):
         base = fixture().replace('out of 7680 bytes', 'out of 7680 bytes (passthrough=0)')
         for backend, value in speed.BACKENDS.items():

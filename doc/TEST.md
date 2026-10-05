@@ -204,7 +204,12 @@ python3 test/run_speed_session.py --restore SESSION_ID
 ```
 
 Use the same device/package for recovery. An outstanding backup blocks a new
-configuration so the original settings cannot be overwritten. This launcher
+configuration so the original settings cannot be overwritten. On that rejection,
+the launcher reads the debug test backup to print the previous session's recovery
+command when available; it does not attempt restoration with the rejected new
+session's ID. Restore the previous session, then rerun the speed command. A setup
+failure reports that speed cycles did not start, without requiring a nonexistent
+driver configuration. This launcher
 does not run pause or seek phases. Physical lipsync remains unmeasured.
 
 ### Individual drivers

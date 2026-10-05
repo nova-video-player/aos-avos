@@ -12,12 +12,15 @@ from analyze_stress import config
 from analyze_stress_recording import analyze_recording, markdown_report
 
 
-def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-config.json'):
+def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-config.json',
+                     *, unavailable_reason=None):
     log = output / 'logcat-session.log'
     settings = output / settings_relative
     report_error = None
     recording_verdict = 'UNAVAILABLE'
     try:
+        if unavailable_reason:
+            raise ValueError(unavailable_reason)
         saved = json.loads(settings.read_text())
         if not isinstance(saved, dict):
             raise ValueError('saved analyzer configuration must be a JSON object')
@@ -32,7 +35,8 @@ def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-c
         report_error = str(error)
         (output / 'recording-review.md').write_text(
             '# Recording review unavailable\n\n' + report_error +
-            f'\n\nThe session log and original {settings_relative} are required.\n')
+            ('\n' if unavailable_reason else
+             f'\n\nThe session log and original {settings_relative} are required.\n'))
 
     if campaign_rc >= 128:
         status, result = 'INTERRUPTED', campaign_rc

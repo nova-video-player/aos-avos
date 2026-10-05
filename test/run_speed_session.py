@@ -13,6 +13,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 import uuid
+import xml.etree.ElementTree as ET
 
 from run_stress_campaign import generate_reports
 
@@ -20,6 +21,28 @@ from run_stress_campaign import generate_reports
 RECEIVER = 'com.archos.mediacenter.video.debug.SpeedTestReceiver'
 PLAYER = 'com.archos.mediacenter.video.player.PlayerActivity'
 BACKENDS = {'atempo': 0, 'audiotrack': 1, 'sonic': 2}
+
+
+class SetupRejected(RuntimeError):
+    """Receiver rejected setup before saving this session's preferences."""
+
+
+def pending_restore_hint(package):
+    # Debug APKs permit run-as. Read only the test backup, never app-wide prefs.
+    try:
+        backup = ET.fromstring(shell('run-as', package, 'cat',
+                                     'shared_prefs/speed_test_preferences.xml'))
+        session = backup.findtext("string[@name='session']")
+        if session and re.fullmatch(r'[A-Za-z0-9_-]{1,80}', session):
+            command = ['python3', 'test/run_speed_session.py', '--package', package]
+            if os.environ.get('ANDROID_SERIAL'):
+                command += ['--serial', os.environ['ANDROID_SERIAL']]
+            command += ['--restore', session]
+            return 'Restore the previous session first: ' + shlex.join(command)
+    except (OSError, RuntimeError, subprocess.SubprocessError, ET.ParseError):
+        pass
+    return ('Restore the previous session using its manifest.json session ID and '
+            '--restore, with the same package/device. The new recovery ID does not own that backup.')
 
 
 def video_uri(value):
@@ -56,8 +79,22 @@ def configure(package, operation, session, backend=None):
     if backend:
         expected += ':' + backend
     if 'result=-1' not in output or f'data="{expected}"' not in output:
+        rejected = re.search(r'data="speed-test:error:([^"\r\n]+)"', output)
+        if rejected:
+            reason = rejected.group(1)
+            message = f'Nova rejected speed-test {operation}: {reason}.'
+            if reason == 'invalid-operation-or-pending-restore':
+                message += ' ' + pending_restore_hint(package)
+            # configure-failed may have persisted a backup before failing to
+            # apply preferences. Unknown errors and lost replies also need cleanup.
+            if operation == 'configure' and reason in {
+                    'invalid-session', 'stop-playback-first', 'invalid-backend',
+                    'invalid-operation-or-pending-restore'}:
+                raise SetupRejected(message)
+            raise RuntimeError(message)
         raise RuntimeError('Nova did not acknowledge speed-test ' + operation +
-                           '; install the debug APK with SpeedTestReceiver. Response: ' + output.strip())
+                           '; check the ADB connection and that the debug APK includes '
+                           'SpeedTestReceiver. Response: ' + output.strip())
     return output
 
 
@@ -202,6 +239,9 @@ def main():
                 raise RuntimeError('session logcat collector exited during the test')
         except KeyboardInterrupt:
             result, error = 130, 'Interrupted'
+        except SetupRejected as exc:
+            restore_needed = False  # Never restore another session using our new ID.
+            result, error = 2, str(exc)
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             result, error = 2, str(exc)
         finally:
@@ -226,6 +266,9 @@ def main():
     if cleanup_error:
         print('Restore failed: ' + cleanup_error, file=sys.stderr)
         print(f'Retry with --restore {session} using the same package/device.', file=sys.stderr)
+    if driver is None:
+        return generate_reports(output, result, 'speed-1/analyzer-config.json',
+                                unavailable_reason='Speed cycles did not start: ' + (error or 'setup incomplete'))
     return generate_reports(output, result, 'speed-1/analyzer-config.json')
 
 

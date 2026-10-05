@@ -2029,7 +2029,7 @@ static void *videosink_thread(void *ctx)
 					// Count successful submissions independently of logging. A gap
 					// in this sequence identifies missing diagnostic records.
 					p->render_submit_seq++;
-					DBGSI2 serprintf("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu speed_correction_us=%lld\n",
+					DBGSI2 serprintf_record("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu speed_correction_us=%lld\n",
 						f->time, f->epoch, (long long)render_ts_ns, (long long)now_ns,
 						diag_interval_ms, (long long)(now_ns / NSEC_PER_MSEC - diag_ref_ms),
 						(long long)f->time - diag_heard -

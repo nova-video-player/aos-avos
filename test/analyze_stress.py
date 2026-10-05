@@ -243,11 +243,12 @@ def gap(rows, end=None):
 
 
 def log_order(rows):
-    """Check player and poll ordering separately; poll delivery is not a barrier."""
+    """Check each producer; delivery across logcat threads is not a barrier."""
     high = None
-    previous = {False: None, True: None}
+    previous = {}
+    player_high = None
     high_is_poll = False
-    valid, poll_skew_ms = True, 0
+    valid, poll_skew_ms, thread_skew_ms = True, 0, 0
     for stamp, line, _ in rows:
         # logd emits suppression summaries with older timestamps, including for
         # unrelated processes. They are not playback clock observations. Keep
@@ -255,22 +256,34 @@ def log_order(rows):
         if re.match(r'^\s*\d+(?:\.\d+)?\s+\d+\s+\d+\s+[VDIWEF]\s+chatty\s*:', line):
             continue
         is_poll = bool(POLL_MARKER.search(line))
-        last = previous[is_poll]
+        producer = re.match(r'^\s*\d+(?:\.\d+)?\s+(\d+)\s+(\d+)\s+[VDIWEF]\s+avos_player\s*:', line)
+        key = ('poll',) if is_poll else producer.groups() if producer else None
+        last = previous.get(key)
         if last is not None and stamp < last:
             valid = False
-        previous[is_poll] = stamp if last is None else max(last, stamp)
+        previous[key] = stamp if last is None else max(last, stamp)
+        if not is_poll:
+            if player_high is not None and stamp < player_high[0]:
+                # Direct renderer records and the stdout logging thread can
+                # reach logd in either order. Only accept this explanation
+                # when both records identify distinct producers. Legacy logs
+                # without PID/TID keep the strict ordering check.
+                if key is not None and player_high[1] is not None and key != player_high[1]:
+                    thread_skew_ms = max(thread_skew_ms, player_high[0] - stamp)
+                else:
+                    valid = False
+            if player_high is None or stamp >= player_high[0]:
+                player_high = (stamp, key)
         if high is not None and stamp < high:
             skew = high - stamp
             # A marker can overtake queued player logs by much more than clock
             # quantization. Keep this visible without confusing delivery order
-            # with reversed playback time. Each stream must remain monotonic.
+            # with reversed playback time. Each producer must remain monotonic.
             if is_poll != high_is_poll:
                 poll_skew_ms = max(poll_skew_ms, skew)
-            else:
-                valid = False
         if high is None or stamp > high or (stamp == high and not is_poll):
             high, high_is_poll = stamp, is_poll
-    return valid, poll_skew_ms
+    return valid, poll_skew_ms, thread_skew_ms
 
 
 def high_windows(rows, cfg):
@@ -488,7 +501,7 @@ def analyze(text, mode, cfg=None):
     if not rows:
         return dict(out, reason='missing_evidence')
     start, end = rows[0][0], max(r[0] for r in rows)
-    ordered, out['poll_marker_skew_ms'] = log_order(signal_rows)
+    ordered, out['poll_marker_skew_ms'], out['thread_log_skew_ms'] = log_order(signal_rows)
     require(ordered, 'log_time_reversed')
     # Live snapshots end with a device log marker, so a silent tail is measured.
     # If the marker trails a player stamp in delivery order, retain that

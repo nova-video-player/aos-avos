@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression fixtures for the actual analyzer used by device scripts."""
 import unittest
-from analyze_stress import analyze, config, high_windows, records
+from analyze_stress import analyze, config, high_windows, log_order, records
 
 
 def fixture(mode='resume', seconds=3, speed=1, start=1000, sequence=False):
@@ -472,6 +472,45 @@ stress_snapshot() {
         result = self.check(text + '\n1005.000 AVOS_TEST_POLL_3')
         self.assertIn('audio_write_gap', result['reason'])
         self.assertIn('stale_presentation', result['reason'])
+
+    def test_direct_renderer_logs_can_overtake_stdout_logs(self):
+        rows = []
+        for line in fixture(sequence=True).splitlines():
+            stamp, message = line.split(' ', 1)
+            tid = 200 if 'video_render_diag:' in message else 100
+            if stamp == '1001.010' and 'video_render_diag:' in message:
+                # Renderer records a slightly newer stamp before older stdout
+                # messages reach logcat, as in the Pixel pause-burst capture.
+                rows.insert(len(rows) - 4, f'1001.012 10 200 D avos_player: {message}')
+            else:
+                rows.append(f'{stamp} 10 {tid} D avos_player: {message}')
+        text = '\n'.join(rows)
+        result = self.check(text)
+        self.assertEqual(result['healthy'], 1, result)
+        self.assertAlmostEqual(result['thread_log_skew_ms'], 2)
+        # Native presentation and render sequence checks remain independent
+        # of permission to interleave delivery from different threads.
+        self.assertIn('presentation_reset', self.check(text.replace(
+            'presented=48000', 'presented=0'))['reason'])
+        self.assertIn('missing_render_sequence_order', self.check(text.replace(
+            'render_seq=26', 'render_seq=25'))['reason'])
+
+    def test_thread_interleaving_does_not_hide_reversals(self):
+        for suffix in (
+                '1000.009 10 100 D avos_player: same thread reversed',
+                '1000.009 untagged legacy record',
+                '1000.009 10 D avos_player: missing tid'):
+            text = ('1000.010 10 100 D avos_player: first\n'
+                    '1000.012 10 200 D avos_player: renderer\n'
+                    '1000.020 AVOS_TEST_POLL_1\n' + suffix)
+            self.assertFalse(log_order(records(text))[0], suffix)
+        # Compare against each producer's high-water mark, not just the
+        # immediately preceding record from a different thread.
+        text = ('1000.010 10 100 D avos_player: first\n'
+                '1000.020 10 200 D avos_player: second\n'
+                '1000.015 10 100 D avos_player: allowed\n'
+                '1000.014 10 100 D avos_player: reversed')
+        self.assertFalse(log_order(records(text))[0])
 
     def test_buffered_presentation_does_not_erase_write_gap(self):
         # Advancing buffered output alone cannot certify producer continuity.

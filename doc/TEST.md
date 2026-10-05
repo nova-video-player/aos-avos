@@ -430,9 +430,14 @@ snapshot; both collector processes must be alive and the marker must arrive.
 This bounds silent tails without comparing host and device clocks. Known log
 loss records make the evidence fail; undetectable omissions remain a limitation.
 Poll markers can overtake queued player logs; receiving one does not prove all
-earlier player records have arrived. The analyzer checks player timestamps and
-poll timestamps separately, reporting cross-stream skew as `poll_marker_skew_ms`.
-It never sorts playback events or excuses reversals within either stream. The
+earlier player records have arrived. The analyzer checks poll timestamps and
+each identified player PID/TID separately, reporting poll delivery skew as
+`poll_marker_skew_ms` and interleaved player-thread delivery as `thread_log_skew_ms`.
+Direct renderer records can overtake older stdout-thread records. This is
+accepted only when both records identify distinct producers; logs without
+PID/TID retain strict ordering. The analyzer never sorts playback events or
+excuses reversals within one producer. Embedded presentation counters and render
+sequences retain their independent monotonicity and continuity checks. The
 observation ends at the latest captured timestamp, so an early poll cannot
 shorten it. Stale presentation, silent tails and log-loss checks remain active;
 later snapshots and the full-session review retain subsequently delivered logs.

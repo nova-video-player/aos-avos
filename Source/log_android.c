@@ -119,4 +119,16 @@ int serprintf(const char *fmt, ...)
 
 	return ret;
 }
+
+int serprintf_record(const char *fmt, ...)
+{
+	// Sparse timing records must not wait behind the verbose stdout/stderr
+	// stream or be split across its 1024-byte chunks. Keep the same logcat tag
+	// and priority; the caller still controls the diagnostic debug level.
+	va_list ap;
+	va_start(ap, fmt);
+	int ret = android_log_vprint(ANDROID_LOG_DEBUG, tag, fmt, ap);
+	va_end(ap);
+	return ret;
+}
 #endif

@@ -90,6 +90,10 @@ after every successful timed submission, even with diagnostic logging disabled.
 It persists across pause, seek and flush and resets with a new decoder instance.
 This distinguishes omitted timing records from deadline errors between adjacent
 submissions. A successful submission does not prove physical display timing.
+On Android these complete records go directly to logcat under the same tag and
+debug level, avoiding the shared verbose stdout pipe and its line splitting.
+Their embedded submission timestamps remain authoritative; logcat can still lose
+records, and sequence gaps remain evidence gaps in the analyzer.
 
 ## Frame Snapping and Wall-Clock Mapping (`Source/codec_sfdec2.c`)
 

@@ -40,5 +40,19 @@ static inline int  serprintf (const char *fmt, ...) { return 0; }
 static inline int  vserprintf(const char *fmt, va_list va ) { return 0; }
 #endif
 
-#endif // _LOG_H_
+// Emit a complete diagnostic record without Android's shared stdout pipe.
+// Other targets retain their usual log transport.
+#if defined(DEBUG_MSG) && defined(CONFIG_ANDROID)
+int serprintf_record(const char *fmt, ...);
+#else
+static inline int serprintf_record(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int ret = vserprintf(fmt, ap);
+	va_end(ap);
+	return ret;
+}
+#endif
 
+#endif // _LOG_H_

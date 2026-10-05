@@ -73,6 +73,7 @@ void stream_sync_anchor_reset( STREAM *s )
 	if( !s )
 		return;
 	pthread_mutex_lock( &s->anchor_mutex );
+	s->pcm_clock_ref_valid = 0;
 	__atomic_store_n( &s->sink_ref_time, -1, __ATOMIC_RELEASE );
 	__atomic_store_n( &s->vid_ref_time, -1, __ATOMIC_RELEASE );
 	pthread_mutex_unlock( &s->anchor_mutex );
@@ -108,8 +109,8 @@ int stream_sync_anchor_get_video( STREAM *s )
 	return vid_ref_time;
 }
 
-int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
-	int only_if_unset, int refresh_sink )
+static int _stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
+	int only_if_unset, int refresh_sink, int pcm_latency_us, int pcm_raw_ts )
 {
 	if( !s )
 		return 0;
@@ -138,12 +139,64 @@ int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 	 * under the close/delete lock so sink_close() cannot destroy the renderer's
 	 * private mutex between this check and put_time().
 	 */
-	if( s->video_sink && s->video_sink->is_open && s->video_sink->put_time )
+	// This calibration belongs to sink_ref_time, not another thread's heard
+	// observation. The sink consumes the pair within this serialized callback.
+	s->pcm_playhead_latency_us = pcm_latency_us;
+	int64_t pcm_wall_ms = atime64();
+	int published = s->video_sink && s->video_sink->is_open && s->video_sink->put_time;
+	if( published )
 		s->video_sink->put_time( s->video_sink, sink_ref_time );
+	s->pcm_playhead_latency_us = -1;
+	s->pcm_clock_ref_valid = published && pcm_raw_ts != STREAM_NO_PTS_VALUE && s->put_time_mode &&
+		!s->paused && !s->paused_internal && !s->seek_paused &&
+		!s->audio_start_pending && !s->audio_resume_pending &&
+		!s->audio_reconfiguring && !s->atempo_commit_count;
+	if( s->pcm_clock_ref_valid ) {
+		s->pcm_clock_ref_ts = pcm_raw_ts;
+		s->pcm_clock_ref_wall_ms = pcm_wall_ms;
+		s->pcm_clock_ref_seek_epoch = s->seek_epoch;
+		s->pcm_clock_ref_speed_epoch = s->audio_speed_diag_epoch;
+		s->pcm_clock_ref_audio_generation = s->audio_lifecycle_generation;
+		s->pcm_clock_ref_av_delay = s->av_delay;
+	}
 	pthread_mutex_unlock( &s->video_sink_mutex );
 	__atomic_store_n( &s->vid_ref_time, vid_ref_time, __ATOMIC_RELEASE );
 	__atomic_store_n( &s->sink_ref_time, sink_ref_time, __ATOMIC_RELEASE );
 	pthread_mutex_unlock( &s->anchor_mutex );
+	return 1;
+}
+
+int stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
+	int only_if_unset, int refresh_sink )
+{
+	return _stream_sync_anchor_publish(s, sink_ref_time, vid_ref_time,
+		only_if_unset, refresh_sink, -1, STREAM_NO_PTS_VALUE);
+}
+
+// Calibration can become ready on either audio or renderer queries. Never
+// block on anchor_mutex here: a publisher can own it while waiting for the
+// renderer's private lock. On contention, retry activation on a later sample.
+static int _stream_pcm_handoff_heard_ts(STREAM *s, int heard_ts, int64_t now_ms,
+	int *handoff_ts)
+{
+	if( pthread_mutex_trylock(&s->anchor_mutex) != 0 )
+		return 0;
+	*handoff_ts = heard_ts;
+	int64_t age = now_ms - s->pcm_clock_ref_wall_ms;
+	if( s->pcm_clock_ref_valid && age >= 0 && age <= 100 &&
+		!s->paused && !s->paused_internal && !s->seek_paused &&
+		!s->audio_start_pending && !s->audio_resume_pending &&
+		!s->audio_reconfiguring && !s->atempo_commit_count &&
+		!s->manual_audio_hold_pending_ms &&
+		s->pcm_clock_ref_seek_epoch == s->seek_epoch &&
+		s->pcm_clock_ref_speed_epoch == s->audio_speed_diag_epoch &&
+		s->pcm_clock_ref_audio_generation == s->audio_lifecycle_generation &&
+		s->pcm_clock_ref_av_delay == s->av_delay ) {
+		int64_t projected = (int64_t)s->pcm_clock_ref_ts + age;
+		if( projected >= INT_MIN && projected <= INT_MAX )
+			*handoff_ts = (int)projected;
+	}
+	pthread_mutex_unlock(&s->anchor_mutex);
 	return 1;
 }
 
@@ -988,6 +1041,7 @@ int stream_sync_mode2_dynamic_active( STREAM *s )
 static int _stream_sync_restart_locked( STREAM *s, int reset_compressed_ledger,
 	int preserve_speed_timing )
 {
+	s->pcm_clock_ref_valid = 0;
 	s->delay         = 0;
 	_stream_pcm_delay_memory_reset( s, preserve_speed_timing );
 	_stream_pcm_reanchor_reset( s );
@@ -1597,8 +1651,10 @@ double stream_get_audiotrack_epoch_ts( STREAM *s, UINT64 frames, int rate, doubl
 }
 
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
-	int renderer_locked )
+	int renderer_locked, int *pcm_latency_us )
 {
+	if( pcm_latency_us )
+		*pcm_latency_us = -1;
 	if( !s || !s->audio || !s->audio->valid || s->audio_time < 0 ) {
 		return fallback_ts;
 	}
@@ -1914,10 +1970,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 			// evidence. Use that evidence too: after seek the calibration is empty,
 			// and rejecting it here leaves speed commits waiting for the brief
 			// fresh-timestamp windows instead of following the calibrated playhead.
+			// Once calibrated, do not learn from a requested return to 1x while
+			// old-speed output is still queued. Initial/deferred startup must still
+			// be allowed to calibrate so its first commit can obtain a playhead.
 			if( !playhead_is_dac &&
 				raw.heard != STREAM_NO_PTS_VALUE && raw.state == 0 &&
 				(delay_valid || delay_status.has_dynamic_evidence) &&
 				cur_speed > 0.999f && cur_speed < 1.001f &&
+				(!s->atempo_ledger_lat_valid || (!s->atempo_commit_count &&
+				 s->video_speed_num == s->video_speed_den)) &&
 				playhead_age <= 100 &&
 				wall_now - s->atempo_ledger_lat_last_ms >= 250 ) {
 				s->atempo_ledger_lat_last_ms = wall_now;
@@ -1931,17 +1992,30 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 					s->atempo_ledger_lat_frames += (target - s->atempo_ledger_lat_frames) / 4;
 				if( s->atempo_ledger_lat_samples < 1000 )
 					s->atempo_ledger_lat_samples++;
-				if( s->atempo_ledger_lat_samples >= 4 && !s->atempo_ledger_lat_valid ) {
+				int handoff_ts;
+				if( s->atempo_ledger_lat_samples >= 4 && !s->atempo_ledger_lat_valid &&
+					_stream_pcm_handoff_heard_ts(s, heard_ts, wall_now, &handoff_ts) ) {
+					// Warm-up can include the shallow queue immediately after a
+					// seek. Its running average may still lag the current latency
+					// by an entire audio block when the fourth sample arrives.
+					// Preserve the published clock's wall-time projection too: a
+					// write-boundary sample can repeat a timestamp for a full block.
+					// Once active, keep the normal 1/4 smoothing (also on resume).
+					s->atempo_ledger_lat_frames = MAX(0,
+						((int64_t)raw.heard - handoff_ts) * playhead_rate / 1000);
 					s->atempo_ledger_lat_valid = 1;
-					DBG serprintf("at_ledger: playhead calibration ready latency_frames=%lld rate=%d samples=%d dynamic_evidence=%d\n",
+					DBG serprintf("at_ledger: playhead calibration ready latency_frames=%lld rate=%d samples=%d dynamic_evidence=%d handoff_delta=%lld\n",
 						(long long)s->atempo_ledger_lat_frames, playhead_rate,
-						s->atempo_ledger_lat_samples, delay_status.has_dynamic_evidence);
+						s->atempo_ledger_lat_samples, delay_status.has_dynamic_evidence,
+						(long long)handoff_ts - heard_ts);
 				}
 			}
 
 			// Use the atempo ledger heard clock in place of the legacy delay model.
 			int ledger_applied = 0;
 			int eff_heard = STREAM_NO_PTS_VALUE;
+			int64_t applied_latency_frames = 0;
+			int calibrated_unclamped = 0;
 			if( playhead_is_dac ) {
 				if( raw.heard != STREAM_NO_PTS_VALUE && raw.state >= 0 ) {
 					eff_heard = raw.heard;
@@ -1949,11 +2023,13 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				}
 			} else if( s->atempo_ledger_lat_valid ) {
 				UINT64 lat = (UINT64)s->atempo_ledger_lat_frames;
+				applied_latency_frames = lat;
 				UINT64 playhead_eff = playhead > lat ? playhead - lat : 0;
 				ATEMPO_LEDGER_LOOKUP eff = _stream_atempo_ledger_lookup( s, playhead_eff, playhead_rate );
 				if( eff.heard != STREAM_NO_PTS_VALUE && eff.state >= 0 ) {
 					eff_heard = eff.heard;
 					ledger_applied = 1;
+					calibrated_unclamped = raw.state == 0 && eff.state == 0;
 				}
 			}
 
@@ -1986,6 +2062,11 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 
 			if( ledger_applied ) {
 				heard_ts = eff_heard;
+				if( pcm_latency_us && calibrated_unclamped ) {
+					int64_t latency_us = applied_latency_frames * 1000000LL / playhead_rate;
+					if( latency_us >= 0 && latency_us <= INT_MAX )
+						*pcm_latency_us = (int)latency_us;
+				}
 			}
 		}
 	}
@@ -2017,14 +2098,19 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 	return heard_ts;
 }
 
-int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
+static int _stream_get_heard_audio_ts_calibrated( STREAM *s, int fallback_ts, int *pcm_latency_us )
 {
-	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts, 0 );
+	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts, 0, pcm_latency_us );
 	// Consume only the observer's cached sample. This keeps JNI off the
 	// scheduler thread and lets shadow diagnostics continue while the compressed
 	// writer is idle or paused.
 	stream_sync_compressed_shadow_observe( s );
 	return heard_ts;
+}
+
+int stream_get_heard_audio_ts( STREAM *s, int fallback_ts )
+{
+	return _stream_get_heard_audio_ts_calibrated(s, fallback_ts, NULL);
 }
 
 int stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts )
@@ -2036,7 +2122,7 @@ int stream_get_heard_audio_ts_renderer_locked( STREAM *s, int fallback_ts )
 	 * would invert the video producer's video_sink_mutex -> scheduler-mutex
 	 * order and can deadlock after a seek.
 	 */
-	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts, 1 );
+	int heard_ts = _stream_get_heard_audio_ts_internal( s, fallback_ts, 1, NULL );
 	stream_sync_compressed_shadow_observe( s );
 	return heard_ts;
 }
@@ -2767,7 +2853,12 @@ int stream_sync_audio( STREAM *s, int audio_time )
 	if( anchor_valid && _stream_is_sink_driven(s) && audio_time != -1 ) {
 		if( !stream_no_sync || s->sync_a_time == -1 ) {
 			// Centralized heard_ts calculation.
-			int anchor_ts = stream_get_heard_audio_ts( s, audio_time );
+			int pcm_latency_us = -1;
+			int anchor_ts = _stream_get_heard_audio_ts_calibrated(s, audio_time, &pcm_latency_us);
+			float pcm_speed = audio_interface_get_audio_speed();
+			int pcm_raw_ts = !passthrough_mode && !libavos_get_ac3_recoding_enabled() &&
+				audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() &&
+				pcm_speed > 0.999f && pcm_speed < 1.001f ? anchor_ts : STREAM_NO_PTS_VALUE;
 
 			int force_passthrough_reanchor =
 				(passthrough_mode > 0) && _stream_is_sink_driven( s ) &&
@@ -2798,8 +2889,8 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			// reanchor heuristics may not replace. Leave sink_ref_time=-1 until
 			// audible time reaches zero.
 			if( anchor_ts >= 0 ) {
-				stream_sync_anchor_publish( s, anchor_ts, s->video_time, 0,
-					force_passthrough_reanchor && sink_ref_time != -1 );
+				_stream_sync_anchor_publish( s, anchor_ts, s->video_time, 0,
+					force_passthrough_reanchor && sink_ref_time != -1, pcm_latency_us, pcm_raw_ts );
 			} else {
 				DBG serprintf("stream_sync_audio: defer negative anchor audio=%d anchor=%d video=%d seek_epoch=%d pt=%d\n",
 					audio_time, anchor_ts, s->video_time, s->seek_epoch, passthrough_mode);

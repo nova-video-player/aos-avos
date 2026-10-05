@@ -107,6 +107,13 @@ typedef struct {
 	timeline_state_t timeline;
 	INT64 deadline_ns;
 	INT64 correction_ns;
+	int short_lookahead;
+	int calibration_valid;
+	int calibration_us;
+	int calibration_av_delay;
+	unsigned int calibration_audio_generation;
+	INT64 calibration_offset_ns;
+	INT64 submitted_calibration_offset_ns;
 } speed_cadence_t;
 
 static void speed_cadence_reset(speed_cadence_t *c)
@@ -115,6 +122,44 @@ static void speed_cadence_reset(speed_cadence_t *c)
 	c->enabled = 0;
 	c->valid = 0;
 	c->correction_ns = 0;
+	c->short_lookahead = 0;
+	c->calibration_valid = 0;
+	c->calibration_offset_ns = 0;
+	c->submitted_calibration_offset_ns = 0;
+}
+
+static INT64 speed_cadence_lookahead_ns(const speed_cadence_t *c, double speed)
+{
+	// Keep most future frames remappable in our queue during speed playback.
+	// A 200ms compositor lead amplifies every ramp-down mapping change, before
+	// the previous phase correction can drain. Keep the short lead at the final
+	// ratio too, including 1.2x or 1x, until a lifecycle reset.
+	return c->short_lookahead || fabs(speed - 1.0) > 0.001 ? 50000000LL : 200000000LL;
+}
+
+static INT64 speed_cadence_calibration(speed_cadence_t *c, int latency_us,
+	unsigned int audio_generation, int av_delay)
+{
+	if (latency_us < 0) {
+		c->calibration_valid = 0;
+		return 0;
+	}
+	INT64 delta = 0;
+	if (c->enabled && c->short_lookahead && c->valid && c->calibration_valid &&
+		c->calibration_audio_generation == audio_generation &&
+		c->calibration_av_delay == av_delay) {
+		delta = ((INT64)latency_us - c->calibration_us) * 1000LL;
+		if (delta >= -8000000LL && delta <= 8000000LL)
+			return 0; // Accumulate small changes without chasing sample noise.
+		if (delta < -350000000LL || delta > 350000000LL)
+			delta = 0; // A source discontinuity is not a latency correction.
+	}
+	c->calibration_valid = 1;
+	c->calibration_us = latency_us;
+	c->calibration_audio_generation = audio_generation;
+	c->calibration_av_delay = av_delay;
+	c->calibration_offset_ns += delta;
+	return delta;
 }
 
 // Pure preview: a lookahead wait must not spend the correction again. Commit
@@ -128,7 +173,11 @@ static INT64 speed_cadence_time(const speed_cadence_t *c, timeline_state_t timel
 		media_time <= c->media_time || nominal_interval_ns <= 0 || timeline.speed <= 0)
 		return raw_ns;
 
-	INT64 correction = c->correction_ns;
+	// A calibration update moves the raw audio schedule. Carry the opposite
+	// correction until the bounded per-frame recovery below repays it. Snapshot
+	// the applied offset at submission so an update during release is not lost.
+	INT64 correction = c->correction_ns -
+		(c->calibration_offset_ns - c->submitted_calibration_offset_ns);
 	if (timeline.speed != c->timeline.speed || timeline.rst_anchor != c->timeline.rst_anchor ||
 		timeline.ts_anchor != c->timeline.ts_anchor) {
 		// Start the new map from the last frame actually submitted, not from
@@ -138,9 +187,11 @@ static INT64 speed_cadence_time(const speed_cadence_t *c, timeline_state_t timel
 			timeline.inv_speed * 1000000.0);
 		correction = c->deadline_ns + delta_ns - raw_ns;
 	}
-	// Return to the audio-derived schedule without leaving permanent phase
-	// debt. Cap convergence at 1ms / 10% of a frame, including the last step.
-	INT64 step = MIN(1000000LL, nominal_interval_ns / 10);
+	// Rapid commits can add another correction before the previous one has
+	// drained. At 24fps, 1ms/frame lets ramp-down build seconds of recovery.
+	// Repay up to 4ms, still bounded to 10% of one frame (also for source gaps),
+	// matching PCM resume recovery without snapping the remaining correction.
+	INT64 step = MIN(4000000LL, nominal_interval_ns / 10);
 	correction -= MAX(-step, MIN(step, correction));
 	*correction_ns = correction;
 	return raw_ns + correction;
@@ -148,7 +199,7 @@ static INT64 speed_cadence_time(const speed_cadence_t *c, timeline_state_t timel
 
 static void speed_cadence_commit(speed_cadence_t *c, unsigned int generation,
 	timeline_state_t timeline, int epoch, int media_time, int media_valid,
-	INT64 deadline_ns, INT64 correction_ns)
+	INT64 deadline_ns, INT64 correction_ns, INT64 calibration_offset_ns)
 {
 	// A seek/pause/flush may have invalidated the state during buffer release.
 	// A speed commit alone does not invalidate the last submitted frame.
@@ -160,6 +211,7 @@ static void speed_cadence_commit(speed_cadence_t *c, unsigned int generation,
 	c->timeline = timeline;
 	c->deadline_ns = deadline_ns;
 	c->correction_ns = correction_ns;
+	c->submitted_calibration_offset_ns = calibration_offset_ns;
 }
 
 typedef struct priv {
@@ -246,6 +298,8 @@ typedef struct priv {
 	int mode2_slew_frame_epoch;
 	int pcm_startup_slew; // bounded PCM startup/resume correction, once per frame
 	int pcm_resume_slew; // faster correction only for a retained-output resume
+	int pcm_resume_calibration_active;
+	int pcm_resume_calibration_us;
 	unsigned int pcm_resume_audio_generation;
 	int pcm_resume_epoch;
 	int pcm_resume_av_delay;
@@ -659,7 +713,8 @@ static int mode1_phase_matches_audio_l(priv_t *p, STREAM *s)
 // mapping. Never carry its absolute target into a seek or reconfiguration.
 static int pcm_resume_matches_audio_l(priv_t *p, STREAM *s)
 {
-	if( !s || !p->pcm_resume_slew || !p->pcm_startup_slew ||
+	if( !s || (!p->pcm_resume_calibration_active &&
+		(!p->pcm_resume_slew || !p->pcm_startup_slew)) ||
 		!s->audio || !s->audio->valid || s->audio_time < 0 ||
 		s->seek_paused || s->audio_start_pending || p->pending_seek_reanchor ||
 		p->render_offset_ns == -1 || !p->render_offset_from_audio ||
@@ -675,6 +730,37 @@ static int pcm_resume_matches_audio_l(priv_t *p, STREAM *s)
 		p->pcm_resume_audio_generation == s->audio_lifecycle_generation;
 	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
 	return matches;
+}
+
+// Follow only the change in calibrated mixer latency after resume, not the
+// bursty wall-minus-heard sample. The first resume target already includes the
+// baseline. Keep watching after its slew completes: calibration can take
+// several seconds to settle. Caller holds locked.mtx.
+static void pcm_resume_calibration_observe_l(priv_t *p, int latency_us)
+{
+	if( !p->pcm_resume_calibration_active )
+		return;
+	INT64 delta = ((INT64)latency_us - p->pcm_resume_calibration_us) * 1000LL;
+	if( latency_us < 0 || llabs(delta) > 350000000LL ||
+		llabs(p->target_offset_ns + delta - p->render_offset_ns) > 350000000LL ||
+		p->pending_reanchor ||
+		(p->slew_active && !p->pcm_startup_slew) ) {
+		p->pcm_resume_calibration_active = 0;
+		return;
+	}
+	// Accumulate small changes; do not chase calibration rounding/noise.
+	if( llabs(delta) <= 8000000LL )
+		return;
+	p->pcm_resume_calibration_us = latency_us;
+	p->target_offset_ns += delta;
+	p->slew_active = p->target_offset_ns != p->render_offset_ns;
+	p->pcm_startup_slew = p->slew_active;
+	p->pcm_resume_slew = p->slew_active;
+	// Retargeting must not reset the distinct-frame guard: an already peeked
+	// frame may have consumed its correction allowance before this publication.
+	p->render_generation++;
+	DBGSI serprintf("android_sync: PCM resume calibration delta=%lldus latency=%dus target=%lld\n",
+		(long long)(delta / 1000), latency_us, (long long)p->target_offset_ns);
 }
 
 // Caller holds locked.mtx. Only Mode 1 invokes this observation path. Keep
@@ -792,6 +878,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// Adopt the committed mapping, cadence and anchor together. Pending video
 	// frames retain RST and are remapped each time the renderer peeks the queue.
 	timeline_state_t timeline = timeline_snapshot();
+	int speed_ratio_changed = timeline.speed != p->video_timeline.speed;
 	int timeline_changed = timeline.speed != p->video_timeline.speed ||
 		timeline.rst_anchor != p->video_timeline.rst_anchor ||
 		timeline.ts_anchor != p->video_timeline.ts_anchor;
@@ -840,6 +927,12 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		!s->audio_resume_pending &&
 		__atomic_load_n( &s->audio_resume_write_committed, __ATOMIC_ACQUIRE ) &&
 		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0;
+	int pcm_latency_us = s ?
+		s->pcm_playhead_latency_us : -1;
+	if( p->pcm_resume_calibration_active &&
+		(!s || passthrough_mode || speed_changed || epoch_changed || s->paused ||
+		 p->pause_armed || pcm_resume || !pcm_resume_matches_audio_l(p, s)) )
+		p->pcm_resume_calibration_active = 0;
 
 	int64_t expected = p->venc_put_time + dr;
 	int64_t diff = time - expected;
@@ -950,6 +1043,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->pcm_resume_epoch = s->seek_epoch;
 			p->pcm_resume_av_delay = s->av_delay;
 			p->pcm_resume_timeline = p->video_timeline;
+			p->pcm_resume_calibration_us = pcm_latency_us;
+			p->pcm_resume_calibration_active = pcm_latency_us >= 0 &&
+				fabsf(current_speed - 1.0f) < 0.001f;
 			p->pcm_startup_slew_frame_handle = NULL;
 			p->pcm_startup_slew_frame_time = INT_MIN;
 			p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -1020,11 +1116,14 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->render_generation++;
 	if (preserve_speed_anchor) {
 		p->speed_cadence.enabled = 1;
+		if (speed_ratio_changed)
+			p->speed_cadence.short_lookahead = 1;
 		DBGSI serprintf("android_sync: speed commit preserves clock speed=%.3f offset=%lld sample_diff=%lld epoch=%d\n",
 			current_speed, (long long)p->render_offset_ns, (long long)diff,
 			s->seek_epoch);
 	}
 	if (allow_reanchor) {
+		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);
 		// Rebuild all absolute seek anchors as before. Keep only a matching
 		// output's relative phase until the new queue has refilled; otherwise
@@ -1118,6 +1217,25 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			time, (long long)diff, speed_changed, discontinuity, no_sched_anchor, resume_started || pcm_resume);
 	}
 
+	// Commit-only publications have no paired calibration. Preserve the last
+	// baseline across them; ordinary missing/DAC samples invalidate it. Metadata
+	// is valid at every software speed, even though learning happens only at 1x.
+	if (!speed_changed || pcm_latency_us >= 0) {
+		INT64 delta = speed_cadence_calibration(&p->speed_cadence,
+			!passthrough_mode && s && !s->paused && !s->seek_paused &&
+			!p->pcm_resume_calibration_active && p->render_offset_from_audio &&
+			!p->pending_reanchor && !p->pending_seek_reanchor ? pcm_latency_us : -1,
+			s ? s->audio_lifecycle_generation : 0, s ? s->av_delay : 0);
+		if (delta) {
+			p->render_offset_ns += delta;
+			p->target_offset_ns += delta;
+			p->render_generation++;
+			DBGSI serprintf("android_sync: PCM speed calibration delta=%lldus latency=%dus speed=%.3f\n",
+				(long long)(delta / 1000), pcm_latency_us, current_speed);
+		}
+	}
+	pcm_resume_calibration_observe_l(p, pcm_latency_us);
+
 	if( passthrough_mode == 1 && preserve_output && s && !s->paused &&
 		!s->seek_paused && !s->audio_start_pending && !s->audio_resume_pending &&
 		!s->video_hold_for_resume_audio && !p->pending_seek_reanchor &&
@@ -1169,6 +1287,7 @@ static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
 	pthread_mutex_lock(&p->locked.mtx);
 	if( p->render_offset_ns != -1 && p->render_offset_from_audio ) {
 		p->pending_reanchor = 1;
+		p->pcm_resume_calibration_active = 0;
 		p->pcm_startup_slew = 1;
 		p->pcm_resume_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
@@ -1787,9 +1906,11 @@ static void *videosink_thread(void *ctx)
 						}
 						p->pcm_startup_slew = 0;
 						p->pcm_resume_slew = 0;
-						p->pcm_startup_slew_frame_handle = NULL;
-						p->pcm_startup_slew_frame_time = INT_MIN;
-						p->pcm_startup_slew_frame_epoch = INT_MIN;
+						if( !p->pcm_resume_calibration_active ) {
+							p->pcm_startup_slew_frame_handle = NULL;
+							p->pcm_startup_slew_frame_time = INT_MIN;
+							p->pcm_startup_slew_frame_epoch = INT_MIN;
+						}
 					}
 				}
 			}
@@ -1798,7 +1919,7 @@ static void *videosink_thread(void *ctx)
 				p->mode2_slew_frame_time = f->time;
 				p->mode2_slew_frame_epoch = f->epoch;
 			}
-			if( (p->pcm_startup_slew || p->mode1_resume_slew) && pcm_startup_new_slew_frame ) {
+			if( (p->pcm_startup_slew || p->pcm_resume_calibration_active || p->mode1_resume_slew) && pcm_startup_new_slew_frame ) {
 				p->pcm_startup_slew_frame_handle = f->android_handle;
 				p->pcm_startup_slew_frame_time = f->time;
 				p->pcm_startup_slew_frame_epoch = f->epoch;
@@ -1814,7 +1935,8 @@ static void *videosink_thread(void *ctx)
 				f->epoch, f->media_time, f->media_time_valid, cadence_interval_ns,
 				render_ts_ns, &speed_correction_ns);
 			INT64 delta_ns = render_ts_ns - now_ns;
-			const INT64 k_max_lookahead_ns = 200 * 1000000LL; // 200ms lookahead
+			const INT64 k_max_lookahead_ns = passthrough ? 200000000LL :
+				speed_cadence_lookahead_ns(&p->speed_cadence, p->video_timeline.speed);
 
 			if (p->render_offset_ns != -1 && delta_ns > k_max_lookahead_ns) {
 				// Frame is too far in the future; timed-wait until it enters the safe lookahead window
@@ -1871,6 +1993,7 @@ static void *videosink_thread(void *ctx)
 		int render_error = 0;
 		int presented = 0;
 		unsigned int cadence_generation = p->speed_cadence.generation;
+		INT64 cadence_calibration_offset = p->speed_cadence.calibration_offset_ns;
 		timeline_state_t submitted_timeline = p->video_timeline;
 		// Snapshot timing under the renderer lock. Diagnostics must not query
 		// AudioTrack or change the clock being measured.
@@ -1930,7 +2053,7 @@ static void *videosink_thread(void *ctx)
 		if (presented) {
 			speed_cadence_commit(&p->speed_cadence, cadence_generation,
 				submitted_timeline, f->epoch, f->media_time, f->media_time_valid,
-				render_ts_ns, speed_correction_ns);
+				render_ts_ns, speed_correction_ns, cadence_calibration_offset);
 			p->presentation_end_ns = MAX(p->presentation_end_ns,
 				render_ts_ns + (INT64)MAX(f->duration, 0) * NSEC_PER_MSEC);
 		}
@@ -2370,6 +2493,7 @@ retry_decoder_open:
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
 	p->pcm_resume_slew = 0;
+	p->pcm_resume_calibration_active = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
 	p->pcm_startup_slew_frame_time = INT_MIN;
 	p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -2629,6 +2753,7 @@ DBGCV	CLOG();
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
 	p->pcm_resume_slew = 0;
+	p->pcm_resume_calibration_active = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
 	p->pcm_startup_slew_frame_time = INT_MIN;
 	p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -2817,6 +2942,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
 	p->pcm_resume_slew = 0;
+	p->pcm_resume_calibration_active = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
 	p->pcm_startup_slew_frame_time = INT_MIN;
 	p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -2871,8 +2997,9 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		p->render_offset_from_audio && !s->seek_paused &&
 		!s->audio_start_pending && !p->pending_seek_reanchor && !p->mode1_seek_pending;
 	int preserve_pcm_slew = !passthrough && preserves_output &&
-		pcm_resume_matches_audio_l(p, s);
+		p->pcm_resume_slew && p->pcm_startup_slew && pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
+		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);
 		if( preserve_mode1_phase ) {
 			p->mode1_resume_pending = 1;

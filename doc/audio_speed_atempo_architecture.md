@@ -107,6 +107,15 @@ anchors, resume and hard clock discontinuities retain their reanchor behavior.
 A speed commit during resume does not consume the pending first-write clock
 correction. This policy does not alter passthrough clock handling.
 
+PCM speed playback limits compositor submission lead to 50ms, keeping queued
+video remappable during rapid ramps. The per-frame cadence correction converges
+at any destination ratio; a 1.8x-to-1.2x ramp does not need to visit 1x. Applied
+mixer-latency metadata accompanies the heard clock at every software speed, and
+post-speed changes in that latency use the same bounded renderer correction.
+Latency learning itself remains restricted to 1x: once calibrated, it waits for
+pending commits to finish and the video speed to reach 1x before updating the
+estimate. Initial calibration remains possible during a deferred startup commit.
+
 Software video decoders retain their existing timestamp handling. Frames already
 released to the Android compositor cannot be rescheduled by this change.
 
@@ -563,6 +572,17 @@ not authorize renderer reanchoring, but must not prevent rebuilding calibration
 after seek. The existing four-sample, 250ms spacing and fresh-playhead checks
 remain in force; a last-good value alone does not qualify. Once calibrated,
 speed commits can follow the playback head between AudioTimestamp queries.
+On the first valid sample, the applied latency is seeded against the last
+published PCM heard timestamp advanced by its elapsed wall time. An instantaneous
+write-boundary value can repeat for a whole audio block, so preserving that value
+alone would still step the renderer's extrapolated clock. The reference is used
+only within 100ms and with matching seek, output, speed and manual-delay state;
+without a matching reference, calibration uses the current heard value. Pauses
+and restarts cannot contribute elapsed time across playback epochs. Reading the
+pair uses a nonblocking anchor-lock attempt, deferring activation on contention
+to avoid reversing the renderer's lock order. Subsequent samples retain the
+existing quarter-step smoothing, including non-flushing resumes. No additional
+renderer reanchor or presentation-clock offset is introduced.
 
 PCM resume retains the shifted renderer clock through the first accepted write.
 A bounded residual correction uses a one-shot slew capped at 4ms per distinct

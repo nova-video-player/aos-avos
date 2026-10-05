@@ -69,6 +69,14 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   invalidated by an output-generation, seek-epoch, speed-mapping or manual-delay
   change. Cold-start corrections still reset on pause. Passthrough resume
   policy is unchanged.
+- At 1x, retained-output PCM resume also follows subsequent changes in the
+  calibrated mixer-playhead latency used by the atempo/Sonic ledger. Calibration
+  and heard time are published as a pair. After the initial resume slew finishes,
+  a latency change exceeding 8ms shifts its target by that change alone, with the
+  same per-frame limit; ordinary timestamp/write jitter cannot retarget it.
+  Seek, pause, output replacement, manual-delay changes, speed transitions,
+  uncalibrated samples and explicit reanchors end this tracking. This does not
+  change passthrough, PlaybackParams, or the calibration algorithm itself.
 - Manual A/V delay (`s->av_delay`) is also slewed in the render path through
   `effective_av_delay` (bounded per-frame step) so large UI jumps do not create
   a burst of ASAP renders ("fast video" transient).
@@ -107,12 +115,28 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   frame. Video can already be scheduled up to 200ms ahead of heard audio, so
   retaining the wall offset alone does not prevent a gap when queued frames are
   remapped. The renderer carries a temporary deadline correction at that boundary,
-  then converges to the audio-derived schedule by at most 1ms (or 10% of a frame)
-  per successful submission. Lookahead retries do not spend this correction;
+  then converges to the audio-derived schedule by at most 4ms and 10% of a frame
+  per successful submission, including the final step. The earlier 1ms limit
+  allowed rapid ramp-down commits to accumulate a correction that took seconds
+  to repay at 24fps. Lookahead retries do not spend this correction;
   original media timestamp gaps remain intact. This applies to atempo, Sonic and
   PlaybackParams PCM commits, not passthrough. Open, seek, flush, reanchor and pause
   clear it, including when they overlap an unlocked buffer release.
   `video_render_diag` reports the residual as `speed_correction_us`.
+- After an actual PCM speed-ratio change, compositor submission lead is limited
+  to 50ms instead of 200ms. This keeps future frames in the engine queue, where
+  subsequent commits can still remap them, and reduces the phase correction
+  accumulated by rapid ramp-down steps. The short lead remains at the final
+  ratio (including 1.2x or 1x) until pause/seek/flush resets speed state; non-1x
+  playback also uses the short lead after a reset. Ordinary 1x startup and
+  passthrough retain their existing 200ms lead.
+- Software PCM publications carry their applied mixer-latency calibration at
+  every speed. After a speed change, a change in this calibration moves the raw
+  renderer offset, while the opposite change is added to the existing bounded
+  speed correction. It therefore converges without a deadline jump or a second
+  independent correction. Calibration updates during an unlocked buffer release
+  remain pending for the next submission. Missing/DAC evidence, output replacement,
+  manual delay changes and lifecycle resets invalidate the calibration baseline.
 
 ## Operational Notes and Caveats
 

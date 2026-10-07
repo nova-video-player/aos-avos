@@ -41,11 +41,57 @@ class AnalyzerTests(unittest.TestCase):
         result = self.check(text.replace(row, row + '\n' + older))
         self.assertEqual(result['healthy'], 1, result)
         self.assertEqual(result['presentation_out_of_order'], 1)
-        # Equal/newer observation timestamps and unclocked reversals still fail.
-        for bad in (older.replace('1001008000000', '1001010000000'),
-                    older.replace('1001008000000', '1001011000000'),
+        # Clearly newer observations and unclocked reversals still fail.
+        for bad in (older.replace('1001008000000', '1001011000000'),
                     older.replace(' sample_ns=1001008000000', '')):
             self.assertIn('presentation_reset', self.check(text.replace(row, row + '\n' + bad))['reason'])
+
+    def test_legacy_playhead_timestamp_tie_is_insufficient_evidence(self):
+        row = '1001.010 audio_present_diag: presented=48000 source=playhead age_ms=0 sample_ns=1001010000000'
+        reversal = row.replace('presented=48000', 'presented=46976')
+        text = fixture().replace(row, row + '\n' + reversal)
+        result = self.check(text)
+        self.assertEqual(result['verdict'], 'INSUFFICIENT_EVIDENCE', result)
+        self.assertEqual(result['presentation_ambiguous_order'], 1)
+        self.assertNotIn('presentation_reset', result['reason'])
+        # Equal DAC timestamp counters are not ambiguous JNI query times.
+        result = self.check(text.replace('source=playhead', 'source=timestamp'))
+        self.assertIn('presentation_reset', result['reason'])
+
+    def test_overlapping_playhead_queries_do_not_prove_reset(self):
+        row = '1001.010 audio_present_diag: presented=48000 source=playhead age_ms=0 sample_ns=1001010000000'
+        first = row + ' query_start_ns=1001009900000'
+        reversal = ('1001.010 audio_present_diag: presented=46976 source=playhead '
+                    'age_ms=0 sample_ns=1001010500000 query_start_ns=1001009800000')
+        text = fixture().replace(row, first + '\n' + reversal)
+        result = self.check(text)
+        self.assertEqual(result['verdict'], 'INSUFFICIENT_EVIDENCE', result)
+        self.assertEqual(result['presentation_ambiguous_order'], 1)
+        # A subsequent non-overlapping reversal must still fail, including
+        # when the earlier ambiguous observation already reduced coverage.
+        later = reversal.replace('1001010500000', '1001011000000').replace(
+            '1001009800000', '1001010600000')
+        result = self.check(text.replace(reversal, reversal + '\n' + later))
+        self.assertEqual(result['verdict'], 'FAIL', result)
+        self.assertIn('presentation_reset', result['reason'])
+        result = self.check(fixture().replace(row, first + '\n' + later))
+        self.assertIn('presentation_reset', result['reason'])
+
+    def test_ambiguous_queries_cannot_supply_fresh_progress(self):
+        rows = fixture().splitlines()
+        for i, row in enumerate(rows):
+            if 'audio_present_diag:' not in row:
+                continue
+            t = float(row.split()[0])
+            if t <= 1001.01:
+                rows[i] += ' query_start_ns=1000000000000'
+            else:
+                rows[i] = (row.split('presented=')[0] +
+                           f'presented=0 source=playhead age_ms=0 sample_ns={round(t*1e9)} '
+                           'query_start_ns=1000000000000')
+        result = self.check('\n'.join(rows))
+        self.assertIn('stale_presentation', result['reason'])
+        self.assertIn('missing_presentation_order', result['reason'])
 
     def test_old_observations_cannot_prove_continued_presentation(self):
         rows = fixture().splitlines()
@@ -155,6 +201,7 @@ class AnalyzerTests(unittest.TestCase):
             reason = 'missing_render_records' if sequence else 'missing_render_continuity'
             live = self.check(missing)
             self.assertEqual(live['healthy'], 0)
+            self.assertEqual(live['verdict'], 'INSUFFICIENT_EVIDENCE', live)
             self.assertIn(reason, live['reason'])
             self.assertNotIn('scheduled_judder', live['reason'])
             self.assertEqual(live['missing_render_records'], 2 if sequence else 0)
@@ -186,6 +233,7 @@ class AnalyzerTests(unittest.TestCase):
         result = self.check(text)
         for reason in ('missing_render_records', 'late_submission', 'sustained_av_phase_error'):
             self.assertIn(reason, result['reason'])
+        self.assertEqual(result['verdict'], 'FAIL', result)
         self.assertEqual(analyze_recording(text, config({}))['verdict'], 'ISSUES_OBSERVED')
 
     def test_sequence_duplicates_and_mixed_logs_are_incomplete(self):
@@ -251,6 +299,27 @@ class AnalyzerTests(unittest.TestCase):
             result = self.check(broken, 'seek')
             self.assertIn('video_feed_gap', result['reason'])
             self.assertIn('audio_write_gap', result['reason'])
+
+    def test_resume_startup_has_separate_budget(self):
+        text = '1000.000 WALLCLOCK_RESET: by pause resume\n' + fixture('speed', start=1000.3)
+        result = self.check(text)
+        self.assertEqual(result['verdict'], 'PASS', result)
+        self.assertAlmostEqual(result['first_video_ms'], 310)
+        self.assertAlmostEqual(result['first_write_ms'], 310)
+        self.assertLess(result['max_video_gap'], 250)
+        self.assertIn('resume_latency', self.check(text, RESUME_LATENCY_MAX_MS=300)['reason'])
+        slow = '1000.000 WALLCLOCK_RESET: by pause resume\n' + fixture('speed', start=1001.1)
+        result = self.check(slow)
+        self.assertEqual(result['verdict'], 'FAIL', result)
+        self.assertIn('resume_latency', result['reason'])
+        # Excluding the initial wait must not waive stalls during playback or
+        # a silent tail, even when renderer evidence is also incomplete.
+        gap = '\n'.join(r for r in text.splitlines() if not 1001 < float(r.split()[0]) < 1001.4)
+        for broken in (gap, text + '\n1004.000 AVOS_TEST_POLL_2'):
+            result = self.check(broken)
+            self.assertIn('video_feed_gap', result['reason'])
+            self.assertIn('audio_write_gap', result['reason'])
+            self.assertEqual(result['verdict'], 'FAIL', result)
 
     def test_seek_startup_requires_render_and_progress(self):
         text = fixture('seek')

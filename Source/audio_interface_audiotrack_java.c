@@ -3261,7 +3261,7 @@ static int audiotrack_get_presented_frames(audio_ctx_t *at, uint64_t *frames, in
 			if (source) *source = AT_PRESENTED_FRAMES_SRC_TIMESTAMP;
 			if (age_ms) *age_ms = (int)(age_ns / 1000000LL);
 			// Report the observed counter, never the extrapolated position.
-DBG2			LOG("audio_present_diag: presented=%llu source=timestamp age_ms=%lld sample_ns=%lld",
+DBG2			serprintf_record("audio_present_diag: presented=%llu source=timestamp age_ms=%lld sample_ns=%lld\n",
 				(unsigned long long)audiotrack_epoch_adjust_presented_frames(at, at->last_timestamp_frames),
 				(long long)(age_ns / 1000000LL), (long long)at->last_timestamp_ns);
 			return 1;
@@ -3285,10 +3285,24 @@ DBG2			LOG("audio_present_diag: presented=%llu source=timestamp age_ms=%lld samp
 	JNIEnv *env = attach_thread_current_vm();
 	if (!env || !at->obj) return 0;
 
+	// Preserve the querying thread and the entire query interval. Concurrent
+	// queries can complete/log out of order; a millisecond completion stamp
+	// alone cannot distinguish that from a playback-head reset. Debug only:
+	// do not serialize AudioTrack queries or change their returned positions.
+	int trace_present = 0;
+	struct timespec query_start;
+DBG2	trace_present = 1;
+	if (trace_present)
+		clock_gettime(CLOCK_MONOTONIC, &query_start);
 	jint ph_frames = call_int_method_with_env(at, env, "getPlaybackHeadPosition", "()I");
-DBG2	LOG("audio_present_diag: presented=%llu source=playhead age_ms=0 sample_ns=%lld",
-		(unsigned long long)audiotrack_epoch_adjust_presented_frames(at, (uint64_t)(uint32_t)MAX(ph_frames, 0)),
-		(long long)atime64() * 1000000LL);
+	if (trace_present) {
+		struct timespec query_end;
+		clock_gettime(CLOCK_MONOTONIC, &query_end);
+		serprintf_record("audio_present_diag: presented=%llu source=playhead age_ms=0 sample_ns=%lld query_start_ns=%lld\n",
+			(unsigned long long)audiotrack_epoch_adjust_presented_frames(at, (uint64_t)(uint32_t)MAX(ph_frames, 0)),
+			(long long)query_end.tv_sec * 1000000000LL + query_end.tv_nsec,
+			(long long)query_start.tv_sec * 1000000000LL + query_start.tv_nsec);
+	}
 	if (ph_frames <= 0) return 0;
 
 	*frames = audiotrack_epoch_adjust_presented_frames(

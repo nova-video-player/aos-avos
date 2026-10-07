@@ -600,6 +600,7 @@ def analyze(text, mode, cfg=None):
     ordered_present = []
     newest_sample = {}
     out['presentation_out_of_order'] = 0
+    out['presentation_ambiguous_order'] = 0
     for r in present:
         domain = (r[2].get('source', r[2].get('src', 'playhead')),
                   r[2].get('generation', ''), r[2].get('epoch', ''))
@@ -611,6 +612,26 @@ def analyze(text, mode, cfg=None):
                 # one. It proves neither a counter reset nor fresh progress.
                 out['presentation_out_of_order'] += 1
                 continue
+            previous = streams.get(domain, [])
+            if previous and domain[0] == 'playhead' and number(r, 'presented') < number(previous[-1], 'presented'):
+                previous_fields = previous[-1][2]
+                previous_ns = previous_fields.get('sample_ns')
+                query_start = r[2].get('query_start_ns')
+                # A counter is sampled somewhere inside its JNI query. A
+                # reversal between overlapping queries has no proven order.
+                # Old captures only recorded millisecond completion times;
+                # equal stamps there have the same ambiguity. Do not turn
+                # either case into PASS or use it as fresh progress.
+                overlap = (previous_ns is not None and query_start is not None and
+                           'query_start_ns' in previous_fields and
+                           int(query_start) <= int(previous_ns))
+                legacy_tie = (previous_ns is not None and query_start is None and
+                              'query_start_ns' not in previous_fields and
+                              sample_ns == int(previous_ns) and sample_ns % 1000000 == 0)
+                if overlap or legacy_tie:
+                    out['presentation_ambiguous_order'] += 1
+                    require(False, 'missing_presentation_order')
+                    continue
             newest_sample[domain] = sample_ns
         streams.setdefault(domain, []).append(r)
         ordered_present.append(r)
@@ -674,12 +695,12 @@ def analyze(text, mode, cfg=None):
     for lo, hi in windows:
         window_v = [r for r in videos if lo <= r[0] <= hi]
         window_w = [r for r in writes if lo <= r[0] <= hi]
-        # Seek target readiness precedes audio readiness and render scheduling.
-        # Check that leading wait against the startup budget above; retain the
-        # ordinary gap limit between records and through the silent tail.
+        # Seek/resume readiness precedes the first output. Check that leading
+        # wait against its transition budget above; retain the ordinary gap
+        # limit between records and through the silent tail.
         vg = gap(window_v, hi) if window_v else hi - lo
         wg = gap(window_w, hi) if window_w else hi - lo
-        if mode != 'seek':
+        if mode == 'speed':
             vg = max(vg, window_v[0][0] - lo if window_v else hi - lo)
             wg = max(wg, window_w[0][0] - lo if window_w else hi - lo)
         if mode == 'speed':
@@ -700,13 +721,15 @@ def analyze(text, mode, cfg=None):
     for failure in failures:
         require(False, failure)
     out['healthy'] = int(not reasons)
-    # Missing or sparse observations cannot certify presentation continuity,
+    # Missing or sparse observations cannot certify presentation/render continuity,
     # but do not demonstrate a stall. Counter resets/frozen counters and all
     # independent playback failures still take precedence over evidence gaps.
-    presentation_gaps = {'missing_presentation_progress',
-                         'missing_presentation_observations', 'stale_presentation'}
+    evidence_gaps = {'missing_presentation_progress',
+                     'missing_presentation_observations', 'stale_presentation',
+                     'missing_render_records', 'missing_render_continuity',
+                     'missing_presentation_order'}
     out['verdict'] = ('PASS' if not reasons else 'FAIL' if
-                      any(r not in presentation_gaps for r in reasons) else 'INSUFFICIENT_EVIDENCE')
+                      any(r not in evidence_gaps for r in reasons) else 'INSUFFICIENT_EVIDENCE')
     out['reason'] = ','.join(reasons) or 'ok'
     return out
 

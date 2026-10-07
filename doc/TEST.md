@@ -462,6 +462,26 @@ precedes audio readiness and renderer scheduling. `first_write_ms`,
 `first_video_ms` and `first_render_ms` report this wait using logcat timestamps;
 they are not measurements of first audible/visible output. The 250ms feed-gap
 limits still apply between subsequent records and through a silent tail.
+Resume uses the same separation with `RESUME_LATENCY_MAX_MS`: the initial
+write/video wait is checked against that budget, not also against the steady
+250ms feed-gap limit. Speed hold windows retain their leading-gap checks.
+
+A gap in renderer sequence numbers (`missing_render_records`), or missing
+adjacency evidence in legacy logs (`missing_render_continuity`), leaves a live
+phase `INSUFFICIENT_EVIDENCE` and non-successful, matching the recording review.
+Independent stalls, late submissions, cadence violations and sustained phase
+errors still produce `FAIL` even when records are also missing.
+
+Audio presentation records go directly to logcat, preserving the querying
+thread. Playhead records include the monotonic nanosecond query interval
+(`query_start_ns` through `sample_ns`); timestamp records retain the actual
+AudioTrack timestamp. A backward counter between overlapping playhead queries
+cannot establish observation order. The analyzer reports
+`missing_presentation_order` / `INSUFFICIENT_EVIDENCE` and excludes that sample
+from progress evidence. The same applies to conflicting playhead counters with
+equal millisecond sample times in older captures. A backward counter from a
+later, non-overlapping query still fails as `presentation_reset`; DAC timestamp
+conflicts, stalled counters and independent playback failures remain failures.
 
 Default directories are `<name>-validation-<stamp>/` and
 `campaign-session-<stamp>/`, or `OUTPUT_DIR`:

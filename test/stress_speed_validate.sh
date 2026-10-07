@@ -51,7 +51,8 @@ capture_failure()
 	reason=$1
 	cycle=$2
 
-	printf 'FAIL cycle=%s label=%s reason=%s\n' "$cycle" "$LABEL" "$reason" | tee -a "$RESULTS"
+	stress_failure_status "$reason"
+	printf '%s cycle=%s label=%s reason=%s\n' "$FAILURE_STATUS" "$cycle" "$LABEL" "$reason" | tee -a "$RESULTS"
 	cp "$LATEST" "$OUTPUT_DIR/failure-cycle-$cycle.log" 2>/dev/null || true
 	adb shell dumpsys media.audio_flinger > "$OUTPUT_DIR/audio_flinger.txt" 2>&1 || true
 	adb shell dumpsys SurfaceFlinger > "$OUTPUT_DIR/surfaceflinger.txt" 2>&1 || true
@@ -137,12 +138,12 @@ while [ "$i" -le "$COUNT" ]; do
 	if [ -z "$current_pid" ] || [ "$current_pid" != "$PLAYER_PID" ]; then
 		tail -n "+$start_line" "$RAW_LOG" > "$LATEST"
 		capture_failure "Nova process exited or restarted" "$i"
-		exit 1
+		exit "$FAILURE_RC"
 	fi
 	stress_snapshot
 	if grep -Eq "Fatal signal|FATAL EXCEPTION|ANR in $PACKAGE|ERROR_DEAD_OBJECT" "$LATEST"; then
 		capture_failure "fatal runtime or decoder error" "$i"
-		exit 1
+		exit "$FAILURE_RC"
 	fi
 
 	health=$(analyse_cycle) || fail "analyzer failed: $health"
@@ -160,7 +161,7 @@ while [ "$i" -le "$COUNT" ]; do
 		cat=$(printf '%s\n' "$health" | sed -n 's/.* hi_underruns=\([0-9][0-9]*\).*/\1/p')
 		[ -n "$cat" ] && [ "$cat" -gt "$UNDERRUN_MAX" ] && reason="AudioTrack underruns at high speed (${cat})"
 		capture_failure "$reason; $health" "$i"
-		exit 1
+		exit "$FAILURE_RC"
 	fi
 
 	i=$((i + 1))

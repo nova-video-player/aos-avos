@@ -61,8 +61,9 @@ capture_failure()
 	iteration=$2
 	target=$3
 
-	printf 'FAIL iteration=%s target=%s reason=%s\n' \
-		"$iteration" "$target" "$reason" | tee -a "$RESULTS"
+	stress_failure_status "$reason"
+	printf '%s iteration=%s target=%s reason=%s\n' \
+		"$FAILURE_STATUS" "$iteration" "$target" "$reason" | tee -a "$RESULTS"
 	cp "$LATEST" "$OUTPUT_DIR/failure-iteration-$iteration.log" 2>/dev/null || true
 	adb shell dumpsys media.audio_flinger > "$OUTPUT_DIR/audio_flinger.txt" 2>&1 || true
 	adb shell dumpsys media.audio_policy > "$OUTPUT_DIR/audio_policy.txt" 2>&1 || true
@@ -196,13 +197,13 @@ while [ "$i" -le "$COUNT" ]; do
 		if [ -z "$current_pid" ] || [ "$current_pid" != "$PLAYER_PID" ]; then
 			tail -n "+$start_line" "$RAW_LOG" > "$LATEST"
 			capture_failure "Nova process exited or restarted" "$i" "$target"
-			exit 1
+			exit "$FAILURE_RC"
 		fi
 
 		stress_snapshot
 		if grep -Eq "Fatal signal|FATAL EXCEPTION|ANR in $PACKAGE|ERROR_DEAD_OBJECT|seek watchdog restart failed" "$LATEST"; then
 			capture_failure "fatal runtime or decoder error" "$i" "$target"
-			exit 1
+			exit "$FAILURE_RC"
 		fi
 
 		last_health=$(analyse_segment) || fail "analyzer failed: $last_health"
@@ -229,7 +230,7 @@ PYEOF
 				case "$review_verdict" in
 					ISSUES_OBSERVED)
 						capture_failure "burst recovered but full-burst timing review found issues; see burst-$i-review.json" "$i" "$target"
-						exit 1 ;;
+						exit "$FAILURE_RC" ;;
 					INSUFFICIENT_EVIDENCE)
 						# The live window starts at resume, but render coverage
 						# starts at the first submission. Keep collecting the same
@@ -267,7 +268,7 @@ PYEOF
 				reason="AudioTrack underruns after resume (${underruns})"
 			fi
 			capture_failure "$reason; $last_health" "$i" "$target"
-			exit 1
+			exit "$FAILURE_RC"
 		fi
 		sleep "$(awk -v ms="$POLL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')"
 	done

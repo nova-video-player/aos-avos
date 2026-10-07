@@ -299,11 +299,11 @@ class AnalyzerTests(unittest.TestCase):
         complete = fixture()
         cases = [
             ('coverage_arrives', [short, complete], 3, 0, 2, 'NO_ISSUES_OBSERVED'),
-            ('coverage_timeout', [short, short], 2, 1, 2, 'INSUFFICIENT_EVIDENCE'),
+            ('coverage_timeout', [short, short], 2, 3, 2, 'INSUFFICIENT_EVIDENCE'),
             ('timing_failure', [complete + '\n1003.021 late frame drop'],
              3, 1, 1, 'ISSUES_OBSERVED'),
             ('capture_loss', [complete + '\n1003.021 chatty dropped 3 lines'] * 2,
-             2, 1, 2, 'INSUFFICIENT_EVIDENCE'),
+             2, 3, 2, 'INSUFFICIENT_EVIDENCE'),
         ]
         setup = r'''
 set -u
@@ -324,7 +324,8 @@ date() { printf '%s\n' "$poll_count"; }
 adb() { printf '123\n'; }
 sleep() { :; }
 fail() { printf 'ERROR: %s\n' "$1"; exit 2; }
-capture_failure() { printf 'FAIL: %s\n' "$1"; }
+. "$SCRIPT_DIR/stress_common.sh"
+capture_failure() { stress_failure_status "$1"; printf '%s: %s\n' "$FAILURE_STATUS" "$1"; }
 analyse_segment() { printf 'healthy=1 reason=ok\n'; }
 stress_snapshot() {
     poll_count=$((poll_count + 1))
@@ -580,6 +581,28 @@ stress_snapshot() {
         self.assertEqual(result['healthy'], 0)
         self.assertIn('missing_presentation_observations', result['reason'])
         self.assertGreater(result['presentation_max_gap_ms'], 500)
+        self.assertEqual(result['verdict'], 'INSUFFICIENT_EVIDENCE')
+
+    def test_throttled_legacy_playhead_is_evidence_gap_not_stall(self):
+        rows = []
+        for row in fixture(seconds=8).splitlines():
+            if 'audio_present_diag:' in row:
+                if round((float(row.split()[0]) - 1000.01) * 1000) not in (0, 2000, 4000, 6000):
+                    continue
+                row = row.replace('audio_present_diag:', 'playhead_delay:')
+            rows.append(row)
+        text = '\n'.join(rows)
+        result = self.check(text)
+        self.assertEqual(result['presentation'], 'advancing')
+        self.assertEqual(result['healthy'], 0)
+        self.assertEqual(result['verdict'], 'INSUFFICIENT_EVIDENCE')
+        self.assertNotIn('presentation_stalled', result['reason'])
+        # Independent playback faults must outrank the sparse sampling gap.
+        self.assertEqual(self.check(text + '\n1008.020 AUDIO_STARVED: waiting=100')['verdict'], 'FAIL')
+        import re
+        frozen = re.sub(r'presented=\d+', 'presented=0', text)
+        self.assertIn('presentation_stalled', self.check(frozen)['reason'])
+        self.assertEqual(self.check(frozen)['verdict'], 'FAIL')
 
     def test_offline_runtime_errors_and_capture_loss(self):
         from analyze_stress_recording import analyze_recording
@@ -685,6 +708,45 @@ stress_snapshot() {
             resume.annotate('video_render_diag:', fields)
             self.assertEqual(fields['_resume_boundary'], 1)
             self.assertNotIn('_resume_boundary_source', fields)
+
+    def test_renderer_can_overtake_buffered_resume_message(self):
+        from analyze_stress_recording import analyze_recording
+        for path in ('PCM', 'mode1'):
+            rows = ['999.000 android_sync: pause start at 998000']
+            inserted = False
+            for row in fixture(sequence=True).splitlines():
+                rows.append(row)
+                if 'video_render_diag:' in row and not inserted:
+                    # The first post-resume submission arrives before the
+                    # stdout thread delivers the shift that already affected it.
+                    rows += ['1000.010 android_sync: resume state offset=2000000000 pending=0',
+                             f'1000.010 android_sync: {path} resume applies paused correction=-40000us remaining=0us',
+                             '1000.010 android_sync: resume shift offset by 2000ms -> 3960000000']
+                    inserted = True
+            text = '\n'.join(rows)
+            render = [r[2] for r in records(text) if 'video_render_diag:' in r[1]]
+            self.assertEqual(render[0]['_resume_boundary'], render[1]['_resume_boundary'])
+            self.assertEqual(render[0]['_resume_adjustment_ms'], 1960)
+            self.assertEqual(self.check(text)['healthy'], 1)
+            self.assertEqual(analyze_recording(text, config({}))['verdict'], 'NO_ISSUES_OBSERVED')
+            # Neither unknown boundaries nor genuine cadence errors get waived.
+            missing = '\n'.join(row for row in rows if 'pause start at' not in row)
+            self.assertIn('scheduled_judder', self.check(missing)['reason'])
+            jumped = text.replace('deadline_ns=1000150000000', 'deadline_ns=1000170000000')
+            self.assertNotEqual(jumped, text)
+            self.assertIn('scheduled_judder', self.check(jumped)['reason'])
+
+    def test_pending_resume_records_do_not_cross_reset(self):
+        from analyze_stress import ResumeBoundary
+        for reset in ('stream_open:', 'stream_stop:', 'VIDEO_SEEK_TARGET_READY: epoch=2'):
+            resume = ResumeBoundary()
+            resume.annotate('android_sync: pause start at 1000', {})
+            first = {'submit_ns': '1200000000'}
+            resume.annotate('video_render_diag:', first)
+            resume.annotate(reset, {})
+            resume.annotate('android_sync: resume shift offset by 100ms -> 500', {})
+            self.assertEqual(first['_resume_boundary'], 0)
+            self.assertNotIn('_resume_boundary_source', first)
 
     def test_recording_baseline_must_be_stable_and_not_borrowed(self):
         from analyze_stress_recording import analyze_recording
@@ -874,6 +936,30 @@ stress_snapshot() {
             self.assertNotIn('UNEXPECTED_ADB', r.stderr)
             self.assertFalse(output.exists())
 
+    def test_campaign_preserves_fault_priority_over_sparse_phases(self):
+        from pathlib import Path
+        import subprocess
+        import tempfile
+        script = Path(__file__).with_name('stress_campaign.sh').read_text()
+        run_phase = script[script.index('run_phase()'):script.index('\naggregate_phase()')]
+        with tempfile.TemporaryDirectory() as tmp:
+            setup = 'CAMPAIGN_FAILED=0\nCAMPAIGN_RC=0\nSESSION_LOG="$1/session.log"\n'
+            calls = '''
+run_phase first "$1/first" bash -c 'exit 3'
+test "$CAMPAIGN_RC" = 3 || exit 91
+run_phase second "$1/second" bash -c 'exit 1'
+test "$CAMPAIGN_RC" = 1 || exit 92
+run_phase third "$1/third" bash -c 'exit 3'
+test "$CAMPAIGN_RC" = 1 || exit 93
+run_phase fourth "$1/fourth" bash -c 'exit 2'
+test "$CAMPAIGN_RC" = 2 || exit 94
+run_phase fifth "$1/fifth" bash -c 'exit 3'
+test "$CAMPAIGN_RC" = 2 || exit 95
+'''
+            result = subprocess.run(['bash', '-c', setup + run_phase + calls, 'test', tmp],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_campaign_report_wrapper_keeps_failure_and_original_reference(self):
         import contextlib
         import io
@@ -886,7 +972,7 @@ stress_snapshot() {
         from run_stress_campaign import main
         with tempfile.TemporaryDirectory() as tmp:
             for campaign_rc, phase, expected in ((0, -303, 0), (1, -303, 1),
-                                                (0, 0, 1), (2, -303, 2)):
+                                                (0, 0, 1), (2, -303, 2), (3, -303, 1), (3, 0, 1)):
                 output = Path(tmp) / f'run-{campaign_rc}-{phase}'
 
                 def campaign(command, env):
@@ -908,6 +994,8 @@ stress_snapshot() {
                     self.assertEqual(main(), expected)
                 summary = json.loads((output / 'run-report.json').read_text())
                 self.assertEqual(summary['campaign_exit_code'], campaign_rc)
+                if campaign_rc == 3:
+                    self.assertEqual(summary['verdict'], 'INSUFFICIENT_EVIDENCE' if phase == -303 else 'FAIL')
                 report = json.loads((output / 'recording-review.json').read_text())
                 self.assertEqual(report['expected_phase_ms'], -303)
                 self.assertIn(report['verdict'], (output / 'recording-review.md').read_text())

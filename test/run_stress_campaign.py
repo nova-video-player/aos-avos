@@ -40,11 +40,11 @@ def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-c
 
     if campaign_rc >= 128:
         status, result = 'INTERRUPTED', campaign_rc
-    elif campaign_rc not in (0, 1) or report_error:
+    elif campaign_rc not in (0, 1, 3) or report_error:
         status, result = 'ERROR', 2
     elif campaign_rc == 1 or recording_verdict == 'ISSUES_OBSERVED':
         status, result = 'FAIL', 1
-    elif recording_verdict != 'NO_ISSUES_OBSERVED':
+    elif campaign_rc == 3 or recording_verdict != 'NO_ISSUES_OBSERVED':
         status, result = 'INSUFFICIENT_EVIDENCE', 1
     else:
         status, result = 'PASS', 0

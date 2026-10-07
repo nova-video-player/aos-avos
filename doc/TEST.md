@@ -478,7 +478,11 @@ Default directories are `<name>-validation-<stamp>/` and
 Campaign success requires the requested number of cycles to pass in every run
 phase. Session-wide signal totals are context; intentional pause/seek intervals
 are not judged as continuous playback. Exit codes: 0 success, 1 failed playback
-checks, 2 usage/precondition/infrastructure failure. Interruptions are nonzero.
+checks, 2 usage/precondition/infrastructure failure, 3 insufficient evidence
+from a phase driver or the shell campaign. The Python report wrapper returns 1
+for insufficient evidence and records `INSUFFICIENT_EVIDENCE` in `run-report.json`.
+Interruptions are nonzero. An incomplete phase still stops the campaign by
+default; `CONTINUE_ON_FAIL=1` permits collecting subsequent phases.
 
 ## Offline checks and regression tests
 
@@ -494,9 +498,14 @@ python3 test/analyze_stress.py speed path/to/current-cycle.log
 python3 test/analyze_stress_recording.py avos-21.log > /tmp/avos-21-report.json
 ```
 
-The single-cycle analyzer prints `healthy=0|1`; exit 0 means parsing completed,
+The single-cycle analyzer prints `healthy=0|1` and a `verdict`; exit 0 means parsing completed,
 not that playback passed. Invalid evidence/configuration exits 2. The device
-drivers consume `healthy` to decide the playback verdict.
+drivers consume `healthy` and distinguish evidence-only failures from playback
+faults. Sparse or missing presentation observations remain `healthy=0` with
+`INSUFFICIENT_EVIDENCE`, never PASS. Some routes expose only throttled legacy
+playhead records roughly two seconds apart, which cannot establish continuity
+at the default 500ms limit. Frozen counters, counter resets and independent
+playback faults still fail; neither the threshold nor native query rate changes.
 
 The recording analyzer uses embedded `submit_ns` and `deadline_ns`. It splits
 at lifecycle and epoch boundaries, excludes explicit pause/seek-preview output,
@@ -509,6 +518,11 @@ not a complete device-campaign PASS.
 Explicit faults are reported even without adequate render coverage. Long
 segments with missing or stale audio anchors cannot produce a clean verdict;
 the JSON keeps timing coverage separate from observed faults.
+Resume-boundary attribution handles both delayed renderer records and renderer
+records that overtake the buffered resume message. The latter are revisited once
+the pause start and applied duration establish the monotonic resume boundary.
+No adjustment is inferred from deadline spacing, and pending records are cleared
+on seek/open/stop so a later boundary cannot repair another playback context.
 
 `stress_pause.sh`, `stress_seek.sh` and `stress_speed.sh` remain unvalidated
 chaos drivers; successful completion is not a playback verdict.

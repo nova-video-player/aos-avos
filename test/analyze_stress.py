@@ -86,6 +86,7 @@ class ResumeBoundary:
         self.pause_start_ms = None
         self.offset_before_ns = None
         self.boundaries = []
+        self.pending_renders = []
 
     def annotate(self, line, fields):
         if 'stream_open:' in line or 'stream_stop:' in line or 'VIDEO_SEEK_TARGET_READY:' in line:
@@ -93,8 +94,10 @@ class ResumeBoundary:
             self.pause_start_ms = self.offset_before_ns = None
             self.pending_correction_ms = 0
             self.boundaries.clear()
+            self.pending_renders.clear()
         pause = re.search(r'android_sync: pause start at (\d+)', line)
         if pause:
+            self.pending_renders.clear()
             self.pause_start_ms = int(pause[1])
             self.offset_before_ns = None
             self.pending_correction_ms = 0
@@ -120,6 +123,16 @@ class ResumeBoundary:
             self.pause_start_ms = self.offset_before_ns = None
             self.generation += 1
             self.boundaries.append((resume_ns, before))
+            # Direct renderer logging can also overtake the buffered resume
+            # message. Revisit only this pause's records using the embedded
+            # monotonic boundary, not log delivery time or deadline size.
+            if resume_ns is not None:
+                for pending in self.pending_renders:
+                    if int(pending['submit_ns']) >= resume_ns:
+                        pending['_resume_boundary'] = self.generation
+                        pending['_resume_adjustment_ms'] = self.adjustment_ms
+                        pending['_resume_boundary_source'] = 'embedded_submit_after_resume'
+            self.pending_renders.clear()
         fields['_resume_boundary'] = self.generation
         fields['_resume_adjustment_ms'] = self.adjustment_ms
         if 'video_render_diag:' in line and 'submit_ns' in fields:
@@ -131,6 +144,8 @@ class ResumeBoundary:
                 submit_ns = int(fields['submit_ns'])
             except ValueError:
                 return  # The caller's render validation reports malformed data.
+            if self.pause_start_ms is not None:
+                self.pending_renders.append(fields)
             for resume_ns, before in reversed(self.boundaries):
                 if resume_ns is None or submit_ns >= resume_ns:
                     break
@@ -446,7 +461,7 @@ def scheduled_metrics(renders, start, end, cfg, findings=None):
 def analyze(text, mode, cfg=None):
     cfg = config() if cfg is None else cfg
     all_rows = records(text)
-    out = {'healthy': 0, 'physical_lipsync': 'unmeasured'}
+    out = {'healthy': 0, 'physical_lipsync': 'unmeasured', 'verdict': 'INSUFFICIENT_EVIDENCE'}
     out.update(write_metrics(text))
     reasons = []
 
@@ -685,6 +700,13 @@ def analyze(text, mode, cfg=None):
     for failure in failures:
         require(False, failure)
     out['healthy'] = int(not reasons)
+    # Missing or sparse observations cannot certify presentation continuity,
+    # but do not demonstrate a stall. Counter resets/frozen counters and all
+    # independent playback failures still take precedence over evidence gaps.
+    presentation_gaps = {'missing_presentation_progress',
+                         'missing_presentation_observations', 'stale_presentation'}
+    out['verdict'] = ('PASS' if not reasons else 'FAIL' if
+                      any(r not in presentation_gaps for r in reasons) else 'INSUFFICIENT_EVIDENCE')
     out['reason'] = ','.join(reasons) or 'ok'
     return out
 

@@ -1,6 +1,22 @@
 #!/bin/bash
 # Shared capture and configuration for device validation. Source after defaults.
 
+# Nonzero remains mandatory when observations cannot prove continuity. Keep
+# this separate from a measured playback fault in driver/campaign summaries.
+stress_failure_status()
+{
+	FAILURE_RC=1
+	FAILURE_STATUS=FAIL
+	case " $1 " in
+		*" verdict=INSUFFICIENT_EVIDENCE "*)
+			FAILURE_RC=3
+			FAILURE_STATUS=INSUFFICIENT_EVIDENCE ;;
+		*" healthy=1 "*" recording_verdict=INSUFFICIENT_EVIDENCE "*)
+			FAILURE_RC=3
+			FAILURE_STATUS=INSUFFICIENT_EVIDENCE ;;
+	esac
+}
+
 stress_configure()
 {
 	command -v python3 >/dev/null 2>&1 || fail 'python3 was not found'

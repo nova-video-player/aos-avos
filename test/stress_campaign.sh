@@ -136,7 +136,15 @@ run_phase()
 	printf 'end=%s phase=%s rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase_name" "$phase_rc" | tee -a "$SESSION_LOG"
 	if [ "$phase_rc" -ne 0 ]; then
 		CAMPAIGN_FAILED=1
-		if [ "$phase_rc" -eq 2 ]; then CAMPAIGN_RC=2; elif [ "$CAMPAIGN_RC" -eq 0 ]; then CAMPAIGN_RC=1; fi
+		# Errors outrank faults, which outrank insufficient evidence. In
+		# CONTINUE_ON_FAIL mode a later sparse phase cannot hide an earlier fault.
+		if [ "$phase_rc" -ne 1 ] && [ "$phase_rc" -ne 3 ]; then
+			CAMPAIGN_RC=2
+		elif [ "$phase_rc" -eq 1 ] && [ "$CAMPAIGN_RC" -ne 2 ]; then
+			CAMPAIGN_RC=1
+		elif [ "$CAMPAIGN_RC" -eq 0 ]; then
+			CAMPAIGN_RC=3
+		fi
 	fi
 	return "$phase_rc"
 }
@@ -164,6 +172,7 @@ EOF
 		status=PASS
 	else
 		status=FAIL
+		[ "$phase_rc" -ne 3 ] || status=INSUFFICIENT_EVIDENCE
 		CAMPAIGN_FAILED=1
 		[ "$CAMPAIGN_RC" -ne 0 ] || CAMPAIGN_RC=1
 	fi
@@ -280,7 +289,8 @@ summary = {
     "session_signals": signals,
 }
 summary["physical_lipsync"] = "unmeasured"
-summary["verdict"] = "FAIL" if (not phases or any(p["status"] != "PASS" for p in phases)) else "PASS"
+summary["verdict"] = ("FAIL" if not phases or any(p["status"] == "FAIL" for p in phases) else
+                      "INSUFFICIENT_EVIDENCE" if any(p["status"] != "PASS" for p in phases) else "PASS")
 print(json.dumps(summary, indent=2, sort_keys=True))
 PYEOF
 }
@@ -289,6 +299,8 @@ write_summary_md()
 {
 	if [ "$CAMPAIGN_FAILED" -eq 0 ]; then
 		verdict=PASS
+	elif [ "$CAMPAIGN_RC" -eq 3 ]; then
+		verdict=INSUFFICIENT_EVIDENCE
 	else
 		verdict=FAIL
 	fi
@@ -456,7 +468,7 @@ while [ "$round" -le "$ROUNDS" ]; do
 		export PHASE_REFERENCE=campaign_initial
 	fi
 	if [ "$resume_rc" -ne 0 ] && [ "$CONTINUE_ON_FAIL" != "1" ]; then
-		printf 'Stopping campaign: resume-%s failed (set CONTINUE_ON_FAIL=1 to continue).\n' \
+		printf 'Stopping campaign: resume-%s did not pass (set CONTINUE_ON_FAIL=1 to continue).\n' \
 			"$round" | tee -a "$SESSION_LOG"
 		break
 	fi
@@ -466,7 +478,7 @@ while [ "$round" -le "$ROUNDS" ]; do
 	seek_rc=$?
 	aggregate_phase "seek-$round" "$OUTPUT_DIR/seek-$round" "$seek_rc"
 	if [ "$seek_rc" -ne 0 ] && [ "$CONTINUE_ON_FAIL" != "1" ]; then
-		printf 'Stopping campaign: seek-%s failed (set CONTINUE_ON_FAIL=1 to continue).\n' \
+		printf 'Stopping campaign: seek-%s did not pass (set CONTINUE_ON_FAIL=1 to continue).\n' \
 			"$round" | tee -a "$SESSION_LOG"
 		break
 	fi
@@ -494,5 +506,7 @@ if [ "$CAMPAIGN_FAILED" -eq 0 ]; then
 	printf '\nCAMPAIGN PASS: %s\nSummary: %s/summary.md\n' "$OUTPUT_DIR" "$OUTPUT_DIR"
 	exit 0
 fi
-printf '\nCAMPAIGN FAIL: %s\nSummary: %s/summary.md\n' "$OUTPUT_DIR" "$OUTPUT_DIR"
+verdict=FAIL
+[ "$CAMPAIGN_RC" -ne 3 ] || verdict=INSUFFICIENT_EVIDENCE
+printf '\nCAMPAIGN %s: %s\nSummary: %s/summary.md\n' "$verdict" "$OUTPUT_DIR" "$OUTPUT_DIR"
 exit "$CAMPAIGN_RC"

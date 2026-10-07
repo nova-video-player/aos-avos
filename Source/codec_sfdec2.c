@@ -276,6 +276,12 @@ typedef struct priv {
 	int64_t pause_start_ms;
 	int pause_armed;
 	int pcm_resume_pending; // renderer-owned; acknowledged by a committed audio clock
+	int pcm_resume_sample_stage; // legacy write clock: refill, then measure; zero is inactive
+	INT64 pcm_resume_sample_start_ns;
+	INT64 pcm_resume_sample_wall_ns;
+	int pcm_resume_sample_start_ts;
+	int pcm_resume_sample_last_ts;
+	INT64 pcm_resume_sample_offset_ns;
 	int mode1_phase_valid;
 	int mode1_phase_av_delay;
 	unsigned int mode1_phase_audio_generation;
@@ -713,7 +719,7 @@ static int mode1_phase_matches_audio_l(priv_t *p, STREAM *s)
 // mapping. Never carry its absolute target into a seek or reconfiguration.
 static int pcm_resume_matches_audio_l(priv_t *p, STREAM *s)
 {
-	if( !s || (!p->pcm_resume_calibration_active &&
+	if( !s || (!p->pcm_resume_sample_stage && !p->pcm_resume_calibration_active &&
 		(!p->pcm_resume_slew || !p->pcm_startup_slew)) ||
 		!s->audio || !s->audio->valid || s->audio_time < 0 ||
 		s->seek_paused || s->audio_start_pending || p->pending_seek_reanchor ||
@@ -730,6 +736,51 @@ static int pcm_resume_matches_audio_l(priv_t *p, STREAM *s)
 		p->pcm_resume_audio_generation == s->audio_lifecycle_generation;
 	pthread_mutex_unlock(&s->audio_lifecycle_mutex);
 	return matches;
+}
+
+// The first accepted write can precede the actual queue restart. For the
+// legacy write-minus-delay clock, first let both wall and media time advance
+// through a refill window, then measure a fresh full-queue reference. Do not
+// include the first resume sample in that minimum: it can precede a restart
+// stall. Duplicate publications and a burst alone cannot complete a window.
+// Return 1 with a target, 0 while observing, or -1 to keep the shifted anchor
+// when progress remains insufficient. Caller holds locked.mtx.
+static int pcm_resume_write_target_l(priv_t *p, int time, INT64 now_ns, INT64 *target)
+{
+	const INT64 window_ns = 250000000LL;
+	INT64 offset = now_ns - (INT64)time * 1000000LL;
+	if( !p->pcm_resume_sample_stage ) {
+		p->pcm_resume_sample_stage = 1;
+		p->pcm_resume_sample_start_ns = now_ns;
+		p->pcm_resume_sample_wall_ns = now_ns;
+		p->pcm_resume_sample_start_ts = time;
+		p->pcm_resume_sample_last_ts = time;
+		return 0;
+	}
+	if( now_ns < p->pcm_resume_sample_wall_ns ||
+		now_ns - p->pcm_resume_sample_start_ns > 2000000000LL ||
+		time < p->pcm_resume_sample_last_ts ) {
+		p->pcm_resume_sample_stage = 0;
+		return -1;
+	}
+	if( time == p->pcm_resume_sample_last_ts )
+		return 0;
+	p->pcm_resume_sample_last_ts = time;
+	if( p->pcm_resume_sample_stage == 2 )
+		p->pcm_resume_sample_offset_ns = MIN(p->pcm_resume_sample_offset_ns, offset);
+	if( now_ns - p->pcm_resume_sample_wall_ns < window_ns ||
+		((INT64)time - p->pcm_resume_sample_start_ts) * 1000000LL < window_ns )
+		return 0;
+	if( p->pcm_resume_sample_stage == 1 ) {
+		p->pcm_resume_sample_stage = 2;
+		p->pcm_resume_sample_wall_ns = now_ns;
+		p->pcm_resume_sample_start_ts = time;
+		p->pcm_resume_sample_offset_ns = offset;
+		return 0;
+	}
+	*target = p->pcm_resume_sample_offset_ns;
+	p->pcm_resume_sample_stage = 0;
+	return 1;
 }
 
 // Follow only the change in calibrated mixer latency after resume, not the
@@ -852,6 +903,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int passthrough_mode = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	int preserve_output = s && audio_interface_pause_preserves_output(s->audio_ctx);
+	int pcm_write_clock = !audio_interface_is_audio_speed_enabled() &&
+		s && !s->at_speed_epoch_active;
 	int mode1_window_ms = passthrough_mode == 1 && s && s->audio_ctx ?
 		MAX(250, audio_interface_get_latency(s->audio_ctx)) : 250;
 
@@ -929,6 +982,14 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0;
 	int pcm_latency_us = s ?
 		s->pcm_playhead_latency_us : -1;
+	// Only plain PCM without a presentation clock needs refill qualification.
+	// Speed backends and calibrated clocks retain their existing resume policy.
+	int sample_pcm_resume = pcm_write_clock && pcm_latency_us < 0 &&
+		fabsf(current_speed - 1.0f) < 0.001f;
+	if( p->pcm_resume_sample_stage &&
+		(!pcm_resume || !sample_pcm_resume || speed_changed || epoch_changed ||
+		 p->pause_armed || !pcm_resume_matches_audio_l(p, s)) )
+		p->pcm_resume_sample_stage = 0;
 	if( p->pcm_resume_calibration_active &&
 		(!s || passthrough_mode || speed_changed || epoch_changed || s->paused ||
 		 p->pause_armed || pcm_resume || !pcm_resume_matches_audio_l(p, s)) )
@@ -1023,14 +1084,31 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		preserve_output && !passthrough_mode && !epoch_changed && !speed_changed &&
 		!s->seek_paused && !s->audio_start_pending && !p->pending_seek_reanchor &&
 		p->render_offset_ns != -1 && p->render_offset_from_audio && !no_sched_anchor;
+	INT64 pcm_resume_target_ns = 0;
+	if( pcm_resume && preserve_pcm_resume_anchor && sample_pcm_resume ) {
+		p->pcm_resume_audio_generation = s->audio_lifecycle_generation;
+		p->pcm_resume_epoch = s->seek_epoch;
+		p->pcm_resume_av_delay = s->av_delay;
+		p->pcm_resume_timeline = p->video_timeline;
+		int ready = pcm_resume_write_target_l(p, time, _get_monotonic_ns(),
+			&pcm_resume_target_ns);
+		if( ready <= 0 ) {
+			pcm_resume = 0;
+			if( ready < 0 ) {
+				p->pcm_resume_pending = 0;
+				DBGSI serprintf("android_sync: PCM resume clock unsettled; keeping shifted anchor\n");
+			}
+		}
+	}
 	if( pcm_resume && preserve_pcm_resume_anchor ) {
 		int manual_hold_ts = MAX(0, s->manual_audio_delay_applied_ms);
 		if( audio_interface_is_audio_speed_enabled() &&
 			!audio_interface_is_using_atempo() ) {
 			manual_hold_ts = (int)(manual_hold_ts * p->video_timeline.inv_speed);
 		}
-		INT64 target = _get_monotonic_ns() -
-			((INT64)time + manual_hold_ts) * 1000000LL;
+		INT64 target = (sample_pcm_resume ? pcm_resume_target_ns :
+			_get_monotonic_ns() - (INT64)time * 1000000LL) -
+			(INT64)manual_hold_ts * 1000000LL;
 		INT64 correction = target - p->render_offset_ns;
 		// Correct a bounded resume phase once per distinct video frame.
 		// Large discontinuities still use the hard reset.
@@ -1123,6 +1201,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			s->seek_epoch);
 	}
 	if (allow_reanchor) {
+		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);
 		// Rebuild all absolute seek anchors as before. Keep only a matching
@@ -1287,6 +1366,7 @@ static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
 	pthread_mutex_lock(&p->locked.mtx);
 	if( p->render_offset_ns != -1 && p->render_offset_from_audio ) {
 		p->pending_reanchor = 1;
+		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		p->pcm_startup_slew = 1;
 		p->pcm_resume_slew = 0;
@@ -2479,6 +2559,7 @@ retry_decoder_open:
 	p->pause_start_ms = 0;
 	p->pause_armed = 0;
 	p->pcm_resume_pending = 0;
+	p->pcm_resume_sample_stage = 0;
 	p->mode1_phase_valid = 0;
 	p->mode1_seek_pending = 0;
 	p->mode1_resume_pending = 0;
@@ -2772,6 +2853,7 @@ DBGCV	CLOG();
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
 	p->pcm_resume_pending = 0;
+	p->pcm_resume_sample_stage = 0;
 	int keep_mode1_phase = p->s && p->s->seek_paused &&
 		mode1_phase_matches_audio_l(p, p->s);
 	p->mode1_phase_valid = keep_mode1_phase;
@@ -2926,6 +3008,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 
 	// Reset android_sync timeline offsets
 	p->pcm_resume_pending = 0;
+	p->pcm_resume_sample_stage = 0;
 	int keep_mode1_phase = s->seek_paused && mode1_phase_matches_audio_l(p, s);
 	p->mode1_phase_valid = keep_mode1_phase;
 	p->mode1_resume_pending = keep_mode1_phase;
@@ -2999,6 +3082,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	int preserve_pcm_slew = !passthrough && preserves_output &&
 		p->pcm_resume_slew && p->pcm_startup_slew && pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
+		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);
 		if( preserve_mode1_phase ) {

@@ -35,7 +35,13 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   a direct AudioTimestamp success streak of 10 may enable a single correction.
   That correction moves at 1ms per distinct video frame and stops within an 8ms
   deadband; playback-head fallback cannot trigger it below that timestamp trust
-  threshold. Direct mode 2 normally keeps its render offset stable after
+  threshold. Plain 1x PCM requests this phase check even when the measured
+  latency differs from the seed by less than 16ms: queue startup can change
+  wall/heard phase without changing pipeline latency. The existing 500ms
+  latency-change plausibility bound and seek/speed epoch checks still apply.
+  Speed clocks retain their latency-delta trigger. This is the same one-shot
+  startup correction, not an additional resume sampler or continuous controller.
+  Direct mode 2 normally keeps its render offset stable after
   initialization. A newly trusted dynamic
   clock first completes any monotonic heard-time hold while the renderer remains
   on its provisional anchor. Once the dynamic phase is ready, an established
@@ -69,6 +75,18 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   invalidated by an output-generation, seek-epoch, speed-mapping or manual-delay
   change. Cold-start corrections still reset on pause. Passthrough resume
   policy is unchanged.
+- Plain 1x PCM without a speed/presentation clock qualifies its resume target
+  before starting that slew. A first accepted write can precede a queue restart
+  stall, so it is not a settled heard-clock reference. Both wall and accepted
+  media time must span a 250ms refill window, then another 250ms measurement
+  window. The latter's minimum wall-minus-heard value selects the full-queue
+  reference without following individual write bursts. Until then, the shifted
+  renderer anchor and any previously measured residual correction remain in use.
+  Insufficient progress for two seconds abandons the observation without moving
+  the anchor. Pause, seek, reanchor, output/manual-delay changes and speed-clock
+  transitions discard the observation. This replaces the legacy single-sample
+  resume target; it does not continuously steer playback or change passthrough,
+  PlaybackParams, atempo/Sonic clocks, or the per-frame correction limit.
 - At 1x, retained-output PCM resume also follows subsequent changes in the
   calibrated mixer-playhead latency used by the atempo/Sonic ledger. Calibration
   and heard time are published as a pair. After the initial resume slew finishes,

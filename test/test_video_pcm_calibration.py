@@ -14,13 +14,20 @@ class PcmCalibrationTest(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / 'Source/codec_sfdec2.c').read_text()
         matches = block(source, 'static int pcm_resume_matches_audio_l(')
         observe = block(source, 'static void pcm_resume_calibration_observe_l(')
+        write_target = block(source, 'static int pcm_resume_write_target_l(')
         eligibility = source[source.index('if( p->pcm_resume_calibration_active &&'): ]
         eligibility = eligibility[:eligibility.index(';') + 1]
+        def statement(marker):
+            start = source.index(marker)
+            return source[start:source.index(';', start) + 1]
+        sampling_guard = statement('int pcm_write_clock =') + statement('int sample_pcm_resume =')
+        sampling_guard += statement('int preserve_pcm_resume_anchor =')
+        sampling_reset = statement('if( p->pcm_resume_sample_stage &&')
         slew = block(source, 'if (p->slew_active &&')
         remember = block(source, 'if( (p->pcm_startup_slew || p->pcm_resume_calibration_active ||')
         guard_start = source.index('int pcm_startup_new_slew_frame =')
         guard = source[guard_start:source.index(';', guard_start) + 1]
-        fields = set(re.findall(r'p->(\w+)', matches + observe + slew + remember + guard + eligibility))
+        fields = set(re.findall(r'p->(\w+)', matches + observe + write_target + slew + remember + guard + eligibility + sampling_guard + sampling_reset))
         fields.remove('pcm_resume_timeline')
         private = '\n'.join(
             f'{"const void *" if name.endswith("handle") else "int64_t "}{name};'
@@ -28,6 +35,7 @@ class PcmCalibrationTest(unittest.TestCase):
         code = r'''
 #include <assert.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,12 +53,25 @@ typedef struct {
     AUDIO *audio;
     int audio_time, seek_paused, audio_start_pending, seek_epoch, av_delay;
     int audio_lifecycle_mutex, audio_reconfiguring, audio_lifecycle_generation, paused;
+    int at_speed_epoch_active;
 } STREAM;
+static int speed_enabled;
+static int audio_interface_is_audio_speed_enabled(void) { return speed_enabled; }
 typedef struct {
     timeline_state_t pcm_resume_timeline;
 ''' + private + r'''
 } priv_t;
-''' + matches + observe + r'''
+''' + matches + observe + write_target + r'''
+static int can_sample(priv_t *p, STREAM *s, int passthrough_mode, int preserve_output,
+                      int pcm_latency_us, float current_speed) {
+    int epoch_changed = 0, speed_changed = 0, no_sched_anchor = 0;
+''' + sampling_guard + r'''
+    return sample_pcm_resume && preserve_pcm_resume_anchor;
+}
+static void validate_sample(priv_t *p, STREAM *s, int pcm_resume, int sample_pcm_resume,
+                            int speed_changed, int epoch_changed) {
+''' + sampling_reset + r'''
+}
 static void validate(priv_t *p, STREAM *s, int passthrough_mode, int speed_changed,
                      int epoch_changed, int pcm_resume) {
 ''' + eligibility + r'''
@@ -159,6 +180,105 @@ int main(void) {
     timeline.speed = 1; timeline.ts_anchor = 100;
     assert(!pcm_resume_matches_audio_l(p, s));
     assert(!pcm_resume_matches_audio_l(p, NULL));
+
+    // Legacy Sony trace: the first resumed clock is followed by only 32ms
+    // of media progress over 174ms. Never keep that early sample as the target.
+    timeline = initial.pcm_resume_timeline;
+    state = initial; p->pcm_resume_calibration_active = 0;
+    INT64 origin = 31454422503499LL, target = -1;
+    INT64 wall = origin + 16145000000LL;
+    assert(!pcm_resume_write_target_l(p, 16145, wall, &target));
+    assert(pcm_resume_matches_audio_l(p, s));
+    assert(!pcm_resume_write_target_l(p, 16145, wall + 22000000, &target));
+    assert(!pcm_resume_write_target_l(p, 16177, wall + 174000000, &target));
+    assert(!pcm_resume_write_target_l(p, 16209, wall + 178000000, &target));
+    assert(!pcm_resume_write_target_l(p, 16241, wall + 189000000, &target));
+    // Once refill has passed, writes run at 1x with 90-110ms phase relative
+    // to that first sample. Duplicated put_time calls cannot bias the minimum.
+    int ready = 0;
+    for (int media = 128; media <= 768 && !ready; media += 32) {
+        INT64 now = wall + (media + 90 + (media % 64 ? 20 : 0)) * 1000000LL;
+        ready = pcm_resume_write_target_l(p, 16145 + media, now, &target);
+        if (!ready) {
+            assert(!pcm_resume_write_target_l(p, 16145 + media, now + 1000000, &target));
+            assert(target == -1);
+        }
+    }
+    assert(ready == 1 && target == origin + 90000000);
+    assert(!p->pcm_resume_sample_stage);
+    // Apply the qualified target through the existing bounded correction.
+    p->render_offset_ns = origin;
+    p->target_offset_ns = target;
+    p->slew_active = p->pcm_startup_slew = p->pcm_resume_slew = 1;
+    for (int frame = 30; frame < 55; frame++) {
+        INT64 previous = p->render_offset_ns;
+        step(p, s, frame);
+        assert(p->render_offset_ns - previous <= 4000000);
+        previous = p->render_offset_ns;
+        step(p, s, frame);
+        assert(p->render_offset_ns == previous);
+    }
+    assert(p->render_offset_ns == target && !p->slew_active);
+
+    // A write burst without elapsed wall time cannot qualify. Nor can time
+    // passing without writes. Failure preserves the caller's current target.
+    state = initial; target = -1;
+    assert(!pcm_resume_write_target_l(p, 1000, wall, &target));
+    assert(!pcm_resume_write_target_l(p, 1500, wall + 1000000, &target));
+    assert(!pcm_resume_write_target_l(p, 1500, wall + 1000000000, &target));
+    assert(pcm_resume_write_target_l(p, 1500, wall + 2001000000, &target) == -1);
+    assert(target == -1 && !p->pcm_resume_sample_stage);
+    assert(!pcm_resume_write_target_l(p, 1500, wall, &target));
+    assert(pcm_resume_write_target_l(p, 1499, wall + 1000000, &target) == -1);
+    assert(target == -1 && !p->pcm_resume_sample_stage);
+    // Pausing discards a partially collected window; the next resume needs
+    // fresh wall/media progress rather than counting the paused interval.
+    assert(!pcm_resume_write_target_l(p, 1500, wall, &target));
+    p->pcm_resume_sample_stage = 0;
+    assert(!pcm_resume_write_target_l(p, 1800, wall + 5000000000LL, &target));
+    assert(p->pcm_resume_sample_stage == 1 && target == -1);
+    state = initial; p->pcm_resume_calibration_active = 0;
+    p->pcm_resume_sample_stage = 1;
+    REJECT_S(seek_epoch, 12);
+    REJECT_S(av_delay, -100);
+    REJECT_S(audio_lifecycle_generation, 8);
+    timeline.speed = 1.6;
+    assert(!pcm_resume_matches_audio_l(p, s));
+    timeline = initial.pcm_resume_timeline;
+    state = initial; p->pcm_resume_pending = 1;
+    assert(can_sample(p, s, 0, 1, -1, 1.0));
+    for (int mode = 1; mode <= 3; mode++) assert(!can_sample(p, s, mode, 1, -1, 1.0));
+    assert(!can_sample(p, s, 0, 0, -1, 1.0)); // backend discards paused output
+    assert(!can_sample(p, s, 0, 1, 37000, 1.0)); // calibrated playhead
+    assert(!can_sample(p, s, 0, 1, -1, 1.2)); // committed speed mapping
+    speed_enabled = 1;
+    assert(!can_sample(p, s, 0, 1, -1, 1.0)); // atempo/Sonic/PlaybackParams
+    speed_enabled = 0; s->at_speed_epoch_active = 1;
+    assert(!can_sample(p, s, 0, 1, -1, 1.0)); // preserved PlaybackParams checkpoint
+    s->at_speed_epoch_active = 0; s->seek_paused = 1;
+    assert(!can_sample(p, s, 0, 1, -1, 1.0));
+    s->seek_paused = 0;
+    // An observation must never survive a change of clock or output identity.
+    p->pcm_resume_sample_stage = 2;
+    validate_sample(p, s, 1, 1, 0, 0);
+    assert(p->pcm_resume_sample_stage == 2);
+    validate_sample(p, s, 1, 1, 1, 0);
+    assert(!p->pcm_resume_sample_stage);
+    p->pcm_resume_sample_stage = 2;
+    validate_sample(p, s, 1, 1, 0, 1);
+    assert(!p->pcm_resume_sample_stage);
+    p->pcm_resume_sample_stage = 2; s->av_delay = -100;
+    validate_sample(p, s, 1, 1, 0, 0);
+    assert(!p->pcm_resume_sample_stage); s->av_delay = 0;
+    p->pcm_resume_sample_stage = 2; s->audio_lifecycle_generation++;
+    validate_sample(p, s, 1, 1, 0, 0);
+    assert(!p->pcm_resume_sample_stage); s->audio_lifecycle_generation--;
+    p->pcm_resume_sample_stage = 2;
+    validate_sample(p, s, 1, 0, 0, 0);
+    assert(!p->pcm_resume_sample_stage);
+    p->pcm_resume_sample_stage = 2;
+    validate_sample(p, s, 0, 1, 0, 0);
+    assert(!p->pcm_resume_sample_stage);
     return 0;
 }
 '''

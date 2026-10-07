@@ -2809,7 +2809,15 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			delay_status.dynamic_evidence_streak >= STREAM_PCM_STARTUP_DIRECT_STREAK ) {
 			int delta = delay_status.dynamic_evidence_ms - s->pcm_startup_seed_delay_ms;
 			int abs_delta = ABS( delta );
-			if( abs_delta >= STREAM_PCM_STARTUP_CORRECTION_MIN_MS &&
+			// Plain PCM's first write may precede a queue restart stall. The
+			// pipeline latency can remain close to its seed while the renderer's
+			// wall/heard phase changes. Once direct timing is trusted, let the
+			// existing one-shot renderer correction check that phase as well.
+			// Keep speed clocks on their calibrated/checkpoint policy, and retain
+			// the startup trust threshold and implausible-latency rejection.
+			int plain_pcm_clock = !audio_interface_is_audio_speed_enabled() &&
+				!s->at_speed_epoch_active && s->video_speed_num == s->video_speed_den;
+			if( (plain_pcm_clock || abs_delta >= STREAM_PCM_STARTUP_CORRECTION_MIN_MS) &&
 				abs_delta <= STREAM_PCM_STARTUP_CORRECTION_MAX_MS ) {
 				pcm_startup_request_correction = 1;
 				DBG serprintf("pcm_startup_correction: request seed=%d dynamic=%d delta=%d streak=%d speed=%.3f epoch=%d\n",

@@ -30,7 +30,7 @@ int  stream_sync_anchor_publish( STREAM *s, int sink_ref_time, int vid_ref_time,
 int  stream_sync_anchor_seed_from_sink( STREAM *s, int vid_ref_time );
 int  stream_sync_anchor_adjust_sink( STREAM *s, int delta );
 void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier );
-void stream_sync_mode2_heard_frontier_arm( STREAM *s );
+void stream_sync_mode2_heard_frontier_arm( STREAM *s, int seek_restart );
 int  stream_sync_mode2_heard_frontier_pending( STREAM *s );
 void stream_sync_compressed_unit_commit( STREAM *s, int encoded_bytes,
 	int logical_samples, int logical_sample_rate, int codec, int framing );

@@ -45,6 +45,12 @@
 #endif
 #ifdef CONFIG_STREAM
 
+#ifdef CONFIG_ANDROID
+extern int libavos_get_ac3_recoding_enabled(void);
+#else
+static inline int libavos_get_ac3_recoding_enabled(void) { return 0; }
+#endif
+
 #define DBGS	DBG_IF(0||Debug[DBG_STREAM])
 #define DBGCV   DBG_IF(0||Debug[DBG_CV])
 #define DBGCV2  DBG_IF(0||Debug[DBG_CV] > 1)
@@ -212,6 +218,18 @@ static void speed_cadence_commit(speed_cadence_t *c, unsigned int generation,
 	c->deadline_ns = deadline_ns;
 	c->correction_ns = correction_ns;
 	c->submitted_calibration_offset_ns = calibration_offset_ns;
+}
+
+// Keep the existing 100ms handoff tolerance, but allow a larger qualified
+// correction if the 5ms/frame recovery can repay it within about two seconds.
+// Include the added frame time for a positive correction. Missing cadence keeps
+// the old limit; the 350ms cap still rejects a badly wrong provisional anchor.
+static INT64 mode2_clock_entry_limit_ns(int frame_ms)
+{
+	if (frame_ms <= 0)
+		return 100000000LL;
+	INT64 frames = 2000LL / ((INT64)frame_ms + 5);
+	return MAX(100000000LL, MIN(350000000LL, frames * 5000000LL));
 }
 
 typedef struct priv {
@@ -942,7 +960,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->snap_origin_epoch = INT_MIN;
 	}
 	int64_t now_ms = atime64();
-	INT64 mode1_clock_ns = passthrough_mode == 1 ? _get_monotonic_ns() : 0;
+	INT64 published_clock_ns = (passthrough_mode == 1 || passthrough_mode == 2) ?
+		_get_monotonic_ns() : 0;
 	int dt = time - p->venc_put_time;
 	int64_t dr = p->venc_ref_time ? now_ms - p->venc_ref_time : 0;
 
@@ -1268,17 +1287,21 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			DBGSI serprintf("android_sync: PCM resume anchor heard=%d manual_hold=%d offset=%lld epoch=%d\n",
 				time, manual_hold_ts, (long long)p->render_offset_ns, s->seek_epoch);
 		}
-		if( passthrough_mode == 1 && s && time >= 0 &&
-			!s->paused && !s->seek_paused ) {
+		if( s && time >= 0 && !s->paused && !s->seek_paused &&
+			(passthrough_mode == 1 ||
+			 (passthrough_mode == 2 && !libavos_get_ac3_recoding_enabled() &&
+			  p->pending_seek_reanchor &&
+			  s->play_n_video_frames <= 0 && !s->seek_video_target_pending &&
+			  s->seek_video_ready_ts != STREAM_NO_PTS_VALUE)) ) {
 			// Publish the renderer anchor with the first clock sample, under
 			// the same lock. Deferring this to videosink_thread lets an arbitrary
-			// number of IEC refill bursts advance heard time before it anchors.
+			// number of compressed refill bursts advance heard time before it anchors.
 			// That race changes the learned startup phase and forces a large
 			// compensating slew after seek. Use this sample's wall timestamp,
 			// not the later time at which the renderer happens to run.
 			// atime64 may have a process-relative origin; render deadlines
 			// must use the absolute CLOCK_MONOTONIC domain sampled above.
-			p->render_offset_ns = mode1_clock_ns - (INT64)time * 1000000LL;
+			p->render_offset_ns = published_clock_ns - (INT64)time * 1000000LL;
 			p->render_offset_from_audio = 1;
 			p->target_offset_ns = p->render_offset_ns;
 			p->slew_active = 0;
@@ -1289,8 +1312,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->last_mode2_dynamic_active = 0;
 			p->pending_reanchor = 0;
 			p->pending_seek_reanchor = 0;
-			DBGSI serprintf("android_sync: mode1 published anchor heard=%d wall_ns=%lld offset=%lld epoch=%d\n",
-				time, (long long)mode1_clock_ns, (long long)p->render_offset_ns, s->seek_epoch);
+			DBGSI serprintf_record("android_sync: mode%d published anchor heard=%d wall_ns=%lld offset=%lld epoch=%d\n",
+				passthrough_mode, time, (long long)published_clock_ns,
+				(long long)p->render_offset_ns, s->seek_epoch);
 		}
 		DBGSI serprintf("videosink_put_time: reset sched and render anchors at time=%d, diff=%lld (speed_changed=%d disc=%d no_sched=%d resume=%d)\n",
 			time, (long long)diff, speed_changed, discontinuity, no_sched_anchor, resume_started || pcm_resume);
@@ -1575,6 +1599,21 @@ static void *videosink_thread(void *ctx)
 			int have_audio_time = (s && s->audio_time >= 0);
 			int passthrough = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 				s->audio_sink->get_passthrough( s ) : 0;
+			// A refined preview may still be queue-owned when playback resumes.
+			// It belongs to this seek epoch but precedes the admitted target.
+			// Release it before it can consume the audio reanchor or delay the
+			// actual target behind a deadline based on an unfinished preview.
+			if (passthrough == 2 && !libavos_get_ac3_recoding_enabled() &&
+				!s->seek_paused && s->play_n_video_frames <= 0 &&
+				s->seek_video_drop && s->seek_video_target_ts > 0 &&
+				f->time < s->seek_video_target_ts) {
+				DBGSI serprintf_record("android_sync: mode2 obsolete preview frame=%d target=%d epoch=%d\n",
+					f->time, s->seek_video_target_ts, f->epoch);
+				f = frame_q_get(&p->locked.venc_q);
+				consumed = 1;
+				stale_epoch_drop = 1;
+				break;
+			}
 			if (passthrough && p->speed_cadence.enabled)
 				speed_cadence_reset(&p->speed_cadence);
 			int mode2_dynamic_active = passthrough == 2 ?
@@ -1590,11 +1629,11 @@ static void *videosink_thread(void *ctx)
 					!p->pending_seek_reanchor ) {
 					INT64 heard_ts = _get_render_heard_ts(p, s, 0, NULL, NULL);
 					entry_delta_ns = now_ns - heard_ts * 1000000LL - p->render_offset_ns;
-					// The heard clock has completed its monotonic catch-up. A
-					// small residual can converge at 5ms/frame without jumping
-					// deadlines. Bound this path to avoid another multi-second
-					// recovery when the provisional startup anchor was far off.
-					smooth_entry = llabs(entry_delta_ns) <= 100000000LL;
+					// The heard clock has completed its monotonic catch-up. Some
+					// eARC routes still need more than 100ms of renderer recovery.
+					// Bound that recovery by cadence instead of snapping deadlines
+					// for an otherwise recoverable phase difference.
+					smooth_entry = llabs(entry_delta_ns) <= mode2_clock_entry_limit_ns(f->duration);
 				}
 				int hard_reanchor = mode2_dynamic_active && !smooth_entry;
 				if( hard_reanchor ) {
@@ -1617,7 +1656,7 @@ static void *videosink_thread(void *ctx)
 					p->mode2_slew_frame_time = INT_MIN;
 					p->mode2_slew_frame_epoch = INT_MIN;
 				}
-				DBGSI serprintf("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d smooth_entry=%d delta_us=%lld\n",
+				DBGSI serprintf_record("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d smooth_entry=%d delta_us=%lld\n",
 					mode2_dynamic_active, hard_reanchor, smooth_entry,
 					(long long)(entry_delta_ns / 1000LL));
 			}

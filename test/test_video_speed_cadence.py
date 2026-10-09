@@ -30,6 +30,7 @@ void fresh(void) { memset(&state, 0, sizeof(state)); }
 void enable(void) { state.enabled = 1; }
 void short_lead(void) { state.short_lookahead = 1; }
 int64_t lookahead(double speed) { return speed_cadence_lookahead_ns(&state, speed); }
+int64_t mode2_entry_limit(int frame_ms) { return mode2_clock_entry_limit_ns(frame_ms); }
 int64_t calibrate(int us, unsigned generation, int delay) {
     return speed_cadence_calibration(&state, us, generation, delay);
 }
@@ -62,6 +63,8 @@ int64_t frame(int media, int epoch, int valid, double speed, double anchor,
         cls.lib.frame.restype = cls.lib.correction.restype = ctypes.c_int64
         cls.lib.lookahead.argtypes = [ctypes.c_double]
         cls.lib.lookahead.restype = cls.lib.calibrate.restype = ctypes.c_int64
+        cls.lib.mode2_entry_limit.argtypes = [ctypes.c_int]
+        cls.lib.mode2_entry_limit.restype = ctypes.c_int64
 
     @classmethod
     def tearDownClass(cls):
@@ -93,6 +96,22 @@ int64_t frame(int media, int epoch, int valid, double speed, double anchor,
         self.assertEqual(previous, raw)
         # Return to 1x, including a new anchor, with an excessive positive gap.
         self.assertEqual(self.frame(1200, previous + 60, anchor=7), previous + 44)
+
+    def test_mode2_handoff_recovery_budget(self):
+        limit = self.lib.mode2_entry_limit
+        # Bravia's two observed corrections fit without a 175ms deadline jump.
+        for correction in (176819000, 174017000):
+            self.assertLessEqual(correction, limit(42))
+            frames = math.ceil(correction / 5000000)
+            self.assertLessEqual(frames * (42 + 5), 2000)
+        for interval in (16, 33, 42, 83, 1000, 2147483647):
+            self.assertGreaterEqual(limit(interval), 100000000)
+            self.assertLessEqual(limit(interval), 350000000)
+            if limit(interval) > 100000000:
+                self.assertLessEqual(limit(interval) // 5000000 * (interval + 5), 2000)
+        self.assertEqual(limit(0), 100000000)
+        self.assertEqual(limit(-1), 100000000)
+        self.assertGreater(400000000, limit(16))
 
     def test_lookahead_retries_and_dropped_frames_do_not_spend_correction(self):
         self.frame(0, 1000)

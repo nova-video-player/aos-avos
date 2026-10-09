@@ -595,6 +595,20 @@ stress_snapshot() {
         self.assertNotEqual(text, fixture())
         self.assertIn('scheduled_judder', self.check(text)['reason'])
 
+    def test_mode2_handoff_diagnostics_do_not_excuse_judder(self):
+        from analyze_stress_recording import analyze_recording
+        events = [
+            'mode2_dynamic_clock_enter: epoch=35 heard=1241674 target=1241272 delay=904',
+            'mode2_dynamic_clock_ready: epoch=35 heard=1241674 target=1241674 delay=889',
+            'android_sync: mode2 dynamic clock transition active=1 hard_reanchor=1 smooth_entry=0 delta_us=176819',
+            'mode2_dynamic_clock_fallback: epoch=35 heard=1242000 static=1242000',
+        ]
+        text = fixture().replace('deadline_ns=1001110000000', 'deadline_ns=1001286819000')
+        text += '\n' + '\n'.join(events)
+        report = analyze_recording(text)
+        self.assertEqual([r['message'] for r in report['transition_records']], events)
+        self.assertEqual(report['verdict'], 'ISSUES_OBSERVED')
+
     def test_internal_phase_error(self):
         self.assertIn('sustained_av_phase_error', self.check(fixture().replace('phase_ms=0', 'phase_ms=120'))['reason'])
         # Startup transients have a bounded exclusion window.

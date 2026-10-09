@@ -106,6 +106,8 @@ def analyze_recording(text, cfg=None):
             context_changes.append(line_number)
             boundary = 'playback_context_change'
         if ('android_sync: mode1 ' in line or 'PCM resume applies paused correction=' in line
+                or 'android_sync: mode2 ' in line or 'mode2_epoch_seed:' in line
+                or re.search(r'mode2_dynamic_clock_(enter|ready|fallback):', line)
                 or RESUME_APPLIED.search(line)):
             transitions.append(dict(line=line_number, message=line.strip()))
         if 'android_sync: pause start' in line or '_stream_play_n_frames(n=' in line:

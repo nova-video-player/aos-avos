@@ -678,6 +678,7 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_heard_interp_delay_ms = -1;
 	s->mode2_heard_interp_last_log_ms = 0;
 	s->mode2_heard_prevideo_phase_active = 0;
+	s->mode2_seek_refill_until_ms = 0;
 	s->mode2_dynamic_clock_active = 0;
 	s->mode2_dynamic_clock_ready = 0;
 	s->mode2_dynamic_clock_ts = STREAM_NO_PTS_VALUE;
@@ -700,13 +701,14 @@ void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier )
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 }
 
-void stream_sync_mode2_heard_frontier_arm( STREAM *s )
+void stream_sync_mode2_heard_frontier_arm( STREAM *s, int seek_restart )
 {
 	if( !s ) {
 		return;
 	}
 	pthread_mutex_lock( &s->mode2_heard_mutex );
-	s->mode2_heard_frontier_seed_pending = 1;
+	// Preserve the reason across the several sync resets inside a seek.
+	s->mode2_heard_frontier_seed_pending = seek_restart ? 2 : 1;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 }
 
@@ -1759,6 +1761,7 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				(!first_start && !delay_change &&
 				 raw_heard_ts < s->mode2_heard_interp_raw_ts);
 			reset_interp = first_start || frontier_restart || delay_change;
+			int seek_restart = s->mode2_heard_frontier_seed_pending == 2;
 			s->mode2_heard_frontier_seed_pending = 0;
 
 			if( reset_interp ) {
@@ -1766,7 +1769,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				const char *seed_cause;
 				if( frontier_restart ) {
 					seed = raw_heard_ts + heard_delay - fixed_latency;
-					seed_cause = "restart_frontier";
+					seed_cause = seek_restart ? "seek_frontier" : "restart_frontier";
+					// Initial compressed refills can be accepted much faster than
+					// they play. Keep the seek's published phase wall-clocked for
+					// one selected pipeline duration instead of advancing it by a
+					// batch of queued samples. Track-change recovery retains its
+					// existing frontier catch-up, as do unmeasurable routes once
+					// this bounded refill interval has elapsed.
+					s->mode2_seek_refill_until_ms = seek_restart ?
+						wall_now + MAX(0, heard_delay) : 0;
 				} else if( delay_change && stream_sync_anchor_get_sink( s ) < 0 ) {
 					// Initial normalization replaces a provisional latency before an
 					// authoritative playback epoch exists. Adopt its physical phase;
@@ -1831,7 +1842,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				// start/seek/track change, or HAL batch jitter), snap up to it. This
 				// restores the raw clock's self-correction during buffer fill instead
 				// of carrying a permanent heard deficit (avos-432 track-change desync).
-				if( raw_heard_ts > s->mode2_heard_interp_ts ) {
+				if( raw_heard_ts > s->mode2_heard_interp_ts &&
+					wall_now >= s->mode2_seek_refill_until_ms ) {
 					s->mode2_heard_interp_ts = raw_heard_ts;
 				}
 			}

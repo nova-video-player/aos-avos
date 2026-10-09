@@ -901,7 +901,8 @@ typedef struct STREAM {
 	int		mode2_heard_interp_delay_ms;	// selected delay used for the current epoch
 	int64_t		mode2_heard_interp_last_log_ms;
 	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
-	int		mode2_heard_frontier_seed_pending;	// passthrough sink was recreated mid-playback (empty buffer): seed heard interp at the frontier
+	int		mode2_heard_frontier_seed_pending;	// empty-buffer seed reason: 1=recreation, 2=seek (preserved across sync resets)
+	int64_t		mode2_seek_refill_until_ms;	// bounded seek refill: writes are not presentation progress
 	STREAM_COMPRESSED_LEDGER compressed_ledger;	// complete compressed units submitted in this clock epoch
 	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence
 	int64_t		mode2_shadow_last_log_ms;

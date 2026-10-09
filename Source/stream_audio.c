@@ -2245,7 +2245,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								// Initial sink configuration has no prior timeline and must retain
 								// the selected pipeline delay (avos-21).
 								if( had_audio_epoch ) {
-									stream_sync_mode2_heard_frontier_arm( s );
+									stream_sync_mode2_heard_frontier_arm( s, 0 );
 									DBG serprintf("mode2_frontier_arm: cause=format audio=%d sink_ref=%d seek_epoch=%d\n",
 										s->audio_time, sink_ref_time, s->seek_epoch);
 								} else {

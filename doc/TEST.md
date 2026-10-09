@@ -456,6 +456,9 @@ output configuration changes, and compressed-write continuation/failure records.
 The phase captures also retain PCM startup corrections, renderer anchor targets,
 startup commits, heard-clock diagnostics and atempo ledger calibration. These
 show whether a seek correction precedes a change of audio clock source.
+Both capture filters also retain Mode 2 dynamic-clock entry, readiness, fallback
+and renderer handoff records; the recording report lists those transitions with
+their source lines.
 
 Seek startup uses its own `SEEK_STARTUP_MAX_MS` budget because target readiness
 precedes audio readiness and renderer scheduling. `first_write_ms`,

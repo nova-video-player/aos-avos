@@ -45,12 +45,26 @@ changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
   initialization. A newly trusted dynamic
   clock first completes any monotonic heard-time hold while the renderer remains
   on its provisional anchor. Once the dynamic phase is ready, an established
-  audio-owned renderer anchor within 100ms of the trusted clock uses fast bounded
-  recovery, avoiding a deadline jump for a small remaining phase error. Missing
-  anchors, a pending seek reanchor, and larger errors retain the explicit
-  audio-based reanchor so startup does not acquire a second multi-second slew.
+  audio-owned renderer anchor uses fast bounded recovery for corrections within
+  about two seconds of 5ms-per-frame repayment (including the added frame time).
+  The tolerance is never below the original 100ms and is capped at 350ms;
+  unknown cadence retains 100ms. This covers the roughly 175ms eARC handoff
+  residual without a single long frame interval. Missing anchors, a pending
+  seek reanchor, and corrections outside that budget retain explicit reanchoring.
+  Recovery still has a temporary phase error; smoothing does not establish
+  physical lipsync or remove the provisional clock's startup uncertainty.
   The smooth handoff preserves the per-frame guard across lookahead retries.
   Later transition and resume corrections remain bounded per frame.
+  On a Mode 2 seek, queued preview frames below the armed target are released
+  once playback resumes; they cannot consume the audio reanchor. The first
+  audio clock publication after target admission establishes the renderer anchor
+  under the sink lock, using that publication's wall timestamp. Refill batches
+  cannot race the renderer to select a later initial phase.
+  The seek's provisional heard clock advances with elapsed time during a bounded
+  refill window (one selected pipeline duration). Accepted compressed batches
+  do not snap it forward during that window. The ordinary fallback frontier
+  catch-up remains available afterward; track recreation keeps its existing
+  immediate catch-up policy. This does not bypass timestamp qualification.
   Mode 2 applies at most 5ms per distinct frame during fast recovery and 0.2ms
   during steady tracking. Any remainder carries into a subsequent frame; the
   final step cannot snap through a second step's worth of correction.

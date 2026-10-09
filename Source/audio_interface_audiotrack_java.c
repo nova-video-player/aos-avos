@@ -295,7 +295,7 @@ static inline void call_void_method_with_env(audio_ctx_t *at, JNIEnv *env, const
 
 static inline int call_int_method(audio_ctx_t *at, const char * name, const char * signature, ...)
 {
-	DBG2 LOG();
+	DBG3 LOG();
 
 	// Check if AudioTrack object is valid before calling methods on it
 	if (!at->obj) {
@@ -331,7 +331,7 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 
 static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const char * name, const char * signature, ...)
 {
-	DBG2 LOG();
+	DBG3 LOG();
 
 	// Check if AudioTrack object is valid before calling methods on it
 	if (!at->obj) {
@@ -1640,14 +1640,14 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	}
 
 	if (len <= 0) {
-		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d -> true",
+		DBG3 LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d -> true",
 			at->format, at->passthrough, len);
 		return 1;
 	}
 
 	// PCM: always ready to accept writes.
 	if (!at->passthrough) {
-		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (pcm fast-path=true)",
+		DBG3 LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (pcm fast-path=true)",
 			at->format, at->passthrough, len);
 		return 1;
 	}
@@ -1657,7 +1657,7 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	// and the playhead often does not advance during startup on eARC/HDMI routes.
 	// Pacing is handled by the stream-level logical lead gate instead.
 	if (at->passthrough >= 2) {
-		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (mode2 bypass=true)",
+		DBG3 LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (mode2 bypass=true)",
 			at->format, at->passthrough, len);
 		return 1;
 	}
@@ -1668,13 +1668,13 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	// suffixes, commits only complete units, and bounds no-progress retries.
 	// Keep the capacity gate below for legacy blocking Mode 1 writes.
 	if (at->passthrough == 1 && device_get_android_api() >= 23) {
-		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (mode1 nonblocking bypass=true)",
+		DBG3 LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (mode1 nonblocking bypass=true)",
 			at->format, at->passthrough, len);
 		return 1;
 	}
 
 	if (at->passthrough_can_write_blind) {
-		DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (blind fallback=true)",
+		DBG3 LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d (blind fallback=true)",
 			at->format, at->passthrough, len);
 		return 1;
 	}
@@ -1747,7 +1747,7 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 		at->can_write_stall_start_ms = 0;
 	}
 
-	DBG LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d pending=%lld available=%lld requested=%lld frame_count=%d frame_size=%zu -> %d",
+	DBG3 LOG("audiotrack_can_write: format=%04X, passthrough=%d, len=%d pending=%lld available=%lld requested=%lld frame_count=%d frame_size=%zu -> %d",
 		at->format, at->passthrough, len,
 		(long long)frames_pending, (long long)frames_available, (long long)frames_requested,
 		at->frame_count, at->frame_size, can_write);

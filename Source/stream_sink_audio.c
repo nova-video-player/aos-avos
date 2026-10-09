@@ -24,7 +24,7 @@
 #ifdef CONFIG_STREAM
 
 #define DBGS 	DBG_IF(Debug[DBG_STREAM])
-#define DBGA2	DBG_IF(Debug[DBG_AUD] > 1)
+#define DBGA3	DBG_IF(Debug[DBG_AUD] > 2)
 
 static int _open( STREAM *s )
 {
@@ -106,7 +106,7 @@ static int syncable( STREAM *s )
 
 static int _write( STREAM *s, AUDIO_FRAME *frame )
 {
-DBGA2 serprintf("\r\n[%8d] size %5d  ", atime(), frame->size );
+DBGA3 serprintf("\r\n[%8d] size %5d  ", atime(), frame->size );
 
 	int ret = audio_interface_write( s->audio_ctx, frame->data, frame->size );
 	return ret;

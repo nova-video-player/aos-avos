@@ -459,6 +459,11 @@ show whether a seek correction precedes a change of audio clock source.
 Both capture filters also retain Mode 2 dynamic-clock entry, readiness, fallback
 and renderer handoff records; the recording report lists those transitions with
 their source lines.
+Routine AudioTrack capacity checks, JNI integer-call entry
+and sink write-attempt traces require audio debug level 3. Level 2 retains
+accepted writes, errors and presentation evidence while reducing retry-loop
+traffic that competes with render records. Missing records still mean incomplete
+evidence; no timing thresholds are relaxed.
 
 Seek startup uses its own `SEEK_STARTUP_MAX_MS` budget because target readiness
 precedes audio readiness and renderer scheduling. `first_write_ms`,

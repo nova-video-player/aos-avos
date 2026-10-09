@@ -480,6 +480,21 @@ acoustic result, never by the `diff` column.
 avsh ses        # prints current value without changing it (pass no arg)
 ```
 
+### Observe PCM presentation without changing the clock
+
+```sh
+avsh at_pcm_observe 600  # debug-only playback-head observations for up to 600 seconds
+avsh at_pcm_observe 0    # disable immediately
+```
+
+Accepts 0–3600 seconds. Disabled by default; the lease expires if the host disappears.
+The observer emits generation-scoped `audio_present_diag` records about every
+100 ms for unpaused PCM. It uses its own query, does not update delay estimates or
+published playback snapshots, and drops observations crossing reset/recreation.
+Passthrough keeps its existing observer behavior. This proves counter progress,
+not physical audio delivery. The test drivers manage this lease when
+`PCM_PRESENTATION_CAPTURE=1` is set; see [TEST.md](TEST.md).
+
 ### Force audio interface for testing
 
 ```sh

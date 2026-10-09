@@ -199,6 +199,21 @@ static int audiotrack_log_underruns = 0;
 static int audiotrack_disable_recovery = 1;
 static int audiotrack_mode2_audit = 0;
 static int audiotrack_force_short_write_bytes = 0;
+#ifdef DEBUG_MSG
+// Explicit, bounded diagnostic lease. Keep 64-bit atomic accesses aligned on
+// 32-bit ABIs too; a killed host must not leave extra PCM queries on forever.
+static int64_t audiotrack_pcm_observe_until_ms __attribute__((aligned(8))) = 0;
+#endif
+
+static int audiotrack_pcm_observe_active(void)
+{
+#ifdef DEBUG_MSG
+	int64_t until_ms = __atomic_load_n(&audiotrack_pcm_observe_until_ms, __ATOMIC_ACQUIRE);
+	return until_ms > 0 && until_ms > atime64();
+#else
+	return 0;
+#endif
+}
 // AC3-recode mode2 plain-policy gate (single source of truth in stream_audio.c). When on,
 // AC3 recode resolved to mode2 uses app_latency instead of pipeline_latency for the static
 // heard delay, paired atomically with the PTS-seeded sample clock in stream_audio.c. Only
@@ -1799,6 +1814,7 @@ static void *audiotrack_presentation_thread(void *arg)
 		AUDIO_PRESENTATION_SNAPSHOT sample = { 0 };
 
 		msec_sleep(100);
+		int pcm_diagnostic = audiotrack_pcm_observe_active();
 		pthread_mutex_lock(&at->presentation_mutex);
 		if (!at->presentation_run) {
 			pthread_mutex_unlock(&at->presentation_mutex);
@@ -1816,7 +1832,9 @@ static void *audiotrack_presentation_thread(void *arg)
 		sample.latency_ms = at->presentation_latency_ms;
 		sample.fixed_latency_ms = at->presentation_fixed_latency_ms;
 		epoch_offset = at->presentation_epoch_offset;
-		if (env && at->init && sample.passthrough >= 1 && at->obj) {
+		if (env && at->init && at->obj && (sample.passthrough >= 1 ||
+			(sample.passthrough == 0 && pcm_diagnostic &&
+			 !__atomic_load_n(&at->track_paused, __ATOMIC_ACQUIRE)))) {
 			track = (*env)->NewGlobalRef(env, at->obj);
 		}
 		pthread_mutex_unlock(&at->presentation_mutex);
@@ -1825,11 +1843,23 @@ static void *audiotrack_presentation_thread(void *arg)
 			continue;
 		}
 
+		struct timespec pcm_query_start, pcm_query_end;
+		if (sample.passthrough == 0)
+			clock_gettime(CLOCK_MONOTONIC, &pcm_query_start);
+		int playhead_ok = get_playhead != NULL;
 		jint raw_playhead = get_playhead ?
 			(*env)->CallIntMethod(env, track, get_playhead) : 0;
 		if ((*env)->ExceptionCheck(env)) {
 			(*env)->ExceptionClear(env);
 			raw_playhead = 0;
+			playhead_ok = 0;
+		}
+		if (sample.passthrough == 0) {
+			clock_gettime(CLOCK_MONOTONIC, &pcm_query_end);
+			if (!playhead_ok) {
+				(*env)->DeleteGlobalRef(env, track);
+				continue;
+			}
 		}
 		uint32_t playhead_raw = (uint32_t)raw_playhead;
 		if (playhead_generation != generation) {
@@ -1844,6 +1874,23 @@ static void *audiotrack_presentation_thread(void *arg)
 		sample.playback_head_frames = playhead_wrap_base + playhead_raw;
 		if (sample.playback_head_frames >= epoch_offset) {
 			sample.playback_head_frames -= epoch_offset;
+		}
+		if (sample.passthrough == 0) {
+			// Independent debug evidence, never a source for the playback clock.
+			// Discard queries crossing flush/recreation or pause. Publish under the
+			// generation lock so an old observation cannot follow a new generation.
+			pthread_mutex_lock(&at->presentation_mutex);
+			if (generation == at->presentation_generation && at->presentation_run &&
+				!__atomic_load_n(&at->track_paused, __ATOMIC_ACQUIRE) &&
+				audiotrack_pcm_observe_active()) {
+				serprintf_record("audio_present_diag: presented=%llu source=pcm_observer generation=%llu age_ms=0 sample_ns=%lld query_start_ns=%lld\n",
+					(unsigned long long)sample.playback_head_frames, (unsigned long long)generation,
+					(long long)pcm_query_end.tv_sec * 1000000000LL + pcm_query_end.tv_nsec,
+					(long long)pcm_query_start.tv_sec * 1000000000LL + pcm_query_start.tv_nsec);
+			}
+			pthread_mutex_unlock(&at->presentation_mutex);
+			(*env)->DeleteGlobalRef(env, track);
+			continue;
 		}
 
 		if (timestamp && at->getTimestampMethodID &&
@@ -3388,6 +3435,19 @@ const audio_interface_impl_t audio_interface_impl_audiotrack_java = {
 };
 
 #ifdef DEBUG_MSG
+static void audiotrack_pcm_observe_cmd(int argc, char *argv[])
+{
+	char *end = NULL;
+	long seconds = argc == 2 ? strtol(argv[1], &end, 10) : -1;
+	if (seconds < 0 || seconds > 3600 || !end || end == argv[1] || *end) {
+		serprintf_record("pcm_present_observer: usage at_pcm_observe <seconds:0-3600>\n");
+		return;
+	}
+	__atomic_store_n(&audiotrack_pcm_observe_until_ms,
+		seconds ? atime64() + (int64_t)seconds * 1000 : 0, __ATOMIC_RELEASE);
+	serprintf_record("pcm_present_observer: enabled seconds=%ld\n", seconds);
+}
+DECLARE_DEBUG_COMMAND("at_pcm_observe", audiotrack_pcm_observe_cmd );
 DECLARE_DEBUG_PARAM("at_underrun", audiotrack_log_underruns );
 DECLARE_DEBUG_PARAM("at_disable_recovery", audiotrack_disable_recovery );
 DECLARE_DEBUG_PARAM("at_mode2_audit", audiotrack_mode2_audit );

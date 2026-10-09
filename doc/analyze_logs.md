@@ -385,7 +385,31 @@ Attach the original log, JSON/Markdown reports, configuration and playback
 context. Keep actionable source-line references. Avoid conclusions based only
 on a final good sample, zero drops or positive writes.
 
-Physical lipsync and displayed cadence remain unmeasured by these scripts.
+### Optional SurfaceFlinger comparison
+
+Capture with `SURFACEFLINGER_CAPTURE=1` as described in [TEST.md](TEST.md).
+Read each phase's `surfaceflinger-report.md` beside its ordinary analyzer report.
+The JSON includes exact per-frame matches, source log lines, query duration,
+snapshot overlap and per-transition summaries. The wrapper's `run-report.json`
+also compares phase segments against the initial session compositor baseline.
+
+Separate three observations: AVOS deadline spacing, actual compositor spacing,
+and AVOS's estimated audio/video phase. Smooth deadlines with irregular actual
+spacing point downstream of scheduling. A consistent increase in actual-minus-
+desired time with unchanged scheduled phase suggests additional video delivery
+delay. Neither observation identifies downstream audio latency. Do not simply
+subtract presentation delay from `phase_ms` during speed changes: the media/wall
+clock relationship and freshness of the audio estimate must first be established.
+
+Allow normal refresh quantization (such as 33/50 ms alternation for 23.976 fps
+at 59.94 Hz). Review cadence candidates against adjacent submissions within one
+epoch/transition; do not join across missing records, paused intervals or layer
+recreation. Constant presentation delay can leave cadence smooth, so inspect
+delay extrema and changes from the fixed initial baseline as well as cadence.
+No late replacement baseline is used when initial calibration evidence is absent.
+Exact matches validate correspondence only for those frames, not the whole run.
+
+Physical lipsync and panel cadence remain unmeasured by these scripts.
 AudioTrack timing can omit downstream TV/ARC/eARC/AVR/soundbar buffering and DSP.
 Use a synchronized recording of known flash/beep events to establish physical
 offset, accounting for capture delay. A stable physical offset on one route

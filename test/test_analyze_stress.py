@@ -494,6 +494,23 @@ stress_snapshot() {
         text = re.sub(r'presented=\d+', 'presented=100', fixture())
         self.assertIn('presentation_stalled', self.check(text)['reason'])
 
+    def test_pcm_observer_is_generation_scoped_and_still_detects_stalls(self):
+        import re
+        text = fixture().replace('source=playhead', 'source=pcm_observer generation=5')
+        self.assertEqual(self.check(text)['healthy'], 1)
+        frozen = re.sub(r'presented=\d+', 'presented=100', text)
+        self.assertIn('presentation_stalled', self.check(frozen)['reason'])
+        lines = []
+        for line in text.splitlines():
+            if 'audio_present_diag:' in line and float(line.split()[0]) >= 1001.5:
+                line = line.replace('generation=5', 'generation=6')
+                line = re.sub(r'presented=(\d+)', lambda m: 'presented=' + str(int(m[1]) - 60000), line)
+            lines.append(line)
+        self.assertNotIn('presentation_reset', self.check('\n'.join(lines))['reason'])
+        sparse = '\n'.join(line for i, line in enumerate(text.splitlines())
+                           if 'audio_present_diag:' not in line or i % 50 == 1)
+        self.assertEqual(self.check(sparse)['verdict'], 'INSUFFICIENT_EVIDENCE')
+
     def test_missing_presentation(self):
         text = '\n'.join(x for x in fixture().splitlines() if 'audio_present_diag' not in x)
         self.assertIn('missing_presentation_progress', self.check(text)['reason'])

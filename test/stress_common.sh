@@ -23,6 +23,7 @@ stress_configure()
 	: "${REQUIRE_AUDIO_PRESENTATION:=1}" "${REQUIRE_RENDER_TIMING:=1}"
 	: "${WRITE_GAP_MAX_MS:=250}" "${LATE_DROP_MAX:=0}" "${UNDERRUN_MAX:=0}"
 	: "${STARVED_MAX:=0}" "${ARM_UNDERRUN:=0}" "${STABLE_MEDIA_MS:=2000}"
+	case "${PCM_PRESENTATION_CAPTURE:-0}" in 0|1) ;; *) fail 'PCM_PRESENTATION_CAPTURE must be 0 or 1' ;; esac
 	export PLAYER_PID
 	export STABLE_MEDIA_MS AV_DIFF_MAX_MS VIDEO_GAP_MAX_MS WRITE_GAP_MAX_MS
 	export REQUIRE_AUDIO_PRESENTATION REQUIRE_RENDER_TIMING LATE_DROP_MAX UNDERRUN_MAX STARVED_MAX ARM_UNDERRUN
@@ -41,10 +42,27 @@ PY
 	LOGCAT_KEEP="$LOGCAT_KEEP|mode2_dynamic_clock(_enter|_ready|_fallback)?:|mode2_epoch_seed:|android_sync: mode2 "
 	LOGCAT_KEEP="$LOGCAT_KEEP|SINK_REF_DEFERRED:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|at_speed_hw:"
+	LOGCAT_KEEP="$LOGCAT_KEEP|pcm_present_observer:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|android_sync anchor_diag|android_sync: (init render_offset|PCM startup correction)|pcm_startup_correction:|at_ledger:|startup_anchor_commit|audio_start_commit|heard_ts_diag:"
 	LOGCAT_ADB_PID=''
 	LOGCAT_PIPE=''
 	STRESS_POLL_SEQUENCE=0
+}
+
+stress_pcm_observer_ready()
+{
+	# A one-off ACK can be lost while periodic observer records still arrive.
+	# Compare device log timestamps, not delivery order: queued old samples
+	# must not confirm a new phase, and the marker may overtake player logs.
+	awk -v marker="$PCM_OBSERVER_MARKER" '
+		$1 ~ /^[0-9]+\.[0-9]+$/ {
+			if (index($0, marker)) boundary = $1 + 0
+			if ($0 ~ /pcm_present_observer: enabled seconds=600([[:space:]]|$)/ ||
+			    $0 ~ /audio_present_diag:.* source=pcm_observer([[:space:]]|$)/)
+				if ($1 + 0 > evidence) evidence = $1 + 0
+		}
+		END { exit !(boundary && evidence >= boundary) }
+	' "$RAW_LOG"
 }
 
 stress_start_logcat()
@@ -58,8 +76,43 @@ stress_start_logcat()
 	LOGCAT_ADB_PID=$!
 	grep --line-buffered -E "$LOGCAT_KEEP" < "$LOGCAT_PIPE" > "$RAW_LOG" &
 	LOGCAT_PID=$!
+	PCM_PRESENTATION_ARMED=0
+	# Optional read-only compositor observer. One per phase also supports the
+	# standalone drivers and speed-session wrapper without duplicate collectors.
+	SURFACEFLINGER_PID=''
+	if [ "${SURFACEFLINGER_CAPTURE:-0}" = 1 ]; then
+		python3 "$SCRIPT_DIR/surfaceflinger_timing.py" collect \
+			--output "$OUTPUT_DIR/surfaceflinger-samples.jsonl" --package "$PACKAGE" \
+			--interval "${SURFACEFLINGER_INTERVAL_SEC:-2}" \
+			--layer "${SURFACEFLINGER_LAYER:-}" \
+			> "$OUTPUT_DIR/surfaceflinger-collector.log" 2>&1 &
+		SURFACEFLINGER_PID=$!
+	fi
 	sleep 1
 	kill -0 "$LOGCAT_ADB_PID" 2>/dev/null && kill -0 "$LOGCAT_PID" 2>/dev/null || fail 'logcat collector did not start'
+	if [ "${PCM_PRESENTATION_CAPTURE:-0}" = 1 ]; then
+		# Arm after collector startup. The broadcast can return before its log
+		# reaches the host, especially on a busy device. Keep this setup wait
+		# separate from playback recovery thresholds. Require an ACK or fresh
+		# observer output; an adb broadcast success alone is not confirmation.
+		# Lease expires even if host cleanup cannot run.
+		PCM_OBSERVER_MARKER="AVOS_TEST_POLL_PCM_ARM_${$}"
+		adb shell log -p i -t avos_test "$PCM_OBSERVER_MARKER" || \
+			fail 'could not mark PCM observer setup in logcat'
+		PCM_PRESENTATION_ARMED=1
+		"$SCRIPT_DIR/av.sh" at_pcm_observe 600 > "$OUTPUT_DIR/pcm-observer-command.log" 2>&1 || \
+			fail 'could not enable PCM presentation diagnostics'
+		attempt=0
+		while [ "$attempt" -lt 80 ]; do
+			kill -0 "$LOGCAT_ADB_PID" 2>/dev/null && kill -0 "$LOGCAT_PID" 2>/dev/null || \
+				fail 'logcat collector stopped while waiting for PCM observer acknowledgement'
+			stress_pcm_observer_ready && break
+			sleep 0.1
+			attempt=$((attempt + 1))
+		done
+		stress_pcm_observer_ready || \
+			fail 'PCM observer confirmation not captured within 8s (setup marker and fresh ACK or observer sample required); check logcat delivery and at_pcm_observe support (playback test not started)'
+	fi
 	stress_preflight
 }
 
@@ -85,11 +138,27 @@ stress_snapshot()
 
 stress_stop_logcat()
 {
+	# Stop before the wait below: the observer intentionally runs until signalled.
+	if [ -n "${SURFACEFLINGER_PID:-}" ]; then
+		kill "$SURFACEFLINGER_PID" 2>/dev/null || true
+		wait "$SURFACEFLINGER_PID" 2>/dev/null || true
+		SURFACEFLINGER_PID=''
+	fi
+	if [ "${PCM_PRESENTATION_ARMED:-0}" = 1 ]; then
+		"$SCRIPT_DIR/av.sh" at_pcm_observe 0 >> "$OUTPUT_DIR/pcm-observer-command.log" 2>&1 || true
+		PCM_PRESENTATION_ARMED=0
+	fi
 	for pid in "${LOGCAT_PID:-}" "${LOGCAT_ADB_PID:-}"; do
 		[ -z "$pid" ] || kill "$pid" 2>/dev/null || true
 	done
 	wait 2>/dev/null || true
 	[ -z "${LOGCAT_PIPE:-}" ] || rm -f "$LOGCAT_PIPE"
+	if [ "${SURFACEFLINGER_CAPTURE:-0}" = 1 ]; then
+		python3 "$SCRIPT_DIR/surfaceflinger_timing.py" report \
+			--samples "$OUTPUT_DIR/surfaceflinger-samples.jsonl" --log "$RAW_LOG" \
+			> "$OUTPUT_DIR/surfaceflinger-analysis.log" 2>&1 || \
+			printf 'SurfaceFlinger report unavailable; see %s/surfaceflinger-*.log\n' "$OUTPUT_DIR" >&2
+	fi
 	if [ "$ARM_UNDERRUN" = 1 ]; then
 		"$SCRIPT_DIR/av.sh" at_underrun 0 >/dev/null 2>&1 || true
 	fi

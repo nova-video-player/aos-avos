@@ -52,6 +52,35 @@ def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-c
     combined = dict(verdict=status, campaign_exit_code=campaign_rc,
                     recording_verdict=recording_verdict, report_error=report_error,
                     physical_lipsync='unmeasured', exit_code=result)
+    # Optional compositor evidence is deliberately independent of the established
+    # playback verdict. The shared driver generates reports on success or failure.
+    compositor = []
+    compositor_baseline = None
+    sf_phases = {path.parent for pattern in ('*/surfaceflinger-samples.jsonl', '*/surfaceflinger-collector.log',
+                                             '*/surfaceflinger-analysis.log') for path in output.glob(pattern)}
+    for phase_dir in sorted(sf_phases):
+        samples = phase_dir / 'surfaceflinger-samples.jsonl'
+        report_path = samples.with_name('surfaceflinger-report.json')
+        try:
+            sf = json.loads(report_path.read_text())
+            if not compositor:
+                compositor_baseline = sf.get('baseline')
+            comparison = []
+            for segment in sf['segments']:
+                comparable = compositor_baseline and all(
+                    segment.get(key) == compositor_baseline.get(key)
+                    for key in ('layer', 'refresh_ns', 'generation'))
+                comparison.append(dict(epoch=segment['epoch'], segment=segment['segment'],
+                                       first_line=segment['first_line'], last_line=segment['last_line'],
+                                       baseline_delay_change_ms=round(segment['present_delay_ms']['median'] -
+                                           compositor_baseline['present_delay_median_ms'], 3) if comparable else None))
+            compositor.append(dict(phase=samples.parent.name, status=sf['status'],
+                                   exact_matches=sf['exact_matches'], report=str(report_path),
+                                   initial_session_baseline_comparison=comparison))
+        except (OSError, ValueError, KeyError, TypeError):
+            compositor.append(dict(phase=samples.parent.name, status='UNAVAILABLE', report=str(report_path)))
+    combined['surfaceflinger'] = compositor
+    combined['surfaceflinger_initial_baseline'] = compositor_baseline
     (output / 'run-report.json').write_text(json.dumps(combined, indent=2, sort_keys=True) + '\n')
     print(f'\nCombined verdict: {status}')
     print(f'Campaign exit code: {campaign_rc}; recording review: {recording_verdict}')
@@ -60,7 +89,9 @@ def generate_reports(output, campaign_rc, settings_relative='resume-1/analyzer-c
     print(f'Campaign summary: {output / "summary.md"}')
     print(f'Recording review: {output / "recording-review.md"}')
     print(f'Combined result: {output / "run-report.json"}')
-    print('Physical lipsync and displayed cadence remain unmeasured.')
+    for sf in compositor:
+        print(f'SurfaceFlinger {sf["phase"]}: {sf["status"]}; {sf["report"]}')
+    print('Physical lipsync and panel cadence remain unmeasured.')
     return result
 
 

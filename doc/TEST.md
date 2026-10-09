@@ -5,6 +5,115 @@ The device harnesses drive playback that is already running. They share
 checks. A PASS applies to the captured evidence and configured thresholds.
 **Physical lipsync and displayed-frame cadence remain unmeasured.**
 
+## Optional compositor presentation capture
+
+`SURFACEFLINGER_CAPTURE=1` adds read-only, periodic `dumpsys SurfaceFlinger
+--latency` snapshots to the shared seek, resume and speed drivers. It also works
+through `run_stress_campaign.py` and `run_speed_session.py`. It requires no new
+APK and is disabled by default. Start playback as usual, then for example:
+
+```bash
+ANDROID_SERIAL=192.168.0.9:5555 SURFACEFLINGER_CAPTURE=1 \
+  bash test/stress_seek_validate.sh 10 8 2000
+
+ANDROID_SERIAL=192.168.0.9:5555 SURFACEFLINGER_CAPTURE=1 \
+  CONTINUE_ON_FAIL=1 ROUNDS=2 RESUME_CYCLES=5 SEEK_CYCLES=10 \
+  BURST_PAIRS=10 BURST_GAP_MS=150 SESSION_RAW=1 \
+  python3 test/run_stress_campaign.py
+```
+
+Use the address of the device being tested. The collector inherits
+`ANDROID_SERIAL`; it never changes playback or clears SurfaceFlinger history.
+`SURFACEFLINGER_INTERVAL_SEC` defaults to 2 seconds (minimum 0.5).
+The video layer is rediscovered each poll. A single exact `SurfaceView[...]#id`
+and `SurfaceView[...](BLAST)#id` pair selects the BLAST buffer layer, not its
+container. Other multiple candidates or no video layer are recorded as
+unavailable. For a vendor-specific name, set
+`SURFACEFLINGER_LAYER` to the exact name from `adb shell dumpsys SurfaceFlinger
+--list`. Do not select the app UI or background layer.
+
+Each phase saves `surfaceflinger-samples.jsonl`, `surfaceflinger-collector.log`,
+`surfaceflinger-report.json` and `surfaceflinger-report.md`. Cleanup captures a
+final snapshot and generates the report for both successful and failed tests.
+An unavailable/failed optional collector does not change the original test
+exit code. The Python session wrapper lists these reports in `run-report.json`.
+It also retains the first phase's compositor baseline for cross-phase comparison;
+if that baseline is unavailable it does not substitute a later phase's baseline.
+
+To regenerate a phase report offline:
+
+```bash
+python3 test/surfaceflinger_timing.py report \
+  --samples path/to/phase/surfaceflinger-samples.jsonl \
+  --log path/to/phase/logcat.log
+```
+
+This is a separate diagnostic signal, not an additional PASS/FAIL gate:
+
+- Only unique exact matches between desired-present timestamps and
+  `video_render_diag` deadlines establish correspondence. No nearest-frame guess.
+- Zero, pending and malformed timestamps are excluded; overlapping history is
+  deduplicated. Unchanged history and absent overlap are reported, not assumed
+  to mean frozen playback or uninterrupted capture. Pending/unobserved records
+  and nonconsecutive render sequences are never bridged for cadence checks.
+- Cadence comparisons allow floor/ceiling display refresh counts. For example,
+  23.976 fps on a 59.94 Hz display normally alternates approximately 33/50 ms.
+  A residual above 2 ms is a review candidate, not a measured physical stutter.
+  Repeated filter-buffer messages do not create transitions; backend changes
+  and changes of the rendered frame interval do. Paused and identified seek-preview
+  frames retain compositor evidence but are excluded from playback cadence,
+  audio-phase summaries and initial baseline selection.
+- Presentation delay and the fresh AVOS audio-phase estimate appear separately.
+  The fixed initial compositor baseline describes delivery after the scheduled
+  deadline; it does not calibrate the soundbar or manual A/V delay. No new baseline
+  is learned after seek/resume. Layer-generation and refresh changes are excluded
+  from baseline comparisons. Keep the device, route and clip fixed for comparisons.
+- Query durations are recorded. Check overhead and history overlap on each device
+  before relying on capture; shorten the interval only when history coverage
+  requires it. Compare with capture disabled when investigating marginal cadence.
+
+`CORRELATED` means matching evidence exists, not complete coverage or healthy
+physical output. `UNCORRELATED` means completed compositor records exist but
+cannot be matched; `UNAVAILABLE` means usable presentation evidence is absent.
+This measures the compositor, not the panel or heard audio. See
+[analyze_logs.md](analyze_logs.md) for interpretation.
+
+### Optional fresh PCM presentation observations
+
+Some PCM routes query timing only every two seconds once the AudioTrack timestamp
+is trusted. Their fallback `playhead_delay` logs cannot satisfy the analyzer's
+500 ms observation requirement. Do not relax that requirement or treat cached
+clock extrapolation as measured progress.
+
+After installing a build with `at_pcm_observe`, enable independent diagnostics:
+
+```bash
+PCM_PRESENTATION_CAPTURE=1 SURFACEFLINGER_CAPTURE=1 \
+  bash test/stress_seek_validate.sh 10 8 2000
+```
+
+This also works in campaign and speed-session wrappers. The existing native
+observer thread samples the PCM playback head about every 100 ms while unpaused,
+logging `audio_present_diag: ... source=pcm_observer generation=...`. It neither
+updates the playback clock nor changes the production timing-query throttle.
+Queries crossing a flush/recreation are discarded; generations isolate counter
+resets. Passthrough sampling and clock selection remain unchanged. Playback-head
+progress still does not prove heard audio at the soundbar.
+
+The driver explicitly arms a 600-second lease after logcat startup, waits up to
+eight seconds for its acknowledgement or fresh `pcm_observer` samples, and
+disables it on cleanup. A device-timestamped setup marker excludes older records;
+periodic samples can confirm startup even if the one-off acknowledgement is lost.
+Collector failure or missing confirmation stops before key injection; a timeout
+can mean delayed log delivery as well as missing command support. This setup wait
+does not change playback recovery thresholds.
+A killed/disconnected host leaves at most the remaining
+lease; a longer single phase needs a deliberate lease renewal or another phase.
+An old APK without this command stops before key injection with an explanatory
+error. Both capture options default to off and are independent: repeat with
+`PCM_PRESENTATION_CAPTURE=1 SURFACEFLINGER_CAPTURE=0` to compare compositor
+collection overhead while keeping audio evidence unchanged.
+
 ## Review a saved log (no device required)
 
 Generate a readable report and retain JSON for comparison:

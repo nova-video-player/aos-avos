@@ -1,12 +1,12 @@
 #!/bin/bash
 
-set -e  # Exit on unhandled errors
+set -euo pipefail
 
 # Save the original directory where script was called
 SCRIPT_DIR="$(pwd)"
 
 # Trap Ctrl-C to display log file before exiting
-trap 'echo ""; echo "🛑 Interrupted. Log file: avos-$(printf "%02d" $LOG_NUM).log"; exit 130' SIGINT
+trap 'echo ""; echo "Interrupted. Log file: ${LOG_FILE:-not started}"; exit 130' SIGINT
 
 # Infer PROJECT_DIR from current script location
 # This script is in native/avos/, so Video/ is two levels up
@@ -21,17 +21,12 @@ if [ -z "$ABI" ]; then
 fi
 echo "✅ Device ABI: $ABI"
 
-if [[ "$ABI" == "arm64-v8a" ]]; then
-    APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-arm64-v8a-debug.apk"
-elif [[ "$ABI" == "armeabi-v7a" ]]; then
-    APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-armeabi-v7a-debug.apk"
-else
-    echo "⚠️ WARNING: Unknown ABI $ABI, defaulting to arm64-v8a"
-    APK_PATTERN="build/outputs/apk/noamazon/debug/org.courville.nova-*-arm64-v8a-debug.apk"
-fi
+case "$ABI" in
+    arm64-v8a|armeabi-v7a|x86|x86_64) ;;
+    *) echo "ERROR: Unsupported device ABI: $ABI"; exit 5 ;;
+esac
 
 BUILD_LOG="build.log"
-VIDEO_PATH="file:///sdcard/Download/Silicon_Valley-S05E02-Reorientation-small.mkv"
 
 # Find next available log file number
 LOG_NUM=0
@@ -52,29 +47,53 @@ if ! cd "$PROJECT_DIR"; then
 fi
 
 # Build APK
-echo "🔨 Building APK with gradlew aND..."
-if ! ./gradlew aND --offline > "$BUILD_LOG" 2>&1; then
+echo "🔨 Building APK with gradlew assembleNoamazonDebug..."
+if ! ./gradlew assembleNoamazonDebug --offline > "$BUILD_LOG" 2>&1; then
     echo "❌ ERROR: Gradle build failed."
     echo "📄 Build log: $PROJECT_DIR/$BUILD_LOG"
     echo ""
-    cd "$SCRIPT_DIR"
-    python3 ./extract_errors.py "$PROJECT_DIR/$BUILD_LOG"
+    python3 "$SCRIPT_LOCATION/extract_errors.py" "$PROJECT_DIR/$BUILD_LOG" || true
     exit 2
 fi
 echo "✅ Build completed successfully"
 
-# Find APK
-echo "🔍 Searching for APK..."
-APK_FILE=$(ls $APK_PATTERN 2>/dev/null | head -n 1)
-if [ -z "$APK_FILE" ]; then
-    echo "❌ ERROR: APK not found at $APK_PATTERN"
+# Select the current build output, not an older version left in the directory.
+echo "🔍 Reading Gradle APK metadata..."
+if ! APK_FILE=$(python3 - "$PROJECT_DIR/build/outputs/apk/noamazon/debug/output-metadata.json" "$ABI" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+metadata = Path(sys.argv[1])
+abi = sys.argv[2]
+try:
+    data = json.loads(metadata.read_text())
+    if data.get('applicationId') != 'org.courville.nova' or data.get('variantName') != 'noamazonDebug':
+        raise ValueError('unexpected application or build variant')
+    matches = [entry for entry in data['elements']
+               if entry.get('filters') == [{'filterType': 'ABI', 'value': abi}]]
+    if not matches:
+        # A universal build is valid for any of the supported device ABIs.
+        matches = [entry for entry in data['elements'] if entry.get('filters') == []]
+    if len(matches) != 1:
+        raise ValueError(f'expected one APK for {abi}, found {len(matches)}')
+    apk = (metadata.parent / matches[0]['outputFile']).resolve()
+    if apk.parent != metadata.parent.resolve() or apk.suffix != '.apk' or not apk.is_file():
+        raise ValueError(f'missing or invalid APK output: {apk}')
+    print(apk)
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print(f'Cannot select current APK: {error}', file=sys.stderr)
+    sys.exit(1)
+PY
+); then
+    echo "❌ ERROR: No unambiguous current APK for $ABI. Nothing installed."
     exit 3
 fi
 echo "✅ Found APK: $APK_FILE"
 
 # Install APK
 echo "📱 Installing APK to device..."
-if ! adb install -r "$APK_FILE" 2>&1 | grep -v "^Performing"; then
+if ! adb install -r "$APK_FILE"; then
     echo "❌ ERROR: Failed to install APK on device."
     exit 4
 fi
@@ -99,6 +118,12 @@ echo "✅ Launch nova"
 echo "🧹 Clearing logcat buffer... and get logs"
 echo "📝 Logging to: $LOG_FILE"
 sleep 5
-adb logcat -c; adb logcat --pid=$(adb shell pidof -s org.courville.nova) -v brief | grep --line-buffered avos_player | tee $LOG_FILE
+adb logcat -c
+PLAYER_PID=$(adb shell pidof -s org.courville.nova | tr -d '\r')
+if [[ ! "$PLAYER_PID" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Nova is not running; cannot capture playback logs."
+    exit 6
+fi
+adb logcat --pid="$PLAYER_PID" -v brief | grep --line-buffered avos_player | tee "$LOG_FILE"
 
 exit 0

@@ -114,6 +114,31 @@ DBG serprintf( "lang: '%s' '%s' '%s'\n", style->id, style->name, style->lang );
 	return style_arr;
 }
 
+int subtitle_idx_read_size( FILE *file, int *w, int *h )
+{
+	if ( !file || !w || !h ) return 0;
+	*w = *h = 0;
+	fseek( file, 0, SEEK_SET );
+
+	char line[LINE_LEN + 1];
+	// The header ends at the first "id:" line; never read into the (large) cue list.
+	while ( fgets( line, sizeof( line ), file ) ) {
+		if ( !strncmp( line, "size:", 5 ) ) {
+			int ww = 0, hh = 0;
+			if ( sscanf( line + 5, " %dx%d", &ww, &hh ) == 2 &&
+			     ww >= 16 && ww <= 8192 && hh >= 16 && hh <= 8192 ) {
+DBG serprintf( "IDX: size %dx%d\n", ww, hh );
+				*w = ww;
+				*h = hh;
+				return 1;
+			}
+			return 0;
+		}
+		if ( !strncmp( line, "id:", 3 ) || !strncmp( line, "timestamp:", 10 ) ) break;
+	}
+	return 0;
+}
+
 static void store_line(char *line, sub_line *sub)
 {
 	sub->top = acalloc(strlen(line) + 1, 1);
@@ -176,14 +201,7 @@ serprintf( "IDX: could not read file %s\n", subname );
 	line = subtitle_get_next_line( line, LINE_LEN, fd );
 
 	while ( line ) {
-		if (!strncmp(line, "size:", 5)) {
-			int w, h;
-			if (sscanf(line + 5, "%dx%d", &w, &h) == 2 &&
-			    w > 0 && h > 0 && w <= 16384 && h <= 16384) {
-				sub->canvas_width = w;
-				sub->canvas_height = h;
-			}
-		} else if( !strncmp( line, "time offset:", strlen("time offset:") ) ) {
+		if( !strncmp( line, "time offset:", strlen("time offset:") ) ) {
 DBG serprintf("%s", line );
 		} else if( !strncmp( line, "id:", strlen("id:") ) ) {
 DBG serprintf("%s", line );

@@ -664,9 +664,28 @@ on seek/open/stop so a later boundary cannot repair another playback context.
 `stress_pause.sh`, `stress_seek.sh` and `stress_speed.sh` remain unvalidated
 chaos drivers; successful completion is not a playback verdict.
 
-The separate native host harnesses are indexed in `AGENT.md`. `make test`
+The separate native host harnesses are indexed in `AGENT.md`; the subtitle-engine ones
+are described under Native host tests below. `make test`
 builds `ff`, `comp`, and `stream_url`; it does not run the Python or shell suites
 or automatically execute those binaries. The historical
 `test/pause_resume_sync.py` extracts a removed helper and currently fails; do not
 count it as validation of current playback. The Sonic document also references
 replacement suites absent from this checkout.
+
+## Native host tests
+
+C tests for the subtitle engine (libass geometry, SSA style cache, frame
+identity and push policy, JNI listener) run on the development machine: no NDK,
+no device. They need a host `libass` (found with `pkg-config`) and a C compiler.
+
+```bash
+python3 test/host/test_host_native.py -v          # all
+python3 test/host/test_host_native.py -k race     # one
+SANITIZERS=thread python3 test/host/test_host_native.py -k race
+```
+
+`SANITIZERS` (default `undefined`, `none` disables) and `CC` are honoured. Tests
+that need libass are skipped, not failed, when `pkg-config` cannot find it.
+The module docstring says what each test covers and what it does not prove
+(mock JavaVM, link-only GL path, playback-speed scheduling). The other host
+test, `test/run-color-conversion.sh`, is unchanged.

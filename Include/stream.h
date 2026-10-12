@@ -627,6 +627,7 @@ typedef struct STREAM {
 
 	int 		audio_time;
 	int 		audio_ref_time;
+	double		audio_ref_time_rst; // PCM sample origin, independent of speed mapping
 	int 		audio_samples;
 	int64_t		audio_time_remainder_us;
 	UINT64		audio_pos;

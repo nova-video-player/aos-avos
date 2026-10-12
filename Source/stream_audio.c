@@ -755,6 +755,7 @@ DBG	serprintf("mode2_sync_mode: forcing STREAM_SYNC_SAMPLES (was %d) ac3_recode=
 	// can immediately accumulate fakeSize duration without waiting for the next chunk.
 	if( chunk_pts != STREAM_NO_PTS_VALUE ) {
 		s->audio_ref_time = chunk_pts;
+		s->audio_ref_time_rst = TS_TO_RST_TIME( chunk_pts, double );
 		s->audio_samples  = 0;
 		_set_audio_time( s, chunk_pts );
 DBG		serprintf("mode2_sync_mode: ref=%d\n", s->audio_ref_time);
@@ -1638,6 +1639,7 @@ serprintf("audio_skip(%d)!\r\n", cdata.time);
 				if( s->sync_mode == STREAM_SYNC_SAMPLES && s->speed == STREAM_SPEED_NORMAL ) {
 					if( s->audio_ref_time == -1 && cdata.time != STREAM_NO_PTS_VALUE ) {
 						s->audio_ref_time = cdata.time;
+						s->audio_ref_time_rst = TS_TO_RST_TIME( cdata.time, double );
 						s->audio_samples  = 0;
 						_set_audio_time( s, cdata.time );
 DBGA serprintf(" [[%d]] ", s->audio_ref_time);
@@ -3076,9 +3078,17 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 								_set_audio_time( s, s->audio_ref_time + delta );
 								DBG serprintf("stream_audio SAMPLES: atempo active, audio_time = %d + %d (no scaling)\n",
 									s->audio_ref_time, delta);
+							} else if( !passthrough_active && !ac3_recoding ) {
+								// Keep the submitted frontier in media time. Rescaling all samples
+								// since a TS reference at the latest speed loses the old-speed span.
+								// Only the audio worker owns this origin/count; speed changes publish
+								// a coherent timeline instead of racing a counter reset here.
+								double media_time = s->audio_ref_time_rst +
+									(double)s->audio_samples * 1000.0 / sync_rate;
+								_set_audio_time( s, RST_TO_TS_TIME(media_time, int) );
 							} else {
-								// Plain PCM and AudioTrack PlaybackParams write unmodified media
-								// samples, so convert their RST-duration clock into TS.
+								// Compressed modes retain their existing carrier/sample clock.
+								// Convert their RST-duration clock into TS.
 								_set_audio_time( s, s->audio_ref_time + RST_TO_TS_DELTA(delta, int) );
 								DBG serprintf("stream_audio SAMPLES: normal, audio_time = %d + RST_TO_TS(%d)\n",
 									s->audio_ref_time, delta);

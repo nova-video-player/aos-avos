@@ -411,6 +411,7 @@ void stream_sync_pcm_output_reset( STREAM *s )
 	// The new track starts at frame zero, at the submitted media frontier.
 	// Sample counts from the previous rate/track cannot be reused.
 	s->audio_ref_time = s->audio_time;
+	s->audio_ref_time_rst = TS_TO_RST_TIME( s->audio_time, double );
 	s->audio_samples = 0;
 	s->audio_time_remainder_us = 0;
 }

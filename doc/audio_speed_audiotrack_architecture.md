@@ -251,3 +251,13 @@ The current `sfdec2` path always uses the restored platform-timed release engine
 
 The TS/WC duration equivalence above remains the mathematical basis for this
 mapping, but the old `blit_duration` wait/drop loop is not the current path.
+
+### Sample-count clock continuity
+
+For unfiltered PCM in sample-sync mode (including FLAC), the audio worker keeps
+an RST origin and cumulative accepted media samples. It converts the resulting
+absolute media frontier through one committed timeline snapshot. Speed changes
+do not reset these counters or rescale the entire elapsed duration relative to
+an old TS origin. This also remaps queued audio ahead of the audible checkpoint.
+Software-filter output retains its TS-duration accounting; compressed carrier
+clocks are unchanged.

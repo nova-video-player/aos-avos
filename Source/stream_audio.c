@@ -683,7 +683,7 @@ void stream_audio_flush( STREAM *s )
 	s->manual_audio_hold_pending_ms = 0;
 	// AudioTrack playhead epoch is anchored to the pre-flush frame position;
 	// clear it so the epoch clock does not run against a stale base.
-	s->at_speed_epoch_active = 0;
+	stream_audiotrack_epoch_reset(s);
 	_stream_atempo_ledger_reset( s );
 
 	if( s->audio_dec ) {

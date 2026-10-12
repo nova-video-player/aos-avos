@@ -348,7 +348,7 @@ static void _stream_pcm_delay_memory_reset( STREAM *s, int preserve_speed_timing
 		// hold the renderer has not yet consumed along with the audio phase.
 		s->manual_audio_delay_applied_ms = 0;
 		s->manual_audio_hold_pending_ms = 0;
-		s->at_speed_epoch_active = 0;
+		stream_audiotrack_epoch_reset(s);
 		s->atempo_ledger_active = 0;
 		s->atempo_ledger_count = 0;
 		s->atempo_ledger_write = 0;
@@ -1641,16 +1641,105 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int64_t wall_now
 	return heard_ts;
 }
 
-double stream_get_audiotrack_epoch_ts( STREAM *s, UINT64 frames, int rate, double fallback_ts )
+// All checkpoint fields (including reader caches) share this short-held lock.
+// JNI queries and hardware setters run outside it. Stream lifetime remains
+// protected by the existing lifecycle lease. One lock also covers reset paths.
+static pthread_mutex_t audiotrack_epoch_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static double audiotrack_epoch_ts_locked( STREAM *s, UINT64 frames, int rate, double fallback )
 {
 	if( !s->at_speed_epoch_active || rate <= 0 || rate != s->at_speed_epoch_rate ||
-		frames < s->at_speed_epoch_presented_frames || s->at_speed_epoch_speed <= 0.0f ) {
-		return fallback_ts;
-	}
-	// Keep fractional milliseconds through every checkpoint. Rounding the
-	// frame delta, then the speed conversion, loses time on each speed tap.
+		frames < s->at_speed_epoch_presented_frames )
+		return fallback;
+	if( s->at_speed_epoch_transition )
+		return s->at_speed_epoch_heard_ts;
+	if( s->at_speed_epoch_speed <= 0.0f )
+		return fallback;
 	double delta_ms = (double)(frames - s->at_speed_epoch_presented_frames) * 1000.0 / rate;
 	return s->at_speed_epoch_heard_ts + delta_ms / s->at_speed_epoch_speed;
+}
+
+double stream_get_audiotrack_epoch_ts( STREAM *s, UINT64 frames, int rate, double fallback )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	double ts = audiotrack_epoch_ts_locked(s, frames, rate, fallback);
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+	return ts;
+}
+
+int stream_audiotrack_epoch_active( STREAM *s )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	int active = s->at_speed_epoch_active;
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+	return active;
+}
+
+void stream_audiotrack_epoch_reset( STREAM *s )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	s->at_speed_epoch_active = 0;
+	s->at_speed_epoch_transition = 0;
+	s->at_speed_epoch_generation++;
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+}
+
+unsigned int stream_audiotrack_epoch_begin( STREAM *s, UINT64 frames, int rate, double fallback )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	double ts = audiotrack_epoch_ts_locked(s, frames, rate, fallback);
+	s->at_speed_epoch_active = 1;
+	s->at_speed_epoch_transition = 1;
+	s->at_speed_epoch_heard_ts = ts;
+	s->at_speed_epoch_presented_frames = frames;
+	s->at_speed_epoch_frames_cached = frames;
+	s->at_speed_epoch_rate = rate;
+	// Readers freeze at this checkpoint until hardware readback confirms a rate.
+	// Never expose the requested speed speculatively, including rejected setters.
+	unsigned int generation = ++s->at_speed_epoch_generation;
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+	return generation;
+}
+
+void stream_audiotrack_epoch_finish( STREAM *s, unsigned int generation, float speed )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	if( s->at_speed_epoch_active && s->at_speed_epoch_generation == generation ) {
+		s->at_speed_epoch_speed = speed;
+		s->at_speed_epoch_transition = 0;
+		s->at_speed_epoch_generation++;
+	}
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+}
+
+static int stream_audiotrack_epoch_read( STREAM *s, int *heard )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	int active = s->at_speed_epoch_active;
+	int transition = s->at_speed_epoch_transition;
+	unsigned int generation = s->at_speed_epoch_generation;
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+	if( !active )
+		return 0;
+
+	UINT64 frames = 0;
+	int rate = 0, source = 0, age = 0;
+	int valid = !transition && audio_interface_get_presented_frames(
+		s->audio_ctx, &frames, &rate, &source, &age, 2);
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	active = s->at_speed_epoch_active;
+	if( active ) {
+		// Discard observations spanning a transition/reset, rate mismatch or
+		// an out-of-order query completion. A newer checkpoint remains usable.
+		if( valid && generation == s->at_speed_epoch_generation &&
+			rate == s->at_speed_epoch_rate && frames >= s->at_speed_epoch_frames_cached )
+			s->at_speed_epoch_frames_cached = frames;
+		*heard = s->at_speed_epoch_transition ? (int)s->at_speed_epoch_heard_ts :
+			(int)audiotrack_epoch_ts_locked(s, s->at_speed_epoch_frames_cached,
+				s->at_speed_epoch_rate, *heard);
+	}
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+	return active;
 }
 
 static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
@@ -1923,43 +2012,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 	// Replaces the write-burst clock (audio_time - last_good) with a presentation-
 	// position clock anchored at the speed-change moment.
 	// Active until cleared by _stream_pcm_delay_memory_reset (seek/flush/stop).
-	if( s->at_speed_epoch_active && !passthrough_mode && !is_mode2_sync ) {
-		UINT64 ep_frames = s->at_speed_epoch_presented_frames;
-		int ep_rate = s->at_speed_epoch_rate;
-
-		// Refresh the playhead on every epoch query.
-		// A stale cached playhead introduces stair-step jitter perceptible at speed.
-		// Optimization (linear interpolation between samples) deferred to a
-		// separate commit after correctness is established.
-		{
-			UINT64 frames_fresh = 0;
-			int rate_fresh = 0, src_fresh = 0, age_fresh = 0;
-			if( audio_interface_get_presented_frames( s->audio_ctx, &frames_fresh, &rate_fresh, &src_fresh, &age_fresh, 2 )
-				&& frames_fresh >= ep_frames ) {
-				s->at_speed_epoch_frames_cached = frames_fresh;
-				s->at_speed_epoch_cache_wall_ms = wall_now;
-			}
-		}
-
-		UINT64 frames_now = s->at_speed_epoch_frames_cached;
-		if( ep_rate > 0 && frames_now >= ep_frames ) {
-			// Use this checkpoint's confirmed rate, even while the global map changes.
-			UINT64 frames_delta = frames_now - ep_frames;
-			int delta_media_ms = (int)((frames_delta * 1000) / (UINT64)ep_rate);
-			int checkpoint_heard = (int)stream_get_audiotrack_epoch_ts( s, frames_now, ep_rate, heard_ts );
-			DBG {
-				static int64_t last_epoch_log_ms = 0;
-				if( wall_now - last_epoch_log_ms >= 500 ) {
-					last_epoch_log_ms = wall_now;
-					serprintf( "at_epoch_clock: checkpoint=%d old=%d diff=%d audio=%d delta_media=%d speed=%.3f epoch_age=%lld\n",
-						checkpoint_heard, heard_ts, checkpoint_heard - heard_ts,
-						s->audio_time, delta_media_ms, s->at_speed_epoch_speed,
-						(long long)(wall_now - s->at_speed_epoch_wall_ms) );
-				}
-			}
-			heard_ts = checkpoint_heard;
-		}
-	}
+	if( !passthrough_mode && !is_mode2_sync )
+		stream_audiotrack_epoch_read(s, &heard_ts);
 
 	if( s->atempo_ledger_active && s->atempo_ledger_count > 0 &&
 		audio_interface_is_audio_speed_enabled() && audio_interface_is_using_atempo() &&
@@ -2829,7 +2883,7 @@ int stream_sync_audio( STREAM *s, int audio_time )
 			// Keep speed clocks on their calibrated/checkpoint policy, and retain
 			// the startup trust threshold and implausible-latency rejection.
 			int plain_pcm_clock = !audio_interface_is_audio_speed_enabled() &&
-				!s->at_speed_epoch_active && s->video_speed_num == s->video_speed_den;
+				!stream_audiotrack_epoch_active(s) && s->video_speed_num == s->video_speed_den;
 			if( (plain_pcm_clock || abs_delta >= STREAM_PCM_STARTUP_CORRECTION_MIN_MS) &&
 				abs_delta <= STREAM_PCM_STARTUP_CORRECTION_MAX_MS ) {
 				pcm_startup_request_correction = 1;

@@ -965,14 +965,13 @@ typedef struct STREAM {
 	// Cleared on seek, flush, or stop.  Drives heard_ts from AT presented-frame
 	// delta rather than from the write-burst clock (audio_time - last_good_delay_ms).
 	int		at_speed_epoch_active;
-	int		at_speed_epoch_audio_time_ts;   // audio_time (TS) at checkpoint
+	unsigned int	at_speed_epoch_generation;
+	int		at_speed_epoch_transition;
 	double		at_speed_epoch_heard_ts;        // fractional heard_ts (TS) at checkpoint
 	float		at_speed_epoch_speed;           // applied speed at checkpoint
 	UINT64		at_speed_epoch_presented_frames;// AT presented frame position at checkpoint
 	int		at_speed_epoch_rate;            // AT sample rate at checkpoint
-	int64_t		at_speed_epoch_wall_ms;         // wall time at checkpoint (diagnostics)
 	UINT64		at_speed_epoch_frames_cached;   // last playhead sample read during epoch
-	int64_t		at_speed_epoch_cache_wall_ms;   // wall time of last playhead sample
 	int		atempo_ledger_active;
 	int		atempo_ledger_count;
 	int		atempo_ledger_write;

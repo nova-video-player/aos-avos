@@ -261,3 +261,12 @@ do not reset these counters or rescale the entire elapsed duration relative to
 an old TS origin. This also remaps queued audio ahead of the audible checkpoint.
 Software-filter output retains its TS-duration accounting; compressed carrier
 clocks are unchanged.
+
+### Checkpoint publication
+
+A short-held mutex protects complete hardware-speed checkpoints, their caches,
+and reset generations. No JNI call runs under this lock. During the setter,
+readers hold the transition timestamp until hardware readback supplies the
+confirmed speed. Playhead queries completing across a transition/reset cannot
+update the newer cache; mismatched rates and older observations are rejected.
+Ordinary pauses preserve the checkpoint and seek/output resets invalidate it.

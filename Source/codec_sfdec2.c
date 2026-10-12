@@ -922,7 +922,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		s->audio_sink->get_passthrough( s ) : 0;
 	int preserve_output = s && audio_interface_pause_preserves_output(s->audio_ctx);
 	int pcm_write_clock = !audio_interface_is_audio_speed_enabled() &&
-		s && !s->at_speed_epoch_active;
+		s && !stream_audiotrack_epoch_active(s);
 	int mode1_window_ms = passthrough_mode == 1 && s && s->audio_ctx ?
 		MAX(250, audio_interface_get_latency(s->audio_ctx)) : 250;
 

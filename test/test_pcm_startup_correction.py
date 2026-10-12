@@ -33,6 +33,7 @@ struct STREAM {
     int pcm_startup_correction_speed_epoch, audio_speed_diag_epoch;
     int pcm_startup_seed_delay_ms, at_speed_epoch_active, video_speed_num, video_speed_den;
 };
+static int stream_audiotrack_epoch_active(STREAM *s) { return s->at_speed_epoch_active; }
 typedef struct { int has_dynamic_evidence, dynamic_evidence_streak, dynamic_evidence_ms; } STATUS;
 static int mode, recode, speed_enabled;
 static int passthrough(STREAM *s) { (void)s; return mode; }

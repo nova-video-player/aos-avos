@@ -39,6 +39,11 @@ int  stream_sync_mode2_dynamic_active( STREAM *s );
 int  stream_sync_av_delay( STREAM *s );
 int  stream_get_atempo_delay( STREAM *s );
 void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active );
+// Coherent hardware-speed checkpoint access; no caller holds its private lock.
+void stream_audiotrack_epoch_reset( STREAM *s );
+int stream_audiotrack_epoch_active( STREAM *s );
+unsigned int stream_audiotrack_epoch_begin( STREAM *s, UINT64 frames, int rate, double fallback );
+void stream_audiotrack_epoch_finish( STREAM *s, unsigned int generation, float speed );
 void stream_sync_pcm_output_reset( STREAM *s );
 int  stream_sync_pcm_reanchor_update( STREAM *s, int passthrough_active );
 int  stream_sync_pcm_audio_lead_gate( STREAM *s, int ac3_recoding );

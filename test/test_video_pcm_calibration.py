@@ -55,6 +55,7 @@ typedef struct {
     int audio_lifecycle_mutex, audio_reconfiguring, audio_lifecycle_generation, paused;
     int at_speed_epoch_active;
 } STREAM;
+static int stream_audiotrack_epoch_active(STREAM *s) { return s->at_speed_epoch_active; }
 static int speed_enabled;
 static int audio_interface_is_audio_speed_enabled(void) { return speed_enabled; }
 typedef struct {

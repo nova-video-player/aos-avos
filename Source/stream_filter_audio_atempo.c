@@ -85,7 +85,7 @@ extern void avfilter_atempo_get_state_v2(AVFilterContext *ctx,
                                      double *tempo,
                                      int64_t *media_out) AVOS_WEAK_IMPORT;
 
-static void atempo_get_state(AVFilterContext *ctx,
+static int atempo_get_state(AVFilterContext *ctx,
 	int *ring_size, int64_t *pos_in, int64_t *pos_out,
 	int64_t *ns_in, int64_t *ns_out, double *tempo, int64_t *media_out)
 {
@@ -95,10 +95,13 @@ static void atempo_get_state(AVFilterContext *ctx,
 	if (avfilter_atempo_get_state_v2) {
 		avfilter_atempo_get_state_v2(ctx, ring_size, pos_in, pos_out,
 			ns_in, ns_out, tempo, media_out);
+		return 1;
 	} else if (avfilter_atempo_get_state) {
 		avfilter_atempo_get_state(ctx, ring_size, pos_in, pos_out,
 			ns_in, ns_out, tempo);
+		return 1;
 	}
+	return 0;
 }
 
 #define DBGA DBG_IF(Debug[DBG_AUD])
@@ -240,6 +243,19 @@ static void atempo_omap_push(struct ctx *ctx, int nsamples, INT64 media_now)
 	ctx->omap_prev_media = media_now;
 }
 
+// Unknown media state is a map miss, not a zero-duration burst. Keep output
+// indices aligned even when an unpatched FFmpeg cannot supply media counters.
+static void atempo_omap_record(struct ctx *ctx, int samples, int valid, INT64 media)
+{
+	if (!valid || media < 0 || ctx->omap_prev_media < 0) {
+		ctx->omap_head = ctx->omap_count = 0;
+		ctx->omap_write_cursor += samples;
+		ctx->omap_prev_media = valid && media >= 0 ? media : -1;
+		return;
+	}
+	atempo_omap_push(ctx, samples, media);
+}
+
 // Drain all frames delivered by FFmpeg and pair that burst with its published
 // media frontier. The patched accessor excludes the partially filled dst_buffer.
 static int atempo_collect_output(struct ctx *ctx)
@@ -263,9 +279,10 @@ static int atempo_collect_output(struct ctx *ctx)
 	if (samples > 0) {
 		int ring = -1;
 		int64_t ns_in = 0, media_out = -1;
-		atempo_get_state(ctx->atempo_ctx, &ring, NULL, NULL, &ns_in, NULL, NULL, &media_out);
+		int valid = atempo_get_state(ctx->atempo_ctx, &ring, NULL, NULL, &ns_in, NULL, NULL, &media_out);
+		valid = valid && (media_out >= 0 || (ns_in >= 0 && ring >= 0));
 		INT64 media = media_out >= 0 ? media_out : MAX(0, ns_in - ring);
-		atempo_omap_push(ctx, samples, media);
+		atempo_omap_record(ctx, samples, valid, media);
 	}
 	return samples;
 }
@@ -1301,8 +1318,9 @@ int stream_filter_audio_atempo_get_audit_state(STREAM_FILTER_AUDIO *f, INT64 *ns
 	int64_t af_pos_in = 0, af_pos_out = 0, af_ns_in = 0, af_ns_out = 0;
 	int64_t af_media_out = -1;
 	double af_tempo = 0.0;
-	atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
-		&af_ns_in, &af_ns_out, &af_tempo, &af_media_out);
+	if (!atempo_get_state(ctx->atempo_ctx, &af_ring, &af_pos_in, &af_pos_out,
+		&af_ns_in, &af_ns_out, &af_tempo, &af_media_out) || af_ring < 0 || af_ns_in < 0)
+		return 0;
 	if (ns_in) {
 		*ns_in = (INT64)af_ns_in;
 	}

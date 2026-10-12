@@ -77,7 +77,10 @@ lacks the v2 accessor, production mapping uses `ns_in - ring` as an estimate.
 The edited source lives in `ext/ffmpeg/libavfilter/af_atempo.c`; regenerate the
 patch from that tree and rebuild the FFmpeg libraries before deploying these
 changes. The AVOS build alone uses the existing prebuilt FFmpeg libraries.
-A stock-FFmpeg strategy
+With stock FFmpeg, the wrapper
+reports missing media state as a map/audit miss, retaining output positions
+without manufacturing zero-span media. Its final 1:1 fallback is an estimate,
+not accurate media mapping at non-unit tempo. Full stock-FFmpeg support
 would require a less precise tempo-schedule estimate or proper filter PTS
 ownership and is a separate design goal.
 

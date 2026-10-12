@@ -232,6 +232,15 @@ static INT64 mode2_clock_entry_limit_ns(int frame_ms)
 	return MAX(100000000LL, MIN(350000000LL, frames * 5000000LL));
 }
 
+// A sub-hard clock step is only actionable if the wall-anchor mismatch persists.
+typedef struct {
+	INT64 start_ns;
+	INT64 last_ns;
+	INT64 target_ns;
+	int start_time;
+	int samples;
+} pcm_drift_t;
+
 typedef struct priv {
 	sfdec_t *sfdec;
 	void *surface_handle;
@@ -347,13 +356,53 @@ typedef struct priv {
 	int64_t grace_until_ms;
 	int last_user_av_delay;
 	int effective_av_delay_ms;
-	int drift_dir;
-	int drift_streak;
+	pcm_drift_t pcm_drift;
 	int hold_audio_active;
 	int64_t hold_audio_until_ms;	// monotonic passthrough startup deadline
 	int64_t hold_audio_start_ms;	// monotonic start of passthrough startup hold
 	int hold_audio_applied_ms;	// ms held during passthrough startup
 } priv_t;
+
+// Qualify the retained anchor, not differences between successive publications:
+// after one real step those differences are normal again. Require advancing
+// audio and wall time, spaced observations, and a stable phase for 500ms.
+static int pcm_drift_observe(pcm_drift_t *d, int eligible, INT64 step_ms,
+	INT64 now_ns, int heard_ms, INT64 offset_ns, int threshold_ms, int hard_ms,
+	INT64 *target_ns)
+{
+	INT64 target = now_ns - (INT64)heard_ms * 1000000LL;
+	INT64 phase = target - offset_ns;
+	if (!eligible || llabs(phase) < (INT64)threshold_ms * 1000000LL ||
+		llabs(phase) >= (INT64)hard_ms * 1000000LL) {
+		d->samples = 0;
+		return 0;
+	}
+	if (d->samples && (now_ns < d->last_ns || now_ns - d->last_ns > 200000000LL ||
+		heard_ms < d->start_time || llabs(target - d->target_ns) > 40000000LL))
+		d->samples = 0;
+	if (!d->samples) {
+		// Do not chase an old route bias. Arm only on a new, same-direction
+		// sub-hard discontinuity that the burst policy deliberately ignored.
+		if (llabs(step_ms) < threshold_ms || llabs(step_ms) >= hard_ms ||
+			((step_ms > 0) == (phase > 0)))
+			return 0;
+		d->start_ns = d->last_ns = now_ns;
+		d->target_ns = target;
+		d->start_time = heard_ms;
+		d->samples = 1;
+		return 0;
+	}
+	if (now_ns - d->last_ns < 50000000LL)
+		return 0;
+	d->last_ns = now_ns;
+	d->samples++;
+	if (d->samples < 6 || now_ns - d->start_ns < 500000000LL ||
+		(INT64)heard_ms - d->start_time < 400)
+		return 0;
+	*target_ns = d->target_ns;
+	d->samples = 0;
+	return 1;
+}
 
 // Caller must hold p->locked.mtx so venc_put_time/venc_ref_time are sampled
 // from the same published clock anchor.
@@ -921,6 +970,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	int passthrough_mode = (s && s->audio_sink && s->audio_sink->get_passthrough) ?
 		s->audio_sink->get_passthrough( s ) : 0;
 	int preserve_output = s && audio_interface_pause_preserves_output(s->audio_ctx);
+	float requested_speed = audio_interface_get_audio_speed();
 	int pcm_write_clock = !audio_interface_is_audio_speed_enabled() &&
 		s && !stream_audiotrack_epoch_active(s);
 	int mode1_window_ms = passthrough_mode == 1 && s && s->audio_ctx ?
@@ -1060,15 +1110,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			s->video->msPerFrame : 33;
 		int hard_drift_ms = (passthrough_mode >= 2) ?
 			MAX( 1500, frame_ms * 16 ) : MAX( 350, frame_ms * 8 );
-		if( !passthrough_mode ) {
-			p->drift_streak++;
-		}
 		// PCM and mode-2 passthrough heard time can legitimately move in write
 		// bursts while the physical sink clock remains continuous.  Keep the
 		// existing scheduler anchor unless this is hard drift.
 		reanchor_discontinuity = (abs_diff >= hard_drift_ms);
-	} else if( !discontinuity ) {
-		p->drift_streak = 0;
 	}
 	if( discontinuity ) {
 		if( passthrough_mode ) {
@@ -1196,7 +1241,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		(long long)diff,
 		(long long)abs_diff,
 		drift_threshold_ms,
-		p->drift_streak,
+		p->pcm_drift.samples,
 		current_speed,
 		speed_changed,
 		discontinuity,
@@ -1338,6 +1383,38 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		}
 	}
 	pcm_resume_calibration_observe_l(p, pcm_latency_us);
+
+	// Lifecycle recovery, manual delay and speed-boundary cadence own their
+	// anchors. Only qualify an otherwise idle PCM anchor, then reuse the
+	// existing once-per-frame bounded startup slew without a hard reanchor.
+	int pcm_drift_eligible = !passthrough_mode && s && s->put_time_mode &&
+		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0 &&
+		!s->paused && !s->seek_paused && !s->audio_start_pending &&
+		!s->audio_resume_pending && s->play_n_video_frames == 0 &&
+		!s->av_delay && !manual_hold_ms && !s->manual_audio_delay_applied_ms &&
+		!speed_changed && !epoch_changed && !resume_started && !pcm_resume &&
+		!in_grace && !allow_reanchor && !p->pause_armed && !p->pcm_resume_pending &&
+		!p->pcm_resume_calibration_active && !p->pending_reanchor &&
+		!p->pending_seek_reanchor && !p->slew_active &&
+		p->render_offset_ns != -1 && p->render_offset_from_audio &&
+		fabsf(requested_speed - current_speed) < 0.001f &&
+		p->speed_cadence.correction_ns == 0;
+	INT64 drift_target_ns;
+	int frame_ms = s && s->video && s->video->msPerFrame > 0 ? s->video->msPerFrame : 33;
+	if (pcm_drift_observe(&p->pcm_drift, pcm_drift_eligible, diff,
+		_get_monotonic_ns(), time, p->render_offset_ns, drift_threshold_ms,
+		MAX(350, frame_ms * 8), &drift_target_ns)) {
+		p->target_offset_ns = drift_target_ns;
+		p->slew_active = 1;
+		p->pcm_startup_slew = 1;
+		p->pcm_resume_slew = 0;
+		p->pcm_startup_slew_frame_handle = NULL;
+		p->pcm_startup_slew_frame_time = INT_MIN;
+		p->pcm_startup_slew_frame_epoch = INT_MIN;
+		p->render_generation++;
+		DBGSI serprintf("android_sync: PCM persistent drift slew correction=%lldus epoch=%d\n",
+			(long long)((drift_target_ns - p->render_offset_ns) / 1000), s->seek_epoch);
+	}
 
 	if( passthrough_mode == 1 && preserve_output && s && !s->paused &&
 		!s->seek_paused && !s->audio_start_pending && !s->audio_resume_pending &&
@@ -3121,6 +3198,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	int preserve_pcm_slew = !passthrough && preserves_output &&
 		p->pcm_resume_slew && p->pcm_startup_slew && pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
+		p->pcm_drift.samples = 0;
 		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);

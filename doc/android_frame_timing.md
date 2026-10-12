@@ -291,3 +291,19 @@ non-zero `render_ts_ns` to MediaCodec for timed release.
   replayed cue and freeze its remaining duration until playback resumes. This is
   a Java-side requirement in `SubtitleManager`, separate from native duration
   clipping and decoder recovery.
+
+### Persistent PCM clock displacement
+
+PCM keeps its wall anchor across sub-hard clock steps to avoid following write
+bursts. A single step can nevertheless leave a lasting phase error even when
+subsequent clock increments look normal. The sfdec2 sink now qualifies that
+residual against the retained wall anchor: a new step of at least 160ms (or four
+frame intervals) must leave a same-direction, sub-hard mismatch stable within
+40ms for 500ms, with advancing audio and spaced observations. Missing samples,
+a reversal, or a lifecycle transition cancel qualification.
+
+A qualified residual uses the existing 1ms-per-distinct-frame PCM slew. It does
+not snap the wall anchor or use late-frame drops as evidence of clock drift.
+Passthrough, manual A/V delay, pause/seek/startup recovery, pending speed changes
+and active cadence compensation are excluded. Existing hard-discontinuity and
+speed-calibration policies remain authoritative.

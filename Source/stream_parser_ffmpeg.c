@@ -1834,6 +1834,20 @@ DBGP serprintf("FFMPEG: seek: time %8d  pos %5d  dir %d\r\n", time, pos, dir);
 DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 	} else {
 		// TODO: start_time is ts: bug mixing time domains
+		// A seek at/after the end of the file must not turn into a fatal seek
+		// error. Mirror the pos-based branch above: mark the parser end and
+		// clamp the target just inside the content so the demuxer finds the
+		// last keyframe and playback drains to a natural completion instead of
+		// reporting VE_FILE_ERROR. See nova-video-player/aos-Video#216 (issue #1986).
+		if( ff_p->duration > 0 && time >= ff_p->duration ) {
+			int margin = 500;
+			if( margin > ff_p->duration )
+				margin = ff_p->duration / 2;
+			DBGP serprintf( "at end (time) %d %d\r\n", time, ff_p->duration );
+			s->video_parse_end = 1;
+			s->audio_parse_end = 1;
+			time = ff_p->duration - margin;
+		}
 		new_pos = ((INT64)time + ff_p->start_time) * AV_TIME_BASE / 1000;
 		DBGP serprintf( "FFMPEG: new time: %lld\r\n", new_pos );
 	}

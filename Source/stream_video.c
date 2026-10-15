@@ -74,6 +74,14 @@
 
 #define SEEK_PREVIEW_PARTIAL_MARGIN_MS 75
 
+// Keep a seek that targets the very end of the media just inside the content.
+// Landing exactly on/after the last frame arms a video/audio drop target that
+// can never be satisfied (seek_video_target_pending never clears), which leaves
+// end-of-playback completion unreported and hangs the player. A small margin
+// lets the engine reach a natural EOF and report completion instead. See
+// nova-video-player/aos-Video#216 (issue #1986).
+#define SEEK_END_MARGIN_MS 500
+
 int 		stream_zero_fill   = 1;
 
 int 		stream_max_delay   = 1;
@@ -3948,6 +3956,17 @@ static int _video_presentation_drained(STREAM *s)
 {
 	if (!s->video_end || s->cdata_now.valid || s->cdata_next.valid)
 		return 0;
+	// A seek that targets at/after the end of the content arms a drop target
+	// that can never be satisfied: seek_video_target_pending never clears
+	// because no frame ever reaches the target. Once the parser has genuinely
+	// reached EOF with no buffered data, an unreached drop target therefore
+	// means every trailing frame was intentionally discarded and there is
+	// nothing left to present, so the stream is drained. Without this the
+	// decoder/presentation drain checks below can never settle and playback
+	// completion is never reported. See nova-video-player/aos-Video#216
+	// (issue #1986).
+	if (s->seek_video_drop && s->seek_video_target_pending)
+		return 1;
 	if (s->video_dec && s->video_dec->drain && !s->video_decoder_drained)
 		return 0;
 	if (frame_q_count(&s->disp_q) || s->video_sink_count > 0)
@@ -5364,6 +5383,18 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 	
 	if( time < 0 )
 		time = 0;
+
+	// A seek at/after the known duration must behave like reaching the end of
+	// the file. Clamp it just inside the content so the seek lands on real
+	// frames and playback drains to a natural completion (issue #1986).
+	if( s && s->duration > 0 && time >= s->duration ) {
+		int target  = time;
+		int margin  = SEEK_END_MARGIN_MS;
+		if( margin > s->duration )
+			margin = s->duration / 2;
+		time = s->duration - margin;
+		DBG serprintf( "SEEK_CLAMP_END: target=%d duration=%d clamped=%d\n", target, s->duration, time );
+	}
 		
 	real_time = _stream_get_real_time( s, time );
 	

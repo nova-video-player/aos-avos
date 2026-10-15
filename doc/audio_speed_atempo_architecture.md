@@ -566,8 +566,32 @@ for the output epoch. This avoids alternating a fresh AudioTimestamp with the
 calibrated fallback when the timestamp becomes older than 100ms during the
 normal two-second query interval. The calibration survives non-flushing pause
 and is cleared with the ledger on seek, output reset, or stop. Before calibration,
-the existing fresh-timestamp/fallback policy remains in effect. This policy is
+a fresh timestamp remains usable. If it expires during stable 1x PCM playback,
+a provisional mixer-head mapping can bridge the gap to calibration. This policy is
 shared by atempo and Sonic; passthrough does not use the software-speed ledger.
+
+The provisional mapping requires an actual timestamp-based PCM publication no
+older than 100ms, with matching seek/output/speed generations, committed timeline
+and manual delay. It is excluded during pause, startup holds, reconfiguration or
+pending speed commits. Its offset is seeded once against that publication's
+wall-time projection; subsequent progress comes only from the ledger lookup of
+the playback-head counter. Stalls do not accumulate wall time. Counter regression,
+rate changes or lifecycle changes invalidate it. It neither marks latency valid
+nor qualifies playback-head evidence for speed commits. The normal four-sample
+calibration remains independent and takes over through the existing publication
+handoff. When the prerequisites are missing, the existing fallback remains.
+
+The one-shot software-PCM startup correction waits for pending speed commits,
+including a deferred neutral commit, to finish. It then requires a fresh,
+in-ledger DAC timestamp or calibrated mixer-head sample; the provisional bridge
+does not qualify. The renderer receives the heard time paired with its monotonic
+sampling time and selects the target directly from that pair. It must not reread
+`venc_put_time`: the normal backward clamp can retain an older fallback value
+ahead of the newly committed heard clock. A stale sample or intervening
+pause/seek/speed transition leaves the correction pending for another sample.
+The existing 8ms deadband and 1ms-per-distinct-frame startup slew remain in use.
+Plain PCM and PlaybackParams retain their existing target selection; passthrough
+does not enter this correction path.
 
 At 1.0x, playback-head calibration also accepts trusted live dynamic evidence
 carried alongside a selected last-good delay. That selection intentionally does
@@ -582,8 +606,12 @@ alone would still step the renderer's extrapolated clock. The reference is used
 only within 100ms and with matching seek, output, speed and manual-delay state;
 without a matching reference, calibration uses the current heard value. Pauses
 and restarts cannot contribute elapsed time across playback epochs. Reading the
-pair uses a nonblocking anchor-lock attempt, deferring activation on contention
-to avoid reversing the renderer's lock order. Subsequent samples retain the
+pair uses a short-held PCM-state mutex, independent of the anchor lock. No
+renderer callback, clock query or logging runs under this mutex. An active
+bridge remains readable while anchor publication waits for the renderer; it
+never falls back merely because that publication owns the anchor lock. Initial
+calibration activation retains a nonblocking attempt on the PCM-state mutex
+and can retry on its next qualifying sample. Subsequent samples retain the
 existing quarter-step smoothing, including non-flushing resumes. No additional
 renderer reanchor or presentation-clock offset is introduced.
 

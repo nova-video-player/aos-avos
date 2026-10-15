@@ -14,7 +14,8 @@ class PlayheadHandoffTest(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / 'Source/stream_sync.c').read_text()
         publish = block(source, 'static int _stream_sync_anchor_publish(')
         reset = block(source, 'void stream_sync_anchor_reset(')
-        fields = set(re.findall(r's->(\w+)', publish + reset)) - {'video_sink'}
+        matches = block(source, 'static int _stream_pcm_clock_ref_matches(')
+        fields = set(re.findall(r's->(\w+)', publish + reset + matches)) - {'video_sink'}
         declarations = '\n'.join(
             f'{"int64_t" if name.endswith("wall_ms") else "int"} {name};'
             for name in sorted(fields))
@@ -23,7 +24,9 @@ class PlayheadHandoffTest(unittest.TestCase):
 #include <stdint.h>
 #include <limits.h>
 #define STREAM_NO_PTS_VALUE INT_MIN
-static int calls;
+static int calls, stream_dbg_delay, pcm_clock_mutex;
+typedef struct { double rst_anchor, ts_anchor, speed, inv_speed; } timeline_state_t;
+static timeline_state_t timeline_snapshot(void) { return (timeline_state_t){0, 0, 1, 1}; }
 static int64_t atime64(void) { return 3000000041LL; }
 static void pthread_mutex_lock(int *m) { assert(!*m); *m = 1; }
 static int pthread_mutex_trylock(int *m) { if (*m) return 1; *m = 1; return 0; }
@@ -37,11 +40,12 @@ static void sfdec2_refresh_sched_anchor_locked(STREAM *s) { (void)s; }
 static int put(SINK *sink, int ts) {
     (void)sink;
     assert(active->anchor_mutex && active->video_sink_mutex);
+    assert(!pcm_clock_mutex); // Never held across the renderer callback.
     assert(active->pcm_playhead_latency_us == 75000 && ts == 100040);
     calls++;
     return 0;
 }
-''' + publish + reset + r'''
+''' + matches + publish + reset + r'''
 int main(void) {
     SINK sink = {1, put};
     STREAM stream = {.video_sink = &sink, .put_time_mode = 1,
@@ -49,7 +53,7 @@ int main(void) {
                      .audio_lifecycle_generation = 7, .av_delay = 100,
                      .sink_ref_time = -1}, *s = &stream;
     active = s;
-    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, 100140));
+    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, 100140, 1));
     assert(calls == 1 && s->pcm_playhead_latency_us == -1);
     assert(s->pcm_clock_ref_valid && s->pcm_clock_ref_ts == 100140);
     assert(s->pcm_clock_ref_wall_ms == 3000000041LL);
@@ -57,19 +61,22 @@ int main(void) {
     assert(s->pcm_clock_ref_audio_generation == 7 && s->pcm_clock_ref_av_delay == 100);
     // A dropped publication cannot replace the timestamp or its reference time.
     s->video_sink_mutex = 1;
-    assert(!_stream_sync_anchor_publish(s, 100050, 100020, 0, 0, 75000, 100150));
+    assert(!_stream_sync_anchor_publish(s, 100050, 100020, 0, 0, 75000, 100150, 1));
     assert(calls == 1 && s->pcm_clock_ref_ts == 100140 && !s->anchor_mutex);
     s->video_sink_mutex = 0;
-    assert(!_stream_sync_anchor_publish(s, 100050, 100020, 1, 0, 75000, 100150));
+    assert(!_stream_sync_anchor_publish(s, 100050, 100020, 1, 0, 75000, 100150, 1));
     assert(calls == 1 && s->pcm_clock_ref_ts == 100140);
     // Non-PCM publications never leave a usable PCM reference behind.
-    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, STREAM_NO_PTS_VALUE));
-    assert(!s->pcm_clock_ref_valid);
-    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, 100140));
+    s->pcm_head_bridge_active = 1;
+    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, STREAM_NO_PTS_VALUE, 1));
+    assert(!s->pcm_clock_ref_valid && !s->pcm_head_bridge_active);
+    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, 100140, 1));
+    s->pcm_head_bridge_active = 1;
     stream_sync_anchor_reset(s);
+    assert(!s->pcm_head_bridge_active);
     assert(!s->pcm_clock_ref_valid && s->sink_ref_time == -1 && s->vid_ref_time == -1);
     sink.is_open = 0;
-    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, 100140));
+    assert(_stream_sync_anchor_publish(s, 100040, 100020, 0, 0, 75000, 100140, 1));
     assert(!s->pcm_clock_ref_valid);
     return 0;
 }
@@ -80,6 +87,242 @@ int main(void) {
             subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra',
                             '-Werror', str(root / 'publication.c'), '-o', str(root / 'publication')], check=True)
             subprocess.run([str(root / 'publication')], check=True)
+
+    def test_timestamp_expiry_bridge_and_invalidation(self):
+        from native_replay import run_c
+        root = Path(__file__).resolve().parents[1]
+        source = (root / 'Source/stream_sync.c').read_text()
+        header = (root / 'Include/stream.h').read_text()
+        helpers = ''.join(block(source, marker) for marker in (
+            'static int _stream_pcm_clock_ref_matches(',
+            'static int _stream_pcm_head_bridge(',
+            'int stream_atempo_presentation('))
+        fields = (set(re.findall(r's->(\w+)', helpers)) | {'atempo_ledger_lat_samples'}) - {'anchor_mutex', 'audio_ctx'}
+        declarations = '\n'.join(re.search(
+            rf'^\s*(?:unsigned int|\w+)\s+{name}\s*;', header, re.MULTILINE)[0]
+            for name in sorted(fields))
+        run_c(r'''
+#include <assert.h>
+#include <stdint.h>
+#include <limits.h>
+typedef uint64_t UINT64;
+#define STREAM_NO_PTS_VALUE INT_MIN
+#define AT_PRESENTED_FRAMES_SRC_TIMESTAMP 1
+#define AT_PRESENTED_FRAMES_SRC_PLAYHEAD 2
+#define MAX(a,b) ((a)>(b)?(a):(b))
+#define DBG if (0)
+#define serprintf(...) ((void)0)
+static int stream_dbg_delay, pcm_clock_mutex;
+static void pthread_mutex_lock(int *m) { assert(!*m); *m=1; }
+static void pthread_mutex_unlock(int *m) { assert(*m); *m=0; }
+typedef struct { double rst_anchor, ts_anchor, speed, inv_speed; } timeline_state_t;
+static timeline_state_t mapping = {10, 20, 1, 1};
+static timeline_state_t timeline_snapshot(void) { return mapping; }
+typedef struct { int anchor_mutex; void *audio_ctx;
+''' + declarations + r'''
+} STREAM;
+typedef struct { int heard, heard_rst, state; } ATEMPO_LEDGER_LOOKUP;
+static int _stream_atempo_presented_frames(STREAM *s, UINT64 *f, int *r, int *src, int *age) {
+    (void)s; *f=48000; *r=48000; *src=2; *age=0; return 1;
+}
+static ATEMPO_LEDGER_LOOKUP _stream_atempo_ledger_lookup(STREAM *s, UINT64 f, int r) {
+    (void)s; (void)f; (void)r; return (ATEMPO_LEDGER_LOOKUP){1000,1000,0};
+}
+''' + helpers + r'''
+static int sample(STREAM *s, int raw, UINT64 frames, int64_t now, int *heard) {
+    return _stream_pcm_head_bridge(s,raw,frames,48000,2,0,0,1,now,heard);
+}
+static STREAM seed(void) {
+    return (STREAM){.put_time_mode=1, .pcm_clock_ref_valid=1,
+        .pcm_clock_ref_ts=522359, .pcm_clock_ref_wall_ms=3000000100LL,
+        .pcm_clock_ref_source=1, .pcm_clock_ref_rst_anchor=10,
+        .pcm_clock_ref_ts_anchor=20, .pcm_clock_ref_speed=1,
+        .video_speed_num=1, .video_speed_den=1};
+}
+int main(void) {
+    STREAM s=seed(); int heard=-1;
+    const int64_t now=3000000132LL;
+    // Logged timestamp expiry: align the head to the last clock plus 32ms,
+    // instead of jumping to raw 522461 or the legacy fallback 522444.
+    assert(sample(&s,522461,48000,now,&heard) && heard==522391);
+    assert(s.pcm_head_bridge_active && s.pcm_head_bridge_offset_ms==-70);
+    assert(!s.atempo_ledger_lat_valid && !s.atempo_ledger_lat_samples);
+    // A provisional publication cannot re-seed the offset on the next query.
+    s.pcm_clock_ref_ts=heard; s.pcm_clock_ref_wall_ms=now; s.pcm_clock_ref_source=2;
+    assert(sample(&s,522493,49536,now+32,&heard) && heard==522423);
+    // Counter stalls do not accumulate wall time, even with repeated queries.
+    for(int i=1;i<=100;i++)
+        assert(sample(&s,522493,49536,now+32+i*10,&heard) && heard==522423);
+    // Unconfirmed head evidence cannot cross a speed commit boundary.
+    s.audio_ctx=&s; s.atempo_ledger_active=1; s.atempo_ledger_count=1;
+    UINT64 ph; int rate,ts,rst,state;
+    assert(!stream_atempo_presentation(&s,&ph,&rate,&ts,&rst,&state));
+    s.atempo_ledger_lat_valid=1;
+    assert(!sample(&s,522493,49536,now+40,&heard) && !s.pcm_head_bridge_active);
+    assert(stream_atempo_presentation(&s,&ph,&rate,&ts,&rst,&state));
+    // Every lifecycle mismatch invalidates an already active mapping.
+#define INVALIDATE(change) do { s=seed(); assert(sample(&s,522461,48000,now,&heard)); \
+    change; assert(!sample(&s,522493,49536,now+32,&heard)); \
+    assert(!s.pcm_head_bridge_active); } while(0)
+    INVALIDATE(s.paused=1);
+    INVALIDATE(s.paused_internal=1);
+    INVALIDATE(s.seek_paused=1);
+    INVALIDATE(s.audio_start_pending=1);
+    INVALIDATE(s.audio_resume_pending=1);
+    INVALIDATE(s.audio_reconfiguring=1);
+    INVALIDATE(s.atempo_commit_count=1);
+    INVALIDATE(s.manual_audio_hold_pending_ms=1);
+    INVALIDATE(s.seek_epoch++);
+    INVALIDATE(s.audio_speed_diag_epoch++);
+    INVALIDATE(s.audio_lifecycle_generation++);
+    INVALIDATE(s.av_delay++);
+    INVALIDATE(s.pcm_clock_ref_valid=0);
+    INVALIDATE(s.video_speed_num=2);
+    INVALIDATE(stream_dbg_delay++); stream_dbg_delay=0;
+    INVALIDATE(mapping.rst_anchor++); mapping.rst_anchor=10;
+    INVALIDATE(mapping.ts_anchor++); mapping.ts_anchor=20;
+    INVALIDATE(mapping.speed=1.2); mapping.speed=1;
+    s=seed(); s.pcm_clock_ref_source=0;
+    assert(!sample(&s,522461,48000,now,&heard));
+    s=seed(); s.pcm_clock_ref_source=2;
+    assert(!sample(&s,522461,48000,now,&heard));
+    s=seed(); assert(!sample(&s,522461,48000,now+69,&heard)); // ref >100ms
+    assert(!sample(&s,522461,48000,now-33,&heard)); // backwards wall time
+    assert(!sample(&s,522000,48000,now,&heard)); // cannot lead the raw head
+    assert(!_stream_pcm_head_bridge(&s,522461,48000,48000,2,101,0,1,now,&heard));
+    assert(!_stream_pcm_head_bridge(&s,522461,48000,48000,2,0,1,1,now,&heard));
+    assert(!_stream_pcm_head_bridge(&s,522461,48000,48000,2,0,0,1.2,now,&heard));
+    assert(!_stream_pcm_head_bridge(&s,522461,48000,48000,1,0,0,1,now,&heard));
+    assert(!_stream_pcm_head_bridge(&s,522461,48000,0,2,0,0,1,now,&heard));
+    // Publication may own the anchor lock; PCM state remains independently readable.
+    s.anchor_mutex=1;
+    assert(sample(&s,522461,48000,now,&heard) && heard==522391);
+    s.anchor_mutex=0;
+    assert(sample(&s,522461,48000,now,&heard));
+    assert(!sample(&s,522460,47999,now+1,&heard) && !s.pcm_head_bridge_active);
+    assert(!sample(&s,522461,48000,now+2,&heard)); // old reference cannot re-arm
+    s=seed(); assert(sample(&s,522461,48000,now,&heard));
+    assert(!_stream_pcm_head_bridge(&s,522461,48000,44100,2,0,0,1,now,&heard));
+    assert(!sample(&s,522461,48000,now+2,&heard));
+    return 0;
+}
+''')
+
+    def test_active_bridge_survives_blocked_publication(self):
+        from native_replay import run_c
+        root = Path(__file__).resolve().parents[1]
+        source = (root / 'Source/stream_sync.c').read_text()
+        header = (root / 'Include/stream.h').read_text()
+        helpers = ''.join(block(source, marker) for marker in (
+            'static int _stream_pcm_clock_ref_matches(',
+            'static int _stream_sync_anchor_publish(',
+            'static int _stream_pcm_head_bridge(',
+            'static int _stream_pcm_handoff_heard_ts(',
+            'void stream_sync_anchor_reset('))
+        fields = set(re.findall(r's->(\w+)', helpers)) - {
+            'anchor_mutex', 'video_sink_mutex', 'video_sink'}
+        declarations = '\n'.join(re.search(
+            rf'^\s*(?:unsigned int|\w+)\s+{name}\s*;', header, re.MULTILINE)[0]
+            for name in sorted(fields))
+        pcm_mutex = re.search(r'^static pthread_mutex_t pcm_clock_mutex.*;',
+                              source, re.MULTILINE)[0]
+        run_c(r'''
+#include <assert.h>
+#include <stdint.h>
+#include <limits.h>
+#include <pthread.h>
+#include <errno.h>
+#include <unistd.h>
+typedef uint64_t UINT64;
+#define STREAM_NO_PTS_VALUE INT_MIN
+#define AT_PRESENTED_FRAMES_SRC_TIMESTAMP 1
+#define AT_PRESENTED_FRAMES_SRC_PLAYHEAD 2
+#define DBG if (0)
+#define serprintf(...) ((void)0)
+static int stream_dbg_delay;
+typedef struct { double rst_anchor, ts_anchor, speed, inv_speed; } timeline_state_t;
+static timeline_state_t timeline_snapshot(void) { return (timeline_state_t){10.5,20.5,1,1}; }
+static int64_t wall=3000000100LL;
+static int64_t atime64(void) { return wall; }
+typedef struct SINK { int is_open; int (*put_time)(struct SINK *, int); } SINK;
+typedef struct {
+    pthread_mutex_t anchor_mutex, video_sink_mutex;
+    SINK *video_sink;
+''' + declarations + r'''
+} STREAM;
+''' + pcm_mutex + r'''
+static void sfdec2_refresh_sched_anchor_locked(STREAM *s) { (void)s; }
+''' + helpers + r'''
+static pthread_mutex_t renderer_mutex=PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t rendezvous=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t entered=PTHREAD_COND_INITIALIZER;
+static int block_callback, in_callback;
+static int put(SINK *sink, int ts) {
+    (void)sink; (void)ts;
+    // The production publisher must release the PCM mutex before callbacks.
+    assert(!pthread_mutex_trylock(&pcm_clock_mutex));
+    pthread_mutex_unlock(&pcm_clock_mutex);
+    if (block_callback) {
+        pthread_mutex_lock(&rendezvous);
+        in_callback=1;
+        pthread_cond_signal(&entered);
+        pthread_mutex_unlock(&rendezvous);
+        pthread_mutex_lock(&renderer_mutex);
+        pthread_mutex_unlock(&renderer_mutex);
+    }
+    return 0;
+}
+static void *publish(void *arg) {
+    STREAM *s=arg;
+    assert(_stream_sync_anchor_publish(s,522423,522400,0,0,-1,522423,2));
+    return NULL;
+}
+int main(void) {
+    alarm(10); // A lock-order regression fails instead of hanging the test suite.
+    SINK sink={1,put};
+    STREAM s={.anchor_mutex=PTHREAD_MUTEX_INITIALIZER,
+        .video_sink_mutex=PTHREAD_MUTEX_INITIALIZER, .video_sink=&sink,
+        .put_time_mode=1, .video_speed_num=1, .video_speed_den=1};
+    int heard;
+    assert(_stream_sync_anchor_publish(&s,522359,522300,0,0,-1,522359,1));
+    assert(_stream_pcm_head_bridge(&s,522461,48000,48000,2,0,0,1,wall+32,&heard));
+    assert(heard==522391);
+    wall+=64; block_callback=1;
+    pthread_mutex_lock(&renderer_mutex);
+    pthread_t writer;
+    assert(!pthread_create(&writer,NULL,publish,&s));
+    pthread_mutex_lock(&rendezvous);
+    while(!in_callback) pthread_cond_wait(&entered,&rendezvous);
+    pthread_mutex_unlock(&rendezvous);
+    assert(pthread_mutex_trylock(&s.anchor_mutex)==EBUSY);
+    // Renderer owns its private lock; publisher owns anchor_mutex and is
+    // waiting for that private lock. Neither bridge nor calibration may lose
+    // the reference or try to reacquire anchor_mutex from this query.
+    assert(_stream_pcm_head_bridge(&s,522493,49536,48000,2,0,0,1,wall,&heard));
+    assert(heard==522423);
+    assert(_stream_pcm_handoff_heard_ts(&s,522476,wall,&heard));
+    assert(heard==522423);
+    for (int i=1;i<=10;i++) {
+        assert(_stream_pcm_head_bridge(&s,522493,49536,48000,2,0,0,1,wall+i*10,&heard));
+        assert(heard==522423); // Still no fabricated progress while blocked.
+    }
+    pthread_mutex_unlock(&renderer_mutex);
+    assert(!pthread_join(writer,NULL));
+    assert(s.pcm_head_bridge_active);
+    // Epoch invalidation still wins, even while the anchor lock is held.
+    pthread_mutex_lock(&s.anchor_mutex);
+    s.seek_epoch++;
+    assert(!_stream_pcm_head_bridge(&s,522525,51072,48000,2,0,0,1,wall+32,&heard));
+    assert(!s.pcm_head_bridge_active);
+    pthread_mutex_unlock(&s.anchor_mutex);
+    stream_sync_anchor_reset(&s);
+    assert(!s.pcm_clock_ref_valid);
+    pthread_mutex_destroy(&s.video_sink_mutex);
+    pthread_mutex_destroy(&s.anchor_mutex);
+    alarm(0);
+    return 0;
+}
+''')
 
     def test_handoff_and_existing_calibration_policy(self):
         source = (Path(__file__).resolve().parents[1] / 'Source/stream_sync.c').read_text()
@@ -92,7 +335,7 @@ int main(void) {
 #include <stdlib.h>
 #define STREAM_NO_PTS_VALUE INT_MIN
 #define MAX(a,b) ((a)>(b)?(a):(b))
-static int lock_busy;
+static int lock_busy, pcm_clock_mutex;
 static int pthread_mutex_trylock(int *m) { (void)m; return lock_busy; }
 static void pthread_mutex_unlock(int *m) { (void)m; }
 #define DBG if (0)

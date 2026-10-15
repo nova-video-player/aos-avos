@@ -1492,16 +1492,31 @@ void sfdec2_refresh_sched_anchor_locked( STREAM *s )
 	pthread_mutex_unlock(&p->locked.mtx);
 }
 
-static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
+static int sfdec2_request_pcm_startup_correction_locked( STREAM *s, int heard_ts, INT64 sample_ns )
 {
 	if( !s || !s->video_sink || !s->video_sink->priv )
-		return;
+		return 0;
 	if( !s->video_sink->name || strcmp( s->video_sink->name, "sfdec2" ) != 0 )
-		return;
+		return 1;
 	priv_t *p = (priv_t*)s->video_sink->priv;
 	pthread_mutex_lock(&p->locked.mtx);
+	if( sample_ns ) {
+		INT64 age_ns = _get_monotonic_ns() - sample_ns;
+		if( heard_ts < 0 || age_ns < 0 || age_ns > 100000000LL ||
+			s->paused || s->paused_internal || s->seek_paused ||
+			s->audio_start_pending || s->audio_resume_pending || s->audio_reconfiguring ||
+			s->atempo_commit_count || p->pending_seek_reanchor ||
+			p->pause_armed || p->pcm_resume_pending ||
+			s->pcm_startup_correction_seek_epoch != s->seek_epoch ||
+			s->pcm_startup_correction_speed_epoch != s->audio_speed_diag_epoch ) {
+			pthread_mutex_unlock(&p->locked.mtx);
+			return 0;
+		}
+	}
 	if( p->render_offset_ns != -1 && p->render_offset_from_audio ) {
-		p->pending_reanchor = 1;
+		// Software PCM supplies a paired wall/heard sample. Do not replace it
+		// with venc_put_time, which may still be clamped to an older clock.
+		p->pending_reanchor = sample_ns ? 0 : 1;
 		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		p->pcm_startup_slew = 1;
@@ -1509,6 +1524,19 @@ static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;
 		p->pcm_startup_slew_frame_epoch = INT_MIN;
+		if( sample_ns ) {
+			p->target_offset_ns = sample_ns - (INT64)heard_ts * 1000000LL;
+			if( llabs(p->target_offset_ns - p->render_offset_ns) <= 8000000LL ) {
+				p->target_offset_ns = p->render_offset_ns;
+				p->pcm_startup_slew = 0;
+			}
+			p->slew_active = p->target_offset_ns != p->render_offset_ns;
+			// Invalidate a renderer calculation that dropped this mutex while
+			// the qualified target was being installed.
+			p->render_generation++;
+			DBGSI serprintf("android_sync: PCM startup qualified target heard=%d target=%lld\n",
+				heard_ts, (long long)p->target_offset_ns);
+		}
 		pthread_cond_broadcast(&p->locked.cond);
 		DBGSI serprintf("android_sync: PCM startup correction armed offset=%lld\n",
 			(long long)p->render_offset_ns);
@@ -1517,6 +1545,7 @@ static void sfdec2_request_pcm_startup_correction_locked( STREAM *s )
 			(long long)p->render_offset_ns, p->render_offset_from_audio);
 	}
 	pthread_mutex_unlock(&p->locked.mtx);
+	return 1;
 }
 
 static int videosink_get_time( STREAM_SINK_VIDEO *sink )
@@ -3513,13 +3542,15 @@ void sfdec2_refresh_sched_anchor(STREAM *s)
 	pthread_mutex_unlock(&s->video_sink_mutex);
 }
 
-void sfdec2_request_pcm_startup_correction(STREAM *s)
+int sfdec2_request_pcm_startup_correction(STREAM *s, int heard_ts, INT64 sample_ns)
 {
-	if (!s) return;
+	if (!s) return 0;
+	int applied = 0;
 	pthread_mutex_lock(&s->video_sink_mutex);
 	if (s->video_sink && s->video_sink->is_open)
-		sfdec2_request_pcm_startup_correction_locked(s);
+		applied = sfdec2_request_pcm_startup_correction_locked(s, heard_ts, sample_ns);
 	pthread_mutex_unlock(&s->video_sink_mutex);
+	return applied;
 }
 
 void sfdec2_reset_sync_state_on_seek(STREAM *s)

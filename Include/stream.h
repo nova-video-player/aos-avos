@@ -1008,7 +1008,8 @@ typedef struct STREAM {
 	// Calibration paired with sink_ref_time under anchor_mutex, consumed only
 	// by the put_time callback at any software speed. Negative means unavailable.
 	int		pcm_playhead_latency_us;
-	// Last PCM clock publication before user delay, paired under anchor_mutex.
+	// Last PCM clock publication before user delay, protected by pcm_clock_mutex
+	// in stream_sync.c (also held for reference/bridge invalidation).
 	// Used only to enter the calibrated playhead without a write-boundary jump.
 	int		pcm_clock_ref_valid;
 	int		pcm_clock_ref_ts;
@@ -1017,6 +1018,17 @@ typedef struct STREAM {
 	int		pcm_clock_ref_speed_epoch;
 	unsigned int	pcm_clock_ref_audio_generation;
 	int		pcm_clock_ref_av_delay;
+	int		pcm_clock_ref_source;
+	int		pcm_clock_ref_dbg_delay;
+	double		pcm_clock_ref_rst_anchor;
+	double		pcm_clock_ref_ts_anchor;
+	double		pcm_clock_ref_speed;
+	// Provisional timestamp-to-head continuity only; never calibration evidence.
+	// Protected by the same short-held PCM lock, including renderer queries.
+	int		pcm_head_bridge_active;
+	int		pcm_head_bridge_rate;
+	UINT64		pcm_head_bridge_last_frames;
+	int64_t		pcm_head_bridge_offset_ms;
 	// Playhead-gated video commits shared by atempo and Sonic speed changes.
 	// The filter switches speed immediately, but ~300-400ms of old-speed output
 	// is still queued in the sink; switching the video timeline at write time
@@ -1147,13 +1159,14 @@ void    sfdec2_android_sync_on_pause( STREAM *s, int paused );
 void    sfdec2_refresh_sched_anchor( STREAM *s );
 // Caller holds video_sink_mutex.
 void    sfdec2_refresh_sched_anchor_locked( STREAM *s );
-void    sfdec2_request_pcm_startup_correction( STREAM *s );
+// sample_ns=0 retains the plain PCM/PlaybackParams renderer clock selection.
+int     sfdec2_request_pcm_startup_correction( STREAM *s, int heard_ts, INT64 sample_ns );
 #else
 static inline void sfdec2_reset_sync_state_on_seek( STREAM *s ) {}
 static inline void sfdec2_android_sync_on_pause( STREAM *s, int paused ) {}
 static inline void sfdec2_refresh_sched_anchor( STREAM *s ) {}
 static inline void sfdec2_refresh_sched_anchor_locked( STREAM *s ) {}
-static inline void sfdec2_request_pcm_startup_correction( STREAM *s ) {}
+static inline int sfdec2_request_pcm_startup_correction( STREAM *s, int heard_ts, INT64 sample_ns ) { return 1; }
 #endif
 int	stream_is_paused( STREAM *s );
 int     stream_get_current_speed( STREAM *s );

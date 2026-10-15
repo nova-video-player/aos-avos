@@ -282,6 +282,17 @@ resume, a measurement window must span at least one configured buffer duration
 publications cannot complete the window. Its minimum wall-minus-heard offset
 selects the fullest queue observation, avoiding the first-burst refill transient.
 
+The first qualified startup window provides a usable reference, but does not
+freeze it: IEC queue occupancy can settle after that window. Before the first
+retained pause or seek, two consecutive complete windows must agree within 8ms
+to refine the reference in either direction, retaining the fuller of the two
+queue observations without moving the renderer anchor. One transient window
+cannot replace the reference. The first retained transition freezes the reference;
+later pauses and seeks must restore it, not relearn their own shifted phase.
+The first pause discards any partial startup-refinement window. Subsequent
+interrupted resume windows retain the running-time policy below. The same
+generation, manual-delay and hard-reanchor invalidations clear the frozen state.
+
 The measured phase change sets a one-shot video correction, bounded to 4ms and
 10% of the playback interval per distinct frame. Ordinary pauses retain both the
 original phase and an unfinished measurement window. Resume shifts the window's

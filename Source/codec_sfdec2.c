@@ -310,6 +310,8 @@ typedef struct priv {
 	int pcm_resume_sample_last_ts;
 	INT64 pcm_resume_sample_offset_ns;
 	int mode1_phase_valid;
+	int mode1_phase_frozen; // stop startup refinement at the first retained pause/seek
+	INT64 mode1_phase_candidate_ns;
 	int mode1_phase_av_delay;
 	unsigned int mode1_phase_audio_generation;
 	INT64 mode1_phase_ns; // established renderer phase relative to the full-queue clock
@@ -920,7 +922,7 @@ static void pcm_resume_calibration_observe_l(priv_t *p, int latency_us)
 // its static-delay clock and measure a change in phase, not absolute DAC time.
 static void mode1_resume_observe_l(priv_t *p, int time, int64_t now_ms, int window_ms)
 {
-	if( p->mode1_phase_valid && !p->mode1_resume_pending )
+	if( p->mode1_phase_valid && p->mode1_phase_frozen && !p->mode1_resume_pending )
 		return;
 	INT64 offset = now_ms * 1000000LL - (INT64)time * 1000000LL;
 	if( !p->mode1_sample_wall_ms ) {
@@ -948,8 +950,25 @@ static void mode1_resume_observe_l(priv_t *p, int time, int64_t now_ms, int wind
 	if( !p->mode1_phase_valid ) {
 		p->mode1_phase_ns = p->render_offset_ns - p->mode1_sample_offset_ns;
 		p->mode1_phase_valid = 1;
+		p->mode1_phase_frozen = 0;
+		p->mode1_phase_candidate_ns = p->mode1_phase_ns;
 		DBGSI serprintf("android_sync: mode1 phase baseline=%lldus window=%dms\n",
 			(long long)(p->mode1_phase_ns / 1000), window_ms);
+	} else if( !p->mode1_phase_frozen && !p->mode1_resume_pending ) {
+		// The first window can finish before IEC queue occupancy settles.
+		// Require two complete windows to agree within 8ms, in either direction,
+		// before retaining the fuller of their two queue observations. This only
+		// learns the existing phase: it never moves the renderer anchor. Freeze
+		// at the first transition so post-resume refill cannot train it away.
+		INT64 phase_ns = p->render_offset_ns - p->mode1_sample_offset_ns;
+		INT64 qualified_ns = MAX(phase_ns, p->mode1_phase_candidate_ns);
+		if( llabs(phase_ns - p->mode1_phase_candidate_ns) <= 8000000LL &&
+			qualified_ns != p->mode1_phase_ns ) {
+			DBGSI serprintf("android_sync: mode1 phase baseline refined=%lldus previous=%lldus window=%dms\n",
+				(long long)(qualified_ns / 1000), (long long)(p->mode1_phase_ns / 1000), window_ms);
+			p->mode1_phase_ns = qualified_ns;
+		}
+		p->mode1_phase_candidate_ns = phase_ns;
 	} else {
 		p->target_offset_ns = p->mode1_sample_offset_ns + p->mode1_phase_ns;
 		p->slew_active = p->target_offset_ns != p->render_offset_ns;
@@ -1021,6 +1040,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		// Never restore the previous output's phase after a seek or pause.
 		p->mode1_phase_av_delay = s->av_delay;
 		p->mode1_phase_valid = 0;
+		p->mode1_phase_frozen = 0;
 		p->mode1_resume_pending = 0;
 		p->mode1_seek_pending = 0;
 		p->mode1_sample_wall_ms = 0;
@@ -1309,6 +1329,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		int keep_mode1_phase = passthrough_mode == 1 && p->mode1_seek_pending &&
 			p->mode1_phase_valid && !speed_changed && !reanchor_discontinuity;
 		p->mode1_phase_valid = keep_mode1_phase;
+		p->mode1_phase_frozen = keep_mode1_phase;
 		p->mode1_resume_pending = keep_mode1_phase;
 		p->mode1_seek_pending = keep_mode1_phase;
 		p->mode1_resume_slew = 0;
@@ -2726,6 +2747,7 @@ retry_decoder_open:
 	p->pcm_resume_pending = 0;
 	p->pcm_resume_sample_stage = 0;
 	p->mode1_phase_valid = 0;
+	p->mode1_phase_frozen = 0;
 	p->mode1_seek_pending = 0;
 	p->mode1_resume_pending = 0;
 	p->mode1_resume_slew = 0;
@@ -3022,6 +3044,7 @@ DBGCV	CLOG();
 	int keep_mode1_phase = p->s && p->s->seek_paused &&
 		mode1_phase_matches_audio_l(p, p->s);
 	p->mode1_phase_valid = keep_mode1_phase;
+	p->mode1_phase_frozen = keep_mode1_phase;
 	p->mode1_resume_pending = keep_mode1_phase;
 	p->mode1_seek_pending = keep_mode1_phase;
 	p->mode1_resume_slew = 0;
@@ -3176,6 +3199,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->pcm_resume_sample_stage = 0;
 	int keep_mode1_phase = s->seek_paused && mode1_phase_matches_audio_l(p, s);
 	p->mode1_phase_valid = keep_mode1_phase;
+	p->mode1_phase_frozen = keep_mode1_phase;
 	p->mode1_resume_pending = keep_mode1_phase;
 	p->mode1_seek_pending = keep_mode1_phase;
 	p->mode1_resume_slew = 0;
@@ -3252,6 +3276,12 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);
 		if( preserve_mode1_phase ) {
+			if( !p->mode1_phase_frozen ) {
+				// Do not let a partial startup-refinement window become resume
+				// evidence. Later interrupted resume windows remain preserved.
+				p->mode1_sample_wall_ms = 0;
+				p->mode1_phase_frozen = 1;
+			}
 			p->mode1_resume_pending = 1;
 		} else {
 			p->mode1_sample_wall_ms = 0;
@@ -3320,6 +3350,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		p->render_offset_ns = -1;
 		p->render_offset_from_audio = 0;
 		p->mode1_phase_valid = 0;
+		p->mode1_phase_frozen = 0;
 		p->mode1_seek_pending = 0;
 		p->mode1_resume_pending = 0;
 		p->mode1_sample_wall_ms = 0;

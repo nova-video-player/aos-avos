@@ -17,6 +17,7 @@ class SlewOffsetTest(unittest.TestCase):
         functions = '\n'.join(extract(text, marker) for marker in (
             'static void speed_cadence_reset(',
             'static int mode1_phase_matches_audio_l(',
+            'static void mode1_resume_observe_l(',
             'static int pcm_resume_matches_audio_l(',
             'static void sfdec2_reset_sync_state_on_seek_locked(',
             'static void sfdec2_android_sync_on_pause_locked('))
@@ -229,6 +230,90 @@ int main(void) {
         pthread_mutex_destroy(&p.locked.mtx);
     }
     timeline.speed=timeline.inv_speed=1;
+    // The recorded Shield baseline was +1.214ms while its steady full-queue
+    // observation was -57.786ms. Two stable windows must qualify either sign.
+    for(int sign=-1;sign<=1;sign+=2) {
+        priv_t p={.render_offset_ns=1308402214083LL};
+        mode1_resume_observe_l(&p,1000,1309401,250);
+        mode1_resume_observe_l(&p,1256,1309657,250);
+        assert(p.mode1_phase_ns==1214083LL);
+        int offset=1308401+sign*59;
+        mode1_resume_observe_l(&p,1314485-offset,1314485,250);
+        mode1_resume_observe_l(&p,1314752-offset,1314752,250);
+        assert(p.mode1_phase_ns==1214083LL); // one window cannot replace it
+        mode1_resume_observe_l(&p,1314790-offset,1314790,250);
+        mode1_resume_observe_l(&p,1315046-offset,1315046,250);
+        assert(p.mode1_phase_ns==1214083LL-sign*59000000LL);
+        assert(p.render_offset_ns==1308402214083LL && !p.slew_active);
+    }
+    // Preserve the renderer's running phase as initial IEC occupancy settles.
+    {
+        priv_t p={0}; pthread_mutex_init(&p.locked.mtx,NULL);
+        STREAM_SINK_VIDEO vs={.name="sfdec2",.priv=&p};
+        STREAM_DEC_VIDEO vd={.name="sfdec2",.priv=&p,.is_open=1};
+        s.video_sink=&vs; s.video_dec=&vd; s.seek_paused=0;
+        s.audio_lifecycle_generation=0; s.av_delay=0; mode=1;
+        p.render_offset_ns=p.target_offset_ns=1000000000LL;
+        p.render_offset_from_audio=1;
+        mode1_resume_observe_l(&p,9000,10000,250);
+        mode1_resume_observe_l(&p,9256,10256,250);
+        assert(p.mode1_phase_valid && !p.mode1_phase_frozen && p.mode1_phase_ns==0);
+        mode1_resume_observe_l(&p,9364,10300,250);
+        mode1_resume_observe_l(&p,9620,10556,250);
+        assert(p.mode1_phase_ns==0);
+        mode1_resume_observe_l(&p,9664,10600,250);
+        mode1_resume_observe_l(&p,9920,10856,250);
+        assert(p.mode1_phase_ns==64000000LL);
+        assert(p.render_offset_ns==1000000000LL && !p.slew_active);
+        // A transient queue fluctuation or repeated publication cannot qualify.
+        mode1_resume_observe_l(&p,9980,10900,250);
+        mode1_resume_observe_l(&p,10236,11156,250);
+        assert(p.mode1_phase_ns==64000000LL);
+        mode1_resume_observe_l(&p,10264,11200,250);
+        mode1_resume_observe_l(&p,10264,11800,250);
+        assert(p.mode1_sample_wall_ms==11200 && p.mode1_phase_ns==64000000LL);
+        // First pause freezes the refined baseline and drops its partial
+        // startup window, rather than reusing it as resume evidence.
+        now_ms=12000; s.paused=1;
+        sfdec2_android_sync_on_pause_locked(&s,1);
+        assert(p.mode1_phase_frozen && p.mode1_resume_pending && !p.mode1_sample_wall_ms);
+        now_ms=12700; sfdec2_android_sync_on_pause_locked(&s,0); s.paused=0;
+        assert(p.render_offset_ns==1700000000LL);
+        mode1_resume_observe_l(&p,11120,12700,250);
+        mode1_resume_observe_l(&p,11376,12956,250);
+        assert(p.mode1_phase_ns==64000000LL && p.mode1_phase_frozen);
+        assert(p.target_offset_ns==1644000000LL && p.mode1_resume_slew);
+        // Settled playback cannot relearn the post-resume clock and accumulate
+        // drift. A subsequent interrupted recovery retains its own window.
+        mode1_resume_observe_l(&p,12000,13000,250);
+        assert(p.mode1_phase_ns==64000000LL && !p.mode1_sample_wall_ms);
+        p.render_offset_ns=p.target_offset_ns; p.mode1_resume_slew=p.slew_active=0;
+        now_ms=14000; s.paused=1; sfdec2_android_sync_on_pause_locked(&s,1);
+        now_ms=14700; sfdec2_android_sync_on_pause_locked(&s,0); s.paused=0;
+        mode1_resume_observe_l(&p,12420,14700,250);
+        now_ms=14800; s.paused=1; sfdec2_android_sync_on_pause_locked(&s,1);
+        assert(p.mode1_sample_wall_ms==14700);
+        now_ms=15300; sfdec2_android_sync_on_pause_locked(&s,0); s.paused=0;
+        assert(p.mode1_sample_wall_ms==15200 && p.mode1_sample_crossed_pause);
+        mode1_resume_observe_l(&p,12676,15456,250);
+        assert(p.mode1_phase_ns==64000000LL && p.mode1_resume_pending);
+        // Seek preserves the frozen relative phase, not a partial observation.
+        s.seek_paused=1; sfdec2_reset_sync_state_on_seek_locked(&s);
+        assert(p.mode1_phase_frozen && p.mode1_phase_ns==64000000LL);
+        assert(p.mode1_seek_pending && !p.mode1_sample_wall_ms);
+        s.audio_lifecycle_generation++; sfdec2_reset_sync_state_on_seek_locked(&s);
+        assert(!p.mode1_phase_valid && !p.mode1_phase_frozen);
+        pthread_mutex_destroy(&p.locked.mtx);
+        // Seeking before the first pause must freeze an existing reference too.
+        priv_t q={0}; pthread_mutex_init(&q.locked.mtx,NULL);
+        vs.priv=vd.priv=&q; s.audio_lifecycle_generation=0;
+        q.mode1_phase_valid=1; q.mode1_phase_ns=64000000LL;
+        sfdec2_reset_sync_state_on_seek_locked(&s);
+        assert(q.mode1_phase_frozen && q.mode1_seek_pending);
+        assert(q.mode1_phase_ns==64000000LL);
+        pthread_mutex_destroy(&q.locked.mtx);
+        s.seek_paused=0;
+    }
     // A PCM target cannot cross a new mapping, seek epoch, delay or output owner.
     for(int mismatch=0;mismatch<7;mismatch++) {
         priv_t p={0}; arm(&p,2,150000000);

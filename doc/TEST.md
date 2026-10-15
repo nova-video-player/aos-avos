@@ -725,3 +725,10 @@ binaries or routes as though they were one experiment.
 
 No connected device was available during the 2026-10-14 host-test repair. That
 work supplies a test baseline, not completion of the device-validation gate.
+
+The transition inventory and coverage boundaries are in
+[sync_transition_invariants.md](sync_transition_invariants.md). The slew replay
+also checks the deliberately different PCM/Mode 1 resume-boundary limits,
+including short backward corrections and PCM speed scaling. The Mode 2 seek
+replay covers named frontier reasons surviving resets, one-time consumption and
+seek-specific refill protection. These checks do not replace device campaigns.

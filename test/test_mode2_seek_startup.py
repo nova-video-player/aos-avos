@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from native_replay import extract, run_c, source
+
 
 def block(source, marker):
     start = source.index(marker)
@@ -19,6 +21,79 @@ def block(source, marker):
 
 
 class Mode2SeekStartupTest(unittest.TestCase):
+    def test_frontier_reason_survives_reset_until_consumed(self):
+        sync = source('stream_sync.c')
+        functions = '\n'.join(extract(sync, marker) for marker in (
+            'static void _stream_sync_mode2_heard_reset_locked(',
+            'void stream_sync_mode2_heard_reset(',
+            'void stream_sync_mode2_heard_frontier_arm(',
+            'int stream_sync_mode2_heard_frontier_pending('))
+        start = sync.index('int frontier_restart =')
+        end = sync.index('s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_NONE;', start)
+        end = sync.index(';', end) + 1
+        consume = sync[start:end]
+        run_c(r'''
+#define CONFIG_SFDEC
+#include "global.h"
+#include "stream.h"
+#include "stream_sync.h"
+#include <assert.h>
+#include <string.h>
+_Static_assert(STREAM_MODE2_FRONTIER_NONE == 0, "pending truth value");
+_Static_assert(STREAM_MODE2_FRONTIER_RECREATE == 1, "recreation reason");
+_Static_assert(STREAM_MODE2_FRONTIER_SEEK == 2, "seek reason");
+''' + functions + r'''
+// Restart wrapper calls the shared reset; unrelated reset side effects are mocked.
+static int _stream_sync_restart_locked(STREAM *s, int reset_ledger, int preserve) {
+    assert(reset_ledger && !preserve);
+    _stream_sync_mode2_heard_reset_locked(s, 0, reset_ledger);
+    return 0;
+}
+''' + extract(sync, 'int stream_sync_restart_with_mode2_frontier(') + r'''
+static int consume(STREAM *s) {
+    int first_start=1, delay_change=0, raw_heard_ts=1000, reset_interp=0;
+    int heard_delay=200, fixed_latency=40, seed=0;
+    int64_t wall_now=10000;
+    const char *seed_cause="";
+''' + consume + '\n' + extract(sync, 'if( frontier_restart )') + r'''
+    assert(reset_interp);
+    if(frontier_restart) {
+        assert(seed==1160);
+        assert(!strcmp(seed_cause,seek_restart?"seek_frontier":"restart_frontier"));
+    }
+    return seek_restart;
+}
+int main(void) {
+    STREAM s={0};
+    pthread_mutex_init(&s.mode2_heard_mutex,NULL);
+    pthread_mutex_init(&s.anchor_mutex,NULL);
+    assert(!stream_sync_mode2_heard_frontier_pending(NULL));
+    stream_sync_mode2_heard_frontier_arm(NULL,STREAM_MODE2_FRONTIER_SEEK);
+    assert(!stream_sync_mode2_heard_frontier_pending(&s));
+    const STREAM_MODE2_FRONTIER_REASON reasons[]={STREAM_MODE2_FRONTIER_RECREATE,
+        STREAM_MODE2_FRONTIER_SEEK};
+    for(unsigned i=0;i<2;i++) {
+        stream_sync_mode2_heard_frontier_arm(&s,reasons[i]);
+        for(int reset=0;reset<3;reset++) {
+            stream_sync_mode2_heard_reset(&s,0);
+            assert(stream_sync_mode2_heard_frontier_pending(&s)==(int)reasons[i]);
+        }
+        assert(consume(&s)==(reasons[i]==STREAM_MODE2_FRONTIER_SEEK));
+        assert(s.mode2_seek_refill_until_ms==(i?10200:0));
+        assert(!stream_sync_mode2_heard_frontier_pending(&s));
+        assert(!consume(&s)); // Consumed once; no new seek refill ownership.
+        stream_sync_mode2_heard_frontier_arm(&s,reasons[i]);
+        stream_sync_mode2_heard_reset(&s,1);
+        assert(!stream_sync_mode2_heard_frontier_pending(&s));
+    }
+    assert(!stream_sync_restart_with_mode2_frontier(&s));
+    assert(stream_sync_mode2_heard_frontier_pending(&s)==STREAM_MODE2_FRONTIER_RECREATE);
+    pthread_mutex_destroy(&s.anchor_mutex);
+    pthread_mutex_destroy(&s.mode2_heard_mutex);
+    return 0;
+}
+''')
+
     def test_preview_publication_and_refill(self):
         root = Path(__file__).resolve().parents[1]
         codec = (root / 'Source/codec_sfdec2.c').read_text()

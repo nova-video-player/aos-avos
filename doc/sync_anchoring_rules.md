@@ -1,5 +1,8 @@
 # AVOS Sync & Anchoring Rules
 
+See [Sync transition invariants](sync_transition_invariants.md) for overlapping
+pause/seek/speed ownership rules and the boundaries of further refactoring.
+
 ## Introduction
 
 - **`venc_put_time` (TS)**: The last TS value passed into the video sink as the anchor point.

@@ -688,7 +688,7 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_dynamic_clock_grace_until_wall_ms = 0;
 	s->mode2_dynamic_clock_last_log_ms = 0;
 	if( clear_frontier ) {
-		s->mode2_heard_frontier_seed_pending = 0;
+		s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_NONE;
 	}
 }
 
@@ -702,14 +702,14 @@ void stream_sync_mode2_heard_reset( STREAM *s, int clear_frontier )
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 }
 
-void stream_sync_mode2_heard_frontier_arm( STREAM *s, int seek_restart )
+void stream_sync_mode2_heard_frontier_arm( STREAM *s, STREAM_MODE2_FRONTIER_REASON reason )
 {
 	if( !s ) {
 		return;
 	}
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	// Preserve the reason across the several sync resets inside a seek.
-	s->mode2_heard_frontier_seed_pending = seek_restart ? 2 : 1;
+	s->mode2_heard_frontier_seed_pending = reason;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 }
 
@@ -1080,7 +1080,7 @@ int stream_sync_restart_with_mode2_frontier( STREAM *s )
 	pthread_mutex_lock( &s->anchor_mutex );
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	ret = _stream_sync_restart_locked( s, 1, 0 );
-	s->mode2_heard_frontier_seed_pending = 1;
+	s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_RECREATE;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	pthread_mutex_unlock( &s->anchor_mutex );
 	return ret;
@@ -1851,8 +1851,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				(!first_start && !delay_change &&
 				 raw_heard_ts < s->mode2_heard_interp_raw_ts);
 			reset_interp = first_start || frontier_restart || delay_change;
-			int seek_restart = s->mode2_heard_frontier_seed_pending == 2;
-			s->mode2_heard_frontier_seed_pending = 0;
+			int seek_restart = s->mode2_heard_frontier_seed_pending == STREAM_MODE2_FRONTIER_SEEK;
+			s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_NONE;
 
 			if( reset_interp ) {
 				int seed;

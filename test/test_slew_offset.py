@@ -193,8 +193,62 @@ int main(void) {
         assert(p.render_offset_ns==-1 && !p.slew_active && !p.pcm_resume_slew);
         assert(!p.pcm_startup_slew && !p.mode1_resume_slew && p.pending_seek_reanchor);
         assert(p.pause_start_ms==now_ms); // Pre-seek pause time is not reapplied.
+        // Mode 1 retains a generation-owned relative phase, never its old target.
+        assert(p.mode1_phase_valid==(policy==3));
+        assert(p.mode1_seek_pending==(policy==3));
+        assert(p.target_offset_ns==0 && !p.pcm_resume_calibration_active);
         pthread_mutex_destroy(&p.locked.mtx);
     }
+    // Resume-boundary rules are intentionally different for PCM and Mode 1.
+    for(int policy=2;policy<=3;policy++) for(int sign=-1;sign<=1;sign+=2)
+    for(int speed=0;speed<(policy==2?3:1);speed++) for(int short_pause=0;short_pause<2;short_pause++) {
+        priv_t p={0}; pthread_mutex_init(&p.locked.mtx,NULL);
+        STREAM_SINK_VIDEO vs={.name="sfdec2",.priv=&p};
+        STREAM_DEC_VIDEO vd={.name="sfdec2",.priv=&p,.is_open=1};
+        s.video_sink=&vs; s.video_dec=&vd; s.seek_paused=0; s.audio_lifecycle_generation=0;
+        mode=policy==3?1:0;
+        const double speeds[]={1.0,1.6,0.5};
+        timeline.speed=speeds[speed]; timeline.inv_speed=1.0/timeline.speed;
+        arm(&p,policy,sign*150000000LL);
+        p.video_timeline=p.pcm_resume_timeline=timeline;
+        p.pcm_resume_epoch=s.seek_epoch; p.mode1_phase_valid=1;
+        s.paused=1; sfdec2_android_sync_on_pause_locked(&s,1);
+        assert(!p.slew_active);
+        INT64 pause_ns=short_pause?5000000LL:3000000000LL;
+        now_ms+=pause_ns/1000000;
+        INT64 limit=policy==2?MIN(100000000LL,(INT64)(40*timeline.inv_speed*2000000.0)):80000000LL;
+        INT64 correction=sign*limit;
+        if(policy==2 && sign<0) correction=-MIN(limit,pause_ns);
+        sfdec2_android_sync_on_pause_locked(&s,0); s.paused=0;
+        assert(p.render_offset_ns==1000000000LL+pause_ns+correction);
+        assert(p.target_offset_ns==1000000000LL+pause_ns+sign*150000000LL);
+        assert(p.slew_active && !p.pause_armed);
+        assert(p.pcm_startup_slew==(policy==2));
+        assert(p.pcm_resume_slew==(policy==2));
+        assert(p.mode1_resume_slew==(policy==3));
+        pthread_mutex_destroy(&p.locked.mtx);
+    }
+    timeline.speed=timeline.inv_speed=1;
+    // A PCM target cannot cross a new mapping, seek epoch, delay or output owner.
+    for(int mismatch=0;mismatch<7;mismatch++) {
+        priv_t p={0}; arm(&p,2,150000000);
+        mode=0; s.seek_paused=0; s.audio_reconfiguring=0;
+        s.audio_lifecycle_generation=0; s.av_delay=0;
+        p.video_timeline=p.pcm_resume_timeline=timeline;
+        p.pcm_resume_epoch=s.seek_epoch;
+        assert(pcm_resume_matches_audio_l(&p,&s));
+        switch(mismatch) {
+        case 0: p.pcm_resume_epoch--; break;
+        case 1: s.audio_reconfiguring=1; break;
+        case 2: p.pcm_resume_timeline.speed=1.2; break;
+        case 3: p.pcm_resume_timeline.rst_anchor++; break;
+        case 4: p.pcm_resume_timeline.ts_anchor++; break;
+        case 5: s.av_delay=20; break;
+        case 6: s.audio_lifecycle_generation++; break;
+        }
+        assert(!pcm_resume_matches_audio_l(&p,&s));
+    }
+    s.av_delay=0; s.audio_reconfiguring=0;
     // A target cannot survive replacement of its audio output, even at the same speed.
     for(int policy=2;policy<=3;policy++) {
         priv_t p={0}; pthread_mutex_init(&p.locked.mtx,NULL);

@@ -73,6 +73,14 @@ typedef enum
 	STREAM_PCM_REANCHOR_EXPIRED,
 } STREAM_PCM_REANCHOR_STATE;
 
+// Empty-output frontier seed cause; NONE must remain false for pending checks.
+typedef enum
+{
+	STREAM_MODE2_FRONTIER_NONE = 0,
+	STREAM_MODE2_FRONTIER_RECREATE = 1,
+	STREAM_MODE2_FRONTIER_SEEK = 2,
+} STREAM_MODE2_FRONTIER_REASON;
+
 typedef enum
 {
 	STREAM_COMPRESSED_FRAMING_UNKNOWN = 0,
@@ -902,7 +910,7 @@ typedef struct STREAM {
 	int		mode2_heard_interp_delay_ms;	// selected delay used for the current epoch
 	int64_t		mode2_heard_interp_last_log_ms;
 	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
-	int		mode2_heard_frontier_seed_pending;	// empty-buffer seed reason: 1=recreation, 2=seek (preserved across sync resets)
+	STREAM_MODE2_FRONTIER_REASON mode2_heard_frontier_seed_pending; // preserved across sync resets
 	int64_t		mode2_seek_refill_until_ms;	// bounded seek refill: writes are not presentation progress
 	STREAM_COMPRESSED_LEDGER compressed_ledger;	// complete compressed units submitted in this clock epoch
 	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence

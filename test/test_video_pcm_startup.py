@@ -17,6 +17,12 @@ def block(source, marker):
     return source[start:end]
 
 
+def slew_helpers(source):
+    start = source.index('// Bounded renderer-offset arithmetic.')
+    end = source.index('// Qualify the retained anchor,', start)
+    return source[start:end]
+
+
 class PcmStartupTest(unittest.TestCase):
     def test_handoff_and_lifecycle_exclusions(self):
         source = (Path(__file__).resolve().parents[1] / 'Source/codec_sfdec2.c').read_text()
@@ -47,7 +53,7 @@ typedef struct {
     struct { int valid, epoch; } speed_cadence;
 ''' + private + r'''
 } priv_t;
-''' + helper + r'''
+''' + slew_helpers(source) + helper + r'''
 static void apply(priv_t *p, STREAM *s, INT64 startup_target_ns) {
     int preserve_pcm_startup_anchor = 1, time = 22;
     INT64 startup_offset_ns = p->render_offset_ns;

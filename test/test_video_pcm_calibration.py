@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from test_video_pcm_startup import block
+from test_video_pcm_startup import block, slew_helpers
 
 
 class PcmCalibrationTest(unittest.TestCase):
@@ -62,7 +62,7 @@ typedef struct {
     timeline_state_t pcm_resume_timeline;
 ''' + private + r'''
 } priv_t;
-''' + matches + observe + write_target + r'''
+''' + slew_helpers(source) + matches + observe + write_target + r'''
 static int can_sample(priv_t *p, STREAM *s, int passthrough_mode, int preserve_output,
                       int pcm_latency_us, float current_speed) {
     int epoch_changed = 0, speed_changed = 0, no_sched_anchor = 0;

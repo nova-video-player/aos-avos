@@ -666,7 +666,62 @@ chaos drivers; successful completion is not a playback verdict.
 
 The separate native host harnesses are indexed in `AGENT.md`. `make test`
 builds `ff`, `comp`, and `stream_url`; it does not run the Python or shell suites
-or automatically execute those binaries. The historical
-`test/pause_resume_sync.py` extracts a removed helper and currently fails; do not
-count it as validation of current playback. The Sonic document also references
-replacement suites absent from this checkout.
+or automatically execute those binaries.
+
+Run all discoverable host regression tests (no Android device required):
+
+```bash
+python3 -m unittest discover -s test -p 'test_*.py'
+```
+
+The former monolithic `pause_resume_sync.py` replay used removed functions and
+obsolete preload/timeout assumptions. It is now a compatibility runner:
+
+```bash
+python3 test/pause_resume_sync.py
+```
+
+It runs these discoverable production-code replays:
+
+- `test_pause_resume_policy.py`: manual delay, preserved versus destructive timing
+  resets, paused checkpoint timeout accounting, backend preload policy, retained
+  PCM on capacity/zero-write/positive-partial-write pause races, abort and failed
+  restart. Sink and wall-clock behavior are mocked; this does not reproduce JNI.
+- `test_slew_offset.py`: all bounded step policies in both directions, variable
+  frame-duration caps, per-frame retry guards, target deadbands, the existing
+  unflagged fallback completion branch, retained resume versus cold-start pause
+  behavior, renderer wall-reference shifts, and seek cancellation. It extracts
+  current arithmetic and lifecycle functions and compares the complete step path
+  against `fixtures/slew_before_refactor.c` from `0ab00c6`, including overlapping
+  flags, variable durations, completion cleanup and repeated-frame retries.
+- `test_audiotrack_speed_epoch.py`: checkpoint continuity and concurrent publication.
+
+The tests compile source excerpts with warnings treated as errors. Missing source
+markers fail rather than silently skipping coverage. A host pass checks these
+contracts, not device scheduling, receiver relock or physical lipsync.
+
+## Renderer extraction validation
+
+The arithmetic-only extraction was authorized on 2026-10-15 before device
+validation of `fdf81dd`, `f386291`, `8d4ece1` and `0ab00c6`. Its host checks
+do not close that hardware-validation gap. Save the build revision, device, route, codec,
+audio mode and capture options with each baseline; do not compare different
+binaries or routes as though they were one experiment.
+
+- Run separate pause/seek campaigns for PCM and passthrough modes 1/2 where
+  supported. Keep speed testing on PCM.
+- For PCM, run atempo, Sonic and AudioTrack speed sessions, including FLAC and a
+  non-1x settling transition such as 1.8x to 1.2x. The current speed-session runner
+  automates 1x to 1.6x to 1x only; use a separately annotated manual capture for
+  the non-1x endpoint until the driver and analyzer support it explicitly.
+- Compare SurfaceFlinger capture enabled/disabled on the same configuration,
+  keeping PCM presentation capture and all other options constant. Query duration
+  is overhead evidence, not proof of a playback stall. Missing compositor or
+  audio coverage remains insufficient evidence.
+- Host replay establishes arithmetic equivalence; device campaigns check playback
+  integration. Physical lipsync needs a calibrated camera/photodiode plus
+  microphone measurement at the panel and speaker. That rig is not a prerequisite
+  for the first two checks.
+
+No connected device was available during the 2026-10-14 host-test repair. That
+work supplies a test baseline, not completion of the device-validation gate.

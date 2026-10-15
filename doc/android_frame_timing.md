@@ -8,6 +8,23 @@ deadline for every decoded frame and passes it to Android `MediaCodec`, while al
 media timestamps remain in the time-scaled (`ts`) domain used for audio speed
 changes. There is no current runtime `android_sync=0` branch in `sfdec2`.
 
+## Display cadence and audio phase
+
+Java `Player.java` separately requests display-refresh matching when enabled in
+settings, using `Surface.setFrameRate()` on supported configurations or selecting
+a `Display.Mode` to reduce judder. The result depends on device capabilities,
+available modes and user settings; it does not guarantee evenly spaced frames on
+every route. Native renderer-offset slewing adjusts video phase against the audio
+clock. It must preserve reasonable cadence even when refresh matching is disabled
+or unavailable. Neither mechanism measures downstream TV/AVR latency.
+
+The bounded offset update is isolated in `offset_slew_step()` in
+`codec_sfdec2.c`. Its per-call policy supplies the fixed rate, whether to derive
+the step from the current frame duration, and the existing fallback completion
+rule. The renderer still owns target qualification, frame guards, deadbands,
+pause/seek handling and completion cleanup. No new persistent state or clock
+estimator is introduced by this extraction.
+
 ## How the Sink Delegates Pacing (`Source/codec_sfdec2.c`)
 
 - The sink always calls `sfdec_buf_render` with a non‑zero `render_ts_ns`.

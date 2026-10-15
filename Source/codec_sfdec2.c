@@ -363,6 +363,41 @@ typedef struct priv {
 	int hold_audio_applied_ms;	// ms held during passthrough startup
 } priv_t;
 
+// Bounded renderer-offset arithmetic. The caller owns mode selection, target
+// qualification, frame identity and lifecycle state; completion only means that
+// this arithmetic reached the target (including the legacy fallback snap).
+typedef struct {
+	int64_t step_ns;
+	int step_from_frame_duration;
+	int snap_small_remainder;
+} offset_slew_policy_t;
+
+static int offset_slew_step(int64_t *offset_ns, int64_t target_ns,
+		offset_slew_policy_t policy, int frame_duration_ms)
+{
+	int64_t step = policy.step_ns;
+	if (policy.step_from_frame_duration) {
+		// Recompute from the current speed-adjusted frame interval on every step.
+		step = frame_duration_ms > 0 ? MIN(4000000LL,
+			(int64_t)frame_duration_ms * 100000LL) : 1000000LL;
+	}
+	int64_t delta = target_ns - *offset_ns;
+	if (delta > step) {
+		delta = step;
+	} else if (delta < -step) {
+		delta = -step;
+	}
+	*offset_ns += delta;
+	int64_t remaining = llabs(target_ns - *offset_ns);
+	// Bounded policies carry the remainder to the next distinct frame. Only
+	// the unflagged fallback retains the historical small-remainder snap.
+	if (remaining == 0 || (policy.snap_small_remainder && remaining <= step)) {
+		*offset_ns = target_ns;
+		return 1;
+	}
+	return 0;
+}
+
 // Qualify the retained anchor, not differences between successive publications:
 // after one real step those differences are normal again. Require advancing
 // audio and wall time, spaced observations, and a stable phase for 500ms.
@@ -2051,35 +2086,20 @@ static void *videosink_thread(void *ctx)
 				(!p->pcm_resume_slew || (!p->pause_armed && (!s || !s->paused))) &&
 				(!p->mode2_dynamic_slew || mode2_new_slew_frame) &&
 				(!(p->pcm_startup_slew || p->mode1_resume_slew) || pcm_startup_new_slew_frame)) {
-				INT64 delta = p->target_offset_ns - p->render_offset_ns;
-				// A Mode 2 clock transition can correct hundreds of milliseconds, so
-				// converge it at 5ms/frame. PCM startup uses 1ms per distinct frame to
-				// remove its bounded residual without a snap. Once established, track
-				// ordinary clock drift at 0.2ms/frame: compressed presentation samples
-				// can move by a whole codec frame and then hold, and chasing that
-				// temporary phase at 5ms/frame produces visible cadence reversals.
-				INT64 step = p->mode2_dynamic_fast_slew ? 5000000 :
-					(p->pcm_startup_slew ? 1000000 : 200000);
-				if( (p->pcm_startup_slew && p->pcm_resume_slew) || p->mode1_resume_slew ) {
-					// Rapid pauses can accumulate a phase that takes seconds to
-					// remove at the startup rate. Limit resume correction to 10%
-					// of the speed-adjusted frame interval, capped at 4ms, so
-					// high frame rates/speeds do not get large cadence changes.
-					step = f->duration > 0 ? MIN(4000000LL,
-						(INT64)f->duration * 100000LL) : 1000000LL;
-				}
-				if (delta > step) {
-					delta = step;
-				} else if (delta < -step) {
-					delta = -step;
-				}
-				p->render_offset_ns += delta;
-				INT64 remaining = llabs(p->target_offset_ns - p->render_offset_ns);
-				// Bounded per-frame slews must carry the remainder to the next
-				// frame. Snapping here can double the Mode 2 correction to 10ms.
-				if (remaining == 0 || (!(p->pcm_startup_slew || p->mode1_resume_slew ||
-					p->mode2_dynamic_slew) && remaining <= step)) {
-					p->render_offset_ns = p->target_offset_ns;
+				// Fast Mode 2 transitions use 5ms/frame, PCM startup 1ms/frame,
+				// and established clock drift 0.2ms/frame. Chasing codec-frame
+				// quantization at the fast rate causes cadence reversals. Resume corrections
+				// use 10% of the current frame interval, capped at 4ms.
+				offset_slew_policy_t policy = {
+					.step_ns = p->mode2_dynamic_fast_slew ? 5000000 :
+						(p->pcm_startup_slew ? 1000000 : 200000),
+					.step_from_frame_duration =
+						(p->pcm_startup_slew && p->pcm_resume_slew) || p->mode1_resume_slew,
+					.snap_small_remainder = !(p->pcm_startup_slew ||
+						p->mode1_resume_slew || p->mode2_dynamic_slew),
+				};
+				if (offset_slew_step(&p->render_offset_ns, p->target_offset_ns,
+						policy, f->duration)) {
 					p->slew_active = 0;
 					if (!p->mode2_dynamic_fast_slew) {
 						p->mode2_dynamic_settle_frames = 0;

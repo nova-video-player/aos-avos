@@ -3115,6 +3115,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 						__atomic_store_n( &s->audio_resume_write_committed, 1, __ATOMIC_RELEASE );
 						stream_sync_audio( s, s->audio_time );
 					}
+					// Pair the first PlaybackParams checkpoint with accepted output,
+					// before another write or control command can age this frontier.
+					if( !passthrough_active && !ac3_recoding && !s->paused &&
+						audio_interface_is_audio_speed_enabled() &&
+						!audio_interface_is_using_atempo() &&
+						fabsf(audio_interface_get_audio_speed() - 1.0f) < 1e-6f &&
+						!stream_audiotrack_epoch_active(s) ) {
+						stream_audiotrack_epoch_observe_written(s, s->audio_time,
+							stream_get_heard_audio_ts(s, s->audio_time));
+					}
 					if( compressed_unit ) {
 						// Pair the AudioTrack presentation frontier with the exact same
 						// complete unit committed to the stream ledger. Mode 1 uses IEC

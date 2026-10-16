@@ -238,6 +238,7 @@ typedef struct {
 	INT64 last_ns;
 	INT64 target_ns;
 	int start_time;
+	int last_time;
 	int samples;
 } pcm_drift_t;
 
@@ -361,6 +362,10 @@ typedef struct priv {
 	int last_user_av_delay;
 	int effective_av_delay_ms;
 	pcm_drift_t pcm_drift;
+	int at_clock_active;
+	int at_clock_handoff_pending;
+	INT64 at_clock_handoff_deadline_ns;
+	pcm_drift_t at_clock_handoff;
 	int hold_audio_active;
 	int64_t hold_audio_until_ms;	// monotonic passthrough startup deadline
 	int64_t hold_audio_start_ms;	// monotonic start of passthrough startup hold
@@ -440,6 +445,54 @@ static int pcm_drift_observe(pcm_drift_t *d, int eligible, INT64 step_ms,
 		return 0;
 	*target_ns = d->target_ns;
 	d->samples = 0;
+	return 1;
+}
+
+// One-time write-clock -> PlaybackParams-clock handoff. A transient rejects
+// the candidate, not the entire handoff. Require a new stable 500ms window
+// within the original deadline; retries and speed taps never extend it.
+// Return -1 to abandon, 0 to keep qualifying, 1 for a qualified target.
+static int audiotrack_handoff_observe(pcm_drift_t *d, INT64 now_ns, int heard_ms,
+	INT64 offset_ns, INT64 deadline_ns, INT64 *target_ns, const char **reason)
+{
+	*reason = NULL;
+	INT64 target = now_ns - (INT64)heard_ms * 1000000LL;
+	if (now_ns >= deadline_ns) {
+		*reason = "timeout";
+		return -1;
+	}
+	if (llabs(target - offset_ns) >= 350000000LL) {
+		*reason = "hard-discontinuity";
+		return -1;
+	}
+	if (d->samples) {
+		if (now_ns < d->last_ns || heard_ms < d->last_time) {
+			*reason = "clock-regression";
+			return -1;
+		}
+		if (now_ns - d->last_ns > 200000000LL)
+			*reason = "observation-gap";
+		else if (llabs(target - d->target_ns) > 40000000LL)
+			*reason = "phase-jitter";
+		if (*reason)
+			d->samples = 0;
+	}
+	if (!d->samples) {
+		d->start_ns = d->last_ns = now_ns;
+		d->start_time = d->last_time = heard_ms;
+		d->target_ns = target;
+		d->samples = 1;
+		return 0;
+	}
+	d->last_time = heard_ms;
+	if (now_ns - d->last_ns < 50000000LL)
+		return 0;
+	d->last_ns = now_ns;
+	d->target_ns += (target - d->target_ns) / ++d->samples;
+	if (d->samples < 6 || now_ns - d->start_ns < 500000000LL ||
+		(INT64)heard_ms - d->start_time < 400)
+		return 0;
+	*target_ns = d->target_ns;
 	return 1;
 }
 
@@ -714,6 +767,8 @@ static int videosink_open(STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void
 	p->last_user_av_delay = s ? s->av_delay : 0;
 
 	pthread_mutex_lock(&p->locked.mtx);
+	p->at_clock_active = 0;
+	p->at_clock_handoff_pending = 0;
 	int i;
 	for (i = 0; i < p->num_frames; ++i)
 		frame_q_put(&p->locked.get_q, p->frames[i]);
@@ -1030,6 +1085,9 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	float requested_speed = audio_interface_get_audio_speed();
 	int pcm_write_clock = !audio_interface_is_audio_speed_enabled() &&
 		s && !stream_audiotrack_epoch_active(s);
+	int at_clock_active = !passthrough_mode && s &&
+		audio_interface_is_audio_speed_enabled() && !audio_interface_is_using_atempo() &&
+		!libavos_get_ac3_recoding_enabled() && stream_audiotrack_epoch_active(s);
 	int mode1_window_ms = passthrough_mode == 1 && s && s->audio_ctx ?
 		MAX(250, audio_interface_get_latency(s->audio_ctx)) : 250;
 
@@ -1449,6 +1507,79 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	}
 	pcm_resume_calibration_observe_l(p, pcm_latency_us);
 
+	// Only reconcile the first hardware clock on a continuous timeline. A
+	// preserved wall anchor is useful for cadence, but its unfinished startup
+	// target belongs to the old write clock and cannot remain authoritative.
+	int at_handoff_allowed = at_clock_active && s->put_time_mode &&
+		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0 &&
+		!s->paused && !s->paused_internal && !s->seek_paused &&
+		!s->audio_start_pending && !s->audio_resume_pending && !s->audio_reconfiguring &&
+		!s->play_n_video_frames && !s->av_delay &&
+		!manual_hold_ms && !s->manual_audio_delay_applied_ms &&
+		!epoch_changed && !resume_started && !pcm_resume && !allow_reanchor &&
+		!p->pause_armed && !p->pcm_resume_pending && !p->pcm_resume_slew &&
+		!p->pcm_resume_calibration_active && !p->pending_seek_reanchor &&
+		(!p->pending_reanchor || p->pcm_startup_slew) &&
+		(!p->slew_active || p->pcm_startup_slew) &&
+		p->render_offset_ns != -1 && p->render_offset_from_audio;
+	if (!at_handoff_allowed && p->at_clock_handoff_pending) {
+		DBGSI serprintf("android_sync: AudioTrack clock handoff cancelled (lifecycle/clock ownership)\n");
+		p->at_clock_handoff_pending = 0;
+	}
+	if (at_handoff_allowed && !p->at_clock_active && preserve_speed_anchor) {
+		p->at_clock_handoff_pending = 1;
+		p->at_clock_handoff.samples = 0;
+		p->at_clock_handoff_deadline_ns = _get_monotonic_ns() + 3000000000LL;
+		DBGSI serprintf("android_sync: AudioTrack clock handoff armed epoch=%d timeout=3000ms\n", s->seek_epoch);
+		if (p->pcm_startup_slew) {
+			p->target_offset_ns = p->render_offset_ns;
+			p->slew_active = 0;
+			p->pcm_startup_slew = 0;
+			p->pcm_seek_startup_slew = 0;
+			p->pending_reanchor = 0;
+			p->render_generation++;
+		}
+	}
+	// The epoch is armed before the hardware setter and timeline commit. An
+	// intervening audio publication must not consume its rising edge. Lifecycle
+	// anchors already adopt the new clock and need no later handoff.
+	if (!at_clock_active || speed_changed || allow_reanchor || epoch_changed || resume_started)
+		p->at_clock_active = at_clock_active;
+	// Commit publications carry the checkpoint sampled before the hardware
+	// setter. Only ordinary audio publications supply fresh heard-time evidence.
+	INT64 at_handoff_now_ns = p->at_clock_handoff_pending ? _get_monotonic_ns() : 0;
+	if (p->at_clock_handoff_pending &&
+		(!speed_changed || at_handoff_now_ns >= p->at_clock_handoff_deadline_ns)) {
+		INT64 target_ns;
+		const char *reason;
+		int result = audiotrack_handoff_observe(&p->at_clock_handoff,
+			at_handoff_now_ns, time, p->render_offset_ns,
+			p->at_clock_handoff_deadline_ns, &target_ns, &reason);
+		if (reason) {
+			DBGSI serprintf("android_sync: AudioTrack clock handoff %s reason=%s remaining=%lldms epoch=%d\n",
+				result < 0 ? "cancelled" : "retry", reason,
+				(long long)MAX(0LL, (p->at_clock_handoff_deadline_ns - at_handoff_now_ns) / 1000000LL),
+				s->seek_epoch);
+		}
+		if (result)
+			p->at_clock_handoff_pending = 0;
+		if (result > 0 && llabs(target_ns - p->render_offset_ns) <= 8000000LL) {
+			DBGSI serprintf("android_sync: AudioTrack clock handoff complete within deadband epoch=%d\n", s->seek_epoch);
+		}
+		if (result > 0 && llabs(target_ns - p->render_offset_ns) > 8000000LL) {
+			p->target_offset_ns = target_ns;
+			p->slew_active = 1;
+			p->pcm_startup_slew = 1;
+			p->pcm_seek_startup_slew = 0;
+			p->pcm_startup_slew_frame_handle = NULL;
+			p->pcm_startup_slew_frame_time = INT_MIN;
+			p->pcm_startup_slew_frame_epoch = INT_MIN;
+			p->render_generation++;
+			DBGSI serprintf("android_sync: AudioTrack clock handoff slew correction=%lldus epoch=%d\n",
+				(long long)((target_ns - p->render_offset_ns) / 1000), s->seek_epoch);
+		}
+	}
+
 	// Lifecycle recovery, manual delay and speed-boundary cadence own their
 	// anchors. Only qualify an otherwise idle PCM anchor, then reuse the
 	// existing once-per-frame bounded startup slew without a hard reanchor.
@@ -1460,7 +1591,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		!speed_changed && !epoch_changed && !resume_started && !pcm_resume &&
 		!in_grace && !allow_reanchor && !p->pause_armed && !p->pcm_resume_pending &&
 		!p->pcm_resume_calibration_active && !p->pending_reanchor &&
-		!p->pending_seek_reanchor && !p->slew_active &&
+		!p->pending_seek_reanchor && !p->slew_active && !p->at_clock_handoff_pending &&
 		p->render_offset_ns != -1 && p->render_offset_from_audio &&
 		fabsf(requested_speed - current_speed) < 0.001f &&
 		p->speed_cadence.correction_ns == 0;
@@ -3210,6 +3341,8 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
 	p->render_generation++;
+	p->at_clock_active = 0;
+	p->at_clock_handoff_pending = 0;
 	p->venc_put_time = 0;
 	p->venc_ref_time = 0;
 	p->sched_start_off_ns = 0;
@@ -3299,6 +3432,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		p->pcm_resume_slew && p->pcm_startup_slew && pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
 		p->pcm_drift.samples = 0;
+		p->at_clock_handoff_pending = 0;
 		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		speed_cadence_reset(&p->speed_cadence);

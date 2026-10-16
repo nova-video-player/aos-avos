@@ -90,13 +90,21 @@ checkpoint at every speed change, including a return to 1.0x:
 2. Before calling `audio_interface_change_audio_speed()`, read a fresh
    `getPlaybackHeadPosition()` sample.
 3. Evaluate the previous epoch at that same playhead sample, keeping fractional
-   milliseconds. Use `anchor_ts` only when no compatible epoch exists (initial
-   startup, reset, backwards playhead, or sample-rate change). Store:
+   milliseconds. Before the first epoch, accepted PCM writes at 1x save a paired
+   heard timestamp and direct playback-head position. Advance that timestamp by
+   observed head progress to the speed-change sample; a stalled head contributes
+   zero. This prevents the time between the last write and the first speed change
+   from becoming a permanent clock deficit. Require the same accepted frontier,
+   selected delay and sample rate, a non-regressing counter, and at most 500ms
+   of counter progress. Otherwise keep the existing `anchor_ts` fallback.
+   Seek/flush/output reset clears the pair. Store:
    - `at_speed_epoch_heard_ts = fractional checkpoint time`
    - `at_speed_epoch_presented_frames = playback_head`
    - `at_speed_epoch_rate = AudioTrack sample rate`
-   - `at_speed_epoch_speed = requested speed`, then patch it to the hardware
-     read-back speed after the PlaybackParams call returns.
+   - Freeze readers at the checkpoint until the PlaybackParams call returns,
+     then publish `at_speed_epoch_speed = hardware read-back speed`.
+   Use the resulting checkpoint for the video timeline mapping as well. A
+   last-good-delay fallback must not replace an established counter checkpoint.
 4. While the epoch is active, derive heard time from the presented-frame delta:
 
 ```text
@@ -108,6 +116,28 @@ heard_ts = at_speed_epoch_heard_ts + delta_media_ms / at_speed_epoch_speed
 Both the delta calculation and the saved checkpoint use double precision.
 Convert to integer milliseconds only when returning the public heard timestamp;
 feeding that rounded value into each new checkpoint accumulates drift over ramps.
+
+Ordinary 1x clock selection is unchanged. At the first continuous commit onto
+an AudioTrack epoch, the renderer stops any unfinished write-clock startup
+slew without moving its current offset. That old target can differ from the
+new counter clock even though both advance at wall rate. Ordinary audio
+publications then qualify the new wall/heard phase over at least 500ms, with
+spaced observations, advancing heard time and a stable 40ms phase band. A
+phase excursion outside that band or observation gap over 200ms discards the
+candidate and starts a fresh qualification window. A fixed three-second deadline
+from the first commit bounds all attempts; speed taps and retries never extend
+it. A stalled counter cannot qualify and eventually times out. Counter/wall-clock
+regression or a correction of 350ms or more abandons the handoff immediately.
+Debug logs distinguish arming, retries, cancellation and completion.
+A qualified correction above 8ms uses the
+existing startup limit of 1ms per distinct video frame; it never jumps the
+wall anchor. Commit-only samples do not qualify the target.
+
+This is one handoff per clock activation, not a recalibration on every speed
+tap. Pause, seek, manual delay and lifecycle recovery cancel qualification;
+those transitions retain their existing recovery policies. Software speed
+filters and compressed passthrough do not collect or use the initial pair or
+this renderer handoff.
 
 This is the same checkpoint idea used by players that derive the audible media
 position from the hardware playhead. It makes speed changes continuous in the

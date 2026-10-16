@@ -1778,13 +1778,53 @@ void stream_audiotrack_epoch_reset( STREAM *s )
 	pthread_mutex_lock(&audiotrack_epoch_mutex);
 	s->at_speed_epoch_active = 0;
 	s->at_speed_epoch_transition = 0;
+	s->at_speed_epoch_seed_valid = 0;
 	s->at_speed_epoch_generation++;
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+}
+
+// Called only after accepted PCM has advanced audio_time, at 1x on the
+// PlaybackParams path. Do not resample this pair from arbitrary clock reads:
+// audio_time - selected_delay stays fixed between writes while the head moves.
+void stream_audiotrack_epoch_observe_written( STREAM *s, int audio_ts, int heard_ts )
+{
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	int active = s->at_speed_epoch_active;
+	unsigned int generation = s->at_speed_epoch_generation;
+	pthread_mutex_unlock(&audiotrack_epoch_mutex);
+	if( active || audio_ts < 0 || heard_ts < 0 )
+		return;
+	UINT64 frames = 0;
+	int rate = 0, source = 0, age = 0;
+	int valid = audio_interface_get_presented_frames(s->audio_ctx,
+		&frames, &rate, &source, &age, 2) && rate > 0;
+	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	if( !s->at_speed_epoch_active && generation == s->at_speed_epoch_generation ) {
+		s->at_speed_epoch_seed_valid = valid;
+		s->at_speed_epoch_seed_audio_ts = audio_ts;
+		s->at_speed_epoch_seed_heard_ts = heard_ts;
+		s->at_speed_epoch_seed_frames = frames;
+		s->at_speed_epoch_seed_rate = rate;
+	}
 	pthread_mutex_unlock(&audiotrack_epoch_mutex);
 }
 
 unsigned int stream_audiotrack_epoch_begin( STREAM *s, UINT64 frames, int rate, double fallback )
 {
 	pthread_mutex_lock(&audiotrack_epoch_mutex);
+	// Only the first checkpoint needs this handoff. Reuse the selected phase
+	// from the last accepted write, advanced by actual head progress, not wall
+	// time. A changed frontier/delay, reset, incompatible rate or implausible
+	// counter delta keeps the existing fallback. A stalled head adds nothing.
+	if( !s->at_speed_epoch_active && s->at_speed_epoch_seed_valid &&
+		s->audio_time == s->at_speed_epoch_seed_audio_ts &&
+		fallback == s->at_speed_epoch_seed_heard_ts &&
+		rate > 0 && rate == s->at_speed_epoch_seed_rate &&
+		frames >= s->at_speed_epoch_seed_frames &&
+		frames - s->at_speed_epoch_seed_frames <= (UINT64)rate / 2 ) {
+		fallback += (double)(frames - s->at_speed_epoch_seed_frames) * 1000.0 / rate;
+	}
+	s->at_speed_epoch_seed_valid = 0;
 	double ts = audiotrack_epoch_ts_locked(s, frames, rate, fallback);
 	s->at_speed_epoch_active = 1;
 	s->at_speed_epoch_transition = 1;

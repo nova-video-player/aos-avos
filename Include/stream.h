@@ -980,6 +980,13 @@ typedef struct STREAM {
 	UINT64		at_speed_epoch_presented_frames;// AT presented frame position at checkpoint
 	int		at_speed_epoch_rate;            // AT sample rate at checkpoint
 	UINT64		at_speed_epoch_frames_cached;   // last playhead sample read during epoch
+	// Before the first speed change, pair the accepted PCM frontier with a
+	// direct playhead sample. Protected by the checkpoint mutex as above.
+	int		at_speed_epoch_seed_valid;
+	int		at_speed_epoch_seed_audio_ts;
+	int		at_speed_epoch_seed_heard_ts;
+	UINT64		at_speed_epoch_seed_frames;
+	int		at_speed_epoch_seed_rate;
 	int		atempo_ledger_active;
 	int		atempo_ledger_count;
 	int		atempo_ledger_write;

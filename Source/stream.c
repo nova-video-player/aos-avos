@@ -854,6 +854,11 @@ static int _stream_set_av_speed( STREAM *s, float av_speed )
 					&ep_rate, &ep_src, &ep_age, 2) && ep_rate > 0 ) {
 					epoch_generation = stream_audiotrack_epoch_begin(s, ep_frames, ep_rate, anchor_ts);
 					epoch_armed = 1;
+					// Use this same checkpoint for the video mapping. The earlier
+					// heard read may predate head progress (or the initial handoff).
+					anchor_ts = (int)stream_get_audiotrack_epoch_ts(s, ep_frames, ep_rate, anchor_ts);
+					speed_anchor_ts = anchor_ts;
+					stream_current_time_rst = MAX(0, TS_TO_RST_TIME(speed_anchor_ts, int));
 				} else {
 					stream_audiotrack_epoch_reset(s);
 				}

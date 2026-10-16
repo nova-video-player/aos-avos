@@ -1864,6 +1864,17 @@ DBGP serprintf("FFMPEG: new pos: %lld\r\n", new_pos );
 #endif
 
 	if( ret < 0 ) {
+		// The timestamp seek can fail when the target lies past the last
+		// keyframe (e.g. a seek at/near the end of the file), even though a
+		// valid keyframe exists earlier. Retry as a backward keyframe seek so
+		// the request lands on the last available keyframe and playback drains
+		// to a natural completion instead of being reported as a fatal file
+		// error. See nova-video-player/aos-Video#216 (issue #1986).
+		DBGP serprintf("FFMPEG: seek retry backward\r\n");
+		ret = av_seek_frame( fmt, -1, new_pos, AVSEEK_FLAG_BACKWARD );
+	}
+
+	if( ret < 0 ) {
 serprintf("FFMPEG: seek error\r\n"); 
 		return 1;
 	}

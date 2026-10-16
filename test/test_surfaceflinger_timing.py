@@ -67,6 +67,25 @@ class SurfaceFlingerTests(unittest.TestCase):
                         parent + '\n' + child + '\n' + LAYER):
             self.assertIsNone(select_layer(listing, 'org.courville.nova'))
 
+    def test_requested_layer_state_preserves_exact_latency_name(self):
+        base = '7da65b5 SurfaceView[org.courville.nova/com.archos.mediacenter.video.player.PlayerActivity]'
+        parent, child = base + '#32176', base + '(BLAST)#32177'
+        listing = '\n'.join((
+            f'RequestedLayerState{{{parent} parentId=32175 relativeParentId=32170 z=-2}}',
+            f'RequestedLayerState{{Background for {base}#32178 parentId=32176 z=-2147483648}}',
+            'RequestedLayerState{305c26f org.courville.nova/Player#32169 parentId=32164}',
+            f'RequestedLayerState{{{child} parentId=32176}}'))
+        self.assertEqual(select_layer(listing, 'org.courville.nova'), child)
+        self.assertEqual(select_layer(listing, 'org.courville.nova', child), child)
+        self.assertIsNone(select_layer(listing, 'org.courville.nova', 'missing'))
+        self.assertEqual(select_layer(parent + '\n' + child, 'org.courville.nova'), child)
+        self.assertEqual(select_layer(f'RequestedLayerState{{{child}}}', 'org.courville.nova'), child)
+        # Recreated or unrelated video layers must still remain ambiguous.
+        extra = f'RequestedLayerState{{{base}(BLAST)#32179 parentId=32176}}'
+        self.assertIsNone(select_layer(listing + '\n' + extra, 'org.courville.nova'))
+        self.assertIsNone(select_layer(listing + '\n' + LAYER, 'org.courville.nova'))
+        self.assertIsNone(select_layer(f'RequestedLayerState{{{child}', 'org.courville.nova'))
+
     def test_overlapping_snapshots_deduplicate_and_allow_refresh_cadence(self):
         rows, log = playback()
         result = analyze([snapshot(rows[:20]), snapshot(rows[10:]), snapshot(rows[10:])], log)

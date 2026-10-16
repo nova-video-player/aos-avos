@@ -28,7 +28,9 @@ Use the address of the device being tested. The collector inherits
 The video layer is rediscovered each poll. A single exact `SurfaceView[...]#id`
 and `SurfaceView[...](BLAST)#id` pair selects the BLAST buffer layer, not its
 container. Other multiple candidates or no video layer are recorded as
-unavailable. For a vendor-specific name, set
+unavailable. Pixel-style `RequestedLayerState{...}` listings are also supported:
+the collector removes state metadata while preserving the exact layer name,
+including any hexadecimal prefix and layer ID. For a vendor-specific name, set
 `SURFACEFLINGER_LAYER` to the exact name from `adb shell dumpsys SurfaceFlinger
 --list`. Do not select the app UI or background layer.
 

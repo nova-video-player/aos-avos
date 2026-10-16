@@ -52,18 +52,28 @@ def parse_latency(text):
 
 
 def select_layer(listing, package, override=None):
-    names = listing.splitlines()
+    names = []
+    for line in listing.splitlines():
+        # Newer SurfaceFlinger versions print layer state instead of bare
+        # names. --latency still takes the name, including its hash prefix
+        # and #id, but not the state wrapper or parent/z-order metadata.
+        if line.startswith('RequestedLayerState{'):
+            match = re.fullmatch(r'RequestedLayerState\{(.+#\d+)(?:\s+[^{}]*)?\}', line)
+            if not match:
+                continue
+            line = match[1]
+        names.append(line)
     if override:
         return override if override in names else None
     # Do not accidentally measure the UI, background or a container layer.
     candidates = [name for name in names if package + '/' in name and
-                  (name.startswith('SurfaceView') or name.startswith('SurfaceView['))]
+                  re.match(r'(?:[0-9a-fA-F]+ )?SurfaceView', name)]
     # Android's BLAST hierarchy exposes both the SurfaceView container and its
     # buffer layer. Resolve only a single, exact parent/child naming pair; two
     # unrelated video surfaces or overlapping recreated layers remain ambiguous.
     if len(candidates) == 2:
         for parent in candidates:
-            match = re.fullmatch(r'(SurfaceView\[.+\])#\d+', parent)
+            match = re.fullmatch(r'((?:[0-9a-fA-F]+ )?SurfaceView\[.+\])#\d+', parent)
             if match:
                 children = [name for name in candidates if re.fullmatch(
                     re.escape(match[1]) + r'\(BLAST\)#\d+', name)]

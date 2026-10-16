@@ -3980,6 +3980,20 @@ static int _video_presentation_drained(STREAM *s)
 
 static int _check_end( STREAM *s )
 {
+	// A seek whose target was at/after the known duration cannot present the
+	// trailing keyframe tail as new content: it is the end of the file. Complete
+	// now so the caller gets end-of-stream instead of a replayed tail. See
+	// issue #1986.
+	if( s->seek_end_of_stream ) {
+		s->seek_end_of_stream = 0;
+		if( !s->stream_end ) {
+			DBG serprintf("SEEK_END_OF_STREAM_COMPLETE\n");
+			s->video_end = 1;
+			s->audio_end = 1;
+			goto FORCE_STOP;
+		}
+	}
+
 	int stop_time_ts = RST_TO_TS_TIME( s->stop_time, int ); // stop_time is external and set in rst
 	if( s->stop_time && ( ( s->video->valid && s->video_time > stop_time_ts ) ||
 						  ( !s->video->valid && s->audio_time > stop_time_ts ) ) ) {
@@ -4904,6 +4918,7 @@ static void _seek_init( STREAM *s )
 	s->seek_audio_target_ts = 0;
 	s->seek_video_target_ts = 0;
 	s->seek_video_ready_ts = STREAM_NO_PTS_VALUE;
+	s->seek_end_of_stream = 0;
 
 	// video_end is a one-way latch (stream_video.c/_get_next_chunk, _check_end)
 	// that is otherwise never cleared. A single premature/transient parser EOF
@@ -5368,6 +5383,7 @@ serprintf("STREAM_seek: aborted\r\n");
 int stream_seek_time( STREAM *s, int time, int dir, int flags )
 {
 	int real_time;
+	int at_end = 0;
 	if( s ) {
 		// Preserve pre-armed audio/video drop target (e.g. frame-accurate seek realignment).
 		if( !(s->seek_use_target_sync && s->seek_audio_target_ts > 0) ) {
@@ -5393,12 +5409,21 @@ int stream_seek_time( STREAM *s, int time, int dir, int flags )
 		if( margin > s->duration )
 			margin = s->duration / 2;
 		time = s->duration - margin;
+		at_end = 1;
 		DBG serprintf( "SEEK_CLAMP_END: target=%d duration=%d clamped=%d\n", target, s->duration, time );
 	}
 		
 	real_time = _stream_get_real_time( s, time );
 	
-	return _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
+	int ret = _stream_seek_abortable( s, real_time, -1, dir, flags, 0 );
+	if( !ret && at_end && s ) {
+		// The demuxer can only land on the final keyframe, leaving a short tail
+		// between it and EOF. Report completion right away instead of replaying
+		// that tail, so a seek at/after the duration behaves like reaching the
+		// end of the file (issue #1986).
+		s->seek_end_of_stream = 1;
+	}
+	return ret;
 }
 
 void stream_seek_preview_supersede( STREAM *s )

@@ -946,6 +946,7 @@ typedef struct STREAM {
 	int		seek_use_target_sync;
 	int		seek_target_sync_time;
 	int		seek_frame;
+	int		seek_end_of_stream;	// last seek targeted at/after the duration; complete instead of replaying the tail
 	int		warmup_video_frames;
 	int		slideshow;	// this stream is a slideshow (fps < 1)
 	int		audio_resume_pending;

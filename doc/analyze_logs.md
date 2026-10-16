@@ -286,6 +286,24 @@ For PCM, inspect `pcm_startup_correction`, `android_sync anchor_diag` and
 `at_ledger` together: an early correction target may precede presentation-clock
 calibration. The phase capture retains these messages for that comparison.
 
+The full-recording analyzer distinguishes `provisional_startup_phase` from a
+qualified-clock phase error. It requires the AudioTrack PlaybackParams backend
+at 1x before any speed change, an explicit PCM startup arm before the first render,
+a matching seek epoch, and AudioTrack's `fallback(warmup)` diagnostic.
+Software-speed ledger clocks and passthrough retain their existing checks.
+Only excursions wholly inside that initial window are reclassified, bounded to
+three seconds from the first render. Dynamic timing, a startup correction decision,
+a speed change, pause, seek or output change ends the window. Missing evidence
+retains the ordinary strict checks; this is not a general startup grace period.
+
+A provisional excursion remains visible with its original magnitude, duration
+and raw phase metrics. It produces `missing_qualified_startup_clock` and an
+`INSUFFICIENT_EVIDENCE` recording verdict, never a pass. Cadence faults and phase
+errors spanning or following calibration still fail. Speed cycles can therefore
+pass while the full recording reports uncertainty about initial startup. This
+classification does not establish physical lipsync or justify adjusting the
+renderer against an unqualified static latency estimate.
+
 Startup consistency requires multiple comparable opens. One recording with one
 startup cannot prove cross-run consistency. Compare equivalent cold/warm starts,
 the publication pair and the resulting stable phase; do not reuse a phase from

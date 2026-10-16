@@ -903,6 +903,72 @@ stress_snapshot() {
         self.assertIsNone(recovery['final_stable_run_ms'])
         self.assertIn('sustained_av_phase_error', result['segments'][0]['issues'])
 
+    def test_provisional_pcm_startup_is_an_evidence_gap_not_a_pass(self):
+        from analyze_stress_recording import analyze_recording, markdown_report
+
+        def capture(armed=True, warmup=True, end=True, epoch=1, bad_from=600,
+                    bad_to=1000, seconds=4, extra='', hardware=True):
+            lines = []
+            if hardware:
+                lines.append('1000.000 stream:stream_set_av_speed gate req=1.000 '
+                             'speed_enabled=1 using_atempo_pref=0 effective_using_atempo=0')
+            if armed:
+                lines.append('1000.000 pcm_startup_correction: armed seed=250 '
+                             f'seek_epoch={epoch} speed_epoch=0 speed=1.000')
+            if warmup:
+                lines.append('1000.001 aud_at_delay: src=fallback(warmup) ret=69 '
+                             'delay_valid=0 streak=7')
+            for row in fixture(mode='speed', seconds=seconds, sequence=True).splitlines():
+                if 'video_render_diag:' in row:
+                    frame = int(row.split('frame=')[1].split()[0])
+                    if bad_from <= frame <= bad_to:
+                        row = row.replace('phase_ms=0', 'phase_ms=-94')
+                lines.append(row)
+            if end:
+                lines.append('1001.300 pcm_startup_correction: request seed=250 '
+                             'dynamic=286 delta=36 streak=10 speed=1.000 epoch=0')
+            if extra:
+                lines.append(extra)
+            return '\n'.join(sorted(lines, key=lambda line: float(line.split()[0])))
+
+        text = capture()
+        report = analyze_recording(text, config({}))
+        self.assertEqual(report['verdict'], 'INSUFFICIENT_EVIDENCE')
+        segment = report['segments'][0]
+        self.assertIn('missing_qualified_startup_clock', segment['evidence_gaps'])
+        self.assertEqual(segment['issues'], [])
+        self.assertEqual(segment['phase_raw_min_ms'], -94)
+        self.assertGreaterEqual(segment['phase_bad_ms'], 250)
+        self.assertIn('provisional_startup_phase', [f['kind'] for f in segment['findings']])
+        self.assertIn('provisional_startup_phase', markdown_report(report, 'fixture'))
+        # No blanket startup exemption: missing/mismatched evidence stays strict.
+        for kwargs in ({'armed': False}, {'warmup': False}, {'epoch': 2}, {'hardware': False},
+                       {'bad_from': 1000, 'bad_to': 1600},
+                       {'bad_from': 1400, 'bad_to': 1800},
+                       {'end': False, 'bad_from': 2800, 'bad_to': 3400}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(analyze_recording(capture(**kwargs), config({}))['verdict'],
+                                 'ISSUES_OBSERVED')
+        # A speed/seek/route transition cannot borrow the old startup context.
+        for marker in ('stream:stream_set_av_speed gate req=1.000 speed_enabled=1 '
+                       'using_atempo_pref=1 effective_using_atempo=1',
+                       'videosink_put_time: speed changed to 1.05',
+                       'VIDEO_SEEK_TARGET_READY: epoch=1',
+                       'audiotrack_set_output_params: resolved out_rate=48000',
+                       'aud_at_delay: src=dynamic ret=286 delay_valid=1',
+                       'pcm_startup_correction: rearm speed_epoch=1 seed=250'):
+            with self.subTest(marker=marker):
+                result = analyze_recording(capture(bad_from=1100, bad_to=1600,
+                                                    extra='1000.500 ' + marker), config({}))
+                self.assertEqual(result['verdict'], 'ISSUES_OBSERVED')
+        # Cadence faults remain failures even when the phase evidence is provisional.
+        broken = text.replace('deadline_ns=1000830000000', 'deadline_ns=1000930000000')
+        self.assertTrue(broken != text)
+        self.assertEqual(analyze_recording(broken, config({}))['verdict'], 'ISSUES_OBSERVED')
+        # A later actual phase error is not hidden by the startup evidence gap.
+        later = capture(bad_from=2000, bad_to=2400)
+        self.assertEqual(analyze_recording(later, config({}))['verdict'], 'ISSUES_OBSERVED')
+
     def test_bad_config(self):
         for value in ('-1', 'nan', 'inf'):
             with self.assertRaises(ValueError):

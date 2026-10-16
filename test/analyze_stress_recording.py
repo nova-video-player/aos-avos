@@ -17,6 +17,86 @@ from analyze_stress import (FIELDS, RESUME_APPLIED, ResumeBoundary, SeekPreview,
 BOUNDARY = re.compile(r'WALLCLOCK_RESET: by pause resume|VIDEO_SEEK_TARGET_READY:|stream_open:|stream_stop:')
 
 
+class PcmStartupEvidence:
+    """Identify a provisional cold-start clock from explicit native evidence.
+
+    Only the pre-speed PlaybackParams write clock is covered. No startup grace
+    period is inferred: phase findings wholly
+    inside confirmed delay warmup become evidence gaps, never successful tests.
+    Missing markers, subsequent seeks and errors spanning calibration stay strict.
+    """
+    def __init__(self):
+        self.seen_frame = False
+        self.first_ms = None
+        self.epoch = None
+        self.warming = False
+        self.hardware_speed = False
+
+    def annotate(self, line, fields):
+        if ('stream_open:' in line or 'stream_stop:' in line or
+                'audiotrack_set_output_params: resolved' in line):
+            self.hardware_speed = False
+        if 'stream_set_av_speed gate' in line:
+            self.hardware_speed = (fields.get('speed_enabled') == '1' and
+                                   fields.get('using_atempo_pref') == '0' and
+                                   fields.get('effective_using_atempo') == '0' and
+                                   fields.get('req') == '1.000')
+            if not self.hardware_speed:
+                self.epoch = None
+                self.warming = False
+        if ('stream_open:' in line or 'stream_stop:' in line or
+                'audiotrack_set_output_params: resolved' in line or
+                'libavos_set_passthrough:' in line or
+                'android_sync: pause start' in line or
+                'VIDEO_SEEK_TARGET_READY:' in line or
+                '_stream_play_n_frames(n=' in line or
+                'videosink_put_time: speed changed' in line or
+                'aud_at_delay: src=dynamic' in line or
+                'pcm_startup_correction: request' in line or
+                'pcm_startup_correction: complete' in line or
+                'pcm_startup_correction: rearm' in line):
+            self.epoch = None
+            self.warming = False
+        if ('pcm_startup_correction: armed' in line and not self.seen_frame and
+                self.hardware_speed):
+            try:
+                if int(fields['speed_epoch']) == 0 and float(fields['speed']) == 1:
+                    self.epoch = int(fields['seek_epoch'])
+            except (KeyError, ValueError):
+                self.epoch = None
+        if self.epoch is not None and 'aud_at_delay: src=fallback(warmup)' in line:
+            self.warming = True
+        if 'video_render_diag:' not in line:
+            return
+        self.seen_frame = True
+        try:
+            wall_ms = int(fields['submit_ns']) / 1e6
+            if self.first_ms is None:
+                self.first_ms = wall_ms
+            if (self.warming and int(fields['epoch']) == self.epoch and
+                    0 <= wall_ms - self.first_ms <= 3000):
+                fields['_pcm_startup_provisional'] = True
+        except (KeyError, ValueError):
+            pass
+
+
+def classify_startup_phase(frames, findings, reasons):
+    provisional = {r[2]['line'] for r in frames if r[2].get('_pcm_startup_provisional')}
+    changed = False
+    for finding in findings:
+        if finding['kind'] != 'sustained_av_phase_error':
+            continue
+        affected = [r[2]['line'] for r in frames
+                    if finding['first_line'] <= r[2]['line'] <= finding['last_line']]
+        if affected and all(line in provisional for line in affected):
+            finding['kind'] = 'provisional_startup_phase'
+            changed = True
+    if changed:
+        if not any(f['kind'] == 'sustained_av_phase_error' for f in findings):
+            reasons[:] = [r for r in reasons if r != 'sustained_av_phase_error']
+        reasons.append('missing_qualified_startup_clock')
+
+
 def recovery_metrics(frames, cfg):
     """Recovery relative to the first render submission, not an unclocked key event."""
     frames = [r for r in frames if not r[2].get('_seek_preview')]
@@ -63,6 +143,7 @@ def analyze_recording(text, cfg=None):
     write_underruns = 0
     resume = ResumeBoundary()
     preview = SeekPreview()
+    startup = PcmStartupEvidence()
     transitions = []
     context_changes = []
     current_mode = None
@@ -80,6 +161,7 @@ def analyze_recording(text, cfg=None):
         fields = dict(FIELDS.findall(line))
         resume.annotate(line, fields)
         preview.annotate(line, fields)
+        startup.annotate(line, fields)
         mode = re.search(r'libavos_set_passthrough: mode=(\d+)', line)
         changed = False
         pid = re.search(r'avos_player\(\s*(\d+)\)', line) or re.match(
@@ -108,6 +190,7 @@ def analyze_recording(text, cfg=None):
         if ('android_sync: mode1 ' in line or 'PCM resume applies paused correction=' in line
                 or 'android_sync: mode2 ' in line or 'mode2_epoch_seed:' in line
                 or re.search(r'mode2_dynamic_clock_(enter|ready|fallback):', line)
+                or 'pcm_startup_correction:' in line or 'AudioTrack clock handoff' in line
                 or RESUME_APPLIED.search(line)):
             transitions.append(dict(line=line_number, message=line.strip()))
         if 'android_sync: pause start' in line or '_stream_play_n_frames(n=' in line:
@@ -179,6 +262,7 @@ def analyze_recording(text, cfg=None):
         start, end = (playback[0][0] if playback else frames[0][0]), frames[-1][0]
         findings = []
         metrics, reasons = scheduled_metrics(frames, start, end, cfg, findings)
+        classify_startup_phase(frames, findings, reasons)
         # A route/session change needs a new capture reference. Keep cadence
         # evidence, but never compare unrelated outputs against the old phase.
         phase_unavailable = reference_missing or any(i <= frames[0][2]['line'] for i in context_changes)
@@ -284,6 +368,10 @@ def markdown_report(report, source):
               'and identified queued seek previews are shown separately from playback judder. '
               'Preview lateness retains the seek startup limit; ordinary submissions retain '
               'the frame-interval limit.', '',
+              '`provisional_startup_phase` retains an excursion measured against an explicitly '
+              'warming PCM delay estimate. It creates an evidence gap, not a pass or proof of '
+              'physical desync. Raw phase metrics retain these samples. Calibration, lifecycle '
+              'changes and a three-second cold-start bound end this classification.', '',
               '| Segment | Source lines | Finding | Measurements |', '|---|---|---|---|']
     for segment in report['segments']:
         for finding in segment['findings']:

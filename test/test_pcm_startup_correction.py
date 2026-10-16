@@ -173,7 +173,8 @@ int main(void) {
         .venc_put_time = 91585};
     SINK sink = {&p, "sfdec2"};
     STREAM s = {.video_sink = &sink, .pcm_startup_correction_pending = 1,
-        .seek_epoch = 13, .pcm_startup_correction_seek_epoch = 13};
+        .seek_epoch = 13, .pcm_startup_correction_seek_epoch = 13,
+        .video_speed_num = 1, .video_speed_den = 1};
     INT64 wall = 7736483422312LL;
     now = wall + 17000000LL; // renderer contention after the sampled pair
     // No publication, fallback, or provisional mixer-head sample can qualify.
@@ -188,6 +189,7 @@ int main(void) {
     dispatch(&s, 1, 1, -1, 91520, wall);
     assert(!s.pcm_startup_correction_pending && p.slew_active);
     assert(!p.pending_reanchor && p.pcm_startup_slew && !p.pcm_resume_slew);
+    assert(p.pcm_seek_startup_slew);
     assert(p.target_offset_ns == wall - 91520LL * 1000000);
     assert(p.target_offset_ns != wall - p.venc_put_time * 1000000LL);
     assert(p.render_offset_ns == 7644943643228LL); // no hard reanchor
@@ -196,11 +198,29 @@ int main(void) {
     dispatch(&s, 1, 2, 84000, 91521, wall);
     assert(!s.pcm_startup_correction_pending);
     assert(p.target_offset_ns == wall - 91521LL * 1000000);
+    // Non-1x speed settling and initial open keep the old startup rate.
+    s.video_speed_num = 6; s.video_speed_den = 5;
+    s.pcm_startup_correction_pending = 1;
+    dispatch(&s, 1, 2, 84000, 91521, wall);
+    assert(p.pcm_startup_slew && !p.pcm_seek_startup_slew);
+    s.video_speed_num = s.video_speed_den = 1;
+    s.seek_epoch = s.pcm_startup_correction_seek_epoch = 1;
+    s.pcm_startup_correction_pending = 1;
+    dispatch(&s, 1, 2, 84000, 91521, wall);
+    assert(p.pcm_startup_slew && !p.pcm_seek_startup_slew);
+    s.seek_epoch = s.pcm_startup_correction_seek_epoch = 13;
+    // A speed ramp returning to 1x within the same seek epoch must not
+    // inherit the faster seek policy, even though its sample is qualified.
+    s.audio_speed_diag_epoch = s.pcm_startup_correction_speed_epoch = 1;
+    s.pcm_startup_correction_pending = 1;
+    dispatch(&s, 1, 2, 84000, 91521, wall);
+    assert(p.pcm_startup_slew && !p.pcm_seek_startup_slew);
+    s.audio_speed_diag_epoch = s.pcm_startup_correction_speed_epoch = 0;
     // Noise remains inside the same 8ms deadband used by renderer selection.
     p.render_offset_ns = wall - 91521LL * 1000000 + 7000000;
     s.pcm_startup_correction_pending = 1;
     dispatch(&s, 1, 2, 84000, 91521, wall);
-    assert(!p.slew_active && !p.pcm_startup_slew);
+    assert(!p.slew_active && !p.pcm_startup_slew && !p.pcm_seek_startup_slew);
     // Expiry or lifecycle changes while acquiring the sink retain the request.
     int *guards[] = {&s.paused, &s.paused_internal, &s.seek_paused,
         &s.audio_start_pending, &s.audio_resume_pending, &s.audio_reconfiguring,
@@ -231,7 +251,7 @@ int main(void) {
     assert(s.pcm_startup_correction_pending);
     // Plain PCM/PlaybackParams retain their existing deferred renderer lookup.
     assert(sfdec2_request_pcm_startup_correction(&s, 0, 0));
-    assert(p.pending_reanchor && p.pcm_startup_slew);
+    assert(p.pending_reanchor && p.pcm_startup_slew && !p.pcm_seek_startup_slew);
     pthread_mutex_destroy(&p.locked.mtx);
     pthread_cond_destroy(&p.locked.cond);
 }

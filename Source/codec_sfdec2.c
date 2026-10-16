@@ -332,6 +332,8 @@ typedef struct priv {
 	int mode2_slew_frame_time;
 	int mode2_slew_frame_epoch;
 	int pcm_startup_slew; // bounded PCM startup/resume correction, once per frame
+	int pcm_seek_startup_slew; // qualified software-PCM seek target at 1x
+	int pcm_seek_startup_speed_epoch; // speed generation captured at seek reset
 	int pcm_resume_slew; // faster correction only for a retained-output resume
 	int pcm_resume_calibration_active;
 	int pcm_resume_calibration_us;
@@ -910,6 +912,7 @@ static void pcm_resume_calibration_observe_l(priv_t *p, int latency_us)
 	p->target_offset_ns += delta;
 	p->slew_active = p->target_offset_ns != p->render_offset_ns;
 	p->pcm_startup_slew = p->slew_active;
+	p->pcm_seek_startup_slew = 0;
 	p->pcm_resume_slew = p->slew_active;
 	// Retargeting must not reset the distinct-frame guard: an already peeked
 	// frame may have consumed its correction allowance before this publication.
@@ -1235,6 +1238,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->target_offset_ns = llabs(correction) > 8000000LL ? target : p->render_offset_ns;
 			p->slew_active = p->target_offset_ns != p->render_offset_ns;
 			p->pcm_startup_slew = p->slew_active;
+			p->pcm_seek_startup_slew = 0;
 			p->pcm_resume_slew = p->slew_active;
 			p->pcm_resume_audio_generation = s->audio_lifecycle_generation;
 			p->pcm_resume_epoch = s->seek_epoch;
@@ -1309,8 +1313,10 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	p->venc_ref_time = now_ms;
 	// A preserved wall anchor still has a new timestamp map/cadence. Invalidate
 	// renderer calculations made while its queue lock was temporarily dropped.
-	if (timeline_changed || allow_reanchor)
+	if (timeline_changed || allow_reanchor) {
+		p->pcm_seek_startup_slew = 0;
 		p->render_generation++;
+	}
 	if (preserve_speed_anchor) {
 		p->speed_cadence.enabled = 1;
 		if (speed_ratio_changed)
@@ -1356,6 +1362,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->target_offset_ns = startup_target_ns;
 			p->slew_active = startup_target_ns != startup_offset_ns;
 			p->pcm_startup_slew = p->slew_active;
+			p->pcm_seek_startup_slew = 0;
 			p->pcm_startup_slew_frame_handle = NULL;
 			p->pcm_startup_slew_frame_time = INT_MIN;
 			p->pcm_startup_slew_frame_epoch = INT_MIN;
@@ -1382,6 +1389,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->target_offset_ns = p->render_offset_ns;
 			p->slew_active = 0;
 			p->pcm_startup_slew = 0;
+			p->pcm_seek_startup_slew = 0;
 			p->pcm_resume_slew = 0;
 			p->pending_reanchor = 0;
 			p->pcm_resume_pending = 0;
@@ -1407,6 +1415,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			p->target_offset_ns = p->render_offset_ns;
 			p->slew_active = 0;
 			p->pcm_startup_slew = 0;
+			p->pcm_seek_startup_slew = 0;
 			p->mode2_dynamic_slew = 0;
 			p->mode2_dynamic_fast_slew = 0;
 			p->mode2_dynamic_settle_frames = 0;
@@ -1463,6 +1472,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->target_offset_ns = drift_target_ns;
 		p->slew_active = 1;
 		p->pcm_startup_slew = 1;
+		p->pcm_seek_startup_slew = 0;
 		p->pcm_resume_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;
@@ -1541,15 +1551,24 @@ static int sfdec2_request_pcm_startup_correction_locked( STREAM *s, int heard_ts
 		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;
 		p->pcm_startup_slew = 1;
+		p->pcm_seek_startup_slew = 0;
 		p->pcm_resume_slew = 0;
 		p->pcm_startup_slew_frame_handle = NULL;
 		p->pcm_startup_slew_frame_time = INT_MIN;
 		p->pcm_startup_slew_frame_epoch = INT_MIN;
 		if( sample_ns ) {
+			// A qualified, fixed post-seek target can repay a larger residual
+			// without chasing codec-block jitter. Speed transitions retain the
+			// conservative startup policy; resume owns its separate correction.
+			// Epoch 1 is initial positioning, not an established seek.
+			p->pcm_seek_startup_slew = s->seek_epoch > 1 &&
+				p->pcm_seek_startup_speed_epoch == s->audio_speed_diag_epoch &&
+				s->video_speed_num > 0 && s->video_speed_num == s->video_speed_den;
 			p->target_offset_ns = sample_ns - (INT64)heard_ts * 1000000LL;
 			if( llabs(p->target_offset_ns - p->render_offset_ns) <= 8000000LL ) {
 				p->target_offset_ns = p->render_offset_ns;
 				p->pcm_startup_slew = 0;
+				p->pcm_seek_startup_slew = 0;
 			}
 			p->slew_active = p->target_offset_ns != p->render_offset_ns;
 			// Invalidate a renderer calculation that dropped this mutex while
@@ -2119,6 +2138,7 @@ static void *videosink_thread(void *ctx)
 						p->target_offset_ns = p->render_offset_ns;
 						p->slew_active = 0;
 						p->pcm_startup_slew = 0;
+						p->pcm_seek_startup_slew = 0;
 						p->pcm_resume_slew = 0;
 						p->pcm_startup_slew_frame_handle = NULL;
 						p->pcm_startup_slew_frame_time = INT_MIN;
@@ -2139,12 +2159,14 @@ static void *videosink_thread(void *ctx)
 				// Fast Mode 2 transitions use 5ms/frame, PCM startup 1ms/frame,
 				// and established clock drift 0.2ms/frame. Chasing codec-frame
 				// quantization at the fast rate causes cadence reversals. Resume corrections
-				// use 10% of the current frame interval, capped at 4ms.
+				// and qualified software-PCM seek corrections at 1x use 10% of
+				// the current frame interval, capped at 4ms.
 				offset_slew_policy_t policy = {
 					.step_ns = p->mode2_dynamic_fast_slew ? 5000000 :
 						(p->pcm_startup_slew ? 1000000 : 200000),
 					.step_from_frame_duration =
-						(p->pcm_startup_slew && p->pcm_resume_slew) || p->mode1_resume_slew,
+						(p->pcm_startup_slew && (p->pcm_resume_slew || p->pcm_seek_startup_slew)) ||
+						p->mode1_resume_slew,
 					.snap_small_remainder = !(p->pcm_startup_slew ||
 						p->mode1_resume_slew || p->mode2_dynamic_slew),
 				};
@@ -2171,6 +2193,7 @@ static void *videosink_thread(void *ctx)
 								(long long)p->render_offset_ns);
 						}
 						p->pcm_startup_slew = 0;
+						p->pcm_seek_startup_slew = 0;
 						p->pcm_resume_slew = 0;
 						if( !p->pcm_resume_calibration_active ) {
 							p->pcm_startup_slew_frame_handle = NULL;
@@ -2760,6 +2783,7 @@ retry_decoder_open:
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
+	p->pcm_seek_startup_slew = 0;
 	p->pcm_resume_slew = 0;
 	p->pcm_resume_calibration_active = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
@@ -3020,6 +3044,7 @@ DBGCV	CLOG();
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
+	p->pcm_seek_startup_slew = 0;
 	p->pcm_resume_slew = 0;
 	p->pcm_resume_calibration_active = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
@@ -3213,6 +3238,8 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->mode2_slew_frame_time = INT_MIN;
 	p->mode2_slew_frame_epoch = INT_MIN;
 	p->pcm_startup_slew = 0;
+	p->pcm_seek_startup_slew = 0;
+	p->pcm_seek_startup_speed_epoch = s->audio_speed_diag_epoch;
 	p->pcm_resume_slew = 0;
 	p->pcm_resume_calibration_active = 0;
 	p->pcm_startup_slew_frame_handle = NULL;
@@ -3306,6 +3333,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 			p->render_generation++;
 		} else {
 			p->pcm_startup_slew = 0;
+			p->pcm_seek_startup_slew = 0;
 			p->pcm_resume_slew = 0;
 		}
 		p->pcm_startup_slew_frame_handle = NULL;
@@ -3361,6 +3389,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		if( p->pcm_resume_slew ) {
 			p->pcm_resume_slew = 0;
 			p->pcm_startup_slew = 0;
+			p->pcm_seek_startup_slew = 0;
 			p->slew_active = 0;
 		}
 		p->pause_start_ms = 0;
@@ -3384,12 +3413,14 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 			p->render_generation++;
 			p->pcm_resume_slew = p->target_offset_ns != p->render_offset_ns;
 			p->pcm_startup_slew = p->pcm_resume_slew;
+			p->pcm_seek_startup_slew = 0;
 			p->slew_active = p->pcm_resume_slew;
 			DBGSI serprintf("android_sync: PCM resume applies paused correction=%lldus remaining=%lldus\n",
 				(long long)(correction / 1000), (long long)((residual - correction) / 1000));
 		} else {
 			p->pcm_resume_slew = 0;
 			p->pcm_startup_slew = 0;
+			p->pcm_seek_startup_slew = 0;
 			p->slew_active = 0;
 		}
 	}

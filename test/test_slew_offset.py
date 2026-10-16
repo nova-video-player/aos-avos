@@ -32,7 +32,8 @@ class SlewOffsetTest(unittest.TestCase):
         start = text.index('const INT64 mode2_deadband_ns =')
         end = text.index('p->pending_seek_reanchor = 0;', start) + len('p->pending_seek_reanchor = 0;')
         settle = text[start:end]
-        fields = set(re.findall(r'p->(\w+)', functions + guards + step + remember + settle)) - {'locked'}
+        invalidate = extract(text, 'if (timeline_changed || allow_reanchor)')
+        fields = set(re.findall(r'p->(\w+)', functions + guards + step + remember + settle + invalidate)) - {'locked'}
         private_source = text[text.index('typedef struct priv {'):text.index('} priv_t;')]
         declarations = []
         for name in sorted(fields):
@@ -69,6 +70,9 @@ static void advance(priv_t *p,STREAM *s,VIDEO_FRAME *f,int mode2_dynamic_active)
 ''' + guards + step + remember + r'''
 }
 ''' + (ROOT / 'test/fixtures/slew_before_refactor.c').read_text() + r'''
+static void invalidate_seek_policy(priv_t *p,int timeline_changed,int allow_reanchor) {
+''' + invalidate + r'''
+}
 static void qualify_target(priv_t *p,int mode2_dynamic_active) {
 ''' + settle + r'''
 }
@@ -130,6 +134,51 @@ int main(void) {
         assert(p.render_offset_ns==initial+sign*increment);
         f.time++; advance(&p,&s,&f,policy>=4);
         assert(p.render_offset_ns==initial+delta && !p.slew_active);
+    }
+    // Qualified 1x PCM seek: replay the Pixel's 122.345ms residual at
+    // 24/30/60/120 fps in both directions. Keep the established cadence bound,
+    // forbid retries spending another step, and finish in under 1.5 seconds.
+    for(int sign=-1;sign<=1;sign+=2) {
+        const int intervals[]={41,33,16,8};
+        for(unsigned i=0;i<sizeof(intervals)/sizeof(*intervals);i++) {
+            priv_t p={0}; VIDEO_FRAME f={.time=1,.epoch=12,.duration=intervals[i]};
+            arm(&p,1,sign*122345168LL); p.pcm_seek_startup_slew=1;
+            int frames=0;
+            while(p.slew_active) {
+                INT64 before=p.render_offset_ns, target=p.target_offset_ns;
+                advance(&p,&s,&f,0);
+                INT64 step=p.render_offset_ns-before;
+                assert(sign*step>0 && llabs(step)<=4000000);
+                assert(llabs(step)<=f.duration*100000LL);
+                assert(llabs(target-p.render_offset_ns)<llabs(target-before));
+                before=p.render_offset_ns;
+                advance(&p,&s,&f,0); assert(before==p.render_offset_ns);
+                f.time+=f.duration; assert(++frames*f.duration<1500);
+            }
+            assert(!p.pcm_seek_startup_slew && !p.pcm_startup_slew);
+            assert(p.render_offset_ns==1000000000LL+sign*122345168LL);
+        }
+    }
+    for(int timeline=0;timeline<2;timeline++) for(int reanchor=0;reanchor<2;reanchor++) {
+        priv_t p={0}; arm(&p,1,122345168); p.pcm_seek_startup_slew=1;
+        invalidate_seek_policy(&p,timeline,reanchor);
+        assert(p.pcm_seek_startup_slew==!(timeline || reanchor));
+    }
+    // Qualified seek recovery is discarded on pause and seek, not inherited
+    // by retained resume corrections or the next startup target.
+    for(int pause=0;pause<2;pause++) {
+        priv_t p={0}; pthread_mutex_init(&p.locked.mtx,NULL);
+        STREAM_SINK_VIDEO vs={.name="sfdec2",.priv=&p};
+        STREAM_DEC_VIDEO vd={.name="sfdec2",.priv=&p,.is_open=1};
+        s.video_sink=&vs; s.video_dec=&vd; mode=0; s.audio_speed_diag_epoch=3;
+        arm(&p,1,122345168); p.pcm_seek_startup_slew=1;
+        if(pause) sfdec2_android_sync_on_pause_locked(&s,1);
+        else {
+            sfdec2_reset_sync_state_on_seek_locked(&s);
+            assert(p.pcm_seek_startup_speed_epoch==3);
+        }
+        assert(!p.pcm_seek_startup_slew && !p.pcm_startup_slew && !p.slew_active);
+        pthread_mutex_destroy(&p.locked.mtx);
     }
     // Preserve the source's unflagged fallback semantics, without assuming reachability.
     {

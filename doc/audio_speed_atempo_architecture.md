@@ -589,7 +589,14 @@ sampling time and selects the target directly from that pair. It must not reread
 `venc_put_time`: the normal backward clamp can retain an older fallback value
 ahead of the newly committed heard clock. A stale sample or intervening
 pause/seek/speed transition leaves the correction pending for another sample.
-The existing 8ms deadband and 1ms-per-distinct-frame startup slew remain in use.
+The existing 8ms deadband remains. For an established seek (after initial
+positioning) at 1x with no intervening speed change, a qualified software-PCM
+target uses 10% of the frame interval,
+capped at 4ms per distinct frame (1ms fallback for unknown duration). This repays
+a 122ms residual at 24fps in about 1.3 seconds instead of five, without a hard
+anchor jump. Pause, seek, target replacement and completion clear this policy.
+Initial positioning, speed settling, unqualified startup targets and ordinary
+drift retain the conservative 1ms startup step.
 Plain PCM and PlaybackParams retain their existing target selection; passthrough
 does not enter this correction path.
 

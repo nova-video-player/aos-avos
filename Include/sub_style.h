@@ -35,7 +35,7 @@
 // sync_styles() in sub_format_ssa.c) -- a hand-edited literal that drifts
 // out of sync with sub_style_create()'s default would silently break that
 // check, with no compiler error to catch it.
-#define SUB_DEFAULT_FONT_FAMILY "sans-serif-medium"
+#define SUB_DEFAULT_FONT_FAMILY "Roboto Medium"
 
 typedef struct SUB_USER_STYLE {
     float    font_size;

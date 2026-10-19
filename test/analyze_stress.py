@@ -158,9 +158,69 @@ def fault_signals(text):
             for kind, pattern in FAULTS.items()}
 
 
+def compressed_wait(line):
+    if 'compressed_write_wait:' not in line:
+        return None
+    fields = dict(FIELDS.findall(line))
+    try:
+        wait = {key: int(fields[key]) for key in (
+            'epoch', 'last_progress_ms', 'start_ms', 'end_ms', 'blocked_ms',
+            'retries', 'interrupted', 'accepted', 'unit_bytes', 'written', 'complete')}
+    except (KeyError, ValueError):
+        return None
+    if not (0 <= wait['last_progress_ms'] <= wait['start_ms'] <= wait['end_ms'] and
+            wait['blocked_ms'] == wait['end_ms'] - wait['start_ms'] and
+            wait['blocked_ms'] >= 100 and wait['retries'] > 0 and
+            wait['interrupted'] in (0, 1) and wait['complete'] in (0, 1) and
+            wait['written'] > 0 and 0 <= wait['accepted'] < wait['unit_bytes'] and
+            wait['accepted'] + wait['written'] <= wait['unit_bytes'] and
+            wait['complete'] == int(wait['accepted'] + wait['written'] == wait['unit_bytes'])):
+        return None
+    return wait
+
+
+def write_gap_evidence(rows, writes, end, limit, epoch):
+    """Attribute gaps only; acceptance/backpressure is not proof of presentation."""
+    out = dict(backpressure_write_gaps=0, incomplete_backpressure_write_gaps=0,
+               unexplained_write_gaps=0)
+    waits = [(r, compressed_wait(r[1])) for r in rows if 'compressed_write_wait:' in r[1]]
+
+    def process(row):
+        parts = row[1].split()
+        # serprintf writes through log_thread; serprintf_record emits directly
+        # from the audio thread. Their logcat TIDs differ within one process.
+        return parts[1] if len(parts) > 3 and all(p.isdigit() for p in parts[1:3]) else None
+
+    for before, after in zip(writes, writes[1:]):
+        elapsed = after[0] - before[0]
+        if elapsed <= limit:
+            continue
+        accepted = re.search(r'audiotrack_write: wrote ([1-9]\d*) out of', after[1])
+        matched = None
+        for row, wait in waits:
+            if (wait and not wait['interrupted'] and str(wait['epoch']) == str(epoch) and
+                    accepted and int(accepted[1]) == wait['written'] and
+                    process(before) == process(after) == process(row) and
+                    abs(row[0] - after[0]) <= 50 and
+                    abs(elapsed - (wait['end_ms'] - wait['last_progress_ms'])) <= 50 and
+                    not any(before[0] < r[0] <= row[0] and any(marker in r[1] for marker in (
+                        'android_sync: pause start', 'VIDEO_SEEK_TARGET_READY:', 'stream_stop:', 'stream_open:'))
+                        for r in rows)):
+                matched = wait
+                break
+        key = ('backpressure_write_gaps' if matched and matched['complete'] else
+               'incomplete_backpressure_write_gaps' if matched else 'unexplained_write_gaps')
+        out[key] += 1
+    if writes and end - writes[-1][0] > limit:
+        out['unexplained_write_gaps'] += 1  # No completion can explain a silent tail.
+    return out
+
+
 def write_metrics(text):
     counts = dict(full_writes=0, partial_writes=0, zero_writes=0,
-                  failed_writes=0, accepted_bytes=0, compressed_continuations=0)
+                  failed_writes=0, accepted_bytes=0, compressed_continuations=0,
+                  compressed_waits=0, compressed_wait_max_ms=0,
+                  compressed_wait_completed_units=0, malformed_wait_records=0)
     for line in text.splitlines():
         match = re.search(r'audiotrack_write: wrote (-?\d+) out of (\d+)', line)
         if match:
@@ -171,6 +231,14 @@ def write_metrics(text):
             counts[kind] += 1
             counts['accepted_bytes'] += max(0, accepted)
         counts['compressed_continuations'] += 'continuing unit at' in line
+        if 'compressed_write_wait:' in line:
+            wait = compressed_wait(line)
+            if wait:
+                counts['compressed_waits'] += 1
+                counts['compressed_wait_max_ms'] = max(counts['compressed_wait_max_ms'], wait['blocked_ms'])
+                counts['compressed_wait_completed_units'] += wait['complete']
+            else:
+                counts['malformed_wait_records'] += 1
     # Interleaved writes have no transaction ID. Matching counts do not prove
     # that every compressed unit completed or that its samples were presented.
     counts['compressed_unit_completion'] = 'not_proven'
@@ -550,6 +618,7 @@ def analyze(text, mode, cfg=None):
     if mode == 'speed':
         reasons = [x for x in reasons if x != 'video_not_monotonic']
     out['max_write_gap'] = gap(writes, end)
+    out.update(write_gap_evidence(rows, writes, end, cfg['WRITE_GAP_MAX_MS'], out['epoch']))
     out['max_video_gap'] = gap(videos, end)
     out['starved'] = sum('AUDIO_STARVED:' in r[1] for r in signal_rows)
     out['late_drops'] = sum('late frame drop' in r[1] for r in signal_rows)

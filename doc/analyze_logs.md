@@ -206,6 +206,25 @@ the same event. A write gap may be covered by queued audio. Advancing writes do
 not prove advancing presentation. Scheduled deadline irregularity establishes a
 software timing disturbance, not exactly what Android displayed.
 
+With `dbgs 2`, `compressed_write_wait:` records a successful write following
+at least 100ms of zero-byte/retry backpressure. It includes monotonic wait
+boundaries, retry count, seek epoch, accepted bytes and `complete=1` when this
+write finishes the unit. `interrupted=1` marks a pause/retry interruption, which
+must not be attributed to ordinary queue capacity. These records are gated by
+`DBG2` (`DBG_STREAM > 1`) and the compile-time `DEBUG_LOGS` switch. They add no
+AudioTrack queries and never change write/retry decisions.
+
+The phase analyzer reports `backpressure_write_gaps` for matching, completed,
+uninterrupted waits, `incomplete_backpressure_write_gaps` when a suffix remains,
+and `unexplained_write_gaps` otherwise. Matching checks epoch, process, timing and
+transition boundaries. Thread IDs need not match: buffered write logs are emitted
+by the logging thread, while wait records are emitted directly by the audio thread.
+The recording report retains the wait records and their
+counts. These are diagnostic classifications: the existing write-gap verdict
+remains in force until presentation evidence establishes that buffering covered
+the interval. Missing diagnostics never excuse a gap, and a later successful
+write does not excuse a silent tail or an observed underrun.
+
 ## 6. Identify persistent lipsync drift and recovery
 
 Prefer fresh `video_render_diag.phase_ms` evidence for scheduled phase. It is

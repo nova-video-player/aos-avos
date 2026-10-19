@@ -943,6 +943,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 	int64_t zero_write_start_ms = -1;
 	int64_t zero_write_last_log_ms = -1;
 	int zero_write_reported = 0;
+	int write_wait_interrupted = 0;
 	int64_t last_progress_ms = atime64();
 	*accepted_bytes = 0;
 
@@ -956,6 +957,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 		// it can release the transaction mutex and retry the unit after resume;
 		// retain a positive prefix here until resume.
 		if( (s->paused || stream_audio_paused) && !s->play_n_audio_frames ) {
+			DBG2 write_wait_interrupted = 1;
 			if( *accepted_bytes == 0 ) {
 				return COMPRESSED_WRITE_PAUSED;
 			}
@@ -1004,6 +1006,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 		}
 		int written = s->audio_sink->write( s, &pending );
 		if( written == 0 || written == AUDIO_WRITE_RETRY ) {
+			DBG2 if( written == AUDIO_WRITE_RETRY ) write_wait_interrupted = 1;
 			// API 23+ compressed AudioTrack writes are non-blocking. Zero is
 			// ordinary queue backpressure; retain the same unit and retry after
 			// yielding; the no-progress deadline also bounds a stalled route.
@@ -1037,6 +1040,20 @@ static compressed_write_result_t _stream_write_compressed_unit(
 				written, pending.size, *accepted_bytes, frame->format);
 			return COMPRESSED_WRITE_ERROR;
 		}
+		DBG2 if( zero_write_start_ms >= 0 ) {
+			int64_t end_ms = atime64();
+			if( end_ms - zero_write_start_ms >= 100 ) {
+				// One direct record on recovery, not one per zero-byte retry.
+				// This proves queue backpressure and byte acceptance only; it
+				// does not establish uninterrupted DAC/receiver presentation.
+				serprintf_record("compressed_write_wait: epoch=%d fmt=%04X last_progress_ms=%lld start_ms=%lld end_ms=%lld blocked_ms=%lld retries=%d interrupted=%d accepted=%d unit_bytes=%d written=%d complete=%d\n",
+					s->seek_epoch, frame->format, (long long)last_progress_ms,
+					(long long)zero_write_start_ms, (long long)end_ms,
+					(long long)(end_ms - zero_write_start_ms), zero_write_retries,
+					write_wait_interrupted, *accepted_bytes, frame->size, written,
+					written == pending.size);
+			}
+		}
 		if( zero_write_reported ) {
 			DBG serprintf("stream_audio: compressed write backpressure cleared remaining=%d accepted=%d/%d retries=%d blocked=%lldms\n",
 				pending.size, *accepted_bytes, frame->size,
@@ -1046,6 +1063,7 @@ static compressed_write_result_t _stream_write_compressed_unit(
 		zero_write_start_ms = -1;
 		zero_write_last_log_ms = -1;
 		zero_write_reported = 0;
+		write_wait_interrupted = 0;
 
 		*accepted_bytes += written;
 		last_progress_ms = atime64();

@@ -192,6 +192,7 @@ struct audio_ctx {
 	int presentation_latency_ms;
 	int presentation_fixed_latency_ms;
 	uint64_t presentation_epoch_offset;
+	int64_t presentation_epoch_start_ns;
 	AUDIO_PRESENTATION_SNAPSHOT presentation_snapshot;
 };
 
@@ -1770,6 +1771,21 @@ static int audiotrack_can_write(audio_ctx_t *at, int len)
 	return can_write;
 }
 
+// A flush can return the old counter before the device resets it. Once a
+// post-flush observation proves a reset, retire that offset for this generation;
+// testing raw >= offset on every poll would subtract it again later in playback.
+static uint64_t audiotrack_observer_counter(uint64_t raw, int64_t sample_ns,
+	int64_t epoch_start_ns, uint64_t *offset)
+{
+	// A cached pre-flush timestamp can lag the playhead used as the offset. It
+	// cannot establish the new origin (or contribute presentation evidence).
+	if (sample_ns < epoch_start_ns)
+		return 0;
+	if (raw < *offset)
+		*offset = 0;
+	return raw - *offset;
+}
+
 static void *audiotrack_presentation_thread(void *arg)
 {
 	audio_ctx_t *at = (audio_ctx_t *)arg;
@@ -1780,6 +1796,8 @@ static void *audiotrack_presentation_thread(void *arg)
 	uint64_t playhead_generation = 0;
 	uint64_t playhead_wrap_base = 0;
 	uint32_t playhead_last_raw = 0;
+	uint64_t playhead_offset = 0;
+	uint64_t timestamp_offset = 0;
 
 	if (env) {
 		get_playhead = (*env)->GetMethodID(env, at->audiotrackClass,
@@ -1811,6 +1829,7 @@ static void *audiotrack_presentation_thread(void *arg)
 		jobject track = NULL;
 		uint64_t generation = 0;
 		uint64_t epoch_offset = 0;
+		int64_t epoch_start_ns = 0;
 		AUDIO_PRESENTATION_SNAPSHOT sample = { 0 };
 
 		msec_sleep(100);
@@ -1832,6 +1851,7 @@ static void *audiotrack_presentation_thread(void *arg)
 		sample.latency_ms = at->presentation_latency_ms;
 		sample.fixed_latency_ms = at->presentation_fixed_latency_ms;
 		epoch_offset = at->presentation_epoch_offset;
+		epoch_start_ns = at->presentation_epoch_start_ns;
 		if (env && at->init && at->obj && (sample.passthrough >= 1 ||
 			(sample.passthrough == 0 && pcm_diagnostic &&
 			 !__atomic_load_n(&at->track_paused, __ATOMIC_ACQUIRE)))) {
@@ -1866,15 +1886,19 @@ static void *audiotrack_presentation_thread(void *arg)
 			playhead_generation = generation;
 			playhead_wrap_base = 0;
 			playhead_last_raw = playhead_raw;
+			// The two Android counters may reset independently. Keep each origin
+			// local to this observer and reset it only on a new output generation.
+			playhead_offset = epoch_offset;
+			timestamp_offset = epoch_offset;
 		} else if (playhead_raw < playhead_last_raw &&
 			playhead_last_raw - playhead_raw > UINT32_MAX / 2) {
 			playhead_wrap_base += (UINT64)UINT32_MAX + 1;
 		}
 		playhead_last_raw = playhead_raw;
-		sample.playback_head_frames = playhead_wrap_base + playhead_raw;
-		if (sample.playback_head_frames >= epoch_offset) {
-			sample.playback_head_frames -= epoch_offset;
-		}
+		if (playhead_ok)
+			sample.playback_head_frames = audiotrack_observer_counter(
+				playhead_wrap_base + playhead_raw, epoch_start_ns,
+				epoch_start_ns, &playhead_offset);
 		if (sample.passthrough == 0) {
 			// Independent debug evidence, never a source for the playback clock.
 			// Discard queries crossing flush/recreation or pause. Publish under the
@@ -1904,9 +1928,10 @@ static void *audiotrack_presentation_thread(void *arg)
 					(uint64_t)timestamp_position : 0;
 				sample.timestamp_ns = (int64_t)(*env)->GetLongField(env,
 					timestamp, at->nanoTimeFieldID);
-				if (sample.timestamp_frames >= epoch_offset) {
-					sample.timestamp_frames -= epoch_offset;
-				}
+				if (timestamp_position > 0)
+					sample.timestamp_frames = audiotrack_observer_counter(
+						sample.timestamp_frames, sample.timestamp_ns,
+						epoch_start_ns, &timestamp_offset);
 			} else if ((*env)->ExceptionCheck(env)) {
 				(*env)->ExceptionClear(env);
 			}
@@ -3054,6 +3079,8 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	if (!at) {
 		return;
 	}
+	struct timespec epoch_start;
+	clock_gettime(CLOCK_MONOTONIC, &epoch_start);
 	pthread_mutex_lock(&at->presentation_mutex);
 	at->presentation_generation++;
 	memset(&at->presentation_snapshot, 0, sizeof(at->presentation_snapshot));
@@ -3064,6 +3091,8 @@ static void audiotrack_reset_timing(audio_ctx_t *at)
 	at->timestamp_written_offset = 0;
 	at->playhead_epoch_offset = 0;
 	at->presentation_epoch_offset = 0;
+	at->presentation_epoch_start_ns = (int64_t)epoch_start.tv_sec * 1000000000LL +
+		epoch_start.tv_nsec;
 	at->ts_success_streak = 0;
 	at->ts_use_timestamp = 0;
 	at->ts_last_query_ms = 0;

@@ -85,6 +85,11 @@ estimator is introduced by this extraction.
   do not snap it forward during that window. The ordinary fallback frontier
   catch-up remains available afterward; track recreation keeps its existing
   immediate catch-up policy. This does not bypass timestamp qualification.
+  The AudioTrack presentation observer retains separate counter origins for
+  timestamps and playhead readings within each output generation. A counter
+  reset retires the old flush offset for that generation; reaching that old
+  numeric value later must not subtract it again. Cached timestamps older than
+  the generation's timing reset cannot establish a new counter origin.
   Mode 2 applies at most 5ms per distinct frame during fast recovery and 0.2ms
   during steady tracking. Any remainder carries into a subsequent frame; the
   final step cannot snap through a second step's worth of correction.

@@ -247,7 +247,40 @@ python3 test/run_stress_campaign.py
 BURST_PAIRS=10 python3 test/run_stress_campaign.py --dry-run
 ```
 
-Start video playback first. The wrapper accepts the campaign's environment
+Start video playback first, or supply `--video` to capture a fresh launch:
+
+```bash
+PCM_PRESENTATION_CAPTURE=1 SURFACEFLINGER_CAPTURE=1 \
+CONTINUE_ON_FAIL=1 ROUNDS=2 RESUME_CYCLES=5 SEEK_CYCLES=10 \
+BURST_PAIRS=10 BURST_GAP_MS=150 SESSION_RAW=1 \
+python3 test/run_stress_campaign.py \
+  --serial 67301FDDV0027C \
+  --video 'content://com.archos.media.videocommunity/external/video/media/277'
+```
+
+`--video` accepts a URI or absolute path on the device. It stops Nova, starts
+raw log capture, initializes the existing debug receiver and enables `dbgs 2`,
+`dbgsink 2`, `dbga 2` before opening the requested video from position zero.
+It preserves the selected decoder, speed and PCM/passthrough preferences;
+it does not use the speed runner's preference override or restore mechanism.
+Select the intended settings (normally 1x for this campaign) beforehand.
+`--serial` overrides `ANDROID_SERIAL`; `--package` overrides `PACKAGE`.
+
+Startup waits up to `--startup-timeout 60` seconds for playback diagnostics,
+then captures `--startup-hold 5` seconds of baseline before running the existing
+campaign. `startup/logcat.log`, `startup/commands.log` and
+`startup/startup-report.json` retain launch evidence even when setup fails.
+The optional PCM observer is armed before launch; optional SurfaceFlinger
+capture also starts before launch and writes its own report under `startup/`.
+The startup collector stops before the campaign's existing collectors start;
+these are separate captures, with a setup gap between them. `READY` confirms
+launch evidence, not startup health or physical lipsync. Startup is not included
+in resume/seek verdicts or their phase baseline. Its compositor generation is
+also independent of later phase collectors. No APK change is needed beyond
+the debug/observer support already required by these tests.
+
+Without `--video`, playback and collection start exactly as before.
+The wrapper accepts the campaign's environment
 controls and an optional rounds argument. Omit `BURST_PAIRS` for ordinary
 pauses; add `SPEED_CYCLES=2` for a PCM speed phase. Speed testing requires the
 appropriate decoder/settings described above and is disabled for passthrough.

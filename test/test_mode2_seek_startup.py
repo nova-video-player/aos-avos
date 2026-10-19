@@ -32,6 +32,8 @@ class Mode2SeekStartupTest(unittest.TestCase):
         end = sync.index('s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_NONE;', start)
         end = sync.index(';', end) + 1
         consume = sync[start:end]
+        qualification = re.search(r'^#define STREAM_MODE2_SEEK_QUALIFY_MS\s+\d+',
+                                  sync, re.MULTILINE).group()
         run_c(r'''
 #define CONFIG_SFDEC
 #include "global.h"
@@ -42,7 +44,7 @@ class Mode2SeekStartupTest(unittest.TestCase):
 _Static_assert(STREAM_MODE2_FRONTIER_NONE == 0, "pending truth value");
 _Static_assert(STREAM_MODE2_FRONTIER_RECREATE == 1, "recreation reason");
 _Static_assert(STREAM_MODE2_FRONTIER_SEEK == 2, "seek reason");
-''' + functions + r'''
+''' + qualification + '\n' + functions + r'''
 // Restart wrapper calls the shared reset; unrelated reset side effects are mocked.
 static int _stream_sync_restart_locked(STREAM *s, int reset_ledger, int preserve) {
     assert(reset_ledger && !preserve);
@@ -79,7 +81,7 @@ int main(void) {
             assert(stream_sync_mode2_heard_frontier_pending(&s)==(int)reasons[i]);
         }
         assert(consume(&s)==(reasons[i]==STREAM_MODE2_FRONTIER_SEEK));
-        assert(s.mode2_seek_refill_until_ms==(i?10200:0));
+        assert(s.mode2_seek_refill_until_ms==(i?10950:0));
         assert(!stream_sync_mode2_heard_frontier_pending(&s));
         assert(!consume(&s)); // Consumed once; no new seek refill ownership.
         stream_sync_mode2_heard_frontier_arm(&s,reasons[i]);
@@ -181,10 +183,17 @@ int main(void) {
     int64_t offset = p.render_offset_ns;
     anchor(&s, &p, 2, 135600); // refill must not publish a second anchor
     assert(p.render_offset_ns == offset);
-    s.mode2_heard_interp_ts=1000; s.mode2_seek_refill_until_ms=1609;
+    s.mode2_heard_interp_ts=1000; s.mode2_seek_refill_until_ms=2359;
     refill(&s, 1209, 1050); // accepted burst is not a presentation jump
     assert(s.mode2_heard_interp_ts == 1000);
-    refill(&s, 1400, 1610); // bounded fallback still catches up
+    refill(&s, 1400, 1610); // static 609ms expires before presentation qualifies
+    assert(s.mode2_heard_interp_ts == 1000);
+    refill(&s, 1400, 1984); // Bravia direct evidence enters at ~984ms
+    assert(s.mode2_heard_interp_ts == 1000);
+    refill(&s, 1400, 2317); // measured frontier catches up at ~1317ms
+    assert(s.mode2_heard_interp_ts == 1000);
+    assert(s.mode2_seek_refill_until_ms == 2359); // writes cannot renew the bound
+    refill(&s, 1400, 2359); // absent evidence still gets bounded fallback
     assert(s.mode2_heard_interp_ts == 1400);
     s.mode2_seek_refill_until_ms=0;
     refill(&s, 1800, 1611); // existing track-recreation policy

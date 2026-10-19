@@ -30,7 +30,9 @@ void fresh(void) { memset(&state, 0, sizeof(state)); }
 void enable(void) { state.enabled = 1; }
 void short_lead(void) { state.short_lookahead = 1; }
 int64_t lookahead(double speed) { return speed_cadence_lookahead_ns(&state, speed); }
-int64_t mode2_entry_limit(int frame_ms) { return mode2_clock_entry_limit_ns(frame_ms); }
+int64_t mode2_entry_limit(int frame_ms, int direct) {
+    return mode2_clock_entry_limit_ns(frame_ms, direct);
+}
 int64_t calibrate(int us, unsigned generation, int delay) {
     return speed_cadence_calibration(&state, us, generation, delay);
 }
@@ -63,7 +65,7 @@ int64_t frame(int media, int epoch, int valid, double speed, double anchor,
         cls.lib.frame.restype = cls.lib.correction.restype = ctypes.c_int64
         cls.lib.lookahead.argtypes = [ctypes.c_double]
         cls.lib.lookahead.restype = cls.lib.calibrate.restype = ctypes.c_int64
-        cls.lib.mode2_entry_limit.argtypes = [ctypes.c_int]
+        cls.lib.mode2_entry_limit.argtypes = [ctypes.c_int, ctypes.c_int]
         cls.lib.mode2_entry_limit.restype = ctypes.c_int64
 
     @classmethod
@@ -99,19 +101,23 @@ int64_t frame(int media, int epoch, int valid, double speed, double anchor,
 
     def test_mode2_handoff_recovery_budget(self):
         limit = self.lib.mode2_entry_limit
-        # Bravia's two observed corrections fit without a 175ms deadline jump.
-        for correction in (176819000, 174017000):
-            self.assertLessEqual(correction, limit(42))
+        # Both earlier eARC captures and the larger ARC corrections fit without
+        # turning the handoff into one long (or backwards) scheduled interval.
+        for correction in (176819000, 174017000, 211886000, 235907000):
+            self.assertLessEqual(correction, limit(42, 1))
             frames = math.ceil(correction / 5000000)
-            self.assertLessEqual(frames * (42 + 5), 2000)
-        for interval in (16, 33, 42, 83, 1000, 2147483647):
-            self.assertGreaterEqual(limit(interval), 100000000)
-            self.assertLessEqual(limit(interval), 350000000)
-            if limit(interval) > 100000000:
-                self.assertLessEqual(limit(interval) // 5000000 * (interval + 5), 2000)
-        self.assertEqual(limit(0), 100000000)
-        self.assertEqual(limit(-1), 100000000)
-        self.assertGreater(400000000, limit(16))
+            self.assertLessEqual(frames * (42 + 5), 3000)
+        for direct, budget in ((0, 2000), (1, 3000)):
+            for interval in (16, 33, 42, 83, 1000, 2147483647):
+                self.assertGreaterEqual(limit(interval, direct), 100000000)
+                self.assertLessEqual(limit(interval, direct), 350000000)
+                if limit(interval, direct) > 100000000:
+                    self.assertLessEqual(limit(interval, direct) // 5000000 *
+                                         (interval + 5), budget)
+            self.assertEqual(limit(0, direct), 100000000)
+            self.assertEqual(limit(-1, direct), 100000000)
+            self.assertGreater(400000000, limit(16, direct))
+        self.assertEqual(limit(42, 0), 210000000)  # AC3-recode policy unchanged
 
     def test_lookahead_retries_and_dropped_frames_do_not_spend_correction(self):
         self.frame(0, 1000)

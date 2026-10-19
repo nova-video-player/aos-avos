@@ -353,6 +353,7 @@ int stream_sync_anchor_adjust_sink( STREAM *s, int delta )
 #define STREAM_MODE2_DIRECT_STABLE_BAND_MS   100
 #define STREAM_MODE2_DIRECT_FRESH_MS          250
 #define STREAM_MODE2_DIRECT_GRACE_MS          750
+#define STREAM_MODE2_SEEK_QUALIFY_MS          750
 #define STREAM_MODE2_DIRECT_MAX_DELAY_MS     5000
 static int stream_mode2_dynamic_all = 1;
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
@@ -2002,12 +2003,15 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 					seed_cause = seek_restart ? "seek_frontier" : "restart_frontier";
 					// Initial compressed refills can be accepted much faster than
 					// they play. Keep the seek's published phase wall-clocked for
-					// one selected pipeline duration instead of advancing it by a
-					// batch of queued samples. Track-change recovery retains its
+					// one selected pipeline duration plus a bounded timestamp
+					// qualification interval. The static delay can understate ARC
+					// buffering: snapping to raw as soon as it expires manufactures
+					// progress before the observer has qualified presentation.
+					// Track-change recovery retains its
 					// existing frontier catch-up, as do unmeasurable routes once
 					// this bounded refill interval has elapsed.
 					s->mode2_seek_refill_until_ms = seek_restart ?
-						wall_now + MAX(0, heard_delay) : 0;
+						wall_now + MAX(0, heard_delay) + STREAM_MODE2_SEEK_QUALIFY_MS : 0;
 				} else if( delay_change && stream_sync_anchor_get_sink( s ) < 0 ) {
 					// Initial normalization replaces a provisional latency before an
 					// authoritative playback epoch exists. Adopt its physical phase;

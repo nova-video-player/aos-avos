@@ -221,14 +221,17 @@ static void speed_cadence_commit(speed_cadence_t *c, unsigned int generation,
 }
 
 // Keep the existing 100ms handoff tolerance, but allow a larger qualified
-// correction if the 5ms/frame recovery can repay it within about two seconds.
+// correction if the 5ms/frame recovery can repay it within about three seconds
+// for direct passthrough (two seconds for AC3 recoding). ARC qualification can
+// leave a 236ms residual at 24fps, just beyond the old two-second budget; a hard
+// reanchor would turn that small budget overrun into a quarter-second long frame.
 // Include the added frame time for a positive correction. Missing cadence keeps
 // the old limit; the 350ms cap still rejects a badly wrong provisional anchor.
-static INT64 mode2_clock_entry_limit_ns(int frame_ms)
+static INT64 mode2_clock_entry_limit_ns(int frame_ms, int direct_passthrough)
 {
 	if (frame_ms <= 0)
 		return 100000000LL;
-	INT64 frames = 2000LL / ((INT64)frame_ms + 5);
+	INT64 frames = (direct_passthrough ? 3000LL : 2000LL) / ((INT64)frame_ms + 5);
 	return MAX(100000000LL, MIN(350000000LL, frames * 5000000LL));
 }
 
@@ -1945,7 +1948,8 @@ static void *videosink_thread(void *ctx)
 					// eARC routes still need more than 100ms of renderer recovery.
 					// Bound that recovery by cadence instead of snapping deadlines
 					// for an otherwise recoverable phase difference.
-					smooth_entry = llabs(entry_delta_ns) <= mode2_clock_entry_limit_ns(f->duration);
+					smooth_entry = llabs(entry_delta_ns) <= mode2_clock_entry_limit_ns(
+						f->duration, !libavos_get_ac3_recoding_enabled());
 				}
 				int hard_reanchor = mode2_dynamic_active && !smooth_entry;
 				if( hard_reanchor ) {

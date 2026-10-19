@@ -63,10 +63,11 @@ estimator is introduced by this extraction.
   clock first completes any monotonic heard-time hold while the renderer remains
   on its provisional anchor. Once the dynamic phase is ready, an established
   audio-owned renderer anchor uses fast bounded recovery for corrections within
-  about two seconds of 5ms-per-frame repayment (including the added frame time).
+  about three seconds of 5ms-per-frame repayment for direct passthrough
+  (two seconds for AC3 recoding, including the added frame time).
   The tolerance is never below the original 100ms and is capped at 350ms;
-  unknown cadence retains 100ms. This covers the roughly 175ms eARC handoff
-  residual without a single long frame interval. Missing anchors, a pending
+  unknown cadence retains 100ms. This covers the roughly 175ms eARC and 236ms ARC
+  handoff residuals without a single long frame interval. Missing anchors, a pending
   seek reanchor, and corrections outside that budget retain explicit reanchoring.
   Recovery still has a temporary phase error; smoothing does not establish
   physical lipsync or remove the provisional clock's startup uncertainty.
@@ -78,7 +79,9 @@ estimator is introduced by this extraction.
   under the sink lock, using that publication's wall timestamp. Refill batches
   cannot race the renderer to select a later initial phase.
   The seek's provisional heard clock advances with elapsed time during a bounded
-  refill window (one selected pipeline duration). Accepted compressed batches
+  refill window (one selected pipeline duration plus 750ms for timestamp
+  qualification). The extra allowance covers routes whose actual pipeline delay
+  exceeds the static estimate; repeated writes do not renew it. Accepted compressed batches
   do not snap it forward during that window. The ordinary fallback frontier
   catch-up remains available afterward; track recreation keeps its existing
   immediate catch-up policy. This does not bypass timestamp qualification.

@@ -49,6 +49,7 @@ SESSION_KEEP="$SESSION_KEEP|PCM resume applies paused correction="
 SESSION_KEEP="$SESSION_KEEP|mode2_dynamic_clock(_enter|_ready|_fallback)?:|mode2_epoch_seed:|android_sync: mode2 "
 SESSION_KEEP="$SESSION_KEEP|SINK_REF_DEFERRED:"
 SESSION_KEEP="$SESSION_KEEP|at_speed_hw:"
+SESSION_KEEP="$SESSION_KEEP|mode2_seek_calibration:"
 
 fail()
 {

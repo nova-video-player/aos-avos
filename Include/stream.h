@@ -912,6 +912,23 @@ typedef struct STREAM {
 	int		mode2_heard_prevideo_phase_active;	// explicit pause/seek phase remains authoritative until video sync starts
 	STREAM_MODE2_FRONTIER_REASON mode2_heard_frontier_seed_pending; // preserved across sync resets
 	int64_t		mode2_seek_refill_until_ms;	// bounded seek refill: writes are not presentation progress
+	// Same-output seek-start calibration; owned by mode2_heard_mutex. The
+	// observation is per seek, while a qualified relative correction may survive
+	// another seek on this audio lifecycle. Never retain absolute media time.
+	struct {
+		int pending;
+		int valid;
+		int correction_ms;
+		int seed_ts;
+		int applied_ms;
+		int delay_ms;
+		int fixed_ms;
+		int format;
+		int rate;
+		unsigned int generation;
+		int64_t seed_wall_ms;
+		int64_t measured_wall_ms;
+	} mode2_seek_calibration;
 	STREAM_COMPRESSED_LEDGER compressed_ledger;	// complete compressed units submitted in this clock epoch
 	STREAM_PRESENTATION_OBSERVATION presentation_observation;	// validated Android presentation evidence
 	int64_t		mode2_shadow_last_log_ms;

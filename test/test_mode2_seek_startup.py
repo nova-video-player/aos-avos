@@ -32,8 +32,8 @@ class Mode2SeekStartupTest(unittest.TestCase):
         end = sync.index('s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_NONE;', start)
         end = sync.index(';', end) + 1
         consume = sync[start:end]
-        qualification = re.search(r'^#define STREAM_MODE2_SEEK_QUALIFY_MS\s+\d+',
-                                  sync, re.MULTILINE).group()
+        qualification = '\n'.join(re.findall(r'^#define STREAM_MODE2_SEEK_\w+\s+\d+',
+                                             sync, re.MULTILINE))
         run_c(r'''
 #define CONFIG_SFDEC
 #include "global.h"
@@ -41,10 +41,15 @@ class Mode2SeekStartupTest(unittest.TestCase):
 #include "stream_sync.h"
 #include <assert.h>
 #include <string.h>
+#include <limits.h>
+#include <stdio.h>
+#define DBG if(0)
+#define serprintf(...) printf(__VA_ARGS__)
+static int stream_dbg_delay;
 _Static_assert(STREAM_MODE2_FRONTIER_NONE == 0, "pending truth value");
 _Static_assert(STREAM_MODE2_FRONTIER_RECREATE == 1, "recreation reason");
 _Static_assert(STREAM_MODE2_FRONTIER_SEEK == 2, "seek reason");
-''' + qualification + '\n' + functions + r'''
+''' + qualification + '\n' + functions + '\n' + extract(sync, 'static int _stream_mode2_seek_seed_locked(') + r'''
 // Restart wrapper calls the shared reset; unrelated reset side effects are mocked.
 static int _stream_sync_restart_locked(STREAM *s, int reset_ledger, int preserve) {
     assert(reset_ledger && !preserve);
@@ -52,6 +57,13 @@ static int _stream_sync_restart_locked(STREAM *s, int reset_ledger, int preserve
     return 0;
 }
 ''' + extract(sync, 'int stream_sync_restart_with_mode2_frontier(') + r'''
+int stream_sync_anchor_get_sink(STREAM *s) { (void)s; return 1000; }
+void stream_sync_anchor_reset(STREAM *s) { (void)s; }
+void sfdec2_refresh_sched_anchor(STREAM *s) { (void)s; }
+int stream_sync_restart(STREAM *s) { return _stream_sync_restart_locked(s,1,0); }
+static int flushes;
+static int flush_output(STREAM *s) { (void)s; flushes++; return 0; }
+''' + extract(source('stream_audio.c'), 'static void _stream_abort_incomplete_compressed_unit(') + r'''
 static int consume(STREAM *s) {
     int first_start=1, delay_change=0, raw_heard_ts=1000, reset_interp=0;
     int heard_delay=200, fixed_latency=40, seed=0;
@@ -90,8 +102,131 @@ int main(void) {
     }
     assert(!stream_sync_restart_with_mode2_frontier(&s));
     assert(stream_sync_mode2_heard_frontier_pending(&s)==STREAM_MODE2_FRONTIER_RECREATE);
+    // Real ordering: _seek_pause marks ownership before stopping the writer.
+    // Aborting its partial AU restarts sync, then the normal seek clears/arms it.
+    s.audio_time=2000;
+    STREAM_SINK_AUDIO sink={.flush=flush_output};
+    s.audio_sink=&sink;
+    s.mode2_seek_calibration.valid=1;
+    s.mode2_seek_calibration.correction_ms=200;
+    s.mode2_seek_calibration.delay_ms=609;
+    s.mode2_seek_calibration.fixed_ms=199;
+    s.seek_paused=1;
+    _stream_abort_incomplete_compressed_unit(&s,1024,2560,2,0);
+    assert(flushes==1);
+    stream_sync_mode2_heard_reset(&s,1);
+    stream_sync_mode2_heard_frontier_arm(&s,STREAM_MODE2_FRONTIER_SEEK);
+    assert(s.mode2_seek_calibration.valid);
+    s.audio=&s.av.audio[0]; s.audio->valid=1;
+    assert(_stream_mode2_seek_seed_locked(&s,10000,609,199,2000)==9800);
+    // The same abort during ordinary playback must invalidate the calibration.
+    s.mode2_seek_calibration.valid=1;
+    s.seek_paused=0;
+    _stream_abort_incomplete_compressed_unit(&s,1024,2560,2,0);
+    assert(!s.mode2_seek_calibration.valid);
     pthread_mutex_destroy(&s.anchor_mutex);
     pthread_mutex_destroy(&s.mode2_heard_mutex);
+    return 0;
+}
+''')
+
+        seek_pause = extract(source('stream_video.c'), 'static int _seek_pause(')
+        self.assertLess(seek_pause.index('s->seek_paused     = 1;'),
+                        seek_pause.index('thread_state_set( &s->audio_tstate'))
+
+    def test_seek_calibration_is_relative_and_output_scoped(self):
+        sync = source('stream_sync.c')
+        constants = '\n'.join(re.findall(r'^#define STREAM_MODE2_SEEK_\w+\s+\d+',
+                                         sync, re.MULTILINE))
+        helpers = '\n'.join(extract(sync, marker) for marker in (
+            'static int _stream_mode2_seek_seed_locked(',
+            'static void _stream_mode2_seek_calibrate_locked(',
+            'static void _stream_sync_mode2_heard_reset_locked('))
+        run_c(r'''
+#define CONFIG_SFDEC
+#include "global.h"
+#include "stream.h"
+#include <assert.h>
+#include <limits.h>
+#include <string.h>
+#define DBG if(0)
+#define serprintf(...) ((void)0)
+static int stream_dbg_delay;
+''' + constants + '\n' + helpers + r'''
+static void init(STREAM *s) {
+    memset(s,0,sizeof(*s));
+    s->audio=&s->av.audio[0];
+    s->audio->valid=1;
+    s->audio->format=0x4747;
+    s->audio->samplesPerSec=48000;
+    s->audio_lifecycle_generation=7;
+}
+static int seed(STREAM *s,int64_t wall) {
+    s->mode2_seek_refill_until_ms=wall+1359;
+    s->mode2_heard_interp_delay_ms=609;
+    return _stream_mode2_seek_seed_locked(s,10000,609,199,wall);
+}
+static void qualify(STREAM *s,int applied,int correction,int64_t wall) {
+    _stream_mode2_seek_calibrate_locked(s,wall+965,10965-applied,10965-correction);
+}
+int main(void) {
+    STREAM s;
+    init(&s);
+    assert(seed(&s,1000)==10000); // No previous qualified seek.
+    qualify(&s,0,188,1000); // First Bravia capture, 188ms below the seed.
+    assert(s.mode2_seek_calibration.valid);
+    assert(s.mode2_seek_calibration.correction_ms==188);
+    // Seek resets discard absolute timestamps/observation, keep relative evidence.
+    s.seek_paused=1;
+    _stream_sync_mode2_heard_reset_locked(&s,1,1);
+    assert(!s.mode2_seek_calibration.pending && s.mode2_seek_calibration.valid);
+    assert(seed(&s,201000)==9812);
+    qualify(&s,188,230,201000); // Next seek differs by 42ms, not another 230ms.
+    assert(s.mode2_seek_calibration.correction_ms==230);
+    for(int i=0;i<10;i++) {
+        int64_t now=203000+i*2000;
+        assert(seed(&s,now)==9770);
+        qualify(&s,230,230,now);
+        assert(s.mode2_seek_calibration.correction_ms==230);
+    }
+    STREAM good=s;
+    // All reuse keys must match; no calibration leaks to a different output.
+    for(int fault=0;fault<8;fault++) {
+        s=good;
+        if(fault==0) s.audio_lifecycle_generation++;
+        if(fault==1) s.audio->format++;
+        if(fault==2) s.audio->samplesPerSec=44100;
+        if(fault==3) s.av_delay=20;
+        if(fault==4) stream_dbg_delay=20;
+        int delay=fault==5?610:609, fixed=fault==6?200:199;
+        int64_t now=fault==7?600000:230000;
+        assert(_stream_mode2_seek_seed_locked(&s,10000,delay,fixed,now)==10000);
+        s.audio->format=0x4747; s.audio->samplesPerSec=48000;
+        stream_dbg_delay=0;
+    }
+    // Do not learn from paused, clamped, stale, underrun or implausible samples.
+    for(int fault=0;fault<11;fault++) {
+        init(&s); seed(&s,1000);
+        if(fault==0) s.paused=1;
+        if(fault==1) s.paused_internal=1;
+        if(fault==2) s.av_delay=20;
+        if(fault==3) s.audio_lifecycle_generation++;
+        if(fault==4) s.presentation_observation.underrun_count=1;
+        if(fault==5) s.audio->samplesPerSec=44100;
+        if(fault==6) s.audio->format++;
+        if(fault==10) s.mode2_heard_interp_delay_ms=700;
+        int64_t now=fault==7?2360:1965;
+        int heard=fault==8?10900:10965; // Starvation/clamping broke wall pacing.
+        int measured=fault==9?10465:10765; // 500ms is outside the safety cap.
+        _stream_mode2_seek_calibrate_locked(&s,now,heard,measured);
+        assert(!s.mode2_seek_calibration.valid && !s.mode2_seek_calibration.pending);
+    }
+    init(&s); seed(&s,1000); qualify(&s,0,-100,1000);
+    assert(s.mode2_seek_calibration.valid);
+    assert(seed(&s,3000)==10100); // Earlier presentation is handled symmetrically.
+    s.seek_paused=0;
+    _stream_sync_mode2_heard_reset_locked(&s,1,1);
+    assert(!s.mode2_seek_calibration.valid); // Non-seek flush invalidates reuse.
     return 0;
 }
 ''')

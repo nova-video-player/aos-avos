@@ -354,6 +354,8 @@ int stream_sync_anchor_adjust_sink( STREAM *s, int delta )
 #define STREAM_MODE2_DIRECT_FRESH_MS          250
 #define STREAM_MODE2_DIRECT_GRACE_MS          750
 #define STREAM_MODE2_SEEK_QUALIFY_MS          750
+#define STREAM_MODE2_SEEK_CALIBRATION_MAX_MS 350
+#define STREAM_MODE2_SEEK_CALIBRATION_AGE_MS 300000
 #define STREAM_MODE2_DIRECT_MAX_DELAY_MS     5000
 static int stream_mode2_dynamic_all = 1;
 #define STREAM_PCM_DELAY_DRIFT_CORRECT_MS    60
@@ -776,6 +778,7 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_heard_interp_last_log_ms = 0;
 	s->mode2_heard_prevideo_phase_active = 0;
 	s->mode2_seek_refill_until_ms = 0;
+	s->mode2_seek_calibration.pending = 0;
 	s->mode2_dynamic_clock_active = 0;
 	s->mode2_dynamic_clock_ready = 0;
 	s->mode2_dynamic_clock_ts = STREAM_NO_PTS_VALUE;
@@ -785,6 +788,8 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_dynamic_clock_last_log_ms = 0;
 	if( clear_frontier ) {
 		s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_NONE;
+		if( !s->seek_paused )
+			s->mode2_seek_calibration.valid = 0;
 	}
 }
 
@@ -806,6 +811,8 @@ void stream_sync_mode2_heard_frontier_arm( STREAM *s, STREAM_MODE2_FRONTIER_REAS
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	// Preserve the reason across the several sync resets inside a seek.
 	s->mode2_heard_frontier_seed_pending = reason;
+	if( reason != STREAM_MODE2_FRONTIER_SEEK )
+		s->mode2_seek_calibration.valid = 0;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 }
 
@@ -1180,6 +1187,10 @@ int stream_sync_restart_with_mode2_frontier( STREAM *s )
 	pthread_mutex_lock( &s->mode2_heard_mutex );
 	ret = _stream_sync_restart_locked( s, 1, 0 );
 	s->mode2_heard_frontier_seed_pending = STREAM_MODE2_FRONTIER_RECREATE;
+	// Seeking first interrupts the writer, which must flush any accepted prefix
+	// before the seek's own flush/SEEK arm. This is still the same output route.
+	if( !s->seek_paused )
+		s->mode2_seek_calibration.valid = 0;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	pthread_mutex_unlock( &s->anchor_mutex );
 	return ret;
@@ -1621,6 +1632,78 @@ int stream_atempo_presentation(STREAM *s, UINT64 *playhead, int *rate,
 	return 1;
 }
 
+// Caller holds mode2_heard_mutex. Learn only the relative error of an empty
+// post-seek seed against qualified presentation, not full-queue occupancy.
+// A seek clears its sampling epoch but may reuse the correction on the same
+// output. Reconfiguration, changed geometry/delay, or old evidence rejects it.
+static int _stream_mode2_seek_seed_locked(STREAM *s, int seed, int delay,
+	int fixed, int64_t wall_now)
+{
+	int usable = s->audio && s->audio->valid && !s->av_delay && !stream_dbg_delay;
+	int matches = usable && s->mode2_seek_calibration.valid &&
+		s->mode2_seek_calibration.generation == s->audio_lifecycle_generation &&
+		s->mode2_seek_calibration.format == s->audio->format &&
+		s->mode2_seek_calibration.rate == s->audio->samplesPerSec &&
+		s->mode2_seek_calibration.delay_ms == delay &&
+		s->mode2_seek_calibration.fixed_ms == fixed &&
+		wall_now >= s->mode2_seek_calibration.measured_wall_ms &&
+		wall_now - s->mode2_seek_calibration.measured_wall_ms <= STREAM_MODE2_SEEK_CALIBRATION_AGE_MS;
+	int correction = matches ? s->mode2_seek_calibration.correction_ms : 0;
+	if( fixed + correction < 0 || fixed + correction > delay ) {
+		matches = 0;
+		correction = 0;
+	}
+	s->mode2_seek_calibration.valid = matches;
+	s->mode2_seek_calibration.pending = usable;
+	s->mode2_seek_calibration.seed_ts = seed;
+	s->mode2_seek_calibration.applied_ms = correction;
+	s->mode2_seek_calibration.seed_wall_ms = wall_now;
+	s->mode2_seek_calibration.generation = s->audio_lifecycle_generation;
+	s->mode2_seek_calibration.format = usable ? s->audio->format : 0;
+	s->mode2_seek_calibration.rate = usable ? s->audio->samplesPerSec : 0;
+	s->mode2_seek_calibration.delay_ms = delay;
+	s->mode2_seek_calibration.fixed_ms = fixed;
+	DBG serprintf("mode2_seek_calibration: seed correction=%d reused=%d generation=%u\n",
+		correction, matches, s->audio_lifecycle_generation);
+	return (int)MAX(INT_MIN + 1LL, MIN(INT_MAX, (int64_t)seed - correction));
+}
+
+static void _stream_mode2_seek_calibrate_locked(STREAM *s, int64_t wall_now,
+	int static_heard_ts, int measured_heard_ts)
+{
+	if( !s->mode2_seek_calibration.pending )
+		return;
+	s->mode2_seek_calibration.pending = 0;
+	int64_t elapsed = wall_now - s->mode2_seek_calibration.seed_wall_ms;
+	int64_t nominal = (int64_t)s->mode2_seek_calibration.seed_ts + elapsed;
+	int64_t correction = nominal - measured_heard_ts;
+	int fixed = s->mode2_seek_calibration.fixed_ms;
+	// Only an uninterrupted wall-paced refill measures the original seed.
+	// Starvation/clamping, pauses, stale evidence and manual offsets cannot
+	// establish a reusable output correction. The caller has qualified the
+	// timestamp's epoch, progress, rate, freshness and occupancy stability.
+	if( s->paused || s->paused_internal || s->av_delay || stream_dbg_delay ||
+		!s->audio || !s->audio->valid ||
+		s->mode2_seek_calibration.generation != s->audio_lifecycle_generation ||
+		s->mode2_seek_calibration.format != s->audio->format ||
+		s->mode2_seek_calibration.rate != s->audio->samplesPerSec ||
+		s->mode2_seek_calibration.delay_ms != s->mode2_heard_interp_delay_ms ||
+		elapsed < 0 || wall_now >= s->mode2_seek_refill_until_ms ||
+		s->presentation_observation.underrun_count != 0 ||
+		llabs(nominal - s->mode2_seek_calibration.applied_ms - static_heard_ts) > 2 ||
+		llabs(correction) > STREAM_MODE2_SEEK_CALIBRATION_MAX_MS ||
+		fixed + correction < 0 || fixed + correction > s->mode2_seek_calibration.delay_ms ) {
+		s->mode2_seek_calibration.valid = 0;
+		return;
+	}
+	s->mode2_seek_calibration.correction_ms = (int)correction;
+	s->mode2_seek_calibration.measured_wall_ms = wall_now;
+	s->mode2_seek_calibration.valid = 1;
+	DBG serprintf("mode2_seek_calibration: qualified correction=%d applied=%d elapsed=%lld generation=%u\n",
+		(int)correction, s->mode2_seek_calibration.applied_ms,
+		(long long)elapsed, s->audio_lifecycle_generation);
+}
+
 // Caller holds mode2_heard_mutex. The static clock remains live as fallback;
 // trusted AudioTimestamp evidence replaces it only after proving a stable
 // submitted-minus-presented frontier. For AC3 recode, that frontier already
@@ -1652,6 +1735,10 @@ static int _stream_apply_mode2_dynamic_clock_locked( STREAM *s, int64_t wall_now
 	int dynamic_delay = -1;
 
 	if( direct_valid && !s->mode2_dynamic_clock_active ) {
+		if( !ac3_recoding )
+			_stream_mode2_seek_calibrate_locked(s, wall_now, static_heard_ts,
+				(int)MIN(INT_MAX, observation->direct_heard_ts +
+					(wall_now - observation->direct_heard_wall_ms)));
 		s->mode2_dynamic_clock_active = 1;
 		s->mode2_dynamic_clock_ready = 0;
 		s->mode2_dynamic_clock_ts = static_heard_ts;
@@ -2000,6 +2087,8 @@ static int _stream_get_heard_audio_ts_internal( STREAM *s, int fallback_ts,
 				const char *seed_cause;
 				if( frontier_restart ) {
 					seed = raw_heard_ts + heard_delay - fixed_latency;
+					if( seek_restart )
+						seed = _stream_mode2_seek_seed_locked(s, seed, heard_delay, fixed_latency, wall_now);
 					seed_cause = seek_restart ? "seek_frontier" : "restart_frontier";
 					// Initial compressed refills can be accepted much faster than
 					// they play. Keep the seek's published phase wall-clocked for

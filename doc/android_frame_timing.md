@@ -85,6 +85,21 @@ estimator is introduced by this extraction.
   do not snap it forward during that window. The ordinary fallback frontier
   catch-up remains available afterward; track recreation keeps its existing
   immediate catch-up policy. This does not bypass timestamp qualification.
+  A qualified timestamp arriving during an uninterrupted seek refill can measure
+  the empty-track seed's error. Direct Mode 2 retains that relative correction
+  for later seeks on the same audio lifecycle, codec, rate and selected/fixed
+  delay, for at most five minutes. The correction is bounded to 350ms and cannot
+  make the seed's effective fixed delay negative or greater than the selected
+  pipeline delay. Each measurement uses the uncorrected seed, so repeated seeks
+  do not add the correction again. Pauses cancel an in-progress measurement;
+  non-seek flushes and recreation invalidate reuse. The seek-owned flush of an
+  interrupted compressed unit preserves it, even before the final SEEK arm.
+  Manual/debug offsets,
+  underruns, clamped or expired refill clocks cannot establish a calibration.
+  The first uncalibrated seek still uses the existing smooth recovery, and new
+  timestamp evidence remains authoritative if the next startup differs.
+  `mode2_seek_calibration` records distinguish a reused seed from a new measurement;
+  this estimates Android-visible startup phase, not external AVR latency.
   The AudioTrack presentation observer retains separate counter origins for
   timestamps and playhead readings within each output generation. A counter
   reset retires the old flush offset for that generation; reaching that old

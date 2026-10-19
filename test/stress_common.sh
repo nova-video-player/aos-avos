@@ -43,6 +43,7 @@ PY
 	LOGCAT_KEEP="$LOGCAT_KEEP|SINK_REF_DEFERRED:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|at_speed_hw:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|pcm_present_observer:"
+	LOGCAT_KEEP="$LOGCAT_KEEP|mode2_seek_calibration:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|android_sync anchor_diag|android_sync: (init render_offset|PCM startup correction)|pcm_startup_correction:|at_ledger:|startup_anchor_commit|audio_start_commit|heard_ts_diag:"
 	LOGCAT_ADB_PID=''
 	LOGCAT_PIPE=''

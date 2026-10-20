@@ -251,7 +251,11 @@ void libavos_set_output_sample_rate(int sample_rate)
 
 int libavos_get_ac3_recoding_enabled(void)
 {
-	return ac3_recoding_enabled;
+	// Report the active pipeline, not just the configured preference. PCM
+	// recovery clears the SPDIF mode before reopening the decoder/filter/sink;
+	// recoding must stay off throughout that recovery and subsequent playback.
+	// Keep the preference intact: the next open reapplies libavos_set_passthrough.
+	return ac3_recoding_enabled && spdif_is_passthrough_on();
 }
 
 void libavos_set_ac3_recode_target_stereo(int stereo)

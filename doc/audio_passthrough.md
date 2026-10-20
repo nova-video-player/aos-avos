@@ -166,6 +166,15 @@ their existing fallback behavior; IEC carrier geometry is unchanged.
 
 ### AC3 recoding (Mode 3)
 
+The configured recoding preference is distinct from the active pipeline.
+`libavos_get_ac3_recoding_enabled()` requires both that preference and a
+nonzero global SPDIF output mode. When `stream_restart_audio_as_pcm()` clears
+the output mode, decoder channel selection, filter creation, sink format and
+runtime timing all stop using recoding. The fallback therefore opens actual
+PCM rather than recreating the rejected AC3 output. The preference remains
+intact, and Java reapplies it before opening the next playback. This does not
+add a Mode 1-to-Mode 2 retry or change mid-frame failure handling.
+
 `stream_audio_setup_ac3_sink()`:
 
 - If IEC supported: use mode 1

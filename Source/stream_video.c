@@ -1080,6 +1080,8 @@ static int stream_restart_audio_as_pcm( STREAM *s, const char *reason )
 		reason ? reason : "sink failure");
 	stream_close_audio_filter( s );
 	stream_close_audio_dec( s );
+	// Also makes libavos_get_ac3_recoding_enabled() false, so decoder channel
+	// selection, filter creation and sink setup all follow the PCM path.
 	spdif_set_passthrough( 0 );
 	s->audio_sink->set_passthrough( s, 0 );
 	if( s->audio->sourceSamples > 0 ) {

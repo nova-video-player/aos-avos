@@ -373,6 +373,11 @@ typedef struct priv {
 	int64_t hold_audio_until_ms;	// monotonic passthrough startup deadline
 	int64_t hold_audio_start_ms;	// monotonic start of passthrough startup hold
 	int hold_audio_applied_ms;	// ms held during passthrough startup
+	int mode2_seek_start_epoch;	// qualification is attempted once per real seek
+	unsigned int mode2_seek_audio_generation;
+	int64_t mode2_seek_wait_start_ms;
+	int64_t mode2_seek_wait_until_ms;
+	int mode2_seek_preroll;	// discard frames overtaken during qualification
 } priv_t;
 
 // Bounded renderer-offset arithmetic. The caller owns mode selection, target
@@ -1822,6 +1827,71 @@ static int videosink_frame_current_l(priv_t *p, STREAM *s, VIDEO_FRAME *f,
 		(!s || f->epoch == s->seek_epoch);
 }
 
+// Called before scheduling any post-seek frame. 1 requests a timed retry,
+// 2 discards obsolete preroll through the normal buffer-release path.
+static int mode2_seek_startup_l(priv_t *p, STREAM *s, VIDEO_FRAME *f,
+	int passthrough, INT64 now_ns)
+{
+	if( !s || s->seek_epoch <= 1 || s->seek_paused || s->play_n_video_frames > 0 )
+		return 0;
+	int64_t now_ms = now_ns / NSEC_PER_MSEC;
+	if( p->mode2_seek_start_epoch != s->seek_epoch ) {
+		p->mode2_seek_start_epoch = s->seek_epoch;
+		p->mode2_seek_audio_generation = s->audio_lifecycle_generation;
+		p->mode2_seek_wait_start_ms = now_ms;
+		p->mode2_seek_wait_until_ms = now_ms + 1500;
+		p->mode2_seek_preroll = 0;
+	}
+	if( passthrough != 2 || libavos_get_ac3_recoding_enabled() ||
+		s->paused || s->paused_internal || s->av_delay ||
+		p->mode2_seek_audio_generation != s->audio_lifecycle_generation ) {
+		p->mode2_seek_wait_until_ms = 0;
+		p->mode2_seek_preroll = 0;
+		return 0;
+	}
+	if( p->mode2_seek_wait_until_ms ) {
+		STREAM_MODE2_SEEK_STARTUP state = stream_sync_mode2_seek_startup(s, now_ms);
+		if( state == STREAM_MODE2_SEEK_WAIT && now_ms < p->mode2_seek_wait_until_ms )
+			return 1;
+		p->mode2_seek_wait_until_ms = 0;
+		if( state == STREAM_MODE2_SEEK_READY ) {
+			INT64 heard = _get_render_heard_ts(p, s, 0, NULL, NULL);
+			if( heard >= 0 ) {
+				// No post-seek frame has been submitted yet: adopt the measured
+				// phase once, without slewing from the provisional published seed.
+				p->render_offset_ns = now_ns - heard * NSEC_PER_MSEC;
+				p->render_offset_from_audio = 1;
+				p->target_offset_ns = p->render_offset_ns;
+				p->slew_active = 0;
+				p->pending_reanchor = 0;
+				p->pending_seek_reanchor = 0;
+				p->last_mode2_dynamic_active = 1;
+				p->mode2_dynamic_slew = 1;
+				p->mode2_dynamic_fast_slew = 0;
+				p->mode2_dynamic_settle_frames = 0;
+				p->mode2_slew_frame_handle = NULL;
+				p->mode2_slew_frame_time = INT_MIN;
+				p->mode2_slew_frame_epoch = INT_MIN;
+				p->snap_origin_epoch = INT_MIN;
+				p->mode2_seek_preroll = 1;
+			}
+		}
+		DBGSI serprintf_record("android_sync: mode2 seek qualification epoch=%d state=%d waited_ms=%lld anchored=%d\n",
+			s->seek_epoch, state, (long long)(now_ms - p->mode2_seek_wait_start_ms),
+			p->mode2_seek_preroll);
+	}
+	if( p->mode2_seek_preroll ) {
+		INT64 heard = _get_render_heard_ts(p, s, 0, NULL, NULL);
+		if( heard >= 0 && (INT64)f->time + MAX(1, f->duration) < heard ) {
+			DBGSI serprintf("android_sync: mode2 seek preroll frame=%d heard=%lld epoch=%d\n",
+				f->time, (long long)heard, s->seek_epoch);
+			return 2;
+		}
+		p->mode2_seek_preroll = 0;
+	}
+	return 0;
+}
+
 static void *videosink_thread(void *ctx)
 {
 	priv_t *p = (priv_t*) ctx;
@@ -1931,6 +2001,22 @@ static void *videosink_thread(void *ctx)
 			}
 			if (passthrough && p->speed_cadence.enabled)
 				speed_cadence_reset(&p->speed_cadence);
+			int seek_startup = mode2_seek_startup_l(p, s, f, passthrough, now_ns);
+			if( seek_startup == 1 ) {
+				struct timespec retry;
+				clock_gettime(CLOCK_MONOTONIC, &retry);
+				timespec_add_ms(&retry, 10);
+				stream_audio_read_release(s);
+				audio_lease = 0;
+				pthread_cond_timedwait(&p->locked.cond, &p->locked.mtx, &retry);
+				goto retry_frame;
+			}
+			if( seek_startup == 2 ) {
+				f = frame_q_get(&p->locked.venc_q);
+				consumed = 1;
+				stale_epoch_drop = 1;
+				break;
+			}
 			int mode2_dynamic_active = passthrough == 2 ?
 				stream_sync_mode2_dynamic_active( s ) : 0;
 			int mode2_dynamic_changed = mode2_dynamic_active !=

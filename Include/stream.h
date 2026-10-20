@@ -918,6 +918,8 @@ typedef struct STREAM {
 	struct {
 		int pending;
 		int valid;
+		int seek_epoch;
+		int reused;
 		int correction_ms;
 		int seed_ts;
 		int applied_ms;

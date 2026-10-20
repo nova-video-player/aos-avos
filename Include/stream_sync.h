@@ -36,6 +36,12 @@ void stream_sync_compressed_unit_commit( STREAM *s, int encoded_bytes,
 	int logical_samples, int logical_sample_rate, int codec, int framing );
 void stream_sync_compressed_shadow_observe( STREAM *s );
 int  stream_sync_mode2_dynamic_active( STREAM *s );
+typedef enum {
+	STREAM_MODE2_SEEK_FALLBACK,
+	STREAM_MODE2_SEEK_WAIT,
+	STREAM_MODE2_SEEK_READY
+} STREAM_MODE2_SEEK_STARTUP;
+STREAM_MODE2_SEEK_STARTUP stream_sync_mode2_seek_startup( STREAM *s, int64_t now_ms );
 int  stream_sync_av_delay( STREAM *s );
 int  stream_get_atempo_delay( STREAM *s );
 void stream_sync_pcm_reanchor_arm( STREAM *s, int passthrough_active );

@@ -779,6 +779,7 @@ static void _stream_sync_mode2_heard_reset_locked( STREAM *s, int clear_frontier
 	s->mode2_heard_prevideo_phase_active = 0;
 	s->mode2_seek_refill_until_ms = 0;
 	s->mode2_seek_calibration.pending = 0;
+	s->mode2_seek_calibration.seek_epoch = 0;
 	s->mode2_dynamic_clock_active = 0;
 	s->mode2_dynamic_clock_ready = 0;
 	s->mode2_dynamic_clock_ts = STREAM_NO_PTS_VALUE;
@@ -1140,6 +1141,46 @@ int stream_sync_mode2_dynamic_active( STREAM *s )
 	active = s->mode2_dynamic_clock_active && s->mode2_dynamic_clock_ready;
 	pthread_mutex_unlock( &s->mode2_heard_mutex );
 	return active;
+}
+
+// Read-only renderer query. Never query JNI or publish an anchor under this
+// lock: the renderer already holds its private mutex. Its wait is separately
+// bounded and releases both that mutex and the audio lifecycle lease.
+STREAM_MODE2_SEEK_STARTUP stream_sync_mode2_seek_startup( STREAM *s, int64_t now_ms )
+{
+	STREAM_MODE2_SEEK_STARTUP result = STREAM_MODE2_SEEK_FALLBACK;
+	if( !s || s->seek_epoch <= 1 || s->paused || s->paused_internal ||
+		s->seek_paused || s->play_n_video_frames > 0 || s->av_delay || stream_dbg_delay ||
+		!s->audio || !s->audio->valid )
+		return result;
+	if( !stream_mode2_dynamic_all &&
+		!(s->audio->format == WAVE_FORMAT_AC3 && s->audio->samplesPerSec == 44100) )
+		return result;
+	pthread_mutex_lock(&s->mode2_heard_mutex);
+	if( s->mode2_heard_frontier_seed_pending == STREAM_MODE2_FRONTIER_SEEK ) {
+		result = STREAM_MODE2_SEEK_WAIT;
+	} else if( s->mode2_seek_calibration.seek_epoch == s->seek_epoch &&
+		!s->mode2_seek_calibration.reused &&
+		s->mode2_seek_calibration.generation == s->audio_lifecycle_generation &&
+		s->mode2_seek_calibration.format == s->audio->format &&
+		s->mode2_seek_calibration.rate == s->audio->samplesPerSec &&
+		s->mode2_seek_calibration.delay_ms == s->mode2_heard_interp_delay_ms &&
+		(s->mode2_seek_calibration.pending || s->mode2_seek_calibration.valid) ) {
+		result = STREAM_MODE2_SEEK_WAIT;
+		if( s->mode2_dynamic_clock_active && s->mode2_dynamic_clock_ready &&
+			s->presentation_observation.epoch == s->mode2_heard_epoch &&
+			s->presentation_observation.direct_trusted &&
+			s->presentation_observation.underrun_count == 0 &&
+			now_ms >= s->presentation_observation.direct_heard_wall_ms &&
+			now_ms - s->presentation_observation.direct_heard_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
+			now_ms >= s->presentation_observation.observed_wall_ms &&
+			now_ms - s->presentation_observation.observed_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS &&
+			now_ms >= s->presentation_observation.last_advance_wall_ms &&
+			now_ms - s->presentation_observation.last_advance_wall_ms <= STREAM_MODE2_DIRECT_FRESH_MS )
+			result = STREAM_MODE2_SEEK_READY;
+	}
+	pthread_mutex_unlock(&s->mode2_heard_mutex);
+	return result;
 }
 
 // Caller owns anchor_mutex followed by mode2_heard_mutex so the renderer anchor
@@ -1655,6 +1696,8 @@ static int _stream_mode2_seek_seed_locked(STREAM *s, int seed, int delay,
 	}
 	s->mode2_seek_calibration.valid = matches;
 	s->mode2_seek_calibration.pending = usable;
+	s->mode2_seek_calibration.seek_epoch = s->seek_epoch;
+	s->mode2_seek_calibration.reused = matches;
 	s->mode2_seek_calibration.seed_ts = seed;
 	s->mode2_seek_calibration.applied_ms = correction;
 	s->mode2_seek_calibration.seed_wall_ms = wall_now;

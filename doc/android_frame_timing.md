@@ -96,8 +96,18 @@ estimator is introduced by this extraction.
   interrupted compressed unit preserves it, even before the final SEEK arm.
   Manual/debug offsets,
   underruns, clamped or expired refill clocks cannot establish a calibration.
-  The first uncalibrated seek still uses the existing smooth recovery, and new
-  timestamp evidence remains authoritative if the next startup differs.
+  Before submitting post-seek video on an uncalibrated direct Mode 2 seek,
+  sfdec2 waits at most 1500ms for qualified presentation and completion of the
+  heard clock's monotonic catch-up. It then adopts that phase once and discards
+  queued preroll already overtaken by audio. Each wait releases the renderer
+  mutex and audio lifecycle lease, and rechecks the queue/epoch on wakeup.
+  The seek preview is never held; a reused calibration bypasses qualification.
+  Pause, audio replacement or invalid calibration cancels the wait. Timeout
+  retains the existing fallback and cannot rearm within the same seek.
+  PCM, Mode 1, AC3 recoding and ordinary pause/resume keep their existing paths.
+  This trades first-seek latency for avoiding a visible provisional-clock slew;
+  it does not promise completion within the harness's default 1000ms startup
+  budget. New timestamp evidence remains authoritative if startup differs.
   `mode2_seek_calibration` records distinguish a reused seed from a new measurement;
   this estimates Android-visible startup phase, not external AVR latency.
   The AudioTrack presentation observer retains separate counter origins for

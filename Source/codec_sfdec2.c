@@ -378,7 +378,47 @@ typedef struct priv {
 	int64_t mode2_seek_wait_start_ms;
 	int64_t mode2_seek_wait_until_ms;
 	int mode2_seek_preroll;	// discard frames overtaken during qualification
+	int mode2_cold_entry_seen;	// never rearmed by seek, resume or clock loss
+	int mode2_cold_entry_epoch;
+	unsigned int mode2_cold_entry_audio_generation;
+	int64_t mode2_cold_entry_until_ms;
 } priv_t;
+
+// Only the first ordinary playback window may repay a larger provisional-clock
+// error. Preview frames do not consume it. The caller owns the renderer mutex;
+// lifecycle hooks cancel it even when no frames are processed during a pause.
+static int mode2_cold_entry_l(priv_t *p, STREAM *s, int passthrough, INT64 now_ns)
+{
+	if( !s || s->seek_paused || s->play_n_video_frames > 0 )
+		return 0;
+	int64_t now_ms = now_ns / NSEC_PER_MSEC;
+	if( !p->mode2_cold_entry_seen ) {
+		p->mode2_cold_entry_seen = 1;
+		p->mode2_cold_entry_epoch = s->seek_epoch;
+		p->mode2_cold_entry_audio_generation = s->audio_lifecycle_generation;
+		p->mode2_cold_entry_until_ms = now_ms + 5000;
+	}
+	if( passthrough != 2 || libavos_get_ac3_recoding_enabled() ||
+		!s->audio || !s->audio->valid || s->av_delay ||
+		s->paused || s->paused_internal || p->pause_armed ||
+		p->mode2_cold_entry_epoch != s->seek_epoch ||
+		p->mode2_cold_entry_audio_generation != s->audio_lifecycle_generation ||
+		now_ms >= p->mode2_cold_entry_until_ms )
+		p->mode2_cold_entry_until_ms = 0;
+	return p->mode2_cold_entry_until_ms != 0;
+}
+
+static INT64 mode2_cold_entry_limit_ns(int frame_ms)
+{
+	if( frame_ms <= 0 )
+		return 100000000LL;
+	// Keep 5ms/frame, but allow four seconds for this first cold handoff,
+	// including added frame time. The observed 428ms residual at 30fps needs
+	// about 3.3 seconds; the ordinary three-second limit would snap instead.
+	// Later transitions and recoding retain mode2_clock_entry_limit_ns().
+	INT64 frames = 4000LL / ((INT64)frame_ms + 5);
+	return MAX(100000000LL, MIN(750000000LL, frames * 5000000LL));
+}
 
 // Bounded renderer-offset arithmetic. The caller owns mode selection, target
 // qualification, frame identity and lifecycle state; completion only means that
@@ -2001,6 +2041,7 @@ static void *videosink_thread(void *ctx)
 			}
 			if (passthrough && p->speed_cadence.enabled)
 				speed_cadence_reset(&p->speed_cadence);
+			int mode2_cold_entry = mode2_cold_entry_l(p, s, passthrough, now_ns);
 			int seek_startup = mode2_seek_startup_l(p, s, f, passthrough, now_ns);
 			if( seek_startup == 1 ) {
 				struct timespec retry;
@@ -2023,6 +2064,8 @@ static void *videosink_thread(void *ctx)
 				p->last_mode2_dynamic_active;
 			if( mode2_dynamic_changed ) {
 				p->last_mode2_dynamic_active = mode2_dynamic_active;
+				// Consume even on failure: later evidence/re-entry is not startup.
+				p->mode2_cold_entry_until_ms = 0;
 				int smooth_entry = 0;
 				INT64 entry_delta_ns = 0;
 				if( mode2_dynamic_active && have_audio_time &&
@@ -2034,8 +2077,11 @@ static void *videosink_thread(void *ctx)
 					// eARC routes still need more than 100ms of renderer recovery.
 					// Bound that recovery by cadence instead of snapping deadlines
 					// for an otherwise recoverable phase difference.
-					smooth_entry = llabs(entry_delta_ns) <= mode2_clock_entry_limit_ns(
-						f->duration, !libavos_get_ac3_recoding_enabled());
+					INT64 entry_limit_ns = mode2_cold_entry ?
+						mode2_cold_entry_limit_ns(f->duration) :
+						mode2_clock_entry_limit_ns(f->duration,
+							!libavos_get_ac3_recoding_enabled());
+					smooth_entry = llabs(entry_delta_ns) <= entry_limit_ns;
 				}
 				int hard_reanchor = mode2_dynamic_active && !smooth_entry;
 				if( hard_reanchor ) {
@@ -2058,9 +2104,9 @@ static void *videosink_thread(void *ctx)
 					p->mode2_slew_frame_time = INT_MIN;
 					p->mode2_slew_frame_epoch = INT_MIN;
 				}
-				DBGSI serprintf_record("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d smooth_entry=%d delta_us=%lld\n",
+				DBGSI serprintf_record("android_sync: mode2 dynamic clock transition active=%d hard_reanchor=%d smooth_entry=%d delta_us=%lld cold_entry=%d\n",
 					mode2_dynamic_active, hard_reanchor, smooth_entry,
-					(long long)(entry_delta_ns / 1000LL));
+					(long long)(entry_delta_ns / 1000LL), mode2_cold_entry);
 			}
 			int mode2_new_slew_frame = p->mode2_dynamic_slew &&
 				(f->android_handle != p->mode2_slew_frame_handle ||
@@ -3256,6 +3302,7 @@ static int videodec_flush(STREAM_DEC_VIDEO *dec)
 DBGCV	CLOG();
 
 	pthread_mutex_lock(&p->locked.mtx);
+	p->mode2_cold_entry_until_ms = 0;
 	p->render_generation++;
 	p->render_offset_ns = -1;
 	p->slew_active = 0;
@@ -3430,6 +3477,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 
 	priv_t *p = (priv_t*) s->video_sink->priv;
 	pthread_mutex_lock( &p->locked.mtx );
+	p->mode2_cold_entry_until_ms = 0;
 	p->render_generation++;
 	p->at_clock_active = 0;
 	p->at_clock_handoff_pending = 0;
@@ -3521,6 +3569,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	int preserve_pcm_slew = !passthrough && preserves_output &&
 		p->pcm_resume_slew && p->pcm_startup_slew && pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
+		p->mode2_cold_entry_until_ms = 0;
 		p->pcm_drift.samples = 0;
 		p->at_clock_handoff_pending = 0;
 		p->pcm_resume_sample_stage = 0;

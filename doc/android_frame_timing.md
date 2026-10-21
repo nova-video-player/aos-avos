@@ -66,7 +66,19 @@ estimator is introduced by this extraction.
   about three seconds of 5ms-per-frame repayment for direct passthrough
   (two seconds for AC3 recoding, including the added frame time).
   The tolerance is never below the original 100ms and is capped at 350ms;
-  unknown cadence retains 100ms. This covers the roughly 175ms eARC and 236ms ARC
+  unknown cadence retains 100ms. The first direct Mode 2 cold-start handoff
+  has a separate 750ms cap and a four-second budget at the same 5ms per frame.
+  This covers the observed 480ms residual at 60fps and 428ms at 30fps without
+  a single long deadline jump; at lower frame rates the repayment budget still limits the
+  correction. It is available only within five seconds of the first ordinary
+  video frame, for the same seek epoch and audio lifecycle. The first clock
+  transition consumes it. Pause, seek/flush, output replacement, manual delay,
+  or leaving direct Mode 2 cancels it permanently for that decoder instance.
+  Preview frames do not arm it. A missing audio-owned anchor or pending seek
+  reanchor retains the explicit reanchor path. Recoding and later transitions
+  retain the original cap. This does not hold video or bypass audio producer
+  gating: qualifying presentation still runs while both streams progress.
+  This covers the roughly 175ms eARC and 236ms ARC
   handoff residuals without a single long frame interval. Missing anchors, a pending
   seek reanchor, and corrections outside that budget retain explicit reanchoring.
   Recovery still has a temporary phase error; smoothing does not establish

@@ -20,11 +20,14 @@
 #include "stream.h"
 #include "file.h"
 #include "audio_interface.h"
+#include "audio_spdif.h"
 
 #ifdef CONFIG_STREAM
 
 #define DBGS 	DBG_IF(Debug[DBG_STREAM])
 #define DBGA3	DBG_IF(Debug[DBG_AUD] > 2)
+
+extern int libavos_get_ac3_recoding_enabled(void);
 
 static int _open( STREAM *s )
 {
@@ -53,8 +56,27 @@ static int start( STREAM *s )
 		passthrough, sink->format, sink->samplesPerSec, sink->channels,
 		sink->bitsPerSample, sink->sourceSamples, sink->sourceChannels,
 		sink->sourceBitsPerSample, sink->request_channels);
-	if( audio_interface_set_output_params( s->audio_ctx, sink->samplesPerSec, sink->channels,
-		content_channels, sink->bitsPerSample, sink->format ) ) {
+	int params_failed = audio_interface_set_output_params( s->audio_ctx,
+		sink->samplesPerSec, sink->channels, content_channels,
+		sink->bitsPerSample, sink->format );
+#ifdef CONFIG_SPDIF
+	// Recoded frames are packaged only after sink setup returns. Switch both
+	// the muxer's mode and AudioTrack together, once per playback. Ordinary
+	// passthrough must not change transport here: its output may already be IEC.
+	if( params_failed && libavos_get_ac3_recoding_enabled() &&
+	    audio_interface_get_passthrough(s->audio_ctx) == 1 &&
+	    !s->ac3_recode_iec_rejected ) {
+		s->ac3_recode_iec_rejected = 1;
+		spdif_set_passthrough(2);
+		serprintf("stream_sink_audio_start: AC3 recoding IEC output rejected, retrying Mode 2\n");
+		if( !audio_interface_set_passthrough(s->audio_ctx, 2) ) {
+			params_failed = audio_interface_set_output_params(s->audio_ctx,
+				sink->samplesPerSec, sink->channels, content_channels,
+				sink->bitsPerSample, sink->format);
+		}
+	}
+#endif
+	if( params_failed ) {
 serprintf("stream_sink_audio_start: cannot set params: fs %d  ch %d  bits %d\r\n", sink->samplesPerSec, sink->channels, sink->bitsPerSample );
 		s->audio_sink_open = 0;
 		return 1;

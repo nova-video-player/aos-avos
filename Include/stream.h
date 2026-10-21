@@ -942,6 +942,7 @@ typedef struct STREAM {
 	int64_t		mode2_dynamic_clock_grace_until_wall_ms;
 	int64_t		mode2_dynamic_clock_last_log_ms;
 	int64_t		ac3_recode_next_write_wall_ms;	// media-time wall cursor for AC3-recode burst pacing
+	int		ac3_recode_iec_rejected;	// retain Mode 2 after IEC creation fails in this playback
 	int		ac3_recode_pacer_valid;	// 0 until the AC3-recode wall-clock pacer is seeded
 	int		ac3_recode_pacer_max_lead_ms;	// bounded write-ahead reservoir to subtract from heard time
 

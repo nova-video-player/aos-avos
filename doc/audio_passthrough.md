@@ -172,13 +172,28 @@ nonzero global SPDIF output mode. When `stream_restart_audio_as_pcm()` clears
 the output mode, decoder channel selection, filter creation, sink format and
 runtime timing all stop using recoding. The fallback therefore opens actual
 PCM rather than recreating the rejected AC3 output. The preference remains
-intact, and Java reapplies it before opening the next playback. This does not
-add a Mode 1-to-Mode 2 retry or change mid-frame failure handling.
+intact, and Java reapplies it before opening the next playback.
+
+If recoding's IEC output parameter setup fails, the stream sink retries once
+with Mode 2. It changes both the global SPDIF framing mode and the audio
+interface mode before any recoded frame is packaged. A per-stream
+`ac3_recode_iec_rejected` flag keeps lazy encoder setup and subsequent
+reconfiguration from selecting IEC again; a new playback starts without that
+flag. The audio worker refreshes its resolved transport and sample-clock
+policy before packaging and accounting for the current output unit.
+
+Recoding does not use the recursive AC3-to-EAC3 compatibility retry: its
+configuration forces AC3 on entry, so that retry would repeat the same failed
+request. Ordinary direct AC3 passthrough retains its compatibility retry.
+If recoding's Mode 2 setup also fails, startup and safe chunk-boundary callers
+can use PCM recovery. Failures with outstanding decoded/encoded storage retain
+the existing playback-error handling rather than reopening that storage.
+Failures from `play()` itself do not trigger this transport retry.
 
 `stream_audio_setup_ac3_sink()`:
 
-- If IEC supported: use mode 1
-- If IEC unsupported: switch to mode 2 (e.g. an ARC/eARC route)
+- If IEC supported and not rejected during this playback: use mode 1
+- If IEC unsupported or its creation was rejected: use mode 2 (e.g. an ARC/eARC route)
 
 **Mode-2 timing policy (`ac3_mode2_plain_policy`, default on).** When AC3 recoding
 resolves to mode 2, it must adopt the plain-mode2 timing, not the mode-1 policy it was

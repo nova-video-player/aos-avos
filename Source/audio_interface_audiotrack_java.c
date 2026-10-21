@@ -1399,11 +1399,16 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 			ERR LOG("audiotrack ctor failed (status=%d) - backing off and retrying", status);
 			failed = 1;
 			if (at->obj) {
+				call_void_method(at, "release", "()V");
 				(*at->env)->DeleteGlobalRef(at->env, at->obj);
 				at->obj = NULL;
 			}
 			pthread_mutex_unlock(&at->presentation_mutex);
-			if (at->format == WAVE_FORMAT_AC3 && track_format == 5 &&
+			(*at->env)->DeleteLocalRef(at->env, audioTrack);
+			audioTrack = NULL;
+			// Recoding forces AC3 on entry; recursing as EAC3 would select
+			// AC3 again indefinitely. Let the stream retry transport or PCM.
+			if (!ac3_recoding_enabled && at->format == WAVE_FORMAT_AC3 && track_format == 5 &&
 			    HDMI_CHECK_BIT(get_hdmi_supported_audio_codecs(), HDMI_ENCODING_E_AC3)) {
 				DBG LOG("audiotrack_set_output_params: AC3 AudioTrack failed, retrying as EAC3 compatibility layer");
 				return audiotrack_set_output_params(at, rate, 2, 2, 16, WAVE_FORMAT_EAC3);
@@ -1451,10 +1456,11 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		//frame_size reported can be false for compressed formats
 		at->frame_count = at->buf_size / at->frame_size; // number of frames in the buffer
 		DBG LOG("len buf size %d frc %d frs %d nbChs %d", at->buf_size, at->frame_count, at->frame_size, at->channel_count);
-		at->jbuffer = (jbyteArray) (*at->env)->NewGlobalRef(at->env, (*at->env)->NewByteArray(at->env, at->buf_size));
+		if (!failed)
+			at->jbuffer = (jbyteArray) (*at->env)->NewGlobalRef(at->env, (*at->env)->NewByteArray(at->env, at->buf_size));
 	}
 
-	if (failed && reinit) {
+	if (failed && reinit && !ac3_recoding_enabled) {
 		msec_sleep( 100 );
 		ERR LOG("audio_interface_audiotrack_java:audiotrack_set_output_params self calls audiotrack_set_output_params\n");
 		return audiotrack_set_output_params(at, retry_rate, retry_channels,

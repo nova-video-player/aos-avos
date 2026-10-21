@@ -94,13 +94,15 @@ extern int libavos_get_max_pcm_channels(void);
 static int pcm_channel_cap = 0;
 
 #ifdef CONFIG_SPDIF
-static int stream_audio_select_ac3_passthrough_mode(const char *tag)
+static int stream_audio_select_ac3_passthrough_mode(STREAM *s, const char *tag)
 {
 	extern int get_hdmi_supports_iec(void);
 	int supports_iec = get_hdmi_supports_iec();
-	int passthrough_mode = (ac3_force_mode2 || !supports_iec) ? 2 : 1;
+	int passthrough_mode = (ac3_force_mode2 || !supports_iec ||
+		s->ac3_recode_iec_rejected) ? 2 : 1;
 	// Always restore the selected framing mode. A prior forced-mode2 run leaves
 	// the global SPDIF mode at 2, so merely clearing the debug flag is insufficient.
+	// A real IEC rejection, however, remains authoritative for this playback.
 	spdif_set_passthrough( passthrough_mode );
 	serprintf("%s: AC3 recode mode=%d iec=%d forced_mode2=%d\n",
 		tag, passthrough_mode, supports_iec, ac3_force_mode2);
@@ -624,7 +626,7 @@ static int _stream_audio_setup_ac3_sink(STREAM *s)
 		return -1;
 	}
 
-	int passthrough_mode = stream_audio_select_ac3_passthrough_mode(
+	int passthrough_mode = stream_audio_select_ac3_passthrough_mode(s,
 		"stream_audio_setup_ac3_sink" );
 	s->audio_sink->set_passthrough( s, passthrough_mode );
 
@@ -2301,7 +2303,7 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 
 #ifdef CONFIG_SPDIF
 							if( spdif_init(sink) ) {
-								int passthrough_mode = stream_audio_select_ac3_passthrough_mode(
+								int passthrough_mode = stream_audio_select_ac3_passthrough_mode(s,
 									"AC3 recoding reconfigure" );
 								s->audio_sink->set_passthrough( s, passthrough_mode );
 								// Call start() with AC3 2-channel format
@@ -2363,6 +2365,16 @@ DBG serprintf("stream_audio: WARNING! s->audio->format changed from %04X to %04X
 				}
 
 					int ac3_recode_output_frames = 1;
+					if( ac3_recoding ) {
+						// Sink creation may have switched IEC to codec-specific AC3.
+						// Use the resolved transport for framing and this unit's clock.
+						passthrough = s->audio_sink->get_passthrough(s);
+						passthrough_active = passthrough != 0;
+						if( passthrough == 2 && ac3_recode_mode2_sync &&
+						    s->sync_mode != STREAM_SYNC_SAMPLES ) {
+							stream_audio_enter_mode2_sync_samples(s, chunk_pts, 1);
+						}
+					}
 					// After the sink is configured for passthrough, wrap AC3 frames in IEC61937
 					if( ac3_recoding && audio_frame.format == WAVE_FORMAT_AC3 && audio_frame.size > 0 ) {
 						if( !ac3_sink_configured ) {

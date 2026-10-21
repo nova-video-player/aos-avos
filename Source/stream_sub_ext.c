@@ -91,6 +91,19 @@ typedef struct SUB_PARSE_WORKER {
 	void           *inflight_title[SUB_PARSE_POOL_SIZE];
 } SUB_PARSE_WORKER;
 
+// Identity of a delivered external bitmap cue. Everything that changes WHAT the engine would be handed for
+// a cue (or whether it still holds it) is part of the key: the track, the cue, the user's ratio (cue times
+// are scaled by it), the delay, and the engine's track generation (bumped by open_track/close_track, which
+// wipes whatever bitmap the engine held).
+typedef struct GFX_KEY {
+	int          valid;
+	const void  *subs;
+	const void  *node;
+	int          ratio_n, ratio_d;
+	int          offset;
+	uint64_t     gen;
+} GFX_KEY;
+
 typedef struct SUB_PRIV {
 	subtitle_files *files;
 	converted_subs *subs;
@@ -99,6 +112,14 @@ typedef struct SUB_PRIV {
 	// text tracks, SUB_FMT_GFX for bitmap tracks. Set per-track in
 	// stream_sub_ext_check() and read by stream_subtitle.c at track open.
 	int engine_fmt[SUB_TRACK_MAX];
+
+	// External bitmap (PGS/VobSub) delivery memo -- see stream_sub_ext_get_gfx_data(). Remembers which cue
+	// was last handed to the engine, under which timing/engine state, so the same active cue isn't re-read
+	// from the file and re-decoded on every video frame. Only touched from the subtitle decode thread.
+	GFX_KEY gfx_delivered;		// what the engine already has
+	GFX_KEY gfx_candidate;		// cue returned by the last get_gfx_data() hit, not yet committed
+	int     gfx_last_rst;		// RST time of the previous lookup, for seek/jump detection
+	int     gfx_last_rst_valid;
 
 	SUB_PARSE_WORKER *worker;	// NULL until the first track is queued;
 					// see _worker_ensure_started() below
@@ -1509,12 +1530,38 @@ int stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 	int parse_state = _poll_parse_state( subs );
 	if( parse_state != SUBT_PARSE_DONE || !subs->first ) return 1;
 
+	// Seek / jump detection. A seek flushes the engine's bitmap, so a memoized "already delivered" would
+	// then suppress the cue forever. Time going backwards, or leaping forward by more than a couple of
+	// seconds between two lookups (one lookup per video frame), is treated as a seek.
+	if( p->gfx_last_rst_valid && ( rst_time < p->gfx_last_rst - 250 || rst_time > p->gfx_last_rst + 2000 ) )
+		p->gfx_delivered.valid = 0;
+	p->gfx_last_rst = rst_time;
+	p->gfx_last_rst_valid = 1;
+	p->gfx_candidate.valid = 0;
+
+	uint64_t gen = s->sub_engine ? sub_engine_get_track_generation( (SUB_ENGINE*)s->sub_engine ) : 0;
+
+	// Fast path: the cue already delivered is still the active one under unchanged settings -> nothing to do
+	// (skips the list walk, the file read and the decode).
+	GFX_KEY *d = &p->gfx_delivered;
+	if( d->valid && d->subs == subs && d->ratio_n == s->subtitle_ratio_n && d->ratio_d == s->subtitle_ratio_d &&
+		d->offset == s->subtitle_offset && d->gen == gen ) {
+		const sub_line *dn = (const sub_line*)d->node;
+		if( scale_time( s, dn->end ) > rst_time && scale_time( s, dn->start ) <= rst_time )
+			return 1;
+	}
+
 	// Walk to find the cue that covers rst_time
 	sub_line *node = subs->first;
 	while( node ) {
 		int start = scale_time( s, node->start );
 		int end   = scale_time( s, node->end );
 		if( end > rst_time && start <= rst_time ) {
+			// Same cue as the one delivered (e.g. fast path missed because of a list change)? Skip it.
+			if( d->valid && d->subs == subs && d->node == node && d->ratio_n == s->subtitle_ratio_n &&
+				d->ratio_d == s->subtitle_ratio_d && d->offset == s->subtitle_offset && d->gen == gen )
+				return 1;
+
 			VIDEO_FRAME *frame = *pframe;
 			frame->valid = frame->size;
 			if( subtitle_get_gfx( subs, node->pos, frame->data[0], &frame->valid ) ) {
@@ -1526,11 +1573,37 @@ int stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time )
 			// scaling it would overflow the int conversion at speeds < 1.0. Only debug output
 			// reads this value today, but keep it well-defined.
 			frame->duration = ( end == INT_MAX ) ? -1 : RST_TO_TS_DELTA(end - start, int);
+
+			GFX_KEY *c = &p->gfx_candidate;
+			c->valid = 1;  c->subs = subs;  c->node = node;
+			c->ratio_n = s->subtitle_ratio_n;  c->ratio_d = s->subtitle_ratio_d;
+			c->offset = s->subtitle_offset;  c->gen = gen;
 			return 0;
 		}
 		node = node->next;
 	}
 	return 1;
+}
+
+// Commits the cue returned by the last stream_sub_ext_get_gfx_data() hit as "delivered": the caller has
+// consumed it (handed it to the engine, or deliberately dropped it as already expired / undecodable), so
+// it will not be read and decoded again while it stays the active cue under the same settings.
+void stream_sub_ext_gfx_delivered( STREAM *s )
+{
+	SUB_PRIV *p = s ? s->subtitle_priv : NULL;
+	if( !p || !p->gfx_candidate.valid ) return;
+	p->gfx_delivered = p->gfx_candidate;
+	p->gfx_candidate.valid = 0;
+}
+
+// Forgets what was delivered. Call on seek and whenever the engine's bitmap state is rebuilt.
+void stream_sub_ext_gfx_reset( STREAM *s )
+{
+	SUB_PRIV *p = s ? s->subtitle_priv : NULL;
+	if( !p ) return;
+	p->gfx_delivered.valid = 0;
+	p->gfx_candidate.valid = 0;
+	p->gfx_last_rst_valid = 0;
 }
 // *************************
 //

@@ -16,10 +16,10 @@
  *
  * This registry makes that handoff explicit and safe:
  *   - Java creating a new engine PUBLISHes it here.
- *   - Java destroying an engine RETRACTs it, and blocks until every
- *     outstanding ACQUIRE has been released -- so destroy cannot complete,
- *     and the memory cannot be freed, while any STREAM is still holding a
- *     reference.
+ *   - Java destroying an engine RETRACTs it with a destroy callback. Retract
+ *     does not block: the engine is freed immediately if nobody holds it,
+ *     otherwise by the last RELEASE -- so the memory cannot be freed while
+ *     any STREAM is still holding a reference.
  *   - Native code (avos_mp_video.c) ACQUIREs a reference when it wants to
  *     bind an engine to a STREAM, and RELEASEs it when that STREAM no
  *     longer needs it (stream close). Nothing outside this file touches a
@@ -38,16 +38,20 @@
 extern "C" {
 #endif
 
+typedef void (*sub_engine_destroy_fn)(SUB_ENGINE *eng);
+
 // Called ONLY from jni_sub_engine.c's nativeCreate, right after
 // sub_engine_create() succeeds, to publish it as the current engine.
 void sub_engine_registry_publish(SUB_ENGINE *eng);
 
-// Called ONLY from jni_sub_engine.c's nativeDestroy, BEFORE sub_engine_destroy().
-// Retracts `eng` if it is still the published engine (a no-op if some other
-// engine has already been published in its place), then blocks until every
-// acquire() taken while it was published has been matched by a release().
-// Safe/idempotent to call even if `eng` was already superseded.
-void sub_engine_registry_retract(SUB_ENGINE *eng);
+// Called ONLY from jni_sub_engine.c's nativeDestroy, INSTEAD of destroying the engine directly.
+// Unpublishes `eng` (no new acquire() can take it) and NEVER blocks. If no STREAM holds a
+// reference, `destroy(eng)` runs immediately on the calling thread and 1 is returned. Otherwise
+// destruction is deferred: the last sub_engine_registry_release() of `eng` runs `destroy(eng)` on
+// the releasing thread (outside the registry lock) and 0 is returned. A repeated retract of the
+// same engine is a no-op returning 0. Retracting an engine that was superseded by a newer publish
+// is fine: older engines stay tracked until their own last release.
+int sub_engine_registry_retract(SUB_ENGINE *eng, sub_engine_destroy_fn destroy);
 
 // Takes a reference to whatever engine is currently published (or NULL if
 // none is). Every non-NULL return MUST be matched by exactly one

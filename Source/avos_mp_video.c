@@ -408,10 +408,10 @@ int avos_mp_video_close(avos_mp_t *mp, avos_mp_video_t *video)
 	if (sub_engine) sub_engine_close_track(sub_engine);
 
 	// Release the reference acquired in avos_mp_video_open(). Must happen
-	// last, after every other use of `sub_engine` above -- this is what
-	// allows a concurrent nativeDestroy() on the Java side (blocked in
-	// sub_engine_registry_retract() if it got here first) to proceed and
-	// free the engine. Safe to call with sub_engine == NULL.
+	// last, after every other use of `sub_engine` above. If nativeDestroy() on
+	// the Java side already retracted this engine (it does not wait), this is
+	// the release that drops the last reference and runs the deferred destroy,
+	// on this thread. Safe to call with sub_engine == NULL.
 	sub_engine_registry_release(sub_engine);
 
 	return AVOS_ERR_OK;

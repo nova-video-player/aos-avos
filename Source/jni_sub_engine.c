@@ -27,8 +27,8 @@ static SUB_ENGINE* get_engine(jlong handle) {
 // (the same reason libavos.c caches its classes in JNI_OnLoad), whereas GetMethodID() on an
 // object we already hold needs no class lookup at all.
 //
-// Lifetime: the listener (and its global ref) is freed in nativeDestroy() strictly AFTER
-// sub_engine_destroy() returns. That call joins the render thread, so no on_content_changed()
+// Lifetime: the listener (and its global ref) is freed by destroy_engine_and_listener() (run when
+// the last registry reference is released) strictly AFTER sub_engine_destroy() returns. That call joins the render thread, so no on_content_changed()
 // can still be running -- there is no window in which the thread uses a freed ref.
 typedef struct {
     JavaVM   *vm;
@@ -96,6 +96,40 @@ static void install_change_listener(JNIEnv *env, jobject thiz, SUB_ENGINE *eng) 
     sub_engine_set_change_callback(eng, on_content_changed, l);
 }
 
+// Final teardown of an engine and its Java listener. Called exactly once by the registry, from
+// either nativeDestroy() (nobody held the engine) or the last sub_engine_registry_release() (a
+// stream thread with no JNIEnv of its own) -- so the global ref is dropped through a JNIEnv
+// obtained from the JavaVM, attaching temporarily if this thread isn't already attached.
+//
+// Read the listener BEFORE destroy (the engine is freed by it), free it AFTER: destroy joins the
+// render thread, the only caller of on_content_changed(), so nothing can use it later.
+static void destroy_engine_and_listener(SUB_ENGINE *eng) {
+    SUB_JNI_LISTENER *l = (SUB_JNI_LISTENER *)sub_engine_get_change_ctx(eng);
+    sub_engine_destroy(eng);
+    if (!l) return;
+
+    JNIEnv *env = NULL;
+    int attached_here = 0;
+    jint rc = (*l->vm)->GetEnv(l->vm, (void **)&env, JNI_VERSION_1_4);
+    if (rc == JNI_EDETACHED) {
+        JavaVMAttachArgs args = { JNI_VERSION_1_4, "SubEngineDestroy", NULL };
+        if ((*l->vm)->AttachCurrentThread(l->vm, &env, &args) == JNI_OK) {
+            attached_here = 1;
+        } else {
+            env = NULL;
+        }
+    } else if (rc != JNI_OK) {
+        env = NULL;
+    }
+    if (env) {
+        (*env)->DeleteGlobalRef(env, l->obj);
+    } else {
+        JNI_LOGW("engine teardown: no JNIEnv, leaking listener global ref");
+    }
+    if (attached_here) (*l->vm)->DetachCurrentThread(l->vm);
+    free(l);
+}
+
 // --- LIFECYCLE & SURFACE ---
 
 JNIEXPORT jlong JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeCreate(JNIEnv *env, jobject thiz) {
@@ -107,21 +141,14 @@ JNIEXPORT jlong JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeDestroy(JNIEnv *env, jobject thiz, jlong handle) {
     SUB_ENGINE *eng = get_engine(handle);
-    // Retract FIRST and block until every STREAM that had acquired a
-    // reference to this exact engine has released it (see
-    // sub_engine_registry.h). Only once that's guaranteed is it safe to
-    // free the engine below -- this is what makes it impossible for a
-    // STREAM::sub_engine snapshot to outlive the memory it points to.
-    sub_engine_registry_retract(eng);
-
-    // Read the listener BEFORE destroy (the engine is freed by it), free it AFTER: destroy joins
-    // the render thread, the only caller of on_content_changed(), so nothing can use it later.
-    SUB_JNI_LISTENER *l = (SUB_JNI_LISTENER *)sub_engine_get_change_ctx(eng);
-    sub_engine_destroy(eng);
-    if (l) {
-        (*env)->DeleteGlobalRef(env, l->obj);
-        free(l);
-    }
+    if (!eng) return;
+    // Retract and return immediately. If no STREAM holds a reference the engine is destroyed
+    // right here (destroy_engine_and_listener runs on this thread); otherwise destruction is
+    // deferred to the release() of the LAST holder, on whatever thread that is. Either way the
+    // engine lives until its last user lets go -- there is no timeout and nothing here blocks
+    // the (typically UI) calling thread. See sub_engine_registry.h.
+    (void)env; (void)thiz;
+    sub_engine_registry_retract(eng, destroy_engine_and_listener);
 }
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSurfaceCreated(JNIEnv *env, jobject thiz, jlong handle, jobject surface) {

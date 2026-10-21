@@ -39,6 +39,9 @@ int  stream_sub_ext_feed_engine(STREAM *s);
 // Use instead of stream_sub_ext_feed_engine() when re-feeding on subtitle_ext_needs_refeed (seek flush or an interrupted streaming feed); safe for all formats.
 int  stream_sub_ext_force_streaming_refeed(STREAM *s);
 int  stream_sub_ext_get_gfx_data( STREAM *s, VIDEO_FRAME **pframe, int time );
+void stream_sub_ext_gfx_delivered(STREAM *s);
+// External bitmap (PGS/VobSub) delivered-cue memo: _delivered() commits the cue returned by the last get_gfx_data() hit as consumed; _reset() forgets it (seek, track open).
+void stream_sub_ext_gfx_reset(STREAM *s);
 int  stream_sub_ext_get_engine_fmt( STREAM *s );
 
 //int stream_get_num_subtitle( STREAM *s );

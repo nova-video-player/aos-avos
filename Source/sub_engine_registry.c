@@ -1,82 +1,123 @@
 #include "sub_engine_registry.h"
 #include <pthread.h>
 #include <stddef.h>
-#include <time.h>
+#include <stdlib.h>
 #include <android/log.h>
 
 #define REG_TAG "SubEngineRegistry"
 #define REG_LOGW(...) __android_log_print(ANDROID_LOG_WARN, REG_TAG, __VA_ARGS__)
 
-// Upper bound on how long retract() will block waiting for outstanding
-// acquire()s to drain. In normal operation this is always fast (a STREAM
-// close finishing its teardown), but this cap exists so that a caller-
-// ordering mistake elsewhere in the codebase (e.g. something calling
-// nativeDestroy() from the same thread a pending release() is queued behind)
-// degrades to a loud, bounded stall instead of hanging the calling thread --
-// typically the app's UI thread -- forever.
-#define RETRACT_WAIT_TIMEOUT_MS 2000
+// Per-engine reference tracking.
+//
+// Every published engine gets its own entry holding its own outstanding-reference count, so
+// references can never be attributed to the wrong engine: publishing a replacement no longer
+// resets or drops anything for the engine it supersedes, and a late release() for an old engine
+// still lands on that engine's own counter.
+//
+// retract() never blocks and never frees anything while a reference is outstanding. It marks the
+// engine retracted (no NEW acquire() can return it) and hands it the destroy callback. The engine
+// is destroyed exactly once, by whichever happens last: retract() (if nobody holds it) or the
+// final release(). That makes the lifetime rule "alive until its last user lets go" unconditional;
+// there is no timeout after which memory is freed under a holder, and no thread (typically the
+// UI thread calling nativeDestroy()) ever waits on a stream.
+typedef struct REG_ENTRY {
+    SUB_ENGINE          *eng;
+    int                  refs;       // outstanding acquire()s on this engine
+    int                  retracted;  // retract() has been called; destroy once refs reaches 0
+    sub_engine_destroy_fn destroy;   // set by retract(); called exactly once, outside s_lock
+    struct REG_ENTRY    *next;
+} REG_ENTRY;
 
-static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  s_drained = PTHREAD_COND_INITIALIZER;
-static SUB_ENGINE      *s_current = NULL;   // currently published engine, or NULL
-static int              s_refcount = 0;     // outstanding acquire()s on s_current
-static SUB_ENGINE      *s_retracting = NULL; // engine currently draining in retract(), if any
+static pthread_mutex_t s_lock    = PTHREAD_MUTEX_INITIALIZER;
+static REG_ENTRY      *s_entries = NULL;  // every engine that is published and not yet destroyed
+static REG_ENTRY      *s_current = NULL;  // the entry acquire() hands out, or NULL
+
+// Caller holds s_lock.
+static REG_ENTRY *find_locked(SUB_ENGINE *eng) {
+    for (REG_ENTRY *e = s_entries; e; e = e->next) {
+        if (e->eng == eng) return e;
+    }
+    return NULL;
+}
+
+// Caller holds s_lock. Unlinks and frees the entry (not the engine).
+static void unlink_free_locked(REG_ENTRY *victim) {
+    REG_ENTRY **pp = &s_entries;
+    while (*pp && *pp != victim) pp = &(*pp)->next;
+    if (*pp) *pp = victim->next;
+    if (s_current == victim) s_current = NULL;
+    free(victim);
+}
 
 void sub_engine_registry_publish(SUB_ENGINE *eng) {
     pthread_mutex_lock(&s_lock);
-    // A new engine can only be published once the previous one has been
-    // fully retracted (nativeDestroy() blocks on that before returning), so
-    // s_current should already be NULL here in the intended usage. Assigning
-    // over it unconditionally is still safe -- it just means whoever still
-    // holds outstanding references to the OLD engine keeps them (their
-    // release() calls decrement s_refcount as normal), while any brand-new
-    // acquire() from this point on returns the new engine.
-    s_current = eng;
-    s_refcount = 0;
+    if (!eng) {
+        s_current = NULL;
+        pthread_mutex_unlock(&s_lock);
+        return;
+    }
+    REG_ENTRY *e = find_locked(eng);
+    if (!e) {
+        e = calloc(1, sizeof(*e));
+        if (!e) {
+            // Cannot track it, so it must not be handed out: an untracked engine could be
+            // destroyed under a holder. Leave it unpublished.
+            REG_LOGW("publish: out of memory, engine %p NOT published", (void *)eng);
+            s_current = NULL;
+            pthread_mutex_unlock(&s_lock);
+            return;
+        }
+        e->eng = eng;
+        e->next = s_entries;
+        s_entries = e;
+    }
+    if (!e->retracted) {
+        // Any previous engine keeps its own entry and its own references. It only stops being
+        // the one acquire() returns.
+        s_current = e;
+    }
     pthread_mutex_unlock(&s_lock);
 }
 
-void sub_engine_registry_retract(SUB_ENGINE *eng) {
+int sub_engine_registry_retract(SUB_ENGINE *eng, sub_engine_destroy_fn destroy) {
+    if (!eng) return 0;
     pthread_mutex_lock(&s_lock);
-    if (s_current == eng) {
-        s_current = NULL;      // no NEW acquire() can hand this pointer out anymore
-        s_retracting = eng;    // remember what we're draining, for the wait predicate below
-        while (s_refcount > 0) {
-            struct timespec deadline;
-            clock_gettime(CLOCK_REALTIME, &deadline);
-            deadline.tv_sec  += RETRACT_WAIT_TIMEOUT_MS / 1000;
-            deadline.tv_nsec += (RETRACT_WAIT_TIMEOUT_MS % 1000) * 1000000L;
-            if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
-
-            // Every outstanding holder releases via sub_engine_registry_release(),
-            // which signals s_drained. This blocks nativeDestroy() (and therefore
-            // sub_engine_destroy()/free) until the last STREAM holding a reference
-            // to THIS engine has let go of it -- up to the timeout above.
-            int rc = pthread_cond_timedwait(&s_drained, &s_lock, &deadline);
-            if (rc != 0 && s_refcount > 0) {
-                // Timed out with references still outstanding: almost certainly a
-                // caller-ordering bug (something acquired a reference and never
-                // released it, or retract() got called from the same thread a
-                // pending release was queued behind). Log loudly and proceed
-                // anyway rather than hang forever -- a leaked/late release after
-                // this point is a use-after-free risk in the old design too, so
-                // this is strictly no worse, just no longer silent.
-                REG_LOGW("retract: TIMED OUT after %dms waiting for %d outstanding reference(s) on eng=%p -- proceeding anyway, this is a caller bug",
-                         RETRACT_WAIT_TIMEOUT_MS, s_refcount, (void*)eng);
-                break;
-            }
-        }
-        s_retracting = NULL;
+    REG_ENTRY *e = find_locked(eng);
+    if (!e) {
+        // Never published (or already destroyed): nobody can hold a reference to it, since
+        // acquire() only returns published engines. Safe to destroy right away.
+        pthread_mutex_unlock(&s_lock);
+        if (destroy) destroy(eng);
+        return 1;
     }
-    // If s_current != eng, this engine was already superseded/retracted by a
-    // prior call (or never published) -- nothing to do, safe no-op.
+    if (e->retracted) {
+        // Second retract of the same engine: the first one owns the destroy.
+        pthread_mutex_unlock(&s_lock);
+        return 0;
+    }
+    e->retracted = 1;
+    e->destroy = destroy;
+    if (s_current == e) s_current = NULL;   // no NEW acquire() can return it from here on
+
+    if (e->refs > 0) {
+        // Deferred: the last release() destroys it.
+        pthread_mutex_unlock(&s_lock);
+        return 0;
+    }
+    sub_engine_destroy_fn fn = e->destroy;
+    unlink_free_locked(e);
     pthread_mutex_unlock(&s_lock);
+    if (fn) fn(eng);
+    return 1;
 }
 
 SUB_ENGINE *sub_engine_registry_acquire(void) {
     pthread_mutex_lock(&s_lock);
-    SUB_ENGINE *eng = s_current;
-    if (eng) s_refcount++;
+    SUB_ENGINE *eng = NULL;
+    if (s_current && !s_current->retracted) {
+        s_current->refs++;
+        eng = s_current->eng;
+    }
     pthread_mutex_unlock(&s_lock);
     return eng;
 }
@@ -84,13 +125,20 @@ SUB_ENGINE *sub_engine_registry_acquire(void) {
 void sub_engine_registry_release(SUB_ENGINE *eng) {
     if (!eng) return;
     pthread_mutex_lock(&s_lock);
-    // Only decrement if this release corresponds to the engine currently
-    // being tracked (either still published as s_current, or mid-retract as
-    // s_retracting) -- guards against a stray double-release being confused
-    // for a still-live reference on a totally unrelated engine instance.
-    if (eng == s_current || eng == s_retracting) {
-        if (s_refcount > 0) s_refcount--;
-        if (s_refcount == 0) pthread_cond_broadcast(&s_drained);
+    REG_ENTRY *e = find_locked(eng);
+    if (!e || e->refs <= 0) {
+        // Stray or double release: ignore rather than disturb another holder's count.
+        pthread_mutex_unlock(&s_lock);
+        return;
+    }
+    e->refs--;
+    if (e->refs == 0 && e->retracted) {
+        sub_engine_destroy_fn fn = e->destroy;
+        unlink_free_locked(e);
+        pthread_mutex_unlock(&s_lock);
+        // Last user of a retracted engine: perform the deferred cleanup, outside the lock.
+        if (fn) fn(eng);
+        return;
     }
     pthread_mutex_unlock(&s_lock);
 }

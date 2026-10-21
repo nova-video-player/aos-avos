@@ -227,6 +227,10 @@ static void _feed_bitmap_to_engine( STREAM *s, VIDEO_FRAME *f )
 	}
 	s->subtitle_pending = 0;
 
+	// From here on the cue is consumed (fed, or dropped as expired): remember it so an external bitmap
+	// cue isn't re-read and re-decoded every frame (no-op for tracks without a pending candidate).
+	stream_sub_ext_gfx_delivered( s );
+
 	if( f->duration > 0 && f->time >= 0 && (int64_t)f->time + f->duration <= now )
 		return;
 
@@ -298,6 +302,14 @@ static void _get_next_int_sub( STREAM *s, int time )
 		return;
 
 	int fmt = s->subtitle->format;
+
+	// _seek_init() flushes the engine's bitmap for GFX tracks and raises subtitle_ext_needs_refeed (it
+	// cannot be missed the way the short-lived s->seek can). Nothing else consumes the flag for bitmap
+	// tracks, so use it here to forget what was delivered.
+	if( _is_ffdec_bitmap(fmt) && _needs_refeed_get( s ) ) {
+		_needs_refeed_set( s, 0 );
+		stream_sub_ext_gfx_reset( s );
+	}
 
 	// --- INIT BLOCK: runs once per track open ---
 	if( !s->sub_dec && !s->subtitle_frame ) {
@@ -472,13 +484,19 @@ serprintf("cannot allocate subtitle frame!\r\n");
 // *****************************************************************************
 static void _get_next_ext_sub( STREAM *s, int time )
 {
-	if( s->seek ) return;
+	if( s->seek ) {
+		// The engine's bitmap is flushed by the seek: forget what was delivered so the cue
+		// active after the seek is fed again.
+		stream_sub_ext_gfx_reset( s );
+		return;
+	}
 
 	int fmt = s->subtitle->format;
 
 	// --- INIT BLOCK: runs once per track open ---
 	if( !s->sub_dec && !s->subtitle_frame ) {
 
+		stream_sub_ext_gfx_reset( s );		// fresh track open: nothing delivered yet
 		if( _is_ffdec_bitmap(fmt) ) {
 			// EXTERNAL BITMAP: open sub_dec for VobSub decode
 			s->sub_dec = stream_get_new_dec_sub( fmt );
@@ -568,6 +586,8 @@ DBG serprintf("got gfx data: %8d %8d  size %d\r\n", f->time, f->duration, f->val
 			if( !ret && f2 ) {
 				f2->time = f->time;
 				_feed_bitmap_to_engine( s, f2 );
+			} else {
+				stream_sub_ext_gfx_delivered( s );	// undecodable cue: don't retry it every frame
 			}
 		}
 	}

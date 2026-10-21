@@ -58,6 +58,10 @@ typedef struct {
     ASS_Style_Backup *backups;
     int               num_backups;
     uint32_t          last_serial;
+    // Set when the track's styles/PlayRes/SBAS were replaced underneath the cached baseline
+    // (a full script arriving via feed()). Forces the next sync_styles() to rebuild backups
+    // and re-apply the user's settings even though the style serial did not move.
+    int               styles_dirty;
 
     int               orig_playres_x;
     int               orig_playres_y;
@@ -350,11 +354,12 @@ static int sync_styles(SSA_BACKEND *ctx) {
     // See sub_style.c's sub_style_snapshot() doc comment for why a shallow pointer copy
     // isn't safe here (use-after-free window against a concurrent setter call).
 
-    if (u.serial == ctx->last_serial) {
+    if (u.serial == ctx->last_serial && !ctx->styles_dirty) {
         free(u.font_family);
         return 0;
     }
     ctx->last_serial = u.serial;
+    ctx->styles_dirty = 0;
 
     // 1. Create Backups of the Original ASS Styles.
     // IMPORTANT: this must run on every call, not just the first, because ass_process_data()
@@ -800,6 +805,24 @@ static int ssa_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64
         // ass_process_data() parses the complete script — [Script Info],
         // [V4+ Styles], and all [Events] — in one shot.
         ass_process_data(ctx->track, (char *)payload, payload_size);
+
+        // The script just replaced the track's styles, PlayRes and ScaledBorderAndShadow.
+        // Everything sync_styles() cached about the PREVIOUS (usually empty, if a render ran
+        // before the file arrived) track is now stale: the backups are index-based, so the
+        // "restore baseline" step would overwrite the freshly loaded styles with them, and a
+        // stale orig_playres/orig_sbas would be written back over the script's own values.
+        // Drop the cache and force a resync so Custom settings apply to this script without
+        // the user having to touch a setting first.
+        if (ctx->backups) {
+            for (int i = 0; i < ctx->num_backups; i++) free(ctx->backups[i].FontName);
+            free(ctx->backups);
+            ctx->backups = NULL;
+        }
+        ctx->num_backups = 0;
+        ctx->orig_playres_x = 0;
+        ctx->orig_playres_y = 0;
+        ctx->orig_sbas_saved = 0;
+        ctx->styles_dirty = 1;
     } else if (payload_size >= 10 && strncmp((const char*)payload, "Dialogue: ", 10) == 0) {
         // Single Dialogue line from an internal embedded SSA track.
         ass_process_data(ctx->track, (char *)payload, payload_size);

@@ -1872,8 +1872,10 @@ static int videosink_frame_current_l(priv_t *p, STREAM *s, VIDEO_FRAME *f,
 static int mode2_seek_startup_l(priv_t *p, STREAM *s, VIDEO_FRAME *f,
 	int passthrough, INT64 now_ns)
 {
-	if( !s || s->seek_epoch <= 1 || s->seek_paused || s->play_n_video_frames > 0 )
+	if( !s || s->seek_epoch <= 1 || s->seek_paused || s->play_n_video_frames > 0 ) {
+		p->mode2_seek_preroll = 0;
 		return 0;
+	}
 	int64_t now_ms = now_ns / NSEC_PER_MSEC;
 	if( p->mode2_seek_start_epoch != s->seek_epoch ) {
 		p->mode2_seek_start_epoch = s->seek_epoch;
@@ -1927,7 +1929,9 @@ static int mode2_seek_startup_l(priv_t *p, STREAM *s, VIDEO_FRAME *f,
 				f->time, (long long)heard, s->seek_epoch);
 			return 2;
 		}
-		p->mode2_seek_preroll = 0;
+		// Passing the heard-clock check is not final admission: the wall
+		// deadline can already have expired while the heard clock catches up.
+		// Keep preroll armed until a frame is actually submitted.
 	}
 	return 0;
 }
@@ -1956,6 +1960,8 @@ static void *videosink_thread(void *ctx)
 		VIDEO_FRAME *f = NULL;
 		INT64 render_ts_ns = 0;
 		INT64 speed_correction_ns = 0;
+		INT64 mode2_preroll_interval_ns = 0;
+		unsigned int mode2_preroll_generation = 0;
 		int consumed = 0;
 		int stale_epoch_drop = 0;
 		int audio_lease = 0;
@@ -2524,6 +2530,11 @@ static void *videosink_thread(void *ctx)
 			render_ts_ns = speed_cadence_time(&p->speed_cadence, p->video_timeline,
 				f->epoch, f->media_time, f->media_time_valid, cadence_interval_ns,
 				render_ts_ns, &speed_correction_ns);
+			if( p->mode2_seek_preroll ) {
+				mode2_preroll_interval_ns = cadence_interval_ns > 0 ? cadence_interval_ns :
+					(INT64)MAX(1, f->duration) * NSEC_PER_MSEC;
+				mode2_preroll_generation = p->render_generation;
+			}
 			break;
 	retry_frame:
 			if (audio_lease) {
@@ -2569,7 +2580,14 @@ static void *videosink_thread(void *ctx)
 			INT64 lateness_ns = now_ns - render_ts_ns;
 			const INT64 k_late_drop_threshold_ns = 200 * 1000000LL; // 200ms lateness drop limit
 
-			if (lateness_ns > k_late_drop_threshold_ns) {
+			if (mode2_preroll_interval_ns > 0 && lateness_ns > mode2_preroll_interval_ns) {
+				// Qualification can outlive queued frames. Check the final deadline
+				// at submission, too: do not display a frame whose entire interval
+				// has elapsed, even if the heard-clock preroll check admitted it.
+				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+				DBGSI serprintf("android_sync: mode2 seek deadline preroll frame=%d lateness_us=%lld epoch=%d\n",
+					f->time, (long long)(lateness_ns / 1000), f->epoch);
+			} else if (lateness_ns > k_late_drop_threshold_ns) {
 				// Drop/release buffer immediately without rendering to catch up
 				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
 				p->dropped++;
@@ -2607,6 +2625,11 @@ static void *videosink_thread(void *ctx)
 			pthread_cond_broadcast(&p->locked.cond);
 		}
 		if (presented) {
+			if (mode2_preroll_interval_ns > 0 &&
+				p->render_generation == mode2_preroll_generation &&
+				p->mode2_seek_start_epoch == f->epoch) {
+				p->mode2_seek_preroll = 0;
+			}
 			speed_cadence_commit(&p->speed_cadence, cadence_generation,
 				submitted_timeline, f->epoch, f->media_time, f->media_time_valid,
 				render_ts_ns, speed_correction_ns, cadence_calibration_offset);

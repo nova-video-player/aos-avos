@@ -123,13 +123,14 @@ int main(void) {
     assert(p.last_mode2_dynamic_active && !p.pending_seek_reanchor && !p.slew_active);
     f.time=10800;
     assert(!mode2_seek_startup_l(&p,&s,&f,2,2200000000LL));
-    assert(!p.mode2_seek_preroll);
+    assert(p.mode2_seek_preroll); // Heard-clock admission is not submission.
     INT64 anchor=p.render_offset_ns;
     state=STREAM_MODE2_SEEK_WAIT;
     assert(!mode2_seek_startup_l(&p,&s,&f,2,2300000000LL));
     assert(p.render_offset_ns==anchor); // No second wait/reanchor in this seek.
     s.seek_epoch++;
     assert(mode2_seek_startup_l(&p,&s,&f,2,3000000000LL)==1);
+    assert(!p.mode2_seek_preroll);
     assert(!mode2_seek_startup_l(&p,&s,&f,2,4500000000LL));
     assert(!p.mode2_seek_wait_until_ms && p.render_offset_ns==anchor);
     state=STREAM_MODE2_SEEK_READY;
@@ -153,6 +154,96 @@ int main(void) {
     assert(mode2_seek_startup_l(&p,&s,&f,2,8000000000LL)==1);
     s.audio_lifecycle_generation++;
     assert(!mode2_seek_startup_l(&p,&s,&f,2,8100000000LL));
+    // A qualified preroll cannot leak into previews, pause, other transports,
+    // recoding, manual delay, or replacement audio.
+    int *cancel[]={&s.seek_paused,&s.play_n_video_frames,&s.paused,
+        &s.paused_internal,&s.av_delay};
+    for(unsigned i=0;i<sizeof(cancel)/sizeof(*cancel);i++) {
+        p.mode2_seek_preroll=1; *cancel[i]=1;
+        assert(!mode2_seek_startup_l(&p,&s,&f,2,8200000000LL));
+        assert(!p.mode2_seek_preroll); *cancel[i]=0;
+    }
+    p.mode2_seek_preroll=1;
+    assert(!mode2_seek_startup_l(&p,&s,&f,2,8200000000LL));
+    assert(!p.mode2_seek_preroll); // Replacement generation above.
+    p.mode2_seek_audio_generation=s.audio_lifecycle_generation;
+    for(int mode=0;mode<3;mode++) {
+        p.mode2_seek_preroll=1; recode=mode==2;
+        assert(!mode2_seek_startup_l(&p,&s,&f,mode,8300000000LL));
+        assert(!p.mode2_seek_preroll);
+    }
+    return 0;
+}
+''')
+
+    def test_deadline_preroll_submission_and_generation(self):
+        renderer = source('codec_sfdec2.c')
+        admission = extract(renderer[renderer.index('// Target render window reached;'):],
+                            'if( p->mode2_seek_preroll )')
+        discard = extract(renderer, 'if (mode2_preroll_interval_ns > 0 && lateness_ns')
+        completion = extract(renderer, 'if (mode2_preroll_interval_ns > 0 &&\n')
+        self.assertIn(completion, extract(renderer, 'if (presented) {\n\t\t\tif (mode2_'))
+        run_c(r'''
+#include <assert.h>
+#include <stdint.h>
+#define NSEC_PER_MSEC 1000000LL
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+#define DBGSI if(0)
+#define serprintf(...) ((void)0)
+typedef int64_t INT64;
+typedef void sfbuf_t;
+typedef struct {
+    int mode2_seek_preroll, mode2_seek_start_epoch;
+    unsigned int render_generation;
+    void *sfdec;
+} priv_t;
+typedef struct { int time, epoch, duration; void *android_handle; } VIDEO_FRAME;
+static int releases, fail_release;
+static int sfdec_buf_render(void *d, sfbuf_t *b, int render, int asap, INT64 deadline) {
+    (void)d; (void)b; assert(!render && !asap && !deadline);
+    releases++; return fail_release;
+}
+static int submit(priv_t *p, VIDEO_FRAME *f, INT64 cadence_interval_ns,
+                  INT64 lateness_ns, int generation_change, int epoch_change) {
+    INT64 mode2_preroll_interval_ns=0;
+    unsigned int mode2_preroll_generation=0;
+    int render_error=0, presented=0;
+''' + admission + r'''
+''' + discard + r''' else { presented=1; }
+    p->render_generation+=generation_change;
+    p->mode2_seek_start_epoch+=epoch_change;
+    if(presented) {
+''' + completion + r'''
+    }
+    return render_error ? -1 : presented;
+}
+int main(void) {
+    priv_t p={.mode2_seek_preroll=1,.mode2_seek_start_epoch=4,.render_generation=7};
+    VIDEO_FRAME f={.time=663621,.epoch=4,.duration=42};
+    const INT64 interval=41708333;
+    // Captured first deadline was 60.781ms late despite passing heard admission.
+    assert(!submit(&p,&f,interval,60780834,0,0));
+    assert(releases==1 && p.mode2_seek_preroll);
+    // The next frame still has part of its display interval remaining.
+    f.time=663663;
+    assert(submit(&p,&f,interval,26671209,0,0)==1);
+    assert(releases==1 && !p.mode2_seek_preroll);
+    // Steady playback (and all paths that never arm preroll) keeps existing policy.
+    assert(submit(&p,&f,interval,60780834,0,0)==1 && releases==1);
+    p.mode2_seek_preroll=1;
+    assert(submit(&p,&f,interval,-11416386,0,0)==1 && !p.mode2_seek_preroll);
+    p.mode2_seek_preroll=1;
+    assert(submit(&p,&f,interval,interval,0,0)==1 && !p.mode2_seek_preroll);
+    p.mode2_seek_preroll=1;
+    assert(!submit(&p,&f,interval,interval+1,0,0) && p.mode2_seek_preroll);
+    assert(!submit(&p,&f,0,42000001,0,0) && p.mode2_seek_preroll);
+    assert(submit(&p,&f,0,42000000,0,0)==1 && !p.mode2_seek_preroll);
+    // An old submission must not disarm a new seek/anchor generation.
+    p.mode2_seek_preroll=1;
+    assert(submit(&p,&f,interval,0,1,0)==1 && p.mode2_seek_preroll);
+    assert(submit(&p,&f,interval,0,0,1)==1 && p.mode2_seek_preroll);
+    fail_release=1;
+    assert(submit(&p,&f,interval,60780834,0,0)==-1 && p.mode2_seek_preroll);
     return 0;
 }
 ''')

@@ -111,7 +111,11 @@ estimator is introduced by this extraction.
   Before submitting post-seek video on an uncalibrated direct Mode 2 seek,
   sfdec2 waits at most 1500ms for qualified presentation and completion of the
   heard clock's monotonic catch-up. It then adopts that phase once and discards
-  queued preroll already overtaken by audio. Each wait releases the renderer
+  queued preroll already overtaken by audio. Until the first successful submission,
+  it also checks the final wall-clock deadline immediately before submitting:
+  a frame whose entire display interval has elapsed is released without rendering.
+  This catches stale preroll even when the heard clock lags the wall anchor;
+  ordinary playback keeps its 200ms late-drop threshold. Each wait releases the renderer
   mutex and audio lifecycle lease, and rechecks the queue/epoch on wakeup.
   The seek preview is never held; a reused calibration bypasses qualification.
   Pause, audio replacement or invalid calibration cancels the wait. Timeout

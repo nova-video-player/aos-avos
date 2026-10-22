@@ -224,11 +224,45 @@ counts. These are diagnostic classifications: the existing write-gap verdict
 remains in force until presentation evidence establishes that buffering covered
 the interval. Missing diagnostics never excuse a gap, and a later successful
 write does not excuse a silent tail or an observed underrun. The narrow exception
-is a completed, uninterrupted wait wholly inside a successful initial Mode 2
-seek qualification window, before any ordinary render. This is counted separately
+is a completed, uninterrupted wait between target readiness and successful initial
+Mode 2 seek qualification, before any ordinary render. The audio producer may
+start filling before the renderer begins its wait; that earlier buffering does
+not increase the recorded first-video allowance. This is counted separately
 as `seek_qualification_write_gaps`: it is startup buffering, not a steady-playback
 write stall. Presentation progress, freshness, underrun and starvation checks
 remain required. Later or unexplained gaps retain the ordinary limit.
+
+Calibrated direct Mode 2 seeks can skip that hold using
+`mode2_seek_calibration: seed ... reused=1`. The renderer's bypass diagnostic can
+precede target readiness during preview and need not report a zero wait. Refill
+classification uses the post-readiness reused seed and new queue evidence, not
+the presence or timing of that bypass diagnostic. The analyzer recognizes at most the
+first completed refill wait as `seek_refill_write_gaps`, within the unchanged
+`SEEK_STARTUP_MAX_MS` budget. It requires a fresh observer queue,
+same-process Mode 2 writes filling at least its reported byte capacity before
+the gap, and two subsequent fresh presentation samples in the same observer
+epoch/generation/format. The counter must advance to a trusted observation,
+with queued logical samples remaining and no observed underrun increment.
+The first observer snapshot must have no presentation yet. Its encoded total
+must exactly match completed access units accepted since target readiness;
+partial write prefixes are credited only when their remainder completes.
+Because the observer is cached, an exact earlier completed-unit total is also
+valid if subsequent units completed within its reported sample age. The age
+must be fresh; no approximate byte-count tolerance is used.
+This allows a throttled snapshot taken after filling starts without assuming
+an unobserved empty queue or tolerating unexplained bytes.
+The wait itself must match the seek epoch, accepted write and timing, and be
+complete and uninterrupted. Pauses/reconfiguration invalidate the evidence.
+`complete=0` in a recovered-wait record describes that individual write. The
+analyzer may prove completion from an explicit matching short-write continuation
+and exact remainder writes in the same process/transport within 50ms. Completion
+must still fit the original startup/qualification deadline. Missing fragments,
+changed requests, interrupted or delayed continuations receive no exemption.
+`compressed_wait_completed_units` remains the count of raw `complete=1` records;
+`backpressure_write_gaps` also includes units whose continuation proves completion.
+This identifies startup queue backpressure; it does not prove uninterrupted
+physical audio or derive PCM durations from compressed byte counts. Later gaps,
+silent tails, presentation freshness and all playback fault checks still apply.
 
 ## 6. Identify persistent lipsync drift and recovery
 

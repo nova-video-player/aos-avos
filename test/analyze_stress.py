@@ -204,15 +204,124 @@ def mode2_seek_qualification(rows, epoch, start, startup_limit):
             ('video_render_diag:' in r[1] and not r[2].get('_seek_preview')))
             for r in rows):
         return None
-    return max(start, begin), row[0], waited
+    # Audio can fill the queue before the renderer reaches its qualification
+    # wait. Attribute completed startup backpressure from target readiness,
+    # not from the renderer's later first poll. The allowance for first video
+    # still uses only the recorded wait, and the checks above forbid ordinary
+    # rendering or pause anywhere in this startup interval.
+    return start, row[0], waited
 
 
-def write_gap_evidence(rows, writes, end, limit, epoch, qualification=None):
+def mode2_calibrated_refill(rows, writes, start, cfg):
+    """Identify the first bounded refill of a new queue using reused calibration.
+
+    This is startup buffering evidence, not proof of continuous physical audio.
+    Never infer queue duration by treating compressed bytes as PCM frames.
+    """
+    gaps = [(a, b) for a, b in zip(writes, writes[1:])
+            if b[0] - a[0] > cfg['WRITE_GAP_MAX_MS']]
+    if not gaps:
+        return None
+    before, after = gaps[0]
+    if after[0] - start > cfg['SEEK_STARTUP_MAX_MS']:
+        return None
+    seeds = [r for r in rows if 'mode2_seek_calibration: seed ' in r[1]]
+    # The renderer's bypass report can precede TARGET_READY during preview,
+    # and waited_ms need not be zero. The post-readiness reused seed and new
+    # queue identify this refill; no qualification-time allowance is granted.
+    if len(seeds) != 1 or seeds[0][2].get('reused') != '1' or seeds[0][0] > before[0]:
+        return None
+    shadows = [r for r in rows if 'mode2_occupancy_shadow:' in r[1]]
+    fresh = [r for r in shadows if r[0] >= after[0] and r[2].get('src') == '1']
+    if len(fresh) < 2:
+        return None
+    first, second = fresh[:2]
+    if not shadows:
+        return None
+    origin = shadows[0]
+    if (origin[0] > before[0] or origin[2].get('src') != '0' or
+            origin[2].get('presented') != '0' or
+            any(k not in origin[2] for k in ('epoch', 'generation', 'fmt'))):
+        return None
+    observed = [r for r in shadows if origin[0] <= r[0] <= second[0]]
+    if (any(any(r[2].get(k) != origin[2].get(k) for k in ('epoch', 'generation', 'fmt')) or
+            r[2].get('pt') != '2' for r in observed) or
+            any(any(marker in r[1] for marker in ('android_sync: pause start',
+                    'stream_stop:', 'stream_open:', 'audiotrack_set_output_params: resolved'))
+                for r in rows if seeds[0][0] <= r[0] <= second[0])):
+        return None
+    # Match process and actual compressed transport, not merely the calibration
+    # marker. An observer's epoch is independent of the renderer seek epoch.
+    def pid(r):
+        parts = r[1].split()
+        return parts[1] if len(parts) > 3 and all(p.isdigit() for p in parts[1:3]) else None
+    evidence = [seeds[0], before, after, origin, first, second]
+    if any(pid(r) != pid(before) for r in evidence):
+        return None
+    prefix = [r for r in writes if r[0] <= before[0]]
+    if any('passthrough=2' not in r[1] or
+           f'format={origin[2].get("fmt")},' not in r[1] or pid(r) != pid(before) for r in prefix + [after]):
+        return None
+    try:
+        # The throttled observer may first run after filling has started.
+        # Prove its queue origin from this seek's writes instead of requiring
+        # a lucky zero-byte snapshot. Mode 2 credits complete access units;
+        # an accepted partial prefix is not in encoded/logical totals yet.
+        snapshot_age = int(origin[2]['age'])
+        snapshot_bytes = int(origin[2]['encoded'])
+        if not 0 <= snapshot_age <= cfg['OBSERVER_FRESH_MS']:
+            return None
+        snapshot_time = origin[0] - snapshot_age
+        snapshot_matches = False
+        completed = pending = remaining = 0
+        for r in rows[:rows.index(origin)]:
+            match = re.search(r'audiotrack_write: wrote (\d+) out of (\d+)', r[1])
+            if not match:
+                continue
+            written, requested = map(int, match.groups())
+            if (not 0 < written <= requested or
+                    (remaining and requested != remaining)):
+                return None
+            pending += written
+            remaining = requested - written
+            if not remaining:
+                # The observer is cached. Its exact total may precede a unit
+                # completed since sampling, but never one completed before
+                # the reported sample age permits. Do not add a byte tolerance.
+                if completed == snapshot_bytes and r[0] >= snapshot_time:
+                    snapshot_matches = True
+                completed += pending
+                pending = 0
+        if (not (snapshot_matches or snapshot_bytes == completed) or
+                (int(origin[2]['logical']) > 0) != (snapshot_bytes > 0) or
+                int(origin[2]['logical']) < 0):
+            return None
+        accepted = sum(int(re.search(r'audiotrack_write: wrote (\d+) out of', r[1])[1]) for r in prefix)
+        capacity = int(first[2]['buffer'])
+        if (capacity <= 0 or accepted < capacity or int(origin[2]['underruns']) < 0 or
+                first[0] - after[0] > cfg['OBSERVER_FRESH_MS'] or
+                not 0 < second[0] - first[0] <= cfg['OBSERVER_FRESH_MS'] or
+                any(not 0 <= int(r[2][k]) <= cfg['OBSERVER_FRESH_MS']
+                    for r in (first, second) for k in ('age', 'ts_age')) or
+                any(r[2].get('framing') != '2' for r in (first, second)) or
+                second[2].get('trusted') != '1' or second[2].get('counter_advancing') != '1' or
+                not 0 < int(first[2]['presented']) < int(second[2]['presented']) or
+                any(int(r[2]['logical']) <= int(r[2]['presented']) for r in (first, second)) or
+                any(int(r[2]['underruns']) != int(origin[2]['underruns']) for r in observed)):
+            return None
+    except (KeyError, ValueError):
+        return None
+    return before[0], after[0], start + cfg['SEEK_STARTUP_MAX_MS']
+
+
+def write_gap_evidence(rows, writes, end, limit, epoch, qualification=None, refill=None):
     """Attribute gaps only; acceptance/backpressure is not proof of presentation."""
     out = dict(backpressure_write_gaps=0, incomplete_backpressure_write_gaps=0,
                unexplained_write_gaps=0)
     if qualification:
         out['seek_qualification_write_gaps'] = 0
+    if refill:
+        out['seek_refill_write_gaps'] = 0
     waits = [(r, compressed_wait(r[1])) for r in rows if 'compressed_write_wait:' in r[1]]
 
     def process(row):
@@ -220,6 +329,48 @@ def write_gap_evidence(rows, writes, end, limit, epoch, qualification=None):
         # serprintf writes through log_thread; serprintf_record emits directly
         # from the audio thread. Their logcat TIDs differ within one process.
         return parts[1] if len(parts) > 3 and all(p.isdigit() for p in parts[1:3]) else None
+
+    def completion_time(wait, after):
+        if wait['complete']:
+            return after[0]
+        # complete=0 describes the first positive write after backpressure,
+        # not the final outcome of the access unit. Follow only an explicitly
+        # identified continuation burst, with exact remaining-byte requests.
+        match = re.search(r'audiotrack_write: wrote (\d+) out of (\d+)', after[1])
+        transport = re.search(r'format=(\d+), passthrough=([12])\)', after[1])
+        if (not match or int(match[2]) != wait['unit_bytes'] - wait['accepted'] or
+                not transport):
+            return None
+        accepted = wait['accepted'] + wait['written']
+        written, requested = map(int, match.groups())
+        continuation = False
+        for r in rows[rows.index(after) + 1:]:
+            if not 0 <= r[0] - after[0] <= 50:
+                return None
+            if any(marker in r[1] for marker in ('android_sync: pause start',
+                    'VIDEO_SEEK_TARGET_READY:', 'stream_stop:', 'stream_open:',
+                    'audiotrack_set_output_params: resolved')):
+                return None
+            short = re.search(r'compressed short write (\d+)/(\d+) fmt=(\d+), continuing unit at (\d+)/(\d+)', r[1])
+            if short:
+                if (process(r) != process(after) or tuple(map(int, short.groups())) !=
+                        (written, requested, int(transport[1]),
+                         accepted, wait['unit_bytes'])):
+                    return None
+                continuation = True
+            match = re.search(r'audiotrack_write: wrote (-?\d+) out of (\d+)', r[1])
+            if not match:
+                continue
+            written, requested = map(int, match.groups())
+            if (not continuation or process(r) != process(after) or
+                    any(r[2].get(k) != after[2].get(k) for k in ('format', 'passthrough')) or
+                    requested != wait['unit_bytes'] - accepted or not 0 < written <= requested):
+                return None
+            accepted += written
+            if accepted == wait['unit_bytes']:
+                return r[0]
+            continuation = False
+        return None
 
     for before, after in zip(writes, writes[1:]):
         elapsed = after[0] - before[0]
@@ -238,12 +389,16 @@ def write_gap_evidence(rows, writes, end, limit, epoch, qualification=None):
                         for r in rows)):
                 matched = wait
                 break
-        key = ('backpressure_write_gaps' if matched and matched['complete'] else
+        completed_at = completion_time(matched, after) if matched else None
+        key = ('backpressure_write_gaps' if completed_at is not None else
                'incomplete_backpressure_write_gaps' if matched else 'unexplained_write_gaps')
         out[key] += 1
         if (qualification and key == 'backpressure_write_gaps' and
-                before[0] >= qualification[0] - 50 and after[0] <= qualification[1]):
+                before[0] >= qualification[0] - 50 and completed_at <= qualification[1]):
             out['seek_qualification_write_gaps'] += 1
+        elif (refill and key == 'backpressure_write_gaps' and
+              (before[0], after[0]) == refill[:2] and completed_at <= refill[2]):
+            out['seek_refill_write_gaps'] += 1
     if writes and end - writes[-1][0] > limit:
         out['unexplained_write_gaps'] += 1  # No completion can explain a silent tail.
     return out
@@ -643,6 +798,8 @@ def analyze(text, mode, cfg=None):
                      if mode == 'seek' else None)
     out['seek_qualification_ms'] = qualification[2] if qualification else 0
     out['seek_qualification_write_gaps'] = 0
+    refill = mode2_calibrated_refill(rows, writes, start, cfg) if mode == 'seek' else None
+    out['seek_refill_write_gaps'] = 0
     require(len(writes) >= 2 and len(videos) >= 3, 'insufficient_progress_records')
     out.update(writes=len(writes), video_count=len(videos),
                video_span=span(videos, 'frame'), audio_span=span(videos, 'audio'))
@@ -655,7 +812,7 @@ def analyze(text, mode, cfg=None):
     if mode == 'speed':
         reasons = [x for x in reasons if x != 'video_not_monotonic']
     out['max_write_gap'] = gap(writes, end)
-    out.update(write_gap_evidence(rows, writes, end, cfg['WRITE_GAP_MAX_MS'], out['epoch'], qualification))
+    out.update(write_gap_evidence(rows, writes, end, cfg['WRITE_GAP_MAX_MS'], out['epoch'], qualification, refill))
     out['max_video_gap'] = gap(videos, end)
     out['starved'] = sum('AUDIO_STARVED:' in r[1] for r in signal_rows)
     out['late_drops'] = sum('late frame drop' in r[1] for r in signal_rows)
@@ -818,13 +975,13 @@ def analyze(text, mode, cfg=None):
                         span(window_v, 'audio') >= cfg['HOLD_MIN_MS'] * .8, 'high_window_no_progress')
             require(all(number(b, 'frame') > number(a, 'frame') for a, b in zip(window_v, window_v[1:])), 'video_not_monotonic')
         require(vg <= cfg['VIDEO_GAP_MAX_MS'], 'video_feed_gap')
-        if qualification:
-            # Only matched, completed waits wholly inside the successful
-            # initial hold are startup buffering. Later gaps and silent tails
-            # remain failures; presentation/underrun checks still apply.
+        if qualification or refill:
+            # Only matched, completed initial waits with startup evidence are
+            # exempt. Later gaps, silent tails and presentation faults remain.
             require(out['unexplained_write_gaps'] == 0 and
                     out['incomplete_backpressure_write_gaps'] == 0 and
-                    out['backpressure_write_gaps'] == out['seek_qualification_write_gaps'],
+                    out['backpressure_write_gaps'] ==
+                    out['seek_qualification_write_gaps'] + out['seek_refill_write_gaps'],
                     'audio_write_gap')
         else:
             require(wg <= cfg['WRITE_GAP_MAX_MS'], 'audio_write_gap')

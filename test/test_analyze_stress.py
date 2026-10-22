@@ -370,6 +370,25 @@ class AnalyzerTests(unittest.TestCase):
                         text + '\n1005.600 AVOS_TEST_POLL_2'):
             self.assertIn('audio_write_gap', self.check(changed, 'seek')['reason'])
 
+    def test_startup_refill_can_precede_renderer_qualification_wait(self):
+        text = self.qualified_seek_fixture()
+        # The audio producer starts filling immediately, while the renderer
+        # reaches qualification later. The completed wait may straddle that
+        # first poll, or finish before it; both precede ordinary rendering.
+        for waited in (1029, 700):
+            delayed = text.replace('waited_ms=1200', f'waited_ms={waited}')
+            result = self.check(delayed, 'seek')
+            self.assertEqual(result['verdict'], 'PASS', result)
+            self.assertEqual(result['seek_qualification_ms'], waited)
+            self.assertEqual(result['seek_qualification_write_gaps'], 1)
+            self.assertEqual(result['max_write_gap'], 360)
+            for event in ('1000.100 android_sync: pause start',
+                          '1000.100 stream_stop:', '1000.100 stream_open:'):
+                broken = self.check(delayed + '\n' + event, 'seek')
+                self.assertIn('audio_write_gap', broken['reason'])
+            broken = self.check(delayed.replace('interrupted=0', 'interrupted=1'), 'seek')
+            self.assertIn('audio_write_gap', broken['reason'])
+
     def test_qualification_preserves_presentation_and_playback_fault_checks(self):
         text = self.qualified_seek_fixture()
         for event, reason in (

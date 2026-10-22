@@ -616,10 +616,21 @@ they are not measurements of first audible/visible output. The 250ms feed-gap
 limits still apply between subsequent records and through a silent tail.
 An explicit successful direct Mode 2 seek qualification can add its recorded
 wait (at most 1500ms) to the first video/render budget, never the first-write
-budget. Only completed compressed backpressure wholly within that pre-render
-qualification window is classified as startup buffering. The analyzer reports
+budget. Only completed compressed backpressure between target readiness and
+successful qualification, before ordinary rendering, is classified as startup
+buffering. Audio may fill the queue before the renderer starts waiting; this
+does not extend the recorded qualification allowance. The analyzer reports
 `seek_qualification_ms` and `seek_qualification_write_gaps`; missing/invalid
 qualification, ongoing gaps, underruns and presentation stalls remain checked.
+For a calibrated direct Mode 2 seek that skips qualification, the first completed
+refill wait can instead be reported as `seek_refill_write_gaps`. This requires
+reused calibration, a fresh queue filled to its reported byte capacity,
+completion within the existing startup budget, and fresh same-domain advancing
+presentation evidence without an underrun increment. It does not extend any
+deadline or excuse later write gaps. A first observer snapshot taken after filling
+starts must match the completed access units accepted since target readiness.
+See `doc/analyze_logs.md` for the evidence
+requirements.
 Resume uses the same separation with `RESUME_LATENCY_MAX_MS`: the initial
 write/video wait is checked against that budget, not also against the steady
 250ms feed-gap limit. Speed hold windows retain their leading-gap checks.

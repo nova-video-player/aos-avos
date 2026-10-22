@@ -20,11 +20,14 @@
  * Checks: one global ref per engine; the render thread attaches once (named), stays attached,
  * and detaches when it exits; nativeDestroy() frees the ref only after the render thread is
  * joined; a missing Java method leaves the engine working with the push disabled; and 200
- * create / announce / destroy races leak nothing and never touch a freed ref.
+ * create / announce / destroy races leak nothing and never touch a freed ref. Run 4 covers the
+ * deferred destroy: when a STREAM still holds the engine, nativeDestroy() must not free the engine
+ * or its listener ref; the last registry release does, on the releasing thread.
  *
  * This validates OUR use of the JNI contract, not the JVM's behaviour -- see the notes in test_host_native.py.
  */
 #include "sub_engine.h"
+#include "sub_engine_registry.h"
 #include "fake_backend.h"
 #include <jni.h>
 #include <pthread.h>
@@ -72,9 +75,16 @@ static int fails=0;
 #define CHECK(c,msg) do{ if(!(c)){printf("FAIL: %s\n",msg);fails++;} else printf("ok:   %s\n",msg);}while(0)
 static int calls(void){return __atomic_load_n(&g_calls,__ATOMIC_RELAXED);}
 static void settle(void){ usleep(100000); }
+// A native (non-JVM) thread, like the avos thread that closes a video: it releases the engine.
+static void *release_thread(void *p){ sub_engine_registry_release((SUB_ENGINE*)p); return NULL; }
 int main(void){
     fake_backend_set_mode(FAKE_EMIT_ON_DEMAND);
     g_env_obj=&env_tbl; g_vm_obj=&vm_tbl; JNIEnv *env=&g_env_obj; jobject thiz=&g_obj_token;
+    // The main thread plays the Java thread that calls nativeCreate/nativeDestroy: already attached,
+    // so GetEnv() succeeds there and the engine teardown must NOT attach it again. (Before the
+    // deferred-destroy change the env was passed in; the destroy callback now asks the JVM itself,
+    // because the last release may happen on a native thread that is not attached.)
+    t_attached=1;
 
     // ---- run 1: normal life cycle ----
     jlong h=J(nativeCreate)(env,thiz); SUB_ENGINE *eng=(SUB_ENGINE*)(intptr_t)h;
@@ -120,5 +130,35 @@ int main(void){
     }
     CHECK(__atomic_load_n(&g_live_refs,__ATOMIC_ACQUIRE)==0 && __atomic_load_n(&g_uaf,__ATOMIC_ACQUIRE)==0 && __atomic_load_n(&g_wrong_obj,__ATOMIC_ACQUIRE)==0,"200 create/announce/destroy races: no leaked ref, no call on a freed ref");
     CHECK(__atomic_load_n(&g_attach,__ATOMIC_ACQUIRE)==g_detach,"every attached render thread detached (attaches == detaches)");
+
+    // ---- run 4: Java destroys the engine while a STREAM still holds it (deferred destroy) ----
+    {
+        int a0=__atomic_load_n(&g_attach,__ATOMIC_ACQUIRE), d0=__atomic_load_n(&g_detach,__ATOMIC_ACQUIRE);
+        h=J(nativeCreate)(env,thiz); eng=(SUB_ENGINE*)(intptr_t)h;
+        SUB_ENGINE *held=sub_engine_registry_acquire();       // what avos_mp_video_open() does
+        CHECK(held==eng && __atomic_load_n(&g_live_refs,__ATOMIC_ACQUIRE)==1,"deferred: stream acquired the published engine");
+        J(nativeSetUIMode)(env,thiz,h,1); sub_engine_start(eng,fake_clock,NULL);
+        sub_engine_open_track(eng,SUB_FMT_SSA,100,100,NULL,0,NULL,0,NULL);
+        sub_engine_set_paused(eng,1); settle();
+        J(nativeDestroy)(env,thiz,h);                          // must return without freeing anything
+        CHECK(__atomic_load_n(&g_live_refs,__ATOMIC_ACQUIRE)==1,"deferred: nativeDestroy with a holder keeps the engine and the listener's global ref");
+        CHECK(sub_engine_registry_acquire()==NULL,"deferred: a retracted engine cannot be acquired by a new stream");
+        int c=calls(); fake_backend_emit(); sub_engine_force_wake(eng); settle();
+        CHECK(calls()>c && __atomic_load_n(&g_uaf,__ATOMIC_ACQUIRE)==0,"deferred: the holder can still use the engine and pushes keep reaching Java");
+        sub_engine_stop(held); sub_engine_close_track(held);   // avos_mp_video_close() order
+        pthread_t rt; pthread_create(&rt,NULL,release_thread,held); pthread_join(rt,NULL);   // last holder: destroy runs THERE
+        CHECK(__atomic_load_n(&g_live_refs,__ATOMIC_ACQUIRE)==0,"deferred: the last release frees the listener's global ref");
+        CHECK((__atomic_load_n(&g_attach,__ATOMIC_ACQUIRE)-a0)==2 && (__atomic_load_n(&g_detach,__ATOMIC_ACQUIRE)-d0)==2,
+              "deferred: render thread + the un-attached releasing thread each attached once and detached once");
+        int after=calls(); settle();
+        CHECK(calls()==after && __atomic_load_n(&g_uaf,__ATOMIC_ACQUIRE)==0 && __atomic_load_n(&g_wrong_obj,__ATOMIC_ACQUIRE)==0,
+              "deferred: no Java call after the deferred destroy");
+        // The next stream gets the NEW engine, never the retracted one.
+        jlong h2=J(nativeCreate)(env,thiz); SUB_ENGINE *next=sub_engine_registry_acquire();
+        CHECK(next==(SUB_ENGINE*)(intptr_t)h2,"deferred: after a rebuild, acquire() returns the new engine");
+        sub_engine_registry_release(next);
+        J(nativeDestroy)(env,thiz,h2);
+        CHECK(__atomic_load_n(&g_live_refs,__ATOMIC_ACQUIRE)==0,"deferred: replacement engine destroyed cleanly");
+    }
     printf("%s\n",fails?"FAILED":"ALL PASSED"); return fails;
 }

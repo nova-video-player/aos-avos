@@ -33,3 +33,24 @@ void     fake_backend_set_mode(FAKE_MODE mode);
 void     fake_backend_emit(void);              /* ON_DEMAND: next render_at() yields one new frame */
 int64_t  fake_clock(void *ctx);                /* pass to sub_engine_start() */
 SUB_FRAME *fake_frame_new(int with_events);    /* refcount 1; with_events=0 is an empty ("clear") frame */
+
+/* ---- observation hooks (added for the lifetime / loading / pause tests) ----------------------
+ * Counters are process-wide and updated with atomics; reset them with fake_backend_reset_counters()
+ * at the start of a scenario. "live" is deliberately NOT reset: it is opened-minus-closed backend
+ * instances, i.e. a leak detector that must read 0 after the engine is destroyed. */
+void    fake_backend_reset_counters(void);
+int     fake_backend_live(void);                 /* backends opened and not yet closed */
+int     fake_backend_feeds(void);                /* feed() calls that reached a backend */
+int     fake_backend_flushes(void);
+int     fake_backend_renders(void);              /* render_at() calls */
+int     fake_backend_resizes(void);              /* backend->resize() calls */
+int     fake_backend_box_sets(void);             /* backend->set_video_box() calls */
+void    fake_backend_last_canvas(int *w, int *h);
+void    fake_backend_last_box(int *x, int *y, int *w, int *h);
+int64_t fake_backend_last_pts(void);             /* pts of the last render_at(); -1 if none */
+/* A backend remembers the first byte of the first cue it was fed as its "label". A later cue with
+ * a different first byte means a cue from another track reached it: counted here. */
+int     fake_backend_foreign(void);
+/* Feeds the MOST RECENTLY OPENED backend has accepted since its last flush (or since open). */
+int     fake_backend_active_since_flush(void);
+

@@ -23,16 +23,22 @@ stubs.c; fake_backend.c replaces the SSA/SRT/GFX decoders where a test needs to 
 Run (from anywhere):
 
     python3 test/host/test_host_native.py               # all
-    python3 test/host/test_host_native.py -v -k race    # one, with names
-    SANITIZERS=thread python3 test/host/test_host_native.py -k race
+    python3 test/host/test_host_native.py -v -k race    # one test, every check listed
+    SANITIZERS=thread python3 test/host/test_host_native.py -k race -k registry -k switch
     SANITIZERS=address,undefined python3 test/host/test_host_native.py -k jni
-    HOST_TEST_OUTPUT=1 python3 test/host/test_host_native.py   # also show passing output
+    HOST_TEST_OUTPUT=1 python3 test/host/test_host_native.py   # raw program output of every test
+    NO_COLOR=1 python3 test/host/test_host_native.py           # plain text (also automatic when piped)
 
 Environment:
     CC            compiler (default "cc"; may contain arguments, e.g. "ccache gcc")
     SANITIZERS    comma-separated -fsanitize= list; default "undefined"; "none" disables
     PKG_CONFIG_PATH  to select a host libass
-    HOST_TEST_OUTPUT  set to print each test's stdout/stderr even when it passes
+    HOST_TEST_OUTPUT  set to print each test's raw stdout/stderr even when it passes
+    NO_COLOR      disable colour (colour is only used on a terminal)
+
+Output: one row per test (PASS / FAIL / SKIP, duration, number of checks). A failing test lists
+its failing checks; -v lists every check; compiler warnings from the code under test are
+collected into one de-duplicated section at the end instead of interleaving with the rows.
 
 Tests that need libass are SKIPPED (not failed) when pkg-config can't find it. Compiler
 warnings are shown; sources that are borrowed rather than under test (see QUIET) are built
@@ -60,7 +66,35 @@ push_policy      The native "content changed" push for the 3D path: only while p
                  a 3D UI mode, once per generation, with no engine or renderer lock held.
 jni_listener     The same policy through the real jni_sub_engine.c against a mock JavaVM: one
                  global ref per engine, attach once / detach at exit, no call on a freed ref
-                 or detached thread, and 200 create/announce/destroy races with no leak.
+                 or detached thread, and 200 create/announce/destroy races with no leak. Run 4:
+                 nativeDestroy() while a stream still holds the engine defers the destroy; the
+                 last registry release frees the engine and the listener ref.
+registry_lifetime  sub_engine_registry.c on its own: an engine is destroyed exactly once, never
+                 while held, immediately when unheld and otherwise by the LAST release; retract
+                 never blocks; a newer publish does not lose older references; the destroy
+                 callback runs outside the registry lock; stray releases are ignored; 6 threads
+                 acquire/release while 400 engines are published and retracted.
+ssa_late_script  An external ASS script fed AFTER the first render: Custom (forced) settings must
+                 apply without the user touching a setting. Compared against the same script fed
+                 before the first render, with an unforced run proving the comparison can fail.
+track_switch     Rapid switches between two large SRT/VTT feeds (and close_track) with generation
+                 tokens: stale cues are dropped, none reach another track's backend, the last
+                 track loads completely, nothing leaks.
+seek_pause_feed  Pause / resume / seek racing the initial bulk feed, modelling the
+                 flush-then-raise-refeed-flag protocol: no deadlock, pause state exact, one full
+                 copy of the list afterwards.
+close_open       Close a video and immediately open another while its parse worker is active, with
+                 the Java side rebuilding the engine: every engine destroyed exactly once and never
+                 while held, no cross-video cues, no leaked backend. Orderly and hostile close
+                 orders.
+style_resize_paused  Style changes and surface resizes while paused: each renders once at the frozen
+                 clock, geometry reaches the backend as a coalesced pair ending on the last
+                 request, style + resize storms on two threads, pause state untouched.
+
+Scope: the four loading/seek/close/paused scenarios run against the real engine and the real
+generation-token and registry code, with the STREAM-level workers modelled by small threads in the
+tests (stream_sub_ext.c needs the whole STREAM to link). They prove the engine-side contract those
+workers rely on; they do not execute stream_sub_ext.c itself.
 
 What this does NOT prove
 ------------------------
@@ -72,11 +106,13 @@ the subtitle track, and confirm the old cue clears and the new one appears witho
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = Path(__file__).resolve().parent        # <repo>/test/host
@@ -95,9 +131,11 @@ QUIET = {'Source/debug.c', HOST + 'stubs.c'}
 
 # Link sets. Repo-relative; the test's own .c is passed separately.
 SSA_BACKEND = ('Source/sub_format_ssa.c', 'Source/sub_style.c', 'Source/debug.c', HOST + 'stubs.c')
+REGISTRY = ('Source/sub_engine_registry.c',)      # opaque SUB_ENGINE* keys only: no engine needed
 ENGINE = ('Source/sub_engine.c', 'Source/sub_render_gl.c', 'Source/sub_style.c',
           'Source/debug.c', HOST + 'stubs.c', HOST + 'fake_backend.c')
 JNI = ENGINE + ('Source/jni_sub_engine.c', 'Source/sub_engine_registry.c')
+LIFECYCLE = ENGINE + ('Source/sub_engine_registry.c',)   # real engine + real registry, fake backends
 
 # Everything the engine links is JNI- or vtable-shaped (JNIEnv*/jobject on nearly every native
 # entry point, SUB_FORMAT_BACKEND's fixed callback signatures, the mock JNINativeInterface_), so
@@ -106,6 +144,22 @@ ENGINE_FLAGS = ('-Wno-pointer-sign', '-Wno-unused-parameter')
 
 _BUILD = None   # temp dir, per test run
 _OBJS = {}      # (source, cflags) -> object file; sources shared by several tests build once
+_INFO = {}      # test method name -> RunInfo, filled by build_and_run(), read by the result printer
+_WARNINGS = []  # compiler output from the files under test, shown once in the summary
+
+
+class RunInfo:
+    """What one test's C program printed and how it ran."""
+    def __init__(self):
+        self.output = ''
+        self.seconds = 0.0
+        self.checks_ok = 0
+        self.checks_failed = 0
+        self.failed_lines = []
+        self.all_lines = []
+
+
+_CHECK_LINE = re.compile(r'^\s*(ok|FAIL)\b')
 
 
 def setUpModule():
@@ -165,7 +219,7 @@ def _build_objects(cc, jobs):
                 del _OBJS[key]                  # don't let a later test reuse a missing object
                 errors.append('%s:\n%s' % (key[0], out))
             elif out.strip():
-                sys.stderr.write(out)           # warnings from the files under test
+                _WARNINGS.append(out)           # warnings from the files under test
     return objs, errors
 
 
@@ -202,21 +256,33 @@ class HostTestCase(unittest.TestCase):
         if link.returncode:
             self.fail('link failed:\n' + link.stdout + link.stderr)
 
+        info = _INFO[self._testMethodName] = RunInfo()
+        started = time.monotonic()
         try:
             run = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         except subprocess.TimeoutExpired as e:
             hung = e
         else:
             hung = None
+        info.seconds = time.monotonic() - started
         if hung:
-            self.fail('%s timed out after %ds (deadlock?)\n%s%s'
-                      % (main, RUN_TIMEOUT_S, _text(hung.stdout), _text(hung.stderr)))
+            info.output = _text(hung.stdout) + _text(hung.stderr)
+            self.fail('%s timed out after %ds (deadlock?)' % (main, RUN_TIMEOUT_S))
         output = run.stdout + run.stderr
-        if os.environ.get('HOST_TEST_OUTPUT'):
-            sys.stderr.write(output)
+        info.output = output
+        for line in output.splitlines():
+            m = _CHECK_LINE.match(line)
+            if not m:
+                continue
+            info.all_lines.append(line.rstrip())
+            if m.group(1) == 'ok':
+                info.checks_ok += 1
+            else:
+                info.checks_failed += 1
+                info.failed_lines.append(line.rstrip())
         if run.returncode:
             how = ('killed by signal %d' % -run.returncode) if run.returncode < 0 else 'exit status %d' % run.returncode
-            self.fail('%s: %s\n%s' % (main, how, output))
+            self.fail('%s: %s' % (main, how))
 
 
 class HostNativeTests(HostTestCase):
@@ -245,6 +311,191 @@ class HostNativeTests(HostTestCase):
         """Listener ref lifetime and thread attach/detach, against a mock JavaVM."""
         self.build_and_run('jni_listener_test.c', JNI, flags=ENGINE_FLAGS)
 
+    def test_registry_lifetime(self):
+        """Engine destroyed once, never while held, deferred to the last release."""
+        self.build_and_run('registry_lifetime_test.c', REGISTRY, flags=ENGINE_FLAGS)
+
+    def test_ssa_late_script(self):
+        """External ASS script arriving after the first render still gets Custom settings."""
+        self.build_and_run('ssa_late_script_test.c', SSA_BACKEND, pkgs=['libass'],
+                           flags=('-Wno-unused-parameter',))
+
+    def test_track_switch_loading(self):
+        """Rapid switches between two large tracks while loading: no stale or foreign cues."""
+        self.build_and_run('track_switch_loading_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
+
+    def test_seek_pause_feed(self):
+        """Pause/resume/seek during the initial feed: no deadlock, one full copy afterwards."""
+        self.build_and_run('seek_pause_feed_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
+
+    def test_close_open_parsing(self):
+        """Close + immediately open a video while parsing, with engine rebuilds underneath."""
+        self.build_and_run('close_open_parsing_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
+
+    def test_style_resize_paused(self):
+        """Style change and surface resize while paused."""
+        self.build_and_run('style_resize_paused_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
+
+
+# ----------------------------------------------------------------------------------------------
+# Output formatting
+# ----------------------------------------------------------------------------------------------
+class _Style:
+    def __init__(self):
+        self.on = sys.stdout.isatty() and not os.environ.get('NO_COLOR')
+
+    def _c(self, code, s):
+        return '\033[%sm%s\033[0m' % (code, s) if self.on else s
+
+    def green(self, s): return self._c('32', s)
+    def red(self, s): return self._c('31;1', s)
+    def yellow(self, s): return self._c('33', s)
+    def dim(self, s): return self._c('2', s)
+    def bold(self, s): return self._c('1', s)
+
+
+def _tool_version(cmd):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout.strip()
+        return out.splitlines()[0] if out else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _environment_line():
+    cc = shlex.split(os.environ.get('CC') or 'cc')
+    parts = ['compiler: %s' % (_tool_version([*cc, '--version']) or ' '.join(cc) + ' (version unknown)'),
+             'libass: %s' % (_tool_version(['pkg-config', '--modversion', 'libass']) or 'not found'),
+             'sanitizers: %s' % (os.environ.get('SANITIZERS') or 'undefined')]
+    return parts
+
+
+class FormattedResult(unittest.TestResult):
+    NAME_W = 22
+
+    def __init__(self, verbosity, style):
+        super().__init__()
+        self.verbosity = verbosity
+        self.s = style
+        self.rows = []          # (name, status) in run order
+        self._t0 = 0.0
+
+    @staticmethod
+    def _short(test):
+        return test._testMethodName.replace('test_', '', 1)
+
+    def startTest(self, test):
+        super().startTest(test)
+        self._t0 = time.monotonic()
+
+    def _row(self, test, status, detail=''):
+        s = self.s
+        name = self._short(test)
+        info = _INFO.get(test._testMethodName)
+        secs = info.seconds if info and info.seconds else time.monotonic() - self._t0
+        tag = {'PASS': s.green('PASS'), 'FAIL': s.red('FAIL'), 'SKIP': s.yellow('SKIP')}[status]
+        counts = ''
+        if info and (info.checks_ok or info.checks_failed):
+            counts = '%d checks' % (info.checks_ok + info.checks_failed)
+            if info.checks_failed:
+                counts = s.red('%d of %s failed' % (info.checks_failed, counts))
+        elif detail:
+            counts = detail
+        print('  %s  %-*s %6.2fs   %s' % (tag, self.NAME_W, name, secs, counts))
+        doc = (test.shortDescription() or '').strip()
+        if doc and status == 'FAIL':
+            print(s.dim('        ' + doc))
+        self.rows.append((name, status))
+        return info
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        info = self._row(test, 'PASS')
+        if info and (self.verbosity > 1 or os.environ.get('HOST_TEST_OUTPUT')):
+            self._print_lines(info, everything=True)
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self._row(test, 'SKIP')
+        first = (reason.splitlines() or [''])[0]
+        print(self.s.dim('        ' + (first if len(first) <= 110 else first[:107] + '...')))
+
+    def _fail(self, test, err, kind):
+        info = self._row(test, 'FAIL')
+        msg = str(err[1]).strip()
+        if info and info.failed_lines:
+            self._print_lines(info, everything=self.verbosity > 1)
+        else:
+            lines = msg.splitlines()
+            print(self.s.red('        ' + (lines[0] if lines else kind)))
+            for line in lines[1:40]:
+                print('        ' + line)
+            if len(lines) > 40:
+                print(self.s.dim('        ... %d more lines (HOST_TEST_OUTPUT=1 for everything)' % (len(lines) - 40)))
+        if msg and info and info.failed_lines and not msg.endswith('exit status 1'):
+            print(self.s.red('        ' + msg.splitlines()[0]))      # e.g. "killed by signal 11" / "timed out"
+        if info and os.environ.get('HOST_TEST_OUTPUT'):
+            print(self.s.dim('        --- raw output ---'))
+            for line in info.output.splitlines():
+                print('        ' + line)
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self._fail(test, err, 'failed')
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self._fail(test, err, 'error')
+
+    def _print_lines(self, info, everything):
+        for line in (info.all_lines if everything else info.failed_lines):
+            text = line.strip()
+            if _CHECK_LINE.match(text) and text.startswith('FAIL'):
+                print(self.s.red('        x ' + re.sub(r'^FAIL:?\s*', '', text)))
+            else:
+                print(self.s.dim('        . ' + re.sub(r'^ok:?\s*', '', text)))
+
+
+class FormattedRunner:
+    """unittest runner that prints the rows above plus a header and a summary."""
+    def __init__(self, verbosity=1, **kwargs):
+        self.verbosity = verbosity
+
+    def run(self, suite):
+        s = _Style()
+        print(s.bold('AVOS native subtitle host tests'))
+        for part in _environment_line():
+            print(s.dim('  ' + part))
+        print()
+        result = FormattedResult(self.verbosity, s)
+        started = time.monotonic()
+        suite(result)
+        elapsed = time.monotonic() - started
+
+        warns = []
+        for text in _WARNINGS:
+            for line in text.splitlines():
+                if 'warning:' in line and line not in warns:
+                    warns.append(line)
+        if warns:
+            print()
+            print(s.yellow('  Compiler warnings in the code under test (%d):' % len(warns)))
+            for line in warns[:20]:
+                print('    ' + line.replace(str(REPO) + '/', ''))
+            if len(warns) > 20:
+                print(s.dim('    ... %d more' % (len(warns) - 20)))
+
+        passed = sum(1 for _, st in result.rows if st == 'PASS')
+        failed = sum(1 for _, st in result.rows if st == 'FAIL')
+        skipped = sum(1 for _, st in result.rows if st == 'SKIP')
+        print()
+        parts = ['%d passed' % passed, '%d failed' % failed, '%d skipped' % skipped]
+        line = '  %s in %.1fs' % (', '.join(parts), elapsed)
+        print(s.red(line) if failed else s.green(line))
+        if failed:
+            print(s.red('  failed: ') + ', '.join(n for n, st in result.rows if st == 'FAIL'))
+        return result
+
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest.main(testRunner=FormattedRunner)

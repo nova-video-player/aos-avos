@@ -223,7 +223,12 @@ The recording report retains the wait records and their
 counts. These are diagnostic classifications: the existing write-gap verdict
 remains in force until presentation evidence establishes that buffering covered
 the interval. Missing diagnostics never excuse a gap, and a later successful
-write does not excuse a silent tail or an observed underrun.
+write does not excuse a silent tail or an observed underrun. The narrow exception
+is a completed, uninterrupted wait wholly inside a successful initial Mode 2
+seek qualification window, before any ordinary render. This is counted separately
+as `seek_qualification_write_gaps`: it is startup buffering, not a steady-playback
+write stall. Presentation progress, freshness, underrun and starvation checks
+remain required. Later or unexplained gaps retain the ordinary limit.
 
 ## 6. Identify persistent lipsync drift and recovery
 
@@ -301,6 +306,13 @@ The live analyzer measures target-ready to first write, scheduled frame and
 render log against `SEEK_STARTUP_MAX_MS` (1000ms by default). It uses the ordinary
 feed-gap limits only after each producer starts, including silent tails. A
 target-ready message alone does not mean audio is ready or a frame is displayed.
+For direct Mode 2, exactly one same-epoch `mode2 seek qualification` record with
+`state=2 anchored=1` and `0 < waited_ms <= 1500` can extend the first video/render
+budget by the recorded wait. `seek_qualification_ms` reports the allowance; raw
+startup latencies remain unchanged. The wait must fit after target readiness
+(50ms log timing tolerance), precede ordinary rendering and have no intervening
+pause. Timeout, duplicate, wrong-epoch or missing records grant no allowance.
+The first-write budget remains unchanged, and later feed gaps are still checked.
 For PCM, inspect `pcm_startup_correction`, `android_sync anchor_diag` and
 `at_ledger` together: an early correction target may precede presentation-clock
 calibration. The phase capture retains these messages for that comparison.

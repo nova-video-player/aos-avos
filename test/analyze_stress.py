@@ -179,10 +179,40 @@ def compressed_wait(line):
     return wait
 
 
-def write_gap_evidence(rows, writes, end, limit, epoch):
+def mode2_seek_qualification(rows, epoch, start, startup_limit):
+    """Recognize one successful, bounded pre-render qualification, not a timeout."""
+    reports = [r for r in rows if 'android_sync: mode2 seek qualification ' in r[1]]
+    if len(reports) != 1:
+        return None
+    row = reports[0]
+    fields = row[2]
+    try:
+        waited = int(fields['waited_ms'])
+    except (KeyError, ValueError):
+        return None
+    # mode2_seek_startup_l() permits 1500ms. Never grant a general transport
+    # allowance, renew the deadline, or use another epoch's qualification.
+    if (fields.get('epoch') != str(epoch) or fields.get('state') != '2' or
+            fields.get('anchored') != '1' or not 0 < waited <= 1500 or
+            row[0] - start > startup_limit + waited):
+        return None
+    begin = row[0] - waited
+    if begin < start - 50:
+        return None
+    if any(r[0] <= row[0] and (
+            'android_sync: pause start' in r[1] or
+            ('video_render_diag:' in r[1] and not r[2].get('_seek_preview')))
+            for r in rows):
+        return None
+    return max(start, begin), row[0], waited
+
+
+def write_gap_evidence(rows, writes, end, limit, epoch, qualification=None):
     """Attribute gaps only; acceptance/backpressure is not proof of presentation."""
     out = dict(backpressure_write_gaps=0, incomplete_backpressure_write_gaps=0,
                unexplained_write_gaps=0)
+    if qualification:
+        out['seek_qualification_write_gaps'] = 0
     waits = [(r, compressed_wait(r[1])) for r in rows if 'compressed_write_wait:' in r[1]]
 
     def process(row):
@@ -211,6 +241,9 @@ def write_gap_evidence(rows, writes, end, limit, epoch):
         key = ('backpressure_write_gaps' if matched and matched['complete'] else
                'incomplete_backpressure_write_gaps' if matched else 'unexplained_write_gaps')
         out[key] += 1
+        if (qualification and key == 'backpressure_write_gaps' and
+                before[0] >= qualification[0] - 50 and after[0] <= qualification[1]):
+            out['seek_qualification_write_gaps'] += 1
     if writes and end - writes[-1][0] > limit:
         out['unexplained_write_gaps'] += 1  # No completion can explain a silent tail.
     return out
@@ -606,6 +639,10 @@ def analyze(text, mode, cfg=None):
         require(all(r[2]['seek_epoch'] == epoch for r in videos), 'unexpected_seek_epoch')
         require(all(r[2]['epoch'] == epoch for r in renders), 'stale_render_epoch')
     out['epoch'] = epoch or 'unknown'
+    qualification = (mode2_seek_qualification(rows, epoch, start, cfg['SEEK_STARTUP_MAX_MS'])
+                     if mode == 'seek' else None)
+    out['seek_qualification_ms'] = qualification[2] if qualification else 0
+    out['seek_qualification_write_gaps'] = 0
     require(len(writes) >= 2 and len(videos) >= 3, 'insufficient_progress_records')
     out.update(writes=len(writes), video_count=len(videos),
                video_span=span(videos, 'frame'), audio_span=span(videos, 'audio'))
@@ -618,7 +655,7 @@ def analyze(text, mode, cfg=None):
     if mode == 'speed':
         reasons = [x for x in reasons if x != 'video_not_monotonic']
     out['max_write_gap'] = gap(writes, end)
-    out.update(write_gap_evidence(rows, writes, end, cfg['WRITE_GAP_MAX_MS'], out['epoch']))
+    out.update(write_gap_evidence(rows, writes, end, cfg['WRITE_GAP_MAX_MS'], out['epoch'], qualification))
     out['max_video_gap'] = gap(videos, end)
     out['starved'] = sum('AUDIO_STARVED:' in r[1] for r in signal_rows)
     out['late_drops'] = sum('late frame drop' in r[1] for r in signal_rows)
@@ -644,7 +681,8 @@ def analyze(text, mode, cfg=None):
         for label, items in startup_items:
             latency = items[0][0] - start if items else -1
             out[f'first_{label}_ms'] = latency
-            require(0 <= latency <= startup_limit,
+            allowance = qualification[2] if qualification and label != 'write' else 0
+            require(0 <= latency <= startup_limit + allowance,
                     'seek_startup_latency' if mode == 'seek' else 'resume_latency')
     if mode == 'resume':
         require(out['rebases'] <= cfg['REBASE_MAX'], 'rebase_churn')
@@ -780,7 +818,16 @@ def analyze(text, mode, cfg=None):
                         span(window_v, 'audio') >= cfg['HOLD_MIN_MS'] * .8, 'high_window_no_progress')
             require(all(number(b, 'frame') > number(a, 'frame') for a, b in zip(window_v, window_v[1:])), 'video_not_monotonic')
         require(vg <= cfg['VIDEO_GAP_MAX_MS'], 'video_feed_gap')
-        require(wg <= cfg['WRITE_GAP_MAX_MS'], 'audio_write_gap')
+        if qualification:
+            # Only matched, completed waits wholly inside the successful
+            # initial hold are startup buffering. Later gaps and silent tails
+            # remain failures; presentation/underrun checks still apply.
+            require(out['unexplained_write_gaps'] == 0 and
+                    out['incomplete_backpressure_write_gaps'] == 0 and
+                    out['backpressure_write_gaps'] == out['seek_qualification_write_gaps'],
+                    'audio_write_gap')
+        else:
+            require(wg <= cfg['WRITE_GAP_MAX_MS'], 'audio_write_gap')
 
     out['last_diff'] = number(videos[-1], 'frame_minus_heard') if videos else 0
     steady_v = [r for r in videos if r[0] >= start + cfg['AV_SETTLE_MS']]

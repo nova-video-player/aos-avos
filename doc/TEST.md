@@ -614,6 +614,12 @@ precedes audio readiness and renderer scheduling. `first_write_ms`,
 `first_video_ms` and `first_render_ms` report this wait using logcat timestamps;
 they are not measurements of first audible/visible output. The 250ms feed-gap
 limits still apply between subsequent records and through a silent tail.
+An explicit successful direct Mode 2 seek qualification can add its recorded
+wait (at most 1500ms) to the first video/render budget, never the first-write
+budget. Only completed compressed backpressure wholly within that pre-render
+qualification window is classified as startup buffering. The analyzer reports
+`seek_qualification_ms` and `seek_qualification_write_gaps`; missing/invalid
+qualification, ongoing gaps, underruns and presentation stalls remain checked.
 Resume uses the same separation with `RESUME_LATENCY_MAX_MS`: the initial
 write/video wait is checked against that budget, not also against the steady
 250ms feed-gap limit. Speed hold windows retain their leading-gap checks.

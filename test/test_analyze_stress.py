@@ -321,6 +321,92 @@ class AnalyzerTests(unittest.TestCase):
             self.assertIn('audio_write_gap', result['reason'])
             self.assertEqual(result['verdict'], 'FAIL', result)
 
+    def qualified_seek_fixture(self):
+        lines = []
+        for line in fixture('seek', seconds=5).splitlines():
+            t = float(line.split()[0])
+            if ('video_sched_diag:' in line or 'video_render_diag:' in line) and t <= 1001.21:
+                continue
+            if 'audiotrack_write:' in line and 1000.01 < t < 1000.37:
+                continue
+            lines.append(line.replace('1000.370 audiotrack_write: wrote 7680 out of 7680',
+                                      '1000.370 audiotrack_write: wrote 1536 out of 1536'))
+        lines += [
+            '1001.210 android_sync: mode2 seek qualification epoch=1 state=2 waited_ms=1200 anchored=1',
+            '1000.370 compressed_write_wait: epoch=1 fmt=4747 last_progress_ms=1000 '
+            'start_ms=1010 end_ms=1360 blocked_ms=350 retries=35 interrupted=0 '
+            'accepted=1024 unit_bytes=2560 written=1536 complete=1',
+        ]
+        return '\n'.join(sorted(lines, key=lambda line: float(line.split()[0])))
+
+    def test_qualified_seek_startup_and_completed_backpressure(self):
+        text = self.qualified_seek_fixture()
+        result = self.check(text, 'seek')
+        self.assertEqual(result['verdict'], 'PASS', result)
+        self.assertEqual(result['seek_qualification_ms'], 1200)
+        self.assertEqual(result['seek_qualification_write_gaps'], 1)
+        self.assertGreater(result['first_render_ms'], 1000)
+        self.assertGreater(result['max_write_gap'], 250)  # Raw metrics stay visible.
+        self.assertIn('seek_startup_latency', self.check(text, 'seek', SEEK_STARTUP_MAX_MS=20)['reason'])
+
+    def test_qualification_does_not_excuse_missing_or_invalid_evidence(self):
+        text = self.qualified_seek_fixture()
+        marker = '1001.210 android_sync: mode2 seek qualification epoch=1 state=2 waited_ms=1200 anchored=1'
+        for replacement in ('', marker.replace('epoch=1', 'epoch=2'),
+                            marker.replace('state=2', 'state=1'),
+                            marker.replace('anchored=1', 'anchored=0'),
+                            marker.replace('waited_ms=1200', 'waited_ms=1501'),
+                            marker.replace('waited_ms=1200', 'waited_ms=-1'),
+                            marker.replace('waited_ms=1200', 'waited_ms=bad'),
+                            marker + '\n' + marker):
+            with self.subTest(replacement=replacement):
+                result = self.check(text.replace(marker, replacement), 'seek')
+                self.assertEqual(result['seek_qualification_ms'], 0)
+                self.assertIn('seek_startup_latency', result['reason'])
+                self.assertIn('audio_write_gap', result['reason'])
+        for changed in (text.replace('interrupted=0', 'interrupted=1'),
+                        text.replace('unit_bytes=2560', 'unit_bytes=4096').replace('complete=1', 'complete=0'),
+                        '\n'.join(l for l in text.splitlines() if 'compressed_write_wait:' not in l),
+                        text + '\n1005.600 AVOS_TEST_POLL_2'):
+            self.assertIn('audio_write_gap', self.check(changed, 'seek')['reason'])
+
+    def test_qualification_preserves_presentation_and_playback_fault_checks(self):
+        text = self.qualified_seek_fixture()
+        for event, reason in (
+                ('1001.500 AudioTrack underruns: delta=1', 'audio_underruns'),
+                ('1001.500 AUDIO_STARVED:', 'audio_starved'),
+                ('1001.500 late frame drop', 'late_frames')):
+            result = self.check(text + '\n' + event, 'seek')
+            self.assertIn(reason, result['reason'])
+        missing = '\n'.join(l for l in text.splitlines() if 'audio_present_diag:' not in l)
+        self.assertEqual(self.check(missing, 'seek')['verdict'], 'INSUFFICIENT_EVIDENCE')
+        frozen = '\n'.join(l.split('presented=')[0] + 'presented=0 ' + l.split(' ', 3)[3]
+                           if 'audio_present_diag:' in l else l for l in text.splitlines())
+        self.assertIn('presentation_stalled', self.check(frozen, 'seek')['reason'])
+        later = '\n'.join(l for l in text.splitlines()
+                          if not ('audiotrack_write:' in l and 1002.01 < float(l.split()[0]) < 1002.37))
+        later = later.replace('1002.370 audiotrack_write: wrote 7680 out of 7680',
+                              '1002.370 audiotrack_write: wrote 1536 out of 1536')
+        wait = next(l for l in text.splitlines() if 'compressed_write_wait:' in l)
+        later += '\n' + wait.replace('1000.370', '1002.370')
+        result = self.check(later, 'seek')
+        self.assertEqual(result['backpressure_write_gaps'], 2)
+        self.assertEqual(result['seek_qualification_write_gaps'], 1)
+        self.assertIn('audio_write_gap', result['reason'])
+
+    def test_qualification_is_not_applied_after_render_or_pause_or_to_resume(self):
+        text = self.qualified_seek_fixture()
+        early_render = next(l for l in fixture('seek').splitlines() if 'video_render_diag:' in l)
+        for event in (early_render, '1000.500 android_sync: pause start'):
+            result = self.check(text + '\n' + event, 'seek')
+            self.assertEqual(result['seek_qualification_ms'], 0)
+            self.assertIn('audio_write_gap', result['reason'])
+        resume = text.replace('VIDEO_SEEK_TARGET_READY: epoch=1', 'WALLCLOCK_RESET: by pause resume')
+        result = self.check(resume)
+        self.assertEqual(result['seek_qualification_ms'], 0)
+        self.assertIn('resume_latency', result['reason'])
+        self.assertIn('audio_write_gap', result['reason'])
+
     def test_seek_startup_requires_render_and_progress(self):
         text = fixture('seek')
         no_render = '\n'.join(r for r in text.splitlines() if 'video_render_diag:' not in r)

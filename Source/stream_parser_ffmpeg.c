@@ -1574,6 +1574,18 @@ static int enqueue_media_packet(STREAM *s, AVQueue *q, AVPacket *packet, int aud
 	return 0;
 }
 
+static void clear_seek_read_error(STREAM *s, AVFormatContext *fmt)
+{
+	// avio_seek() clears EOF but retains pb->error. A read cancelled for
+	// this seek must not poison later reads (including natural EOF). FFmpeg
+	// may still return a buffered packet after the underlying read was cancelled.
+	// Preserve genuine I/O failures even if a seek was requested too.
+	if (s->parser_interrupt && !stream_abort(s) && fmt->pb && fmt->pb->error == AVERROR_EXIT) {
+		fmt->pb->error = 0;
+		fmt->pb->eof_reached = 0;
+	}
+}
+
 static int _parse_once( STREAM *s, int *timestamp)
 {
 	AVFormatContext *fmt = ff_p->fmt;
@@ -1631,9 +1643,15 @@ DBGP serprintf("FFMPEG: sleep\r\n");
 	// Read new packet
 	int result = av_read_frame(fmt, &packet);
 	int demux_result = result;
+	clear_seek_read_error(s, fmt);
+	// Demuxers can return a partial packet after cancellation. The pending
+	// seek will replace it; do not queue it or report it as corrupt media.
+	if (s->parser_interrupt || stream_abort(s)) {
+		av_packet_unref(&packet);
+		return FF_PARSE_WAIT;
+	}
 	if (result < 0) {
 		av_packet_unref(&packet);
-		if (s->parser_interrupt || stream_abort(s)) return FF_PARSE_WAIT;
 		// Some demuxers translate an AVIO failure to EOF; retain its cause.
 		if (result == AVERROR_EOF && fmt->pb && fmt->pb->error < 0 && fmt->pb->error != AVERROR_EOF)
 			result = fmt->pb->error;

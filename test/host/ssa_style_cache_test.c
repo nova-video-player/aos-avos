@@ -39,6 +39,7 @@
  * even though geometry says it must.
  */
 #include "sub_engine.h"
+#include "host_font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,7 @@
  * registration machinery. */
 SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 
-static const char *SCRIPT =
+static const char *SCRIPT_TMPL =
     "[Script Info]\n"
     "ScriptType: v4.00+\n"
     "PlayResX: 384\n"
@@ -59,12 +60,13 @@ static const char *SCRIPT =
     "\n"
     "[V4+ Styles]\n"
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
-    "Style: Default,DejaVu Sans,18,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,30,1\n"
+    "Style: Default," FONT_PLACEHOLDER ",18,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,30,1\n"
     "\n"
     "[Events]\n"
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,HHHH\n";
 
+static const char *SCRIPT;   /* SCRIPT_TMPL with the harness-selected font family filled in */
 static int fails = 0;
 static void check(const char *what, int got, int want, int tol) {
     if (got < want - tol || got > want + tol) {
@@ -103,6 +105,7 @@ static int rendered_ink_height(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
 }
 
 int main(void) {
+    SCRIPT = with_font(SCRIPT_TMPL);
     /* --- Portrait phone, 16:9 video letterboxed into a taller canvas,
      * same geometry as ssa_geometry_test.c's first scenario: canvas
      * 1080x2400, video box (0,896) 1080x608 -- content_h = 608. --- */
@@ -116,6 +119,9 @@ int main(void) {
      * override_mode, but set an explicit font size so the forced value
      * (and therefore the bug, if reintroduced) is unambiguous. */
     sub_style_set_font_size(style, 55.0f);
+    /* Forced styles use the USER's font family, not the script's. Name the harness-selected face
+     * explicitly so the forced style resolves to it on every platform. */
+    sub_style_set_font_family(style, test_font_family());
 
     SUB_FORMAT_BACKEND *be = sub_format_ssa_create();
     if (!be) { fprintf(stderr, "sub_format_ssa_create failed\n"); return 1; }
@@ -132,6 +138,9 @@ int main(void) {
     params.codec_private_size = (int)strlen(SCRIPT);
     params.user_style = style;
     params.is_plain_text_format = 0; /* real SSA script; force_all comes from override_mode==1 below */
+    /* The harness-selected font, registered through the backend's own fonts-folder path, so text renders
+     * on every platform without fontconfig. NULL (variable unset) = system fonts, as before. */
+    params.fonts_dir = getenv("HOST_TEST_FONT_DIR");
 
     sub_style_set_override_mode(style, 1); /* ASS_OVERRIDE_FORCE -- exercise the force_all path */
 

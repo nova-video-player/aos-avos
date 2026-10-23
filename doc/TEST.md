@@ -750,15 +750,26 @@ fed. The directory is not a Python package, so
 
 ### Environment
 
-- Linux with a C11 compiler (`cc`, or set `CC`), `pkg-config` and pthreads.
-- libass development files (`pkg-config --cflags libass` must work, or set
-  `PKG_CONFIG_PATH`). Tests that need libass are **skipped**, not failed, when it
-  is missing.
-- fontconfig with the **DejaVu Sans** family installed: `ssa_geometry`,
-  `ssa_style_cache` and `ssa_late_script` render real text with it.
-- macOS is **not yet supported**: the full suite does not currently run there (a
-  timed-wait function and the font setup are known problems, tracked separately).
-  Use Linux until that is fixed.
+- Linux or macOS with a C11 compiler (`cc`, or set `CC`), `pkg-config` and pthreads.
+  - Linux: `libass-dev` and `pkg-config` (for example `apt-get install libass-dev pkg-config`).
+  - macOS: `brew install libass pkgconf`; the Apple compiler works. If `pkg-config` cannot find
+    libass, set `PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"`.
+- libass development files (`pkg-config --cflags libass` must work). Tests that need libass are
+  **skipped**, not failed, when it is missing.
+- One real TrueType/OpenType font file is needed; nothing is bundled. The harness picks, in order:
+  `HOST_TEST_FONT` + `HOST_TEST_FONT_FAMILY` (your own file and its family name); a system font
+  (Arial on macOS, which ships it; DejaVu Sans, Liberation Sans or Noto Sans on Linux); then
+  fontconfig's `sans-serif` match. On Linux, `apt-get install fonts-dejavu-core` is enough. The
+  chosen font is printed in the run header. It is registered with libass directly, so fontconfig is
+  not required, and since every check compares text rendered with the same font against itself, the
+  choice does not change results. With no font the libass tests fail with instructions rather than
+  passing on empty renders.
+- Portability notes: `sub_engine.c` waits on its wake condition through
+  `sub_cond_timedwait_ms()`: a `CLOCK_MONOTONIC` condvar on Android/Linux, and
+  `pthread_cond_timedwait_relative_np()` on macOS (which has no `pthread_condattr_setclock`).
+  The macOS path was checked on Linux through a shim of that call; the full suite has **not** been
+  run on a Mac by the authors. `.github/workflows/avos-host-tests.yml` runs it on a macOS runner
+  and on Linux, so macOS gets exercised on every change once the workflow is enabled.
 
 ### Running
 

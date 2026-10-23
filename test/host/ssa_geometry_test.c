@@ -13,8 +13,29 @@
 // limitations under the License.
 
 #include "ssa_geometry.h"
+#include "host_font.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Text is rendered with the font file the harness found on this machine (HOST_TEST_FONT, see
+ * host_font.h): registered with libass directly and with NO system font provider, so the same file
+ * is used on Linux and macOS whether or not fontconfig exists. Run by hand without the variable it
+ * falls back to the system's "DejaVu Sans" through libass's own font discovery. */
+static int g_have_font_file;
+static void use_test_font(ASS_Library *lib) {
+    const char *path = getenv("HOST_TEST_FONT");
+    if (!path || !path[0]) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cannot open test font %s\n", path); exit(2); }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)n);
+    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { fprintf(stderr, "cannot read %s\n", path); exit(2); }
+    fclose(f);
+    ass_add_font(lib, "hosttestfont", buf, (size_t)n);   /* libass copies the data */
+    free(buf);
+    g_have_font_file = 1;
+}
 
 static void cb(int l, const char *f, va_list v, void *d) { (void)l; (void)f; (void)v; (void)d; }
 typedef struct { int x0, y0, x1, y1, n; } BB;
@@ -22,9 +43,11 @@ typedef struct { int x0, y0, x1, y1, n; } BB;
 static BB render(const SSA_GEOM *g, const char *script) {
     ASS_Library *lib = ass_library_init(); ass_set_message_cb(lib, cb, NULL);
     ASS_Renderer *r = ass_renderer_init(lib);
-    ass_set_fonts(r, NULL, "DejaVu Sans", ASS_FONTPROVIDER_AUTODETECT, NULL, 0);
+    use_test_font(lib);                                   /* before ass_set_fonts() */
+    ass_set_fonts(r, NULL, test_font_family(), g_have_font_file ? ASS_FONTPROVIDER_NONE : ASS_FONTPROVIDER_AUTODETECT, NULL, 0);
     ssa_geom_apply(r, g);
-    ASS_Track *t = ass_read_memory(lib, (char *)script, strlen(script), NULL);
+    char *filled = with_font(script);
+    ASS_Track *t = ass_read_memory(lib, filled, strlen(filled), NULL);
     int ch; ASS_Image *im = ass_render_frame(r, t, 1000, &ch);
     BB b = { 1 << 30, 1 << 30, -1, -1, 0 };
     for (; im; im = im->next)
@@ -39,13 +62,14 @@ static BB render(const SSA_GEOM *g, const char *script) {
                     b.n++;
                 }
     ass_free_track(t); ass_renderer_done(r); ass_library_done(lib);
+    free(filled);
     return b;
 }
 
 #define HDR(px, py, sbas, outl) \
  "[Script Info]\nScriptType: v4.00+\nPlayResX: " #px "\nPlayResY: " #py "\nScaledBorderAndShadow: " sbas "\n\n" \
  "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n" \
- "Style: Default,DejaVu Sans,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1," #outl ",0,2,10,10,30,1\n\n" \
+ "Style: Default," FONT_PLACEHOLDER ",48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1," #outl ",0,2,10,10,30,1\n\n" \
  "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
 #define EV(txt) "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,," txt "\n"
 
@@ -89,6 +113,14 @@ static void scenario(const char *name, int cw, int ch, int bx, int by, int bw, i
 }
 
 int main(void) {
+    // Font sanity: every comparison below is "ink == reference ink", which two EMPTY renders also
+    // satisfy. Prove the font works first so a missing font fails loudly instead of passing vacuously.
+    {
+        SSA_GEOM g = ssa_geom_compute(1920, 1080, 0, 0, 1920, 1080, 1920, 1080);
+        BB b = render(&g, HDR(1920,1080,"yes",0) EV("HHHH"));
+        check("test font renders glyphs (is a usable font available? see HOST_TEST_FONT in TEST.md)", b.n > 0, 1);
+        if (fails) { printf("\nSOME CHECKS FAILED (%d failed checks)\n", fails); return 1; }
+    }
     // NOTE on "regular bottom" expectation: with use_margins the text sits against the FRAME
     // bottom, so relative to a video-only reference it moves down by (top bar + bottom bar).
     // For box-only frames (no bars) that shift is 0.

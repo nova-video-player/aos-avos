@@ -30,13 +30,14 @@
  * i.e. the comparison can actually fail.
  */
 #include "sub_engine.h"
+#include "host_font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 SUB_FORMAT_BACKEND *sub_format_ssa_create(void);
 
-static const char *SCRIPT =
+static const char *SCRIPT_TMPL =
     "[Script Info]\n"
     "ScriptType: v4.00+\n"
     "PlayResX: 384\n"
@@ -45,12 +46,13 @@ static const char *SCRIPT =
     "\n"
     "[V4+ Styles]\n"
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
-    "Style: Default,DejaVu Sans,18,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,30,1\n"
+    "Style: Default," FONT_PLACEHOLDER ",18,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,30,1\n"
     "\n"
     "[Events]\n"
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,HHHH\n";
 
+static const char *SCRIPT;   /* SCRIPT_TMPL with the harness-selected font family filled in */
 static int fails = 0;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: "); printf(__VA_ARGS__); printf("\n"); fails++; } \
                            else { printf("ok:   "); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -75,6 +77,7 @@ static int scenario(int render_before_script, int override_mode, float font) {
     SUB_USER_STYLE *style = sub_style_create();
     sub_style_set_font_size(style, font);
     sub_style_set_override_mode(style, override_mode);
+    sub_style_set_font_family(style, test_font_family());   /* forced runs use the user's family: pin it to the harness font */
 
     SUB_FORMAT_BACKEND *be = sub_format_ssa_create();
     SUB_FORMAT_OPEN_PARAMS params;
@@ -82,6 +85,7 @@ static int scenario(int render_before_script, int override_mode, float font) {
     params.video_w = 1280;  params.video_h = 720;
     params.user_style = style;
     params.is_plain_text_format = 0;               /* a real ASS script, like an external .ass file */
+    params.fonts_dir = getenv("HOST_TEST_FONT_DIR");   /* harness-selected font: no fontconfig needed */
     if (be->open(be, &params) != 0) { fprintf(stderr, "open failed\n"); exit(1); }
 
     if (render_before_script) {
@@ -99,6 +103,7 @@ static int scenario(int render_before_script, int override_mode, float font) {
 }
 
 int main(void) {
+    SCRIPT = with_font(SCRIPT_TMPL);
     const float CUSTOM = 90.0f;
     const int FORCE = 1;                            /* ASS_OVERRIDE_FORCE, as in ssa_style_cache_test */
 

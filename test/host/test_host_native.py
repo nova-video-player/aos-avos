@@ -34,13 +34,19 @@ Environment:
     SANITIZERS    comma-separated -fsanitize= list; default "undefined"; "none" disables
     PKG_CONFIG_PATH  to select a host libass
     HOST_TEST_OUTPUT  set to print each test's raw stdout/stderr even when it passes
+    HOST_TEST_FONT, HOST_TEST_FONT_FAMILY   use this font file (and its family name) for the libass tests
     NO_COLOR      disable colour (colour is only used on a terminal)
 
 Output: one row per test (PASS / FAIL / SKIP, duration, number of checks). A failing test lists
 its failing checks; -v lists every check; compiler warnings from the code under test are
 collected into one de-duplicated section at the end instead of interleaving with the rows.
 
-Tests that need libass are SKIPPED (not failed) when pkg-config can't find it. Compiler
+Tests that need libass are SKIPPED (not failed) when pkg-config can't find it. They also need one real
+TrueType/OpenType font file; none is bundled. The harness uses, in order: HOST_TEST_FONT (+
+HOST_TEST_FONT_FAMILY), a well-known system font (Arial on macOS; DejaVu Sans / Liberation Sans / Noto
+Sans on Linux), or fontconfig's sans-serif match. The file is registered with libass directly, so
+fontconfig itself is not required. Every check compares text rendered with the SAME font against
+itself, so which font is used does not matter -- only that glyphs render. Compiler
 warnings are shown; sources that are borrowed rather than under test (see QUIET) are built
 with -w. This directory is not a package, so the repo's top-level unittest discovery does not
 pick it up -- it needs a host toolchain the other tests don't.
@@ -106,6 +112,7 @@ the subtitle track, and confirm the old cue clears and the new one appears witho
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import shutil
@@ -157,6 +164,73 @@ class RunInfo:
         self.checks_failed = 0
         self.failed_lines = []
         self.all_lines = []
+
+
+# (file, family as an ASS style must spell it). Only fonts that ship with the OS or with the
+# near-universal font packages; the first one present wins.
+FONT_CANDIDATES = (
+    ('/System/Library/Fonts/Supplemental/Arial.ttf', 'Arial'),                       # macOS
+    ('/Library/Fonts/Arial.ttf', 'Arial'),
+    ('/System/Library/Fonts/Supplemental/Verdana.ttf', 'Verdana'),
+    ('/System/Library/Fonts/Supplemental/Tahoma.ttf', 'Tahoma'),
+    ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 'DejaVu Sans'),              # Debian / Ubuntu
+    ('/usr/share/fonts/TTF/DejaVuSans.ttf', 'DejaVu Sans'),                          # Arch
+    ('/usr/share/fonts/dejavu/DejaVuSans.ttf', 'DejaVu Sans'),                       # Fedora / SUSE
+    ('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', 'Liberation Sans'),
+    ('/usr/share/fonts/liberation/LiberationSans-Regular.ttf', 'Liberation Sans'),
+    ('/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf', 'Liberation Sans'),
+    ('/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf', 'Noto Sans'),
+    ('/usr/share/fonts/noto/NotoSans-Regular.ttf', 'Noto Sans'),
+)
+FONT_HELP = ('no usable font found for the libass tests. Install one (Linux: fonts-dejavu-core or '
+             'fonts-liberation; macOS ships Arial) or point at any TrueType/OpenType file with '
+             'HOST_TEST_FONT=/path/font.ttf HOST_TEST_FONT_FAMILY="Family Name".')
+
+
+def find_test_font():
+    """(file, family) of a real font on this machine. Raises RuntimeError with instructions if none."""
+    path, family = os.environ.get('HOST_TEST_FONT'), os.environ.get('HOST_TEST_FONT_FAMILY')
+    if path:
+        if not family:
+            raise RuntimeError('HOST_TEST_FONT is set but HOST_TEST_FONT_FAMILY is not: libass styles need '
+                               'the family name (for example "Liberation Sans").')
+        if not Path(path).is_file():
+            raise RuntimeError('HOST_TEST_FONT=%s is not a file' % path)
+        return path, family
+    for cand, fam in FONT_CANDIDATES:
+        if Path(cand).is_file():
+            return cand, fam
+    fc_match = shutil.which('fc-match')                  # any Linux with fontconfig, wherever it keeps fonts
+    if fc_match:
+        out = subprocess.run([fc_match, '-f', '%{file}|%{family[0]}', 'sans-serif'],
+                             capture_output=True, text=True).stdout
+        cand, _, fam = out.partition('|')
+        if fam and cand.lower().endswith(('.ttf', '.otf')) and Path(cand).is_file():
+            return cand, fam
+    raise RuntimeError(FONT_HELP)
+
+
+_FONT_ENV = None
+
+
+def _font_env():
+    """HOST_TEST_FONT / _FAMILY / _DIR for the libass tests; the DIR holds a copy of just that font,
+    for the backend's fonts-folder path. Raises RuntimeError if no font can be found."""
+    global _FONT_ENV
+    if _FONT_ENV is None:
+        path, family = find_test_font()
+        fonts = _BUILD / 'font'
+        fonts.mkdir(exist_ok=True)
+        shutil.copyfile(path, fonts / Path(path).name)   # content only: copy2 copies macOS file flags and fails with EPERM
+        _FONT_ENV = {'HOST_TEST_FONT': path, 'HOST_TEST_FONT_FAMILY': family, 'HOST_TEST_FONT_DIR': str(fonts)}
+    return _FONT_ENV
+
+
+def _run_env(libass):
+    env = dict(os.environ)
+    if libass:
+        env.update(_font_env())
+    return env
 
 
 _CHECK_LINE = re.compile(r'^\s*(ok|FAIL)\b')
@@ -256,10 +330,15 @@ class HostTestCase(unittest.TestCase):
         if link.returncode:
             self.fail('link failed:\n' + link.stdout + link.stderr)
 
+        try:
+            run_env = _run_env('libass' in pkgs)
+        except RuntimeError as e:
+            self.fail(str(e))
         info = _INFO[self._testMethodName] = RunInfo()
         started = time.monotonic()
         try:
-            run = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+            run = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=RUN_TIMEOUT_S,
+                                 env=run_env)
         except subprocess.TimeoutExpired as e:
             hung = e
         else:
@@ -362,11 +441,21 @@ def _tool_version(cmd):
         return None
 
 
+def _font_description():
+    try:
+        path, family = find_test_font()
+        return '%s (%s)' % (family, path)
+    except RuntimeError:
+        return 'NONE FOUND -- the libass tests will fail (see HOST_TEST_FONT)'
+
+
 def _environment_line():
     cc = shlex.split(os.environ.get('CC') or 'cc')
-    parts = ['compiler: %s' % (_tool_version([*cc, '--version']) or ' '.join(cc) + ' (version unknown)'),
+    parts = ['platform: %s %s' % (platform.system(), platform.machine()),
+             'compiler: %s' % (_tool_version([*cc, '--version']) or ' '.join(cc) + ' (version unknown)'),
              'libass: %s' % (_tool_version(['pkg-config', '--modversion', 'libass']) or 'not found'),
-             'sanitizers: %s' % (os.environ.get('SANITIZERS') or 'undefined')]
+             'sanitizers: %s' % (os.environ.get('SANITIZERS') or 'undefined'),
+             'font: %s' % _font_description()]
     return parts
 
 

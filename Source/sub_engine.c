@@ -149,18 +149,59 @@ static void broadcast_wake_locked(SUB_ENGINE *eng) {
     pthread_cond_broadcast(&eng->wake_cond);
 }
 
+// --- Portable monotonic timed wait ------------------------------------------------------------
+// The render thread sleeps for a wall-clock DURATION ("wake me in N ms, or earlier on a broadcast"),
+// so the wait must not be tied to the system clock: a CLOCK_REALTIME deadline stretches or collapses
+// when the time is adjusted.
+//   Android / Linux: a condvar bound to CLOCK_MONOTONIC (pthread_condattr_setclock) and an absolute
+//                    CLOCK_MONOTONIC deadline.
+//   macOS:           has neither pthread_condattr_setclock() nor a monotonic absolute wait.
+//                    pthread_cond_timedwait_relative_np() takes the RELATIVE timeout directly, which
+//                    is exactly what is needed and equally immune to clock changes.
+// Both variants wait with the mutex held and return on a signal, a broadcast or the timeout; the
+// callers re-check their predicate, so which of the three ended the wait does not matter.
+#if defined(__APPLE__) || defined(SUB_COND_USE_RELATIVE_NP)
+#define SUB_COND_RELATIVE 1
+#else
+#define SUB_COND_RELATIVE 0
+#endif
+
+static void sub_cond_init_monotonic(pthread_cond_t *cond) {
+#if SUB_COND_RELATIVE
+    pthread_cond_init(cond, NULL);
+#else
+    pthread_condattr_t cattr;
+    pthread_condattr_init(&cattr);
+    pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+    pthread_cond_init(cond, &cattr);
+    pthread_condattr_destroy(&cattr);
+#endif
+}
+
+// Waits on `cond` (with `lock` held) for at most `timeout_ms` (> 0) milliseconds.
+static void sub_cond_timedwait_ms(pthread_cond_t *cond, pthread_mutex_t *lock, int timeout_ms) {
+#if SUB_COND_RELATIVE
+    struct timespec rel;
+    rel.tv_sec  = timeout_ms / 1000;
+    rel.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+    pthread_cond_timedwait_relative_np(cond, lock, &rel);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);   // matches the condattr set in sub_cond_init_monotonic()
+    long long nsec = ts.tv_nsec + ((long long)timeout_ms * 1000000LL);
+    ts.tv_sec += nsec / 1000000000LL;
+    ts.tv_nsec = nsec % 1000000000LL;
+    pthread_cond_timedwait(cond, lock, &ts);
+#endif
+}
+
 SUB_ENGINE *sub_engine_create(void) {
     SUB_ENGINE *eng = calloc(1, sizeof(SUB_ENGINE));
 
     // FIX: Initialize mutex and cond BEFORE spawning the thread
     pthread_mutex_init(&eng->lock, NULL);
-    // Timed waits are computed from a wall-clock DURATION, so wait on CLOCK_MONOTONIC: a
-    // CLOCK_REALTIME deadline stretches or collapses when the system time is adjusted.
-    pthread_condattr_t cattr;
-    pthread_condattr_init(&cattr);
-    pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
-    pthread_cond_init(&eng->wake_cond, &cattr);
-    pthread_condattr_destroy(&cattr);
+    // Timed waits are computed from a wall-clock DURATION: see sub_cond_init_monotonic().
+    sub_cond_init_monotonic(&eng->wake_cond);
 
     // Pass eng straight into create() so r->engine is set before the render
     // thread is spawned -- see sub_render_gl_create()'s doc comment. The old
@@ -883,12 +924,7 @@ void sub_engine_wait_event(SUB_ENGINE *eng, uint64_t last_generation) {
         pthread_cond_wait(&eng->wake_cond, &eng->lock);
     } else if (timeout_ms > 0) {
         // Sleep until timeout OR a broadcast
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);   // matches the condattr set in sub_engine_create()
-        long long nsec = ts.tv_nsec + ((long long)timeout_ms * 1000000LL);
-        ts.tv_sec += nsec / 1000000000LL;
-        ts.tv_nsec = nsec % 1000000000LL;
-        pthread_cond_timedwait(&eng->wake_cond, &eng->lock, &ts);
+        sub_cond_timedwait_ms(&eng->wake_cond, &eng->lock, timeout_ms);
     }
 
     pthread_mutex_unlock(&eng->lock);

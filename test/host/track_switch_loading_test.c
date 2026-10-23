@@ -58,7 +58,7 @@ static uint64_t open_label(SUB_ENGINE *e, char label) {
     uint64_t tok = 0;
     /* A = SRT, anything else = SSA-wrapped (VTT/ASS): different backends, same engine, like a real switch. */
     int rc = sub_engine_open_track(e, label == 'A' ? SUB_FMT_SRT : SUB_FMT_SSA, 1920, 1080, NULL, 0, NULL, 0, &tok);
-    CHECK(rc == 0, "open_track(%c) succeeded", label);
+    if (rc != 0) CHECK(0, "open_track(%c) failed (rc=%d)", label, rc);   /* silent on success: called hundreds of times */
     return tok;
 }
 

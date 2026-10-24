@@ -718,7 +718,9 @@ chaos drivers; successful completion is not a playback verdict.
 
 The separate native host harnesses are indexed in `AGENT.md`. `make test`
 builds `ff`, `comp`, and `stream_url`; it does not run the Python or shell suites
-or automatically execute those binaries.
+or automatically execute those binaries. The subtitle engine's host tests live in
+`test/host/` and are run separately; see
+[Native subtitle engine host tests](#native-subtitle-engine-host-tests).
 
 Run all discoverable host regression tests (no Android device required):
 
@@ -751,6 +753,109 @@ It runs these discoverable production-code replays:
 The tests compile source excerpts with warnings treated as errors. Missing source
 markers fail rather than silently skipping coverage. A host pass checks these
 contracts, not device scheduling, receiver relock or physical lipsync.
+
+## Native subtitle engine host tests
+
+`test/host/test_host_native.py` compiles small C programs together with the **real**
+subtitle engine sources, links them on the host and runs them. No NDK, device or
+Makefile change is involved. Android-only headers (`jni.h`, `android/*`, `EGL`,
+`GLES2`) are replaced by `host_stubs.h`; the few symbols that live elsewhere in the tree
+are weak stand-ins in `stubs.c`; `fake_backend.c` replaces the SSA/SRT/GFX decoders
+where a test must control exactly when a backend answers, how slowly, and what it was
+fed. The directory is not a Python package, so
+`python3 -m unittest discover -s test` does **not** run it; invoke it explicitly.
+
+### Environment
+
+- Linux or macOS with a C11 compiler (`cc`, or set `CC`), `pkg-config` and pthreads.
+  - Linux: `libass-dev` and `pkg-config` (for example `apt-get install libass-dev pkg-config`).
+  - macOS: `brew install libass pkgconf`; the Apple compiler works. If `pkg-config` cannot find
+    libass, set `PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"`.
+- libass development files (`pkg-config --cflags libass` must work). Tests that need libass are
+  **skipped**, not failed, when it is missing.
+- One real TrueType/OpenType font file is needed; nothing is bundled. The harness picks, in order:
+  `HOST_TEST_FONT` + `HOST_TEST_FONT_FAMILY` (your own file and its family name); a system font
+  (Arial on macOS, which ships it; DejaVu Sans, Liberation Sans or Noto Sans on Linux); then
+  fontconfig's `sans-serif` match. On Linux, `apt-get install fonts-dejavu-core` is enough. The
+  chosen font is printed in the run header. It is registered with libass directly, so fontconfig is
+  not required, and since every check compares text rendered with the same font against itself, the
+  choice does not change results. With no font the libass tests fail with instructions rather than
+  passing on empty renders.
+- Portability notes: `sub_engine.c` waits on its wake condition through
+  `sub_cond_timedwait_ms()`: a `CLOCK_MONOTONIC` condvar on Android/Linux, and
+  `pthread_cond_timedwait_relative_np()` on macOS (which has no `pthread_condattr_setclock`).
+  The macOS path was checked on Linux through a shim of that call; the full suite has **not** been
+  run on a Mac by the authors. `.github/workflows/avos-host-tests.yml` runs it on a macOS runner
+  and on Linux, so macOS gets exercised on every change once the workflow is enabled.
+
+### Running
+
+```bash
+python3 test/host/test_host_native.py                 # all, UBSan (the default)
+python3 test/host/test_host_native.py -v -k registry  # one test, every check listed
+
+# Concurrency tests under ThreadSanitizer
+SANITIZERS=thread python3 test/host/test_host_native.py -v \
+  -k race -k registry -k switch -k seek -k close_open -k style_resize -k jni
+
+# Lifetime / use-after-free checks under AddressSanitizer
+SANITIZERS=address,undefined python3 test/host/test_host_native.py -v \
+  -k registry -k close_open -k jni
+
+HOST_TEST_OUTPUT=1 python3 test/host/test_host_native.py   # print passing output too
+```
+
+Output is one row per test (PASS / FAIL / SKIP, duration, number of checks). A failing
+test lists only its failing checks, `-v` lists every check, and `HOST_TEST_OUTPUT=1` adds the
+raw program output. Compiler warnings from the code under test are collected into one
+de-duplicated section at the end. The header records the compiler, libass version and
+sanitizer, so a pasted run carries its own environment. Colour is used only on a terminal
+(`NO_COLOR=1` turns it off). Exit status is 0 when nothing failed.
+
+`SANITIZERS=none` disables instrumentation; `CC` may carry arguments (for example
+`ccache gcc`). A test that runs longer than 120 s is reported as a probable
+deadlock, and the concurrency tests also arm their own watchdog that prints
+`FAIL: watchdog expired` instead of hanging.
+
+Last recorded full run: 12 of 12 tests passed with `SANITIZERS=undefined`, and the six
+concurrency tests (`registry`, `switch`, `seek`, `close_open`, `style_resize`, `jni`) passed
+under `SANITIZERS=thread` (2026-10-23, Linux). Record the compiler, libass version and
+sanitizer with any later baseline.
+
+### What is covered
+
+| Test | Contract checked |
+|---|---|
+| `ssa_geometry` | `ssa_geom_compute()` / `ssa_geom_apply()` against a box-only libass reference render, including degenerate and transient inputs |
+| `ssa_style_cache` | Forced FontSize is recomputed when canvas or content height changes |
+| `ssa_late_script` | An external ASS script fed **after** the first render still receives Custom (forced) settings without the user touching a setting; compared with the same script fed before the first render, and with an unforced run so the comparison can fail |
+| `race_harness` | Nothing is visible once `close_track()` has returned |
+| `fill_contract` | UNCHANGED / CLEAR / FRAME / ERROR and when the frame generation moves |
+| `push_policy` | The 3D "content changed" push: paused only, 3D only, once per generation, no locks held |
+| `jni_listener` | Listener global-ref and thread attach/detach lifetime against a mock JavaVM, including the deferred destroy: `nativeDestroy()` while a stream still holds the engine frees nothing, and the last release frees the engine and listener ref, attaching a native releasing thread itself |
+| `registry_lifetime` | `sub_engine_registry`: an engine is destroyed exactly once and never while held; immediately if unheld, otherwise by the last release; retract never blocks; a newer publish keeps older references; the destroy callback runs outside the registry lock; stray releases are ignored; concurrent acquire/release against publish/retract |
+| `track_switch_loading` | Rapid switches between two large SRT/VTT feeds (and `close_track()`) with generation tokens: stale cues dropped, none reach another track's backend, every accepted cue reaches exactly one backend, the last track loads completely, no backend leaks |
+| `seek_pause_feed` | Pause, resume and seek racing the initial bulk feed (flush, then raise the re-feed flag): no deadlock, pause state exact, one full copy of the list afterwards |
+| `close_open_parsing` | Closing a video and immediately opening another while its parse worker is active, with the Java side rebuilding the engine: each engine destroyed exactly once and never while held, no cross-video cues, no leaked backend; both an orderly and a hostile close order |
+| `style_resize_paused` | Style changes and surface resizes while paused render once at the frozen clock, reach the backend as a coalesced canvas/box pair ending on the last request, survive concurrent style and resize storms, and leave the pause state untouched |
+
+### Limits
+
+- The `track_switch_loading`, `seek_pause_feed` and `close_open_parsing` scenarios
+  exercise the real engine, generation-token and registry code, with the STREAM-level
+  workers modelled by small threads in the tests: `stream_sub_ext.c` needs the whole
+  STREAM to link and is **not executed** by these tests. They check the engine-side
+  contract those workers rely on.
+- The mock JavaVM validates our use of the JNI contract, not a real ART.
+- The render thread never gets a real EGL surface (the same as production 3D mode
+  without a window), so the GPU blend path is link-only here.
+- `track_switch_loading` asserts that the race was actually exercised (some feeders
+  were cut off mid-list). That depends on feeding being slower than a switch interval;
+  raise `BIG_CUES` if it ever fails on a much faster machine.
+- Smoke-test on a device as well: pause in 3D, switch or disable the subtitle track,
+  and confirm the old cue clears and the new one appears without resuming; load an
+  external `.ass` after playback has started with "Custom" settings active; seek inside
+  a PGS/VobSub cue.
 
 ## Renderer extraction validation
 

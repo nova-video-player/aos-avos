@@ -1,0 +1,42 @@
+# Runs the native subtitle host tests (test/host) on Linux AND macOS, so macOS support is
+# checked on every change without anyone needing a Mac. Place at <repo root>/.github/workflows/.
+# The avos repository root is the project root (Source/, Include/, test/host/). Place at
+# .github/workflows/avos-host-tests.yml.
+name: avos host tests
+
+on:
+  workflow_dispatch:   # manual only: GitHub -> Actions -> "avos host tests" -> Run workflow
+
+jobs:
+  host-tests:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libass and pkg-config (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libass-dev pkg-config fonts-dejavu-core
+
+      - name: Install libass and pkg-config (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libass pkgconf
+
+      - name: Show toolchain
+        run: |
+          cc --version | head -1
+          pkg-config --modversion libass
+
+      - name: Host tests (UBSan)
+        env:
+          SANITIZERS: undefined
+        run: python3 test/host/test_host_native.py -v
+
+      - name: Concurrency tests (ThreadSanitizer)
+        env:
+          SANITIZERS: thread
+        run: python3 test/host/test_host_native.py -v -k race -k registry -k switch -k seek -k close_open -k style_resize -k jni

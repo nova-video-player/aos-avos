@@ -13,7 +13,7 @@
 # limitations under the License.
 
 LOCAL_PATH := $(call my-dir)
-
+include $(LOCAL_PATH)/libass_prebuilt.mk
 AVOS_JNI_DIR := $(LOCAL_PATH)
 AVOS_DIR := $(LOCAL_PATH)/..
 EXTERNAL_DIR := $(AVOS_DIR)/external

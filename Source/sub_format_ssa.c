@@ -16,6 +16,7 @@
 #include <ass/ass.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <pthread.h>
 #include "debug.h"
 #include "ssa_geometry.h"
@@ -356,9 +357,45 @@ static int load_embedded_fonts(ASS_Library *lib, const SUB_EMBEDDED_FONT *fonts,
     return loaded;
 }
 
+// Local copy of libass's ass_lazy_track_init() defaulting rule (libass has no public API for
+// it). libass applies that rule inside ass_render_frame(), but ONLY once the track has at
+// least one event (ass_start_frame() returns early when n_events == 0). So for a script
+// without PlayResX/PlayResY, track->PlayRes stays 0x0 until the first render after events
+// exist. If sync_styles() ran in that window it computed font_res_scale with
+// orig_playres_y == 0 (-> 1.0) and baked an oversized FontSize/Outline/Shadow into the
+// styles; libass then defaulted PlayRes to 384x288 underneath those values, and nothing
+// re-synced until the style serial changed. Applying the same default here, before the
+// baseline is captured, makes the first sync after events exist see the real PlayRes.
+//
+// Only call this when track->n_events > 0: defaulting an empty track would be wrong if a
+// script that carries only PlayResX (or only PlayResY) arrives later.
+// Caller holds ctx->lock.
+static void ssa_ensure_playres(ASS_Track *t) {
+    if (t->PlayResX > 0 && t->PlayResY > 0) return;
+    if (t->PlayResX <= 0 && t->PlayResY <= 0) {
+        t->PlayResX = 384;
+        t->PlayResY = 288;
+        return;
+    }
+    if (t->PlayResY <= 0) {
+        // overflow-safe `* 3/4`, same as libass
+        unsigned x1 = (unsigned)t->PlayResX - 1u;
+        unsigned y  = x1 - x1 / 4u;
+        t->PlayResY = (t->PlayResX == 1280) ? 1024 : (int)(y > 1u ? y : 1u);
+    } else { // PlayResX <= 0
+        unsigned x = (unsigned)t->PlayResY + (unsigned)t->PlayResY / 3u;
+        t->PlayResX = (t->PlayResY == 1024) ? 1280 : (int)(x < (unsigned)INT_MAX ? x : (unsigned)INT_MAX);
+    }
+    DBG serprintf("Playes assigned by backend PlayResX:%d, PlayResY:%d\n",t->PlayResX,t->PlayResY);
+}
+
 // Synchronizes Java UI changes safely without corrupting the original ASS track!
 static int sync_styles(SSA_BACKEND *ctx) {
     if (!ctx->user_style_ptr || !ctx->track) return 0;
+
+    // Must happen before the serial early-out and before orig_playres is captured below.
+    // See ssa_ensure_playres().
+    if (ctx->track->n_events > 0) ssa_ensure_playres(ctx->track);
 
     SUB_USER_STYLE u;
     memset(&u, 0, sizeof(SUB_USER_STYLE));
@@ -374,6 +411,13 @@ static int sync_styles(SSA_BACKEND *ctx) {
     }
     ctx->last_serial = u.serial;
     ctx->styles_dirty = 0;
+
+    DBG serprintf("SUB_DEBUG: sync_styles serial=%u track PlayRes=%dx%d orig_playres=%dx%d "
+    "content_h=%d short_side=%d n_events=%d n_styles=%d user_font_size=%f\n",
+    (unsigned)u.serial, ctx->track->PlayResX, ctx->track->PlayResY,
+                  ctx->orig_playres_x, ctx->orig_playres_y,
+                  ctx->content_h, ctx->screen_short_side,
+                  ctx->track->n_events, ctx->track->n_styles, (double)u.font_size);
 
     // 1. Create Backups of the Original ASS Styles.
     // IMPORTANT: this must run on every call, not just the first, because ass_process_data()
@@ -875,6 +919,12 @@ static void ssa_compute_schedule(SSA_BACKEND *ctx, int64_t pts_ms) {
 static SUB_FRAME *ssa_render_at(SUB_FORMAT_BACKEND *be, int64_t pts_ms) {
     SSA_BACKEND *ctx = (SSA_BACKEND *)be->priv;
     pthread_mutex_lock(&ctx->lock);
+    // Events can arrive one by one (embedded track, via ass_process_chunk()) with no style
+    // serial change and no full-script feed(), so nothing else would ever force a re-sync
+    // after the first event lands. If the baseline PlayRes hasn't been captured yet but
+    // events now exist, resync so sync_styles() defaults PlayRes and bakes the correct scale.
+    if (ctx->orig_playres_y == 0 && ctx->track->n_events > 0) ctx->styles_dirty = 1;
+
     // --- APPLY LIVE SLIDER UPDATES ---
     int styles_changed = sync_styles(ctx);
 

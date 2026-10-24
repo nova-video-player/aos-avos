@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include "debug.h"
 #include "ssa_geometry.h"
@@ -612,7 +613,10 @@ static int sync_styles(SSA_BACKEND *ctx) {
                         // frame size == canvas == video.
                         if (ctx->content_h > 0 && ctx->track->PlayResY > 0) {
                             float scale_ratio = (float)ctx->track->PlayResY / (float)ctx->content_h;
-                            style->MarginV = (int)(u.margin_bottom * scale_ratio);
+                            // Round, don't truncate: MarginV is an integer in PlayRes units, and on
+                            // low-PlayRes scripts (384x288 -> 3.75 px/unit at 1080p) truncation made
+                            // the first few slider steps map to 0 and then jump a whole unit.
+                            style->MarginV = (int)lroundf(u.margin_bottom * scale_ratio);
                             DBG serprintf("SUB_SURFACE: Margin translation: UI sent %d physical px -> libass mapped to %d logical px (Scale: %f, PlayResY: %d, VideoBoxH: %d)\n",
                                  u.margin_bottom, style->MarginV, scale_ratio, ctx->track->PlayResY, ctx->content_h);
                         } else {

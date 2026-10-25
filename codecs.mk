@@ -120,7 +120,6 @@ ifeq ($(VIDEO),ON)
 	DEFINES += -DCONFIG_3GP
 	
 	DEFINES += -DCONFIG_SUBTITLES
-    DEFINES += -DCONFIG_VOBSUB
 
     ifeq ($(LIBASS),ON)
 		DEFINES += -DCONFIG_LIBASS      # for rendering subtitles

@@ -151,7 +151,7 @@ CSRC_STREAM_PARSER = \
 	
 CSRC_STREAM_CODEC = \
 	codec_yuv.c \
-	codec_textsub.c vobsub.c codec_vobsub.c codec_utils.c  \
+	codec_utils.c  \
 	codec_ffsub.c
 
 CSRC_STREAM_SINK = \

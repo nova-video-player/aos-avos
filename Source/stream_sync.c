@@ -23,6 +23,7 @@
 #include "stream.h"
 #include "stream_sync.h"
 
+#include <limits.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdlib.h>

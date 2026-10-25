@@ -21,6 +21,8 @@
 #include "debug.h"
 #include "platform.h"
 
+#include <stdlib.h>
+
 #if defined(CONFIG_FB_QVFB)
 
 static void init_fb_ops( FRAME_BUFFER *fb );
@@ -47,7 +49,7 @@ int DUMMY_connect(FRAME_BUFFER *fb)
 
 PLATFORM_REGISTER_FB( DUMMY_connect );
 
-static void DUMMY_update()
+static void DUMMY_update(int flags)
 {
 }
 
@@ -90,6 +92,14 @@ static void DUMMY_set_display_enable(int active)
 {
 }
 
+/* FB_get_osd_data() calls this unconditionally, so it must not be NULL. */
+static unsigned char *DUMMY_get_osd_data(void)
+{
+	static unsigned char *buf;
+	if (!buf)
+		buf = calloc(800 * 480, 4);
+	return buf;
+}
 
 static void init_fb_ops(FRAME_BUFFER *fb){
 	fb->fb_ops.update = DUMMY_update;
@@ -103,7 +113,7 @@ static void init_fb_ops(FRAME_BUFFER *fb){
 	fb->fb_ops.set_osd_properties = DUMMY_set_osd_properties;
 	fb->fb_ops.set_video_properties = DUMMY_set_video_properties;
 	fb->fb_ops.set_display_enable = DUMMY_set_display_enable;
+	fb->fb_ops.get_osd_data = DUMMY_get_osd_data;
 }
 
 #endif
-

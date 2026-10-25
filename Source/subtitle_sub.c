@@ -121,7 +121,7 @@ static int microdvd_style_codes_to_ass( const char *in, int in_size, char *out, 
 			continue;
 		}
 
-		char *close = memchr( in + i, '}', in_size - i );
+		const char *close = memchr( in + i, '}', in_size - i );
 		if( !close ) {
 			out[j++] = in[i++];
 			continue;

@@ -64,7 +64,13 @@ include common.mk
 
 CFLAGS += -g -O2
 ifeq ($(TGT_BASE),sim)
+CFLAGS += -std=gnu17
 CFLAGS += -fPIC
+# Host compilers are much newer than the ones this code was written for: don't let
+# new warnings (e.g. -Wstringop-truncation in util.h strnZcpy) break the sim build.
+# These come after common.mk so they override any -Werror / -Wall set there.
+CFLAGS += -Wno-stringop-truncation
+CFLAGS += -Wno-error
 endif
 CFLAGS += $(DEFINES)
 
@@ -73,7 +79,36 @@ INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/
 INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/freetype2
 INCLUDES += -I/opt/homebrew/include
 
+ifeq ($(TGT_BASE),sim)
+# Host stand-ins for Android NDK / EGL / GLES headers (see test/host/host_stubs.h)
+HOST_STUBS  := $(SRC_PATH)/test/host/host_stubs.h
+HOST_COMPAT := $(TGT_PATH)/host_compat
+COMPAT_HDRS := jni.h android/native_window.h android/native_window_jni.h \
+               android/bitmap.h android/log.h EGL/egl.h GLES2/gl2.h
+
+# create each forwarding header once (only if missing, so mtimes stay stable and nothing rebuilds needlessly)
+$(foreach h,$(COMPAT_HDRS),$(shell test -f $(HOST_COMPAT)/$(h) || (mkdir -p $(dir $(HOST_COMPAT)/$(h)) && echo '#include "$(HOST_STUBS)"' > $(HOST_COMPAT)/$(h))))
+
+# -I first so these win over any system EGL/GLES headers
+INCLUDES := -I$(HOST_COMPAT) $(INCLUDES)
+
+# Sources that exist in Source/ but are missing from the sim's source list
+# (found via undefined-reference errors at link time). Duplicates are harmless: $(sort) dedups.
+CSRC += sub_engine.c sub_style.c sub_render_gl.c
+# OSS needs linux/soundcard.h (-> linux/ioctl.h), which doesn't exist on macOS.
+# audio_interface.c already guards all OSS references with #ifndef __APPLE__.
+ifneq ($(UNAME_S),Darwin)
+CSRC += audio_interface_oss.c mixerdev_oss.c
+endif
+# Homebrew keeps freetype headers (ft2build.h) in a freetype2 subdirectory
+INCLUDES += -I/opt/homebrew/include/freetype2
+endif
+
 SHARED_LIBS += -lzip -pthread -lm
+ifeq ($(TGT_BASE),sim)
+# need to link libass and libfreetype (subs and fonts)
+SHARED_LIBS += -lass -lfreetype
+endif
 
 LDFLAGS += -rdynamic
 ifeq ($(UNAME_S),Linux)
@@ -163,7 +198,7 @@ else
 APP_OBJS += $(LIB_OBJS)
 endif
 
-CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH)
+CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH) -lm
 quiet_CMD_LINK = "LD  $(TGT_NAME)"
 
 $(TGT_PATH)/$(LIB_NAME): $(LIB_OBJS)

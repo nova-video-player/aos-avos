@@ -841,6 +841,7 @@ DBG serprintf( "SMI parsing failed. No records\n" );
 	sub_record->frame_multiplier = 0;
 	return sub_record;
 CLEAN_ERROR:
+	subtitle_clean_error(sub_record);
 	afree(sub_record);
 	if(cmd_lines != 0){
 		for(i = 0; i < SMI_ARRAY_SIZE;++i){
@@ -848,7 +849,6 @@ CLEAN_ERROR:
 		}
 		afree(cmd_lines);
 	}
-	subtitle_clean_error(sub_record);
 	return 0;
 }
 

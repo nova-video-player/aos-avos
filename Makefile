@@ -66,11 +66,6 @@ CFLAGS += -g -O2
 ifeq ($(TGT_BASE),sim)
 CFLAGS += -std=gnu17
 CFLAGS += -fPIC
-# Host compilers are much newer than the ones this code was written for: don't let
-# new warnings (e.g. -Wstringop-truncation in util.h strnZcpy) break the sim build.
-# These come after common.mk so they override any -Werror / -Wall set there.
-CFLAGS += -Wno-stringop-truncation
-CFLAGS += -Wno-error
 endif
 CFLAGS += $(DEFINES)
 

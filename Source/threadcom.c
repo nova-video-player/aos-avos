@@ -92,8 +92,14 @@ ERR		serprintf("threadcom_get_event: insufficient space for event data (%i < %i)
 				len, msg_len);
 				
 		/* sigh. but it's better than falling out of format */
-		while (msg_len--)
-			read(link->pipe[0], &tmp, 1);
+		while (msg_len--) {
+			ssize_t r;
+			do {
+				r = read(link->pipe[0], &tmp, 1);
+			} while (r < 0 && errno == EINTR);
+			if (r <= 0)
+				break;
+		}
 
 		return 1;
 	}

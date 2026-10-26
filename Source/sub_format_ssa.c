@@ -19,6 +19,8 @@
 #include <limits.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
+
 #include "debug.h"
 #include "ssa_geometry.h"
 
@@ -304,8 +306,7 @@ static int load_fonts_dir(ASS_Library *lib, const char *dir) {
             if (rd != (size_t)size) { free(buf); continue; }
 
             CACHED_FONT_FILE *slot = &s_fonts_cache[s_fonts_cache_count++];
-            strncpy(slot->name, entry->d_name, sizeof(slot->name) - 1);
-            slot->name[sizeof(slot->name) - 1] = '\0';
+            snprintf(slot->name, sizeof(slot->name), "%s", entry->d_name);
             slot->data = buf;
             slot->size = (int)size;
         }

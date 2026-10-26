@@ -715,10 +715,14 @@ static int convert_to_utf8( char **filename, int *delete )
 
 	// check for BOM
 	unsigned short bom = 0;
-	fread( &bom, 2, 1, file );
+	if( fread( &bom, 2, 1, file ) != 1 ) {
+		bom = 0;	// short/empty file: no BOM
+	}
 	if( bom != BOM_LE && bom != BOM_BE ) {
 		unsigned char msb = 0;
-		fread( &msb, 1, 1, file );
+		if( fread( &msb, 1, 1, file ) != 1 ) {
+			msb = 0;
+		}
 		if( bom == (BOM_UTF8 & 0xFFFF) && msb == (BOM_UTF8 >> 16) ) {
 DBG serprintf("sub: UTF-8 by BOM!\n");
 			ret = 1;

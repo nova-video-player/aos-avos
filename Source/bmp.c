@@ -100,5 +100,7 @@ void BMP_write_header( int fd, int width, int height, int bits_per_pixel )
 	*((int*)  &buf[idx]) = ih.colors;		idx += sizeof(int);
 	*((int*)  &buf[idx]) = ih.important_colors;	idx += sizeof(int);
 
-	write( fd, buf, FILE_HEADER_SIZE + INFO_HEADER_SIZE );
+	if( write( fd, buf, FILE_HEADER_SIZE + INFO_HEADER_SIZE ) != (ssize_t)(FILE_HEADER_SIZE + INFO_HEADER_SIZE) ) {
+		serprintf( "BMP_write_header: write failed\n" );
+	}
 }

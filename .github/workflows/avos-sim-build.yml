@@ -25,9 +25,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
-            libass-dev libfreetype-dev libsdl2-dev libzip-dev zlib1g-dev \
-            libavcodec-dev libavformat-dev libavutil-dev \
-            libswscale-dev libswresample-dev libavfilter-dev
+            libass-dev libfreetype-dev libsdl2-dev libzip-dev zlib1g-dev
+
+      # The sources need FFmpeg >= 7.1 (sws_free_context, AV_CHAN_SIDE_SURROUND_*) but
+      # Ubuntu 24.04 only ships 6.1, so Linux gets FFmpeg 9 from conda-forge instead.
+      - name: Install FFmpeg 9 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export MAMBA_ROOT_PREFIX="$HOME/micromamba"
+          curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C /tmp bin/micromamba
+          /tmp/bin/micromamba create -y -q -n ffmpeg9 -c conda-forge --override-channels "ffmpeg=9"
+          P="$MAMBA_ROOT_PREFIX/envs/ffmpeg9"
+          ln -sfn "$P/lib" "$P/lib64"          # Makefile looks in $(TOOLCHAIN_PATH)/lib64
+          echo "FFMPEG_PREFIX=$P" >> "$GITHUB_ENV"
+          # LD_LIBRARY_PATH is deliberately NOT exported for later steps: conda's libs
+          # (curl, ssl, zlib, ...) would shadow the system ones used by git and friends.
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
@@ -44,7 +56,15 @@ jobs:
           pkg-config --modversion libass
 
       - name: Build sim target
-        run: make -j"$(getconf _NPROCESSORS_ONLN)"
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" ${FFMPEG_PREFIX:+TOOLCHAIN_PATH="$FFMPEG_PREFIX"}
 
       - name: Check the binary was produced
         run: test -x build/avos
+
+      - name: Check the binary links FFmpeg 9 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          out="$(LD_LIBRARY_PATH="$FFMPEG_PREFIX/lib" ldd build/avos)"
+          echo "$out" | grep -E 'libav|libsw'
+          ! echo "$out" | grep 'not found'
+          echo "$out" | grep -q "libavcodec.so.63 => $FFMPEG_PREFIX/lib/"

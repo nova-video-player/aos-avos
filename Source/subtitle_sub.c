@@ -338,6 +338,7 @@ static uni_sub *parse_SUB( subt_orig *spex, int clean_tags )
 
 	if(fd) {
 		fclose(fd);
+		fd = NULL;	// don't fclose() again at CLEAR_ERROR when nothing was parsed
 	}
 
 	if ( sub_record && sub_record->first ) {

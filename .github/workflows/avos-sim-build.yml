@@ -1,0 +1,50 @@
+# Builds the native (sim) target on Linux and macOS, so the host build keeps working
+# without anyone needing both platforms locally. The sim build links the real decoder,
+# demuxer, audio and subtitle code against the host's FFmpeg/libass/freetype/SDL2/libzip.
+name: avos sim build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:   # manual: GitHub -> Actions -> "avos sim build" -> Run workflow
+
+jobs:
+  sim-build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libass-dev libfreetype-dev libsdl2-dev libzip-dev zlib1g-dev \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswscale-dev libswresample-dev libavfilter-dev
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libass freetype sdl2 libzip ffmpeg pkgconf
+
+      # codecs.mk expects the audio compressor as a sibling of this repository and
+      # builds it on demand (ARCH is the host architecture for the sim target).
+      - name: Fetch audiocompress
+        run: git clone --depth 1 https://github.com/nova-video-player/aos-audiocompress.git ../audiocompress
+
+      - name: Show toolchain
+        run: |
+          cc --version | head -1
+          pkg-config --modversion libass
+
+      - name: Build sim target
+        run: make -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Check the binary was produced
+        run: test -x build/avos

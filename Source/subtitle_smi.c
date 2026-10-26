@@ -773,20 +773,28 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 			//new data entry begins. Store what came this far. If here then the previous frame
 			//has no ending time. Add it there
 			if ( cmd != 0 ) {
-				if(cmd == 1){
-					//there was no data to store. propably syntax error in file
-					//or two consecutive SYNC Start's
-					clean_smi_array( cmd_lines );
-					cmd = 1;
-					line_read = strip_smi_line( &line_read );					
-					cmd_lines[0] = astrdup( line_read );
-					
-					line_read = getNextLine( line_read_start, LINE_LEN, file );					
-					continue;
-				}
-					      
+				// NOTE: there used to be a "cmd == 1" special case here that
+				// threw away cmd_lines[0] on the assumption that a lone
+				// <Sync Start=..> line carried no data. But the very common
+				//   <Sync Start=1000><P Class=EN>Hello
+				//   <Sync Start=3000><P Class=EN>World      (no &nbsp line between)
+				// layout has the text on the Sync line itself, so cmd == 1
+				// is a complete cue, and the special case silently dropped
+				// every such cue not followed by an &nbsp terminator.
+				// extract_smi_line() already copes with a genuinely empty
+				// Sync line (it returns NULL, which is ignored below), so
+				// no special handling is needed.
+				//
+				// This new Sync line is also the end of the previous cue, so
+				// hand it to extract_smi_line() as the terminating line (same
+				// as the &nbsp / </SYNC> branch above). That way the end time
+				// is the exact Sync time from the file. The last slot of
+				// cmd_lines is always kept free for it (see the cap on
+				// body lines below), so cmd < SMI_ARRAY_SIZE here.
+				line_read = strip_smi_line( &line_read );
+				cmd_lines[cmd] = astrdup( line_read );
 				new_line = extract_smi_line( cmd_lines, subs->default_language, clean_tags, subs->utf8 );
-				
+
 				//store gathered data to sub_record
 				if ( new_line ) {
 					sub_record = store_title(sub_record,new_line);
@@ -797,8 +805,7 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 				}
 				cmd = 1;
 				clean_smi_array( cmd_lines );
-				//Store array here
-				line_read = strip_smi_line( &line_read );				
+				//Store array here: this Sync line starts the next cue
 				cmd_lines[0] = astrdup(line_read);
 				line_read = getNextLine( line_read_start, LINE_LEN, file );
 				continue;
@@ -807,7 +814,15 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 		
 		line_read = strip_smi_line( &line_read );
 		if(*line_read != 0){
-			cmd_lines[cmd++] = astrdup(line_read);
+			// cmd_lines holds SMI_ARRAY_SIZE entries. Keep the last slot free
+			// for the terminating <Sync Start=..> line written by the branches
+			// above; any body line beyond that is dropped instead of
+			// overrunning the array.
+			if(cmd < SMI_ARRAY_SIZE - 1){
+				cmd_lines[cmd++] = astrdup(line_read);
+			} else {
+DBG serprintf( "SMI: too many lines in one cue, dropping: %s\n", line_read );
+			}
 		}
 		line_read = getNextLine( line_read_start, LINE_LEN, file );
 	}

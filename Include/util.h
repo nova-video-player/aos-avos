@@ -62,7 +62,9 @@ const unsigned char *u8_to_u16(unsigned short *utf16, const unsigned char *utf8)
 // ATTENTION : make sure that the size of the dst buffer is at least (n + 1) bytes!!!
 static inline char *strnZcpy( char *dst, const char *src, size_t n )
 {
-	size_t len = strnlen( src, n );
+	size_t len = 0;
+	while( len < n && src[len] )
+		len++;
 	memcpy( dst, src, len );
 	dst[len] = '\0';
 

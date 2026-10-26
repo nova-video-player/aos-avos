@@ -634,6 +634,19 @@ DBGF serprintf("dir_remove( %s )\r\n", name );
 	return ret;
 }
 
+static int join_path(char *dst, size_t size, const char *dir, const char *name)
+{
+	size_t dir_len = strlen(dir);
+	size_t name_len = strlen(name);
+
+	if (dir_len + name_len + 2 > size)
+		return -1;
+	memcpy(dst, dir, dir_len);
+	dst[dir_len] = '/';
+	memcpy(dst + dir_len + 1, name, name_len + 1);
+	return 0;
+}
+
 // *******************************************
 //
 // 	dir_recursive_remove
@@ -664,7 +677,11 @@ DBGF serprintf("dir_recursive_remove( %s )\r\n", name );
 		if (!strcmp(d->d_name, ".."))
 			continue;
 
-		snprintf(filename, 512, "%s/%s", name, d->d_name);
+		if (join_path(filename, sizeof(filename), name, d->d_name) < 0) {
+			DBGF serprintf("path too long: %s/%s\n", name, d->d_name);
+			ret = -1;
+			continue;
+		}
 
 		// if directory, dive in
 		if (file_lstat(filename, &st) >= 0) {
@@ -722,8 +739,12 @@ DBGF serprintf("dir_recursive_copy( %s => %s )\r\n", from, to);
 		if (!strcmp(d->d_name, ".."))
 			continue;
 
-		snprintf(f_name, sizeof(f_name), "%s/%s", from, d->d_name);
-		snprintf(t_name, sizeof(t_name), "%s/%s", to, d->d_name);
+		if (join_path(f_name, sizeof(f_name), from, d->d_name) < 0 ||
+		    join_path(t_name, sizeof(t_name), to, d->d_name) < 0) {
+			DBGF serprintf("path too long: %s/%s\n", from, d->d_name);
+			ret = -1;
+			continue;
+		}
 
 		// if directory, dive in
 		if (file_lstat(f_name, &st) >= 0) {

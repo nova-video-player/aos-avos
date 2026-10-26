@@ -759,7 +759,7 @@ contracts, not device scheduling, receiver relock or physical lipsync.
 `test/host/test_host_native.py` compiles small C programs together with the **real**
 subtitle engine sources, links them on the host and runs them. No NDK, device or
 Makefile change is involved. Android-only headers (`jni.h`, `android/*`, `EGL`,
-`GLES2`) are replaced by `host_stubs.h`; the few symbols that live elsewhere in the tree
+`GLES2`) are replaced by `Include/host_compat/host_stubs.h`; the few symbols that live elsewhere in the tree
 are weak stand-ins in `stubs.c`; `fake_backend.c` replaces the SSA/SRT/GFX decoders
 where a test must control exactly when a backend answers, how slowly, and what it was
 fed. The directory is not a Python package, so

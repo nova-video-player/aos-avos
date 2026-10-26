@@ -108,7 +108,10 @@ typedef struct sub_line_t
 	struct sub_line_t *prev;
 } sub_line;
 
-// Async parse state machine, strictly forward: NOT_QUEUED -> QUEUED -> IN_PROGRESS -> DONE|FAILED; all transitions/reads of the parse-result fields below must hold ->parse_mutex.
+// Async parse state machine: NOT_QUEUED -> QUEUED -> IN_PROGRESS -> DONE|FAILED. FAILED is terminal. Streaming (SRT/VTT) tracks may
+// also go back to NOT_QUEUED from DONE or IN_PROGRESS when the engine no longer holds their cues (reopen, seek flush, switch-away,
+// interruption), so they get re-fed; see _streaming_job_finish() and stream_sub_ext_set_track_generation() in stream_sub_ext.c. All
+// transitions/reads of the parse-result fields below must hold ->parse_mutex.
 enum {
 	SUBT_PARSE_NOT_QUEUED = 0,
 	SUBT_PARSE_QUEUED,

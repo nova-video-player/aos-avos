@@ -42,6 +42,11 @@ int DUMMY_connect(FRAME_BUFFER *fb)
 
 	fb->video0_props = fb->osd_props;
 
+	fb->osd_props.map_size = fb->osd_props.line_length * fb->osd_props.y_l;
+	fb->osd_props.addr = calloc(1, fb->osd_props.map_size);
+	if (!fb->osd_props.addr)
+		return 1;
+
 	init_fb_ops(fb);
 
 	return 0;
@@ -92,13 +97,10 @@ static void DUMMY_set_display_enable(int active)
 {
 }
 
-/* FB_get_osd_data() calls this unconditionally, so it must not be NULL. */
+/* FB_get_osd_data() calls this unconditionally; the buffer is sized and owned by connect. */
 static unsigned char *DUMMY_get_osd_data(void)
 {
-	static unsigned char *buf;
-	if (!buf)
-		buf = calloc(800 * 480, 4);
-	return buf;
+	return fb.osd_props.addr;
 }
 
 static void init_fb_ops(FRAME_BUFFER *fb){

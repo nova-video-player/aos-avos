@@ -72,7 +72,16 @@ CFLAGS += $(DEFINES)
 INCLUDES += -I$(TOOLCHAIN_PATH)/include/
 INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/
 INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/freetype2
-INCLUDES += -I/opt/homebrew/include
+
+# Homebrew lives in /opt/homebrew on Apple Silicon and /usr/local on Intel (or anywhere
+# with a custom prefix); ask brew instead of hardcoding one of them.
+ifeq ($(UNAME_S),Darwin)
+HOMEBREW_PREFIX ?= $(shell command -v brew >/dev/null 2>&1 && brew --prefix)
+ifneq ($(HOMEBREW_PREFIX),)
+INCLUDES += -I$(HOMEBREW_PREFIX)/include -I$(HOMEBREW_PREFIX)/include/freetype2
+LDFLAGS += -L$(HOMEBREW_PREFIX)/lib
+endif
+endif
 
 ifeq ($(TGT_BASE),sim)
 # Host stand-ins for Android NDK / EGL / GLES headers (see Include/host_compat/host_stubs.h).
@@ -87,15 +96,27 @@ CSRC += sub_engine.c sub_style.c sub_render_gl.c
 ifneq ($(UNAME_S),Darwin)
 CSRC += audio_interface_oss.c mixerdev_oss.c
 endif
-# Homebrew keeps freetype headers (ft2build.h) in a freetype2 subdirectory
-INCLUDES += -I/opt/homebrew/include/freetype2
+
+# libass and freetype2 through pkg-config, so custom prefixes and their transitive
+# dependencies are correct. Fall back to plain -l flags when pkg-config is absent.
+PKG_CONFIG ?= pkg-config
+LIBASS_CFLAGS   := $(shell $(PKG_CONFIG) --cflags libass 2>/dev/null)
+LIBASS_LIBS     := $(shell $(PKG_CONFIG) --libs libass 2>/dev/null)
+FREETYPE_CFLAGS := $(shell $(PKG_CONFIG) --cflags freetype2 2>/dev/null)
+FREETYPE_LIBS   := $(shell $(PKG_CONFIG) --libs freetype2 2>/dev/null)
+INCLUDES += $(LIBASS_CFLAGS) $(FREETYPE_CFLAGS)
+SHARED_LIBS += $(LIBASS_LIBS) $(FREETYPE_LIBS)
+ifeq ($(strip $(LIBASS_LIBS)),)
+SHARED_LIBS += -lass
+endif
+ifeq ($(strip $(FREETYPE_LIBS)),)
+SHARED_LIBS += -lfreetype
+endif
+# -lm is a host-only link dependency; CMD_LINK used to append it for every target.
+SHARED_LIBS += -lm
 endif
 
-SHARED_LIBS += -lzip -pthread -lm
-ifeq ($(TGT_BASE),sim)
-# need to link libass and libfreetype (subs and fonts)
-SHARED_LIBS += -lass -lfreetype
-endif
+SHARED_LIBS += -lzip -pthread
 
 LDFLAGS += -rdynamic
 ifeq ($(UNAME_S),Linux)
@@ -108,7 +129,6 @@ endif
 LDFLAGS += -L$(TOOLCHAIN_PATH)/usr/$(LIBDIR)
 
 LDFLAGS += -L$(TOOLCHAIN_PATH)/$(LIBDIR)
-LDFLAGS += -L/opt/homebrew/lib
 LDFLAGS += $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 
 # path to sources
@@ -185,7 +205,7 @@ else
 APP_OBJS += $(LIB_OBJS)
 endif
 
-CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH) -lm
+CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH)
 quiet_CMD_LINK = "LD  $(TGT_NAME)"
 
 $(TGT_PATH)/$(LIB_NAME): $(LIB_OBJS)

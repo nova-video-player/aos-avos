@@ -40,3 +40,9 @@ jobs:
         env:
           SANITIZERS: thread
         run: python3 test/host/test_host_native.py -v -k race -k registry -k switch -k seek -k close_open -k style_resize -k jni
+
+      - name: SMI error paths (AddressSanitizer, Linux)
+        if: runner.os == 'Linux'   # LeakSanitizer makes the empty-record leak visible
+        env:
+          SANITIZERS: address
+        run: python3 test/host/test_host_native.py -v -k smi_parse_error

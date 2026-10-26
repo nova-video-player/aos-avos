@@ -673,23 +673,21 @@ void subtitle_clean_error(uni_sub *subs)
 	if(!subs){
 		return;
 	}
-	if(subs->first){
-		sub_line* tmp = subs->first;
-		sub_line* line = tmp;
-		while(line){
-			if(line->top){
-				afree(line->top);
-			}
-			if(line->bottom){
-				afree(line->bottom);
-			}
-			line = line->next;
-			afree(tmp);
-			tmp = line;
+	sub_line* tmp = subs->first;
+	sub_line* line = tmp;
+	while(line){
+		if(line->top){
+			afree(line->top);
 		}
-		if(subs->identifier){
-			afree(subs->identifier);
+		if(line->bottom){
+			afree(line->bottom);
 		}
+		line = line->next;
+		afree(tmp);
+		tmp = line;
+	}
+	if(subs->identifier){
+		afree(subs->identifier);
 	}
 }
 

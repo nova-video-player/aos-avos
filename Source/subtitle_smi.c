@@ -648,6 +648,8 @@ static inline char *strip_smi_line( char **line )
 char *getNextLine(char* start, int len, FILE* fd)
 {
 	char *ret = fgets(start, len, fd);
+	if(!ret)
+		return NULL;
 	if(strlen(ret) >= LINE_LEN - 1){
 		if(strchr(ret,'\n')){
 			return ret;
@@ -680,7 +682,7 @@ char *getNextLine(char* start, int len, FILE* fd)
 static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 {
 	clean_tags = 0;
-	FILE *file;
+	FILE *file = NULL;
 	char _line_read[LINE_LEN + 1];
 	char* line_read = _line_read;
 	char *line_read_start = line_read;
@@ -703,15 +705,18 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 	subs->default_language = set_SMI_code( subs, file );
 	if ( !subs->default_language ) {
 		DBG serprintf( "Subtitle: parseSMI: Could not get/quess the language selection\n" );
+		fclose( file );
 		return 0;
 	}
 	
 	sub_record = acalloc(1, sizeof( uni_sub ) );
+	if ( !sub_record )
+		goto CLEAN_ERROR;
 	
 	smi_seek_start( file );
 	line_read = getNextLine( line_read_start, LINE_LEN, file );
 	//skip the header
-	while ( !feof( file ) ) {
+	while ( line_read && !feof( file ) ) {
 
 		//<BODY> statement starts the actual data. Header is already read
 		if ( strstrNC( line_read, "<BODY>" ) ) {
@@ -729,7 +734,7 @@ static uni_sub *parse_SMI( subt_orig *subs, int clean_tags )
 		goto CLEAN_ERROR;
 
 	clean_smi_array(cmd_lines);
-	while ( !feof( file ) ) {
+	while ( line_read && !feof( file ) ) {
 		line++;
 		//Check for end of BODY
 		if ( strstrNC( line_read, "</BODY>" ) ) {
@@ -837,25 +842,20 @@ DBG serprintf( "SMI: too many lines in one cue, dropping: %s\n", line_read );
 	}
 	afree(cmd_lines);
 	fclose( file );
-	if ( !sub_record ) {
-		return 0;
-	}
+	file = NULL;
 	if ( !sub_record->first ) {
+		DBG serprintf( "SMI parsing failed. No records\n" );
+		subtitle_clean_error( sub_record );
+		afree( sub_record );
 		return 0;
 	}
 	compress_times( sub_record );
-	if ( !sub_record ) {
-DBG serprintf( "SMI parsing failed. Null record\n" );
-		return 0;
-	}
-	if ( !sub_record->first ) {
-DBG serprintf( "SMI parsing failed. No records\n" );
-		return 0;
-	}
 
 	sub_record->frame_multiplier = 0;
 	return sub_record;
 CLEAN_ERROR:
+	if ( file )
+		fclose( file );
 	subtitle_clean_error(sub_record);
 	afree(sub_record);
 	if(cmd_lines != 0){

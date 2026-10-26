@@ -406,6 +406,12 @@ class HostNativeTests(HostTestCase):
         """Style change and surface resize while paused."""
         self.build_and_run('style_resize_paused_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
 
+    def test_smi_parse_error(self):
+        """Empty SMI bodies close the file and free the record without touching it after free."""
+        self.build_and_run('smi_parse_error_test.c', (HOST + 'stubs.c',),
+                           flags=('-Wno-sign-compare', '-Wno-unused-parameter', '-Wno-pointer-sign',
+                                  '-Wno-unused-but-set-variable', '-Wno-missing-field-initializers'))
+
 
 # ----------------------------------------------------------------------------------------------
 # Output formatting

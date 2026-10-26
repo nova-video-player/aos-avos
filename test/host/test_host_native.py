@@ -127,11 +127,6 @@ REPO = HERE.parents[1]                        # <repo>
 HOST = 'test/host/'                           # repo-relative prefix for this directory
 RUN_TIMEOUT_S = 120                           # a hung test is a deadlock, not a slow test
 
-# <header> paths the engine includes; each becomes a one-line forwarder to host_stubs.h in the
-# temp build dir, so no Source/ file has to change.
-STUB_HEADERS = ('jni.h', 'android/native_window.h', 'android/native_window_jni.h',
-                'android/bitmap.h', 'android/log.h', 'EGL/egl.h', 'GLES2/gl2.h')
-
 # Borrowed for realism, not under test: built with -w so their pre-existing warnings don't
 # bury the ones from the files that are. (log.c is deliberately absent: see stubs.c.)
 QUIET = {'Source/debug.c', HOST + 'stubs.c'}
@@ -239,10 +234,6 @@ _CHECK_LINE = re.compile(r'^\s*(ok|FAIL)\b')
 def setUpModule():
     global _BUILD
     _BUILD = Path(tempfile.mkdtemp(prefix='avos-host.'))
-    for rel in STUB_HEADERS:
-        fwd = _BUILD / 'inc' / rel
-        fwd.parent.mkdir(parents=True, exist_ok=True)
-        fwd.write_text('#include "%s"\n' % (HERE / 'host_stubs.h'))
 
 
 def tearDownModule():
@@ -308,7 +299,7 @@ class HostTestCase(unittest.TestCase):
         pkg_cflags, pkg_libs = _pkg_config('--cflags', pkgs), _pkg_config('--libs', pkgs)
         sanitize = _sanitize_flags()
         base = ['-std=gnu11', '-g', '-O1']
-        includes = ['-I', str(REPO / 'Include'), '-I', str(_BUILD / 'inc')]
+        includes = ['-I', str(REPO / 'Include' / 'host_compat'), '-I', str(REPO / 'Include')]
         checked = tuple([*base, '-Wall', '-Wextra', '-Wno-deprecated-declarations',
                          *sanitize, *flags, *includes, *pkg_cflags])
         quiet = tuple([*base, '-w', *includes])

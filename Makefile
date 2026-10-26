@@ -75,17 +75,9 @@ INCLUDES += -I$(TOOLCHAIN_PATH)/usr/include/freetype2
 INCLUDES += -I/opt/homebrew/include
 
 ifeq ($(TGT_BASE),sim)
-# Host stand-ins for Android NDK / EGL / GLES headers (see test/host/host_stubs.h)
-HOST_STUBS  := $(SRC_PATH)/test/host/host_stubs.h
-HOST_COMPAT := $(TGT_PATH)/host_compat
-COMPAT_HDRS := jni.h android/native_window.h android/native_window_jni.h \
-               android/bitmap.h android/log.h EGL/egl.h GLES2/gl2.h
-
-# create each forwarding header once (only if missing, so mtimes stay stable and nothing rebuilds needlessly)
-$(foreach h,$(COMPAT_HDRS),$(shell test -f $(HOST_COMPAT)/$(h) || (mkdir -p $(dir $(HOST_COMPAT)/$(h)) && echo '#include "$(HOST_STUBS)"' > $(HOST_COMPAT)/$(h))))
-
-# -I first so these win over any system EGL/GLES headers
-INCLUDES := -I$(HOST_COMPAT) $(INCLUDES)
+# Host stand-ins for Android NDK / EGL / GLES headers (see Include/host_compat/host_stubs.h).
+# -I first so these win over any system EGL/GLES headers.
+INCLUDES := -I$(SRC_PATH)/Include/host_compat $(INCLUDES)
 
 # Sources that exist in Source/ but are missing from the sim's source list
 # (found via undefined-reference errors at link time). Duplicates are harmless: $(sort) dedups.

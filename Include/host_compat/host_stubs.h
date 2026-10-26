@@ -17,11 +17,12 @@
  * includes, so Source/ files compile and link on a plain host build. Nothing in Source/ is
  * modified.
  *
- * test_host_native.py writes one-line forwarding headers into its temp build directory
- * (<jni.h>, <android/native_window.h>, <android/native_window_jni.h>, <android/bitmap.h>,
- * <android/log.h>, <EGL/egl.h>, <GLES2/gl2.h>), each of which just includes this file, so
- * the engine's `#include <EGL/egl.h>` etc. resolve here. Every function is a `static inline`
- * no-op or a "not available" failure -- there is no companion .c file.
+ * This directory also holds one-line forwarding headers (<jni.h>, <android/native_window.h>,
+ * <android/native_window_jni.h>, <android/bitmap.h>, <android/log.h>, <EGL/egl.h>,
+ * <GLES2/gl2.h>), each of which just includes this file, so the engine's
+ * `#include <EGL/egl.h>` etc. resolve here. The sim build and the host tests put this
+ * directory first on the include path. Every function is a `static inline` no-op or a
+ * "not available" failure -- there is no companion .c file.
  *
  * What this does NOT exercise:
  *   - The render thread's real GL path. eglCreateWindowSurface() always returns

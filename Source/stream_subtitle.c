@@ -596,6 +596,30 @@ DBG serprintf("got gfx data: %8d %8d  size %d\r\n", f->time, f->duration, f->val
 
 // ************************************************************
 //
+//	_drain_subtitle_queue
+//
+// ************************************************************
+// Consume and discard pending embedded subtitle cues while subtitles are
+// disabled. Packets already queued for the still-selected track (and any that
+// race the parser observing subtitle_disabled) must not be left with no
+// consumer: they would otherwise accumulate until the shared packet budget /
+// FF_QUEUE_MAX_PACKETS limit is reached and playback stalls. The bounded
+// history used to replay a track on reselection lives in the parser's subtitle
+// cache, not here, and is unaffected.
+static void _drain_subtitle_queue( STREAM *s )
+{
+	if( !s->parser || !s->parser->get_subtitle_cdata )
+		return;
+	s->cdata_sub.valid = 0;
+	while( s->parser->get_subtitle_cdata( s, &s->sub_buffer, &s->cdata_sub ) == 0 )
+		s->cdata_sub.valid = 0;
+	// Nothing is left to consume: let the input buffer reclaim data up to the
+	// video position instead of pinning it at the last (possibly old) cue.
+	stream_buffer_fix_subs( s->buffer );
+}
+
+// ************************************************************
+//
 //	_sub_decode
 //
 // ************************************************************
@@ -608,8 +632,11 @@ void _sub_decode( STREAM *s )
 			s->message_cb( s, STREAM_SUB_PROPS_CHANGED );
 		}
 	}
-	if( !__atomic_load_n( &s->subtitle_disabled, __ATOMIC_ACQUIRE ) &&
-		s->subtitle->valid && (!s->paused || s->subtitle_replay) ) {
+	if( __atomic_load_n( &s->subtitle_disabled, __ATOMIC_ACQUIRE ) ) {
+		_drain_subtitle_queue( s );
+		return;
+	}
+	if( s->subtitle->valid && (!s->paused || s->subtitle_replay) ) {
 		int time = s->video_time;
 		if( time != -1 ) {
 			// apply correction
@@ -947,6 +974,12 @@ DBGS serprintf("subtitle switch: requested track %d no longer present after a co
 		}
 	}
 	s->subtitle_replay = 1;
+	// Re-enable before resuming the threads, otherwise the subtitle thread
+	// could observe the flag still set and drain the cues _reset_subtitle just
+	// restored for replay. On failure the previous (possibly disabled) state is
+	// left untouched.
+	if( !failed )
+		__atomic_store_n( &s->subtitle_disabled, 0, __ATOMIC_RELEASE );
 	// Selection changes no track properties. A metadata notification here
 	// makes the app reapply its selection, recursively reopening this decoder.
 	if( parser_state == THREAD_RUNNING )
@@ -1006,12 +1039,8 @@ serprintf("SsS: sub_stream already set\n");
 //		return 0;
 	}
 
-	if( s->av.sub[sub_stream].ext || s->parser->reset_subtitle ) {
-		int failed = _switch_subtitle(s, sub_stream, req_ext, req_path);
-		if( !failed )
-			__atomic_store_n( &s->subtitle_disabled, 0, __ATOMIC_RELEASE );
-		return failed;
-	}
+	if( s->av.sub[sub_stream].ext || s->parser->reset_subtitle )
+		return _switch_subtitle(s, sub_stream, req_ext, req_path);
 
 	int was_paused = stream_pause( s );
 

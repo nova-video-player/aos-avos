@@ -923,7 +923,7 @@ typedef struct STREAM {
 	CLEVER_BUFFER	sub_buffer;
 	int		subtitle_changed;
 	int		subtitle_replay; // rebuild current cue from retained packets after switch
-	int		subtitle_disabled; // sticky "none" selection: the decode/feed paths must stay idle until a track is selected again
+	int		subtitle_disabled; // sticky "none" selection: demux enqueue and decode/feed paths stay idle until a track is selected again
 	int subtitle_pending;
 	
 	int 		error_count;

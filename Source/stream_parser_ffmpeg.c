@@ -1837,7 +1837,8 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", G
 	} else if( _subtitle_props_for_stream(s, stream) ) {
 		_rt_sub_pkts++;
 		_cache_subtitle_packet(s, &packet);
-		if (s->subtitle->valid && !s->subtitle->ext && stream == s->subtitle->stream) {
+		if (s->subtitle->valid && !s->subtitle->ext && stream == s->subtitle->stream &&
+		    !__atomic_load_n(&s->subtitle_disabled, __ATOMIC_ACQUIRE)) {
 			if (enqueue_media_packet(s, &ff_p->sq, &packet, audio_starved)) goto QueueError;
 			if (timestamp)
 				*timestamp = GET_SUB_TS(packet.pts);

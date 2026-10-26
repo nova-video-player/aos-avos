@@ -13,7 +13,11 @@
 # limitations under the License.
 
 ifeq ($(BUILD_FROM),ARCBUILD)
-audiocompress: 
+# Give the archive path used by STATIC_LIBS a real rule so parallel builds can
+# create it before the main link instead of racing the submake.
+audiocompress: ../audiocompress/$(ARCH)/audiocompress.a
+
+../audiocompress/$(ARCH)/audiocompress.a: FORCE
 	$(MAKE) --directory ../audiocompress ARCH=$(ARCH) REL=$(REL) $(ARCH)/audiocompress.a
 
 audiocompress-clean:

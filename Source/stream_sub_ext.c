@@ -163,6 +163,11 @@ typedef struct _STREAMING_POLL_CTX {
 	STREAM  *s;
 	uni_sub *job;
 	int      stale;
+	int      interrupted; // pause/seek/close stopped the pass at a checkpoint (the engine
+	                       // was flushed). Reported through _do_streaming_feed()'s return
+	                       // value, NOT through s->subtitle_ext_needs_refeed: that flag is
+	                       // consumed by the sub thread, which could clear it while this
+	                       // job is still IN_PROGRESS -- see _parse_worker_thread()
 	uint64_t track_gen; // engine track-generation token this pass is pinned
 	                     // to; fixed at track-selection time -- see
 	                     // uni_sub::track_gen's doc comment in
@@ -213,6 +218,66 @@ static void _free_sub_line_list( sub_line *node )
 		afree( node );
 		node = next;
 	}
+}
+
+// True if `sub` is the external track currently selected on `s` -- the same test
+// _do_streaming_feed() and _feed_from_cache() make inline.
+static int _sub_is_current( STREAM *s, uni_sub *sub )
+{
+	SUB_PRIV *p = s->subtitle_priv;
+	return s->subtitle && p && p->subs &&
+	       s->subtitle->stream >= 0 && s->subtitle->stream < p->subs->cnt &&
+	       p->subs->converted[ s->subtitle->stream ] == sub;
+}
+
+// Single completion point for a streaming (SRT/VTT) feed job, shared by the parse-worker
+// thread and _synchronous_parse_fallback(). `result` is _do_streaming_feed()'s return value
+// and `token` the track generation that pass was pinned to.
+//
+// The generation check and the final parse_state write happen under ONE hold of
+// sub->parse_mutex. stream_sub_ext_set_track_generation() (a reopen) takes the same mutex, so
+// every reopen is ordered strictly before or after this block:
+//   - before: we see track_gen != token. The engine dropped every cue this pass sent, and the
+//     reopen's own feed_engine() call already ran and deferred because the job was still
+//     in flight. So the job goes back to NOT_QUEUED and another feed is requested.
+//   - after: the state is already final here, and the reopen's stamp resets DONE (the
+//     only state it touches) to NOT_QUEUED, so its feed_engine() re-enqueues.
+// Checking the generation earlier and taking the mutex again to write the state left a gap in
+// which a reopen could land and the old job then still marked itself DONE on an empty engine.
+//
+// The refeed flag is raised only AFTER the state is committed and the mutex released: the sub
+// thread reacts by calling stream_sub_ext_force_streaming_refeed() -> feed_engine(), which must
+// see NOT_QUEUED to re-enqueue (see the note in _parse_worker_thread()).
+//
+// A refeed raised because the generation MOVED is further gated on `sub` still being the
+// selected track. The refeed branch in _get_next_ext_sub() resets DONE and re-feeds the
+// CURRENT track without flushing first, so a flag raised for a track the user has since
+// left would re-feed an already complete track into the engine for no reason. A moved
+// generation means a reopen stamped this sub, and it can only have done so while this sub
+// was the selected track (the stamp resolves the sub through s->subtitle->stream), so
+// "still selected now" is exactly "the reopen's deferred feed_engine() is still wanted".
+// If the user has switched away again, the next selection re-stamps and feeds on its own.
+// A result-3 interruption flushed the engine for the current track and keeps its
+// unconditional refeed.
+//
+// result: 1 = whole track fed, 2 = track no longer selected, 3 = interrupted/flushed,
+// 0 = setup failure. A setup failure stays FAILED regardless of generation: it is a property
+// of the file, not of what the engine holds.
+static void _streaming_job_finish( STREAM *s, uni_sub *sub, int result, uint64_t token )
+{
+	pthread_mutex_lock( &sub->parse_mutex );
+	int moved = ( result != 0 && sub->track_gen != token );
+	if( result == 3 || moved ) {
+		sub->parse_state = SUBT_PARSE_NOT_QUEUED;
+	} else if( result == 2 ) {
+		sub->parse_state = SUBT_PARSE_NOT_QUEUED; // switched away: a later re-selection re-feeds
+	} else {
+		sub->parse_state = ( result == 1 ) ? SUBT_PARSE_DONE : SUBT_PARSE_FAILED;
+	}
+	pthread_mutex_unlock( &sub->parse_mutex );
+
+	if( !s ) return;
+	if( result == 3 || ( moved && _sub_is_current( s, sub ) ) ) _needs_refeed_set( s, 1 );
 }
 
 // ctx for _cue_to_engine_and_cache(): feeds the engine exactly like
@@ -274,9 +339,10 @@ static void _cue_to_engine_and_cache( void *ctx, const char *text, int start_ms,
 // SMI/SUB/MPL2 list-walk path in stream_sub_ext_feed_engine(), plus the same
 // periodic yield/stop-check feed_SRT()/feed_VTT() do, so a very large cached
 // track can't hog eng->lock during a refeed either. Return contract matches
-// _do_streaming_feed(): 1 = ran to completion (or was cleanly interrupted --
-// the cache itself is untouched either way, so there's nothing to discard),
-// 2 = track went stale mid-walk, caller must not mark the job DONE.
+// _do_streaming_feed(): 1 = ran to completion, 2 = track went stale mid-walk,
+// 3 = the engine does not hold the full track (interrupted by pause/seek/close, or
+// the engine track was reopened). The cache itself is untouched in every case, so
+// there's nothing to discard. For 2 and 3 the caller must not mark the job DONE.
 //
 // `token` is the engine track-generation captured once by the caller before
 // this walk started (see sub_engine_get_track_generation()) -- used for
@@ -301,8 +367,7 @@ static int _feed_from_cache( STREAM *s, uni_sub *subs, uint64_t token )
 		if( (++n % SRT_CACHE_POLL_INTERVAL) == 0 ) {
 			if( thread_state_asked( &s->sub_tstate ) != THREAD_RUNNING ) {
 				if( s->sub_engine ) sub_engine_flush_gen( (SUB_ENGINE*)s->sub_engine, token );
-				_needs_refeed_set( s, 1 );
-				return 1;
+				return 3; // engine flushed: the caller resets the job and raises the refeed flag
 			}
 			stream_yield_RT();
 		}
@@ -318,20 +383,14 @@ static int _feed_from_cache( STREAM *s, uni_sub *subs, uint64_t token )
 
 		node = node->next;
 	}
-	return 1;
+	return 1; // a reopen during the walk is caught by _streaming_job_finish() under parse_mutex
 }
 
-// Runs SRT/VTT's streaming feed() on the parse-worker thread instead of stream_sub_dec_thread (see file header comment), reusing the same _cue_to_engine_gen()/_sub_feed_should_stop() every feed() caller uses. Returns 1 if the whole file was fed or a genuine pause/seek/close interrupted it (subtitle_ext_needs_refeed is set for the latter); 2 if `subs` was no longer the actively selected track, so the caller must NOT mark the job DONE; 0 only on a genuine setup failure (maps to SUBT_PARSE_FAILED).
-static int _do_streaming_feed( STREAM *s, uni_sub *subs )
+// Runs SRT/VTT's streaming feed() on the parse-worker thread instead of stream_sub_dec_thread (see file header comment), reusing the same _cue_to_engine_gen()/_sub_feed_should_stop() every feed() caller uses. Returns 1 if the whole file was fed; 2 if `subs` was no longer the actively selected track, so the caller must NOT mark the job DONE; 3 if a genuine pause/seek/close interrupted the pass (the engine was flushed); 0 only on a genuine setup failure (maps to SUBT_PARSE_FAILED). `*token_out` receives the track generation this pass was pinned to. This function does NOT decide the final parse_state, and in particular does not check whether the track was reopened while it ran: the caller passes the result and token to _streaming_job_finish(), which re-checks the generation and writes the state under one parse_mutex hold (a check made here, before the state write, left a window for a reopen to land in between).
+static int _do_streaming_feed( STREAM *s, uni_sub *subs, uint64_t *token_out )
 {
+	*token_out = 0;
 	if( !s || !subs || !subs->spex ) return 0;
-
-	// Skip if the user already switched away while this job sat in the queue -- nothing fed yet, nothing to flush.
-	SUB_PRIV *p = s->subtitle_priv;
-	int still_current = s->subtitle && p && p->subs &&
-	                     s->subtitle->stream >= 0 && s->subtitle->stream < p->subs->cnt &&
-	                     p->subs->converted[ s->subtitle->stream ] == subs;
-	if( !still_current ) return 2;
 
 	// Fixed at track-SELECTION time, not discovered here: subs->track_gen
 	// was stamped by stream_sub_ext_set_track_generation() synchronously,
@@ -371,6 +430,20 @@ static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 	pthread_mutex_lock( &subs->parse_mutex );
 	uint64_t token = subs->track_gen;
 	pthread_mutex_unlock( &subs->parse_mutex );
+	*token_out = token;
+
+	// Read BEFORE the still_current check below, so that an early return 2 also has a token for
+	// _streaming_job_finish() to compare: a reselect landing after the check but before the job's
+	// final state write must still be noticed. The order is safe: a token read just before a
+	// switch is only ever OLDER than the engine's current generation, so the engine drops its
+	// cues and flushes, and the generation check in _streaming_job_finish() reports it.
+
+	// Skip if the user already switched away while this job sat in the queue -- nothing fed yet, nothing to flush.
+	SUB_PRIV *p = s->subtitle_priv;
+	int still_current = s->subtitle && p && p->subs &&
+	                     s->subtitle->stream >= 0 && s->subtitle->stream < p->subs->cnt &&
+	                     p->subs->converted[ s->subtitle->stream ] == subs;
+	if( !still_current ) return 2;
 
 	// Fast path -- see the caching comment above. Skips the file entirely.
 	if( subs->first ) {
@@ -380,10 +453,10 @@ static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 	SUBTITLE_FORMAT *fmt = subtitle_get_format_for_sub( subs );
 	if( !fmt || !fmt->feed ) return 0;
 
-	// Cleared before the call, not after: _sub_feed_should_stop() may set it back to 1 during the call, and that must survive.
+	// Drop any stale latch from before this pass: it feeds the engine from scratch anyway. An interruption of THIS pass is reported via poll_ctx.interrupted, not through this flag.
 	_needs_refeed_set( s, 0 );
 
-	_STREAMING_POLL_CTX poll_ctx  = { s, subs, 0, token };
+	_STREAMING_POLL_CTX poll_ctx  = { s, subs, 0, 0, token };
 	_CACHE_BUILD_CTX     cache_ctx = { s, NULL, NULL, 0, token };
 	fmt->feed( subs->spex, _cue_to_engine_and_cache, &cache_ctx, _sub_feed_should_stop, &poll_ctx );
 
@@ -397,9 +470,9 @@ static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 		return 2;
 	}
 
-	if( _needs_refeed_get( s ) ) {
+	if( poll_ctx.interrupted ) {
 		// Genuinely interrupted by pause/seek/close partway through --
-		// _sub_feed_should_stop() set the flag back to 1 (see its comment).
+		// _sub_feed_should_stop() flushed the engine and set poll_ctx.interrupted.
 		// The list built so far only covers cues up to the interruption
 		// point; caching a truncated list would silently drop the tail of
 		// the file on every future refeed, so discard it. The next
@@ -424,7 +497,11 @@ static int _do_streaming_feed( STREAM *s, uni_sub *subs )
 		subs->last  = cache_ctx.last;
 	}
 
-	return 1;
+	// The cue list above is a property of the FILE and stays valid either way, but the engine
+	// only holds the full track if this pass wasn't interrupted (it flushed) -- report that as
+	// "not fed" (return 3). A reopen while this ran (the engine dropped every cue sent with the
+	// old token) is detected by the caller in _streaming_job_finish(), under parse_mutex.
+	return poll_ctx.interrupted ? 3 : 1;
 }
 
 // Finds and removes the first pending job (starting from queue_head, so _worker_prioritize()'s promotions are respected) whose title isn't already IN_PROGRESS on another pool thread. Returns NULL if the queue is empty or every pending job's title collides with something in flight -- only reachable when multiple queued jobs are all language variants of the same multi-language file. Caller must hold queue_mutex and record the returned job's title into inflight_title[my_slot] before releasing it, so claiming the job and its title happen as one atomic step.
@@ -505,15 +582,13 @@ static void *_parse_worker_thread( void *arg )
 		job->parse_state = SUBT_PARSE_IN_PROGRESS;
 		pthread_mutex_unlock( &job->parse_mutex );
 
-		int was_ok;
-		int stale = 0; // job->is_streaming only -- see _do_streaming_feed()'s
-		                // return-2 case
+		int was_ok = 0;
 		if( job->is_streaming ) {
-			was_ok = _do_streaming_feed( w->stream, job ); // patch 6
-			if( was_ok == 2 ) {
-				stale = 1;
-				was_ok = 0;
-			}
+			uint64_t token;
+			int result = _do_streaming_feed( w->stream, job, &token );
+			// Final generation check + parse_state write + refeed request all live in
+			// _streaming_job_finish(), under one parse_mutex hold -- see its comment.
+			_streaming_job_finish( w->stream, job, result, token );
 		} else {
 			was_ok = subtitle_do_parse( job ); // the actual (possibly slow) file I/O
 
@@ -531,24 +606,17 @@ static void *_parse_worker_thread( void *arg )
 			}
 		}
 
-		pthread_mutex_lock( &job->parse_mutex );
-		if( stale ) {
-			// The user switched away from this track before/while this job
-			// ran -- nothing was left in the engine for it (see
-			// _do_streaming_feed()'s comment). NOT_QUEUED, not DONE/FAILED,
-			// so a later genuine re-selection of this same track re-queues
-			// and properly re-feeds it instead of _poll_parse_state()
-			// wrongly reporting "already fed" for a track whose cues were
-			// never actually left in the engine.
-			job->parse_state = SUBT_PARSE_NOT_QUEUED;
-		} else {
+		// Non-streaming: nothing in the engine to go stale, so the state write is unconditional.
+		// (Streaming jobs were completed by _streaming_job_finish() above; its refeed request is
+		// raised only after the state is committed, so the sub thread's feed_engine() sees
+		// NOT_QUEUED and re-enqueues instead of deferring on a job that is still IN_PROGRESS.)
+		if( !job->is_streaming ) {
+			pthread_mutex_lock( &job->parse_mutex );
 			job->parse_state = was_ok ? SUBT_PARSE_DONE : SUBT_PARSE_FAILED;
-		}
-		pthread_mutex_unlock( &job->parse_mutex );
+			pthread_mutex_unlock( &job->parse_mutex );
 
-		// Wake the sub-decode thread's per-frame poll so a freshly-completed non-streaming track is picked up promptly. Scoped to non-streaming only: streaming jobs already fed the engine directly on this thread, and this flag means "redo the feed" -- setting it after a clean streaming completion would loop forever.
-		if( w->stream && !job->is_streaming && !stale ) {
-			_needs_refeed_set( w->stream, 1 );
+			// Wake the sub-decode thread's per-frame poll so a freshly-completed non-streaming track is picked up promptly. Scoped to non-streaming only: a streaming job already fed the engine directly on this thread, and this flag means "redo the feed" -- raising it after a clean streaming completion would loop forever.
+			if( w->stream ) _needs_refeed_set( w->stream, 1 );
 		}
 
 		// Release this slot's title claim and wake any sibling thread that might have skipped a now-un-collided job.
@@ -701,11 +769,10 @@ static void _owner_release( STREAM *s )
 static void _synchronous_parse_fallback( STREAM *s, uni_sub *sub )
 {
 	if( sub->is_streaming ) {
-		int was_ok = s ? _do_streaming_feed( s, sub ) : 0;
-		pthread_mutex_lock( &sub->parse_mutex );
-		if( was_ok == 2 ) sub->parse_state = SUBT_PARSE_NOT_QUEUED; // stale -- see _do_streaming_feed()'s comment
-		else               sub->parse_state = was_ok ? SUBT_PARSE_DONE : SUBT_PARSE_FAILED;
-		pthread_mutex_unlock( &sub->parse_mutex );
+		uint64_t token = 0;
+		int result = s ? _do_streaming_feed( s, sub, &token ) : 0;
+		// Same completion logic as the worker thread: generation check and state write under one lock.
+		_streaming_job_finish( s, sub, result, token );
 	} else {
 		subtitle_do_parse( sub );
 	}
@@ -1369,7 +1436,7 @@ static void _cue_to_engine_gen( STREAM *s, uint64_t token, const char *text, int
 	                 duration );
 }
 
-// sub_feed_poll_cb implementation behind feed_SRT()/feed_VTT()'s periodic checkpoint. Checked first: track-switch staleness -- bails and flushes if the user selected a different track while this job was queued/mid-feed (safe unconditionally, since the FIFO worker guarantees nothing else is writing to the engine at this point). Then the normal pause/seek/close check via thread_state_asked(), which also flushes and marks the track for a full refeed (feed_SRT/feed_VTT always restart from the top of their in-memory buffer, so "refeed" means redo the whole file, not resume). Otherwise calls stream_yield_RT() on every non-stopping checkpoint to relieve eng->lock contention with the render thread.
+// sub_feed_poll_cb implementation behind feed_SRT()/feed_VTT()'s periodic checkpoint. Checked first: track-switch staleness -- bails and flushes if the user selected a different track while this job was queued/mid-feed (safe unconditionally, since the FIFO worker guarantees nothing else is writing to the engine at this point). Then the normal pause/seek/close check via thread_state_asked(), which also flushes and records pc->interrupted so the job ends NOT_QUEUED and is refed (feed_SRT/feed_VTT always restart from the top of their in-memory buffer, so "refeed" means redo the whole file, not resume). Otherwise calls stream_yield_RT() on every non-stopping checkpoint to relieve eng->lock contention with the render thread.
 static int _sub_feed_should_stop( void *poll_ctx )
 {
 	_STREAMING_POLL_CTX *pc = (_STREAMING_POLL_CTX *)poll_ctx;
@@ -1388,7 +1455,7 @@ static int _sub_feed_should_stop( void *poll_ctx )
 
 	if( thread_state_asked( &s->sub_tstate ) != THREAD_RUNNING ) {
 		if( s->sub_engine ) sub_engine_flush_gen( (SUB_ENGINE*)s->sub_engine, pc->track_gen );
-		_needs_refeed_set( s, 1 );
+		pc->interrupted = 1; // not the shared flag -- see _STREAMING_POLL_CTX::interrupted
 		return 1;
 	}
 
@@ -1668,6 +1735,16 @@ void stream_sub_ext_set_track_generation( STREAM *s, uint64_t token )
 	if( !subs ) return;
 	pthread_mutex_lock( &subs->parse_mutex );
 	subs->track_gen = token;
+	// A new generation means the engine holds NONE of this track's cues (open_track/
+	// close_track wipe them), so a finished streaming feed is no longer true. DONE is
+	// forward-only by design, which made every re-selection of an already-fed SRT/VTT
+	// track hit "already fed" in stream_sub_ext_feed_engine() and show nothing. Resetting
+	// it here makes that call re-enqueue; the job takes the cached-cue fast path. QUEUED/
+	// IN_PROGRESS are left alone: a queued job reads the new token when it starts, and an
+	// in-flight one is caught by _streaming_job_finish() when it finishes.
+	if( subs->is_streaming && subs->parse_state == SUBT_PARSE_DONE ) {
+		subs->parse_state = SUBT_PARSE_NOT_QUEUED;
+	}
 	pthread_mutex_unlock( &subs->parse_mutex );
 }
 

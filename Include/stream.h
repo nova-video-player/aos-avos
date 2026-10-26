@@ -923,6 +923,7 @@ typedef struct STREAM {
 	CLEVER_BUFFER	sub_buffer;
 	int		subtitle_changed;
 	int		subtitle_replay; // rebuild current cue from retained packets after switch
+	int		subtitle_disabled; // sticky "none" selection: the decode/feed paths must stay idle until a track is selected again
 	int subtitle_pending;
 	
 	int 		error_count;
@@ -1210,6 +1211,7 @@ int	stream_filter_audio_atempo_get_audit_state( STREAM_FILTER_AUDIO *f, INT64 *n
 int	stream_filter_audio_atempo_lookup_output_media( STREAM_FILTER_AUDIO *f, UINT64 out_start, int nframes, INT64 *media_span_frames, int *rate );
 int	stream_check_subtitles( STREAM *s );
 int	stream_set_subtitle_stream( STREAM *s, int sub_stream );
+void	stream_disable_subtitles( STREAM *s );
 void	stream_audio_mute    ( STREAM *s );
 void	stream_audio_unmute  ( STREAM *s );
 int	stream_audio_is_muted( STREAM *s );

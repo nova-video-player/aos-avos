@@ -534,8 +534,10 @@ int avos_mp_video_setsubtitletrack(avos_mp_t *mp, avos_mp_video_t *video, int tr
 	if (track < 0 || track >= subs_max) {
 		video->sub_enabled = 0;
 		*ret = 1;
-		// Clear the screen if track is disabled
-		if (video->s && video->s->sub_engine) sub_engine_close_track((SUB_ENGINE*)video->s->sub_engine);
+		// Clear the screen and keep it cleared: closing the engine backend is
+		// not enough, the subtitle decode thread would reopen and feed the
+		// selected track on its next pass (e.g. after the startup seek).
+		stream_disable_subtitles(video->s);
 	} else {
 		if (video->sub_enabled && track == video->s->av.subs &&
 		    video->s->subtitle->valid && !video->s->subtitle->ext) {

@@ -532,9 +532,9 @@ static void _get_next_ext_sub( STREAM *s, int time )
 				// stream_sub_ext.c.
 				stream_sub_ext_set_track_generation( s, track_gen );
 
-				// Bulk-feed the full cue list now; clear the refeed flag BEFORE the call so that if a streaming feed gets interrupted and sets it back to 1, that survives for the refeed branch below to pick up.
+				// Bulk-feed the full cue list now; clear the refeed flag BEFORE the call so that if a streaming feed gets interrupted and sets it back to 1, that survives for the refeed branch below to pick up. Use the force variant: this engine backend is brand new, so a streaming track's SUBT_PARSE_DONE from an earlier open (subtitles disabled then re-enabled) no longer describes it and must be reset before feeding.
 				_needs_refeed_set( s, 0 );
-				stream_sub_ext_feed_engine( s );
+				stream_sub_ext_force_streaming_refeed( s );
 			}
 			// No sub_dec for external text — engine owns the timeline.
 		}
@@ -608,7 +608,8 @@ void _sub_decode( STREAM *s )
 			s->message_cb( s, STREAM_SUB_PROPS_CHANGED );
 		}
 	}
-	if( s->subtitle->valid && (!s->paused || s->subtitle_replay) ) {
+	if( !__atomic_load_n( &s->subtitle_disabled, __ATOMIC_ACQUIRE ) &&
+		s->subtitle->valid && (!s->paused || s->subtitle_replay) ) {
 		int time = s->video_time;
 		if( time != -1 ) {
 			// apply correction
@@ -1005,8 +1006,12 @@ serprintf("SsS: sub_stream already set\n");
 //		return 0;
 	}
 
-	if( s->av.sub[sub_stream].ext || s->parser->reset_subtitle )
-		return _switch_subtitle(s, sub_stream, req_ext, req_path);
+	if( s->av.sub[sub_stream].ext || s->parser->reset_subtitle ) {
+		int failed = _switch_subtitle(s, sub_stream, req_ext, req_path);
+		if( !failed )
+			__atomic_store_n( &s->subtitle_disabled, 0, __ATOMIC_RELEASE );
+		return failed;
+	}
 
 	int was_paused = stream_pause( s );
 
@@ -1053,10 +1058,43 @@ DBGS serprintf("stream_set_subtitle_stream, requested track %d no longer present
 		stream_seek_time( s, current_time - 1, STREAM_SEEK_BACKWARD, 0 );
 	}
 	s->subtitle_replay = 1;
+	__atomic_store_n( &s->subtitle_disabled, 0, __ATOMIC_RELEASE );
 	if( sub_state == THREAD_RUNNING )
 		thread_state_set(&s->sub_tstate, sub_state);
 
 	return 0;
+}
+
+// *****************************************************************************
+//
+//	stream_disable_subtitles
+//
+// *****************************************************************************
+// Sticky "none" selection. Closing the engine backend alone is not enough:
+// the subtitle decode thread keeps running, and _get_next_int_sub()/
+// _get_next_ext_sub() lazily open and feed the selected track on their next
+// pass (e.g. right after the startup seek), so dialogue subtitles reappear
+// while the menu says "none". Set the flag first, then rendezvous with the
+// decode thread before closing the backend so an in-flight track open cannot
+// reopen it behind our back.
+void stream_disable_subtitles( STREAM *s )
+{
+	if( !s )
+		return;
+
+	__atomic_store_n( &s->subtitle_disabled, 1, __ATOMIC_RELEASE );
+	s->subtitle_pending = 0;
+
+	if( thread_state_get( &s->sub_tstate ) == THREAD_EXIT ) {
+		if( s->sub_engine )
+			sub_engine_close_track( (SUB_ENGINE*)s->sub_engine );
+		return;
+	}
+	int sub_state = thread_state_set( &s->sub_tstate, THREAD_IDLE );
+	if( s->sub_engine )
+		sub_engine_close_track( (SUB_ENGINE*)s->sub_engine );
+	if( sub_state == THREAD_RUNNING )
+		thread_state_set( &s->sub_tstate, THREAD_RUNNING );
 }
 
 // *****************************************************************************

@@ -129,7 +129,9 @@ endif
 LDFLAGS += -L$(TOOLCHAIN_PATH)/usr/$(LIBDIR)
 
 LDFLAGS += -L$(TOOLCHAIN_PATH)/$(LIBDIR)
-LDFLAGS += $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
+# Libraries must follow the objects and archives that reference them. Keep them
+# out of LDFLAGS and append them at the end of each link command.
+LINK_LIBS =
 
 # path to sources
 VPATH = .:Source
@@ -150,7 +152,7 @@ quiet_CMD_MKDEP = "DEP $<"
       CMD_ASM_O_S = $(ASM) $(ASMFLAGS) -o $@ -c $<
 quiet_CMD_ASM_O_S =  "AS  $<"
 
-      CMD_LDSO = $(LINK) -shared $(LDFLAGS) -o $@ $^
+      CMD_LDSO = $(LINK) -shared $(LDFLAGS) -o $@ $^ $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 quiet_CMD_LDSO = "LD  $@"
 
       CMD_AR = $(AR) rcs $@ $^
@@ -193,19 +195,20 @@ ifeq (1,$(ASAN))
 ASAN_FLAGS = -g -fsanitize=address
 endif
 
-CMD_LIB = $(LINK) $(ASAN_FLAGS) $(LDFLAGS) -shared -o $(TGT_PATH)/$(LIB_NAME) $(LIB_OBJS)
+CMD_LIB = $(LINK) $(ASAN_FLAGS) $(LDFLAGS) -shared -o $(TGT_PATH)/$(LIB_NAME) $(LIB_OBJS) $(LINK_LIBS) $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 quiet_CMD_LIB = "LIB $(LIB_NAME)"
 
 ifeq (YES,$(LIBAVOS))
 # build libavos.so:
 LIB_DEPS  += $(TGT_PATH)/$(LIB_NAME)
-LDFLAGS += -lavos $(LIB_RPATH)
+LINK_LIBS += -lavos
+LDFLAGS += $(LIB_RPATH)
 else
 # build one big binary
 APP_OBJS += $(LIB_OBJS)
 endif
 
-CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH)
+CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH) $(LINK_LIBS) $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 quiet_CMD_LINK = "LD  $(TGT_NAME)"
 
 $(TGT_PATH)/$(LIB_NAME): $(LIB_OBJS)

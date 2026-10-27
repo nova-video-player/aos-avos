@@ -94,6 +94,17 @@ typedef struct SINK_PRIV {
     int sdl_fullscreen;
     int sdl_window_width, sdl_window_height;
     int sdl_renderer_is_gl;	// renderer owns an OpenGL/GLES context (bound to one thread at a time)
+
+	// venc_thread drops venc_mutex while it sleeps for a frame and while it renders one.
+	// _flush() runs in that window (seek) and hands every frame, including the one the thread
+	// holds, back to the empty queue. These two fields keep the two from stepping on each other:
+	//  - flush_gen:  bumped by _flush(). A thread that finds it changed after re-locking no longer
+	//                owns its frame and must not render it or put it back on the empty queue.
+	//  - rendering:  set (under the mutex) while the thread uses its frame without the mutex.
+	//                _flush() waits for it to clear, so the decoder can't get the frame back and
+	//                free/overwrite its AVFrame while dec->render() is still reading it.
+	unsigned int	flush_gen;
+	int		rendering;
 } SINK_PRIV;
 
 // An OpenGL context is current on exactly one thread. The renderer is created on the
@@ -229,6 +240,7 @@ serprintf("venc_thread::stop 0\n");
 		}
 
 		VIDEO_FRAME *f = p->out_frame;
+		const unsigned int gen = p->flush_gen;	// frame belongs to us as long as this doesn't change
 		int venc_time;
 		int blit_duration;
 RETRY:
@@ -250,10 +262,23 @@ RETRY:
 				if( !p->venc_run ) {
 					break;
 				}
+				if( p->flush_gen != gen ) {
+					// flushed while we waited: the frame is back in the empty queue, not ours
+					continue;
+				}
 				goto RETRY;
 			}
 DBGSI serprintf("wait %3d  f %08d  v %08d\n", blit_duration, f->blit_time, venc_time);
+			pthread_mutex_unlock(&p->venc_mutex);
 			msec_sleep( blit_duration - 10 );
+			pthread_mutex_lock(&p->venc_mutex);
+			if( !p->venc_run ) {
+				break;
+			}
+			if( p->flush_gen != gen ) {
+				// flushed while we slept: drop it, a stale frame must not be shown after a seek
+				continue;
+			}
 		} else if( blit_duration < -100 && p->dropped < 5 ) {
 			// too late, drop it
 			p->dropped ++;
@@ -261,7 +286,9 @@ DBGSI serprintf("wait %3d  f %08d  v %08d\n", blit_duration, f->blit_time, venc_
 			do_render = 0;
 DBGSI serprintf("drop %3d  f %08d  v %08d\n", blit_duration, f->blit_time, venc_time);
 		}
-		
+		// From here until we re-lock, f is used without the mutex. Tell _flush() to wait for us.
+		p->rendering = 1;
+		pthread_mutex_unlock(&p->venc_mutex);
 		if( do_render ) {
 DBGSI serprintf("blit %3d\n", blit_duration);
 			p->dropped = 0;
@@ -283,7 +310,10 @@ DBGSI serprintf("blit %3d\n", blit_duration);
 				}
 			}
 		}
-
+		pthread_mutex_lock(&p->venc_mutex);
+		// _flush() could not run while rendering was set, so f is still ours: give it back.
+		p->rendering = 0;
+		pthread_cond_broadcast(&p->venc_cond);	// wakes a _flush() waiting for us
 		frame_q_put( &p->empty, f );
 		p->out_frame = NULL;
 	
@@ -330,7 +360,16 @@ static int _flush( STREAM_SINK_VIDEO *sink )
 	SINK_PRIV *p = sink->priv;
 DBGS serprintf("stream_sink_video_flush_SIM\r\n");
 	pthread_mutex_lock ( &p->venc_mutex );
-	
+
+	// venc_thread may be rendering a frame without the mutex. Once we put every frame back on
+	// the empty queue the decoder can take (and free/overwrite) it, so wait until that render
+	// is done. The wait is bounded by one blit; venc_thread never waits on the caller of flush.
+	while( p->rendering ) {
+		pthread_cond_wait( &p->venc_cond, &p->venc_mutex );
+	}
+	// a frame venc_thread is merely waiting on (sleeping for its time) is taken away from it:
+	p->flush_gen++;
+
 	frame_q_flush( &p->empty );
 	frame_q_flush( &p->full  );
 	p->out_frame = NULL;

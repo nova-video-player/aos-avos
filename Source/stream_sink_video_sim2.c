@@ -567,6 +567,9 @@ static int _open( STREAM_SINK_VIDEO *sink, VIDEO_PROPERTIES *video, void *ctx, i
 	sink->ctx = ctx;
 	SINK_PRIV *p = sink->priv;
 	p->num_frames = num_frames + 1;
+	if( p->num_frames < 8 ) {
+		p->num_frames = 8;
+	}
 
 	if( p->num_frames > STREAM_MAX_FRAMES )
 		return 1;

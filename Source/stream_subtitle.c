@@ -23,6 +23,7 @@
 #include "util.h"
 #include "sub_engine.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <limits.h>
 
@@ -704,7 +705,7 @@ serprintf("ScS: not open!\r\n");
 	prev_sub = s->av.subs;
 	start_gen = s->subtitle_select_generation;
 	if (s->subtitle && s->subtitle->valid && s->subtitle->ext) {
-		strncpy(prev_extsub, s->subtitle->path, MAX_NAME_LEN);
+		snprintf(prev_extsub, sizeof(prev_extsub), "%s", s->subtitle->path);
 		has_prev_extsub = 1;
 	}
 	pthread_mutex_unlock( &s->subtitle_table_lock );

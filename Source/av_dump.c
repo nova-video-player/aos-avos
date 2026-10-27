@@ -63,6 +63,15 @@ static void YUYVtoRGB24( unsigned short yu, unsigned short yv, rgba *rgb1, rgba 
 	YYUVtoRGB24( Y1, Y2, U, V, rgb1, rgb2 );
 }
 
+// write one pixel as B,G,R. A short write only truncates the debug dump.
+static void dump_write_bgr( int fd, const rgba *pix )
+{
+	unsigned char bgr[3] = { pix->b, pix->g, pix->r };
+	if( write( fd, bgr, sizeof(bgr) ) != (ssize_t)sizeof(bgr) ) {
+		serprintf( "dump video frame: write failed\n" );
+	}
+}
+
 // ********************************************************
 //
 //	av_dump_video_frame
@@ -107,14 +116,8 @@ serprintf("dump video frame to %s\n", filename);
 				pix_b.a = 255;
 
 				// write the blended pixels
-				unsigned char tc;
-				tc = pix_a.b; write( fd, &tc, 1 );
-				tc = pix_a.g; write( fd, &tc, 1 );
-				tc = pix_a.r; write( fd, &tc, 1 );
-
-				tc = pix_b.b; write( fd, &tc, 1 );
-				tc = pix_b.g; write( fd, &tc, 1 );
-				tc = pix_b.r; write( fd, &tc, 1 );
+				dump_write_bgr( fd, &pix_a );
+				dump_write_bgr( fd, &pix_b );
 			}
 		}
 	} else if( frame->colorspace == AV_IMAGE_NV12 ) {
@@ -139,14 +142,8 @@ serprintf("dump video frame to %s\n", filename);
 				pix_b.a = 255;
 
 				// write the blended pixels
-				unsigned char tc;
-				tc = pix_a.b; write( fd, &tc, 1 );
-				tc = pix_a.g; write( fd, &tc, 1 );
-				tc = pix_a.r; write( fd, &tc, 1 );
-
-				tc = pix_b.b; write( fd, &tc, 1 );
-				tc = pix_b.g; write( fd, &tc, 1 );
-				tc = pix_b.r; write( fd, &tc, 1 );
+				dump_write_bgr( fd, &pix_a );
+				dump_write_bgr( fd, &pix_b );
 			}
 		}
 	

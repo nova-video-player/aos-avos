@@ -66,5 +66,8 @@ jobs:
         run: |
           out="$(LD_LIBRARY_PATH="$FFMPEG_PREFIX/lib" ldd build/avos)"
           echo "$out" | grep -E 'libav|libsw'
-          ! echo "$out" | grep 'not found'
+          if grep -q 'not found' <<< "$out"; then
+            echo "$out"
+            exit 1
+          fi
           echo "$out" | grep -q "libavcodec.so.63 => $FFMPEG_PREFIX/lib/"

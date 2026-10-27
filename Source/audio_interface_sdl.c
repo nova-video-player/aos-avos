@@ -73,20 +73,17 @@ static void sdl_audio_callback( void *userdata, uint8_t *stream, int len )
 
 	pthread_mutex_lock( &ctx->lock );
 
-	if( ctx->buffer.data && ctx->buffer.pos < ctx->buffer.size ) {
-		int available = ctx->buffer.size - ctx->buffer.pos;
-		int to_copy = ( len < available ) ? len : available;
+	if( ctx->buffer.data && ctx->buffer.size > 0 ) {
+		int to_copy = ( len < ctx->buffer.size ) ? len : ctx->buffer.size;
 
 		if( to_copy > 0 ) {
-			memcpy( stream, ctx->buffer.data + ctx->buffer.pos, to_copy );
-			ctx->buffer.pos += to_copy;
+			memcpy( stream, ctx->buffer.data, to_copy );
+			ctx->buffer.size -= to_copy;
+			if( ctx->buffer.size > 0 ) {
+				memmove( ctx->buffer.data, ctx->buffer.data + to_copy, ctx->buffer.size );
+			}
 			len -= to_copy;
 			stream += to_copy;
-		}
-
-		if( ctx->buffer.pos >= ctx->buffer.size ) {
-			ctx->buffer.pos = 0;
-			ctx->buffer.size = 0;
 		}
 	}
 
@@ -261,7 +258,7 @@ static int sdl_set_output_params( audio_ctx_t *ctx, int freq, int channels, int 
 	desired.freq = freq;
 	desired.format = sdl_fmt;
 	desired.channels = channels;
-	desired.samples = SDL_AUDIO_BUFFER_SIZE;
+	desired.samples = 2048;
 	desired.callback = sdl_audio_callback;
 	desired.userdata = (void *)c;
 

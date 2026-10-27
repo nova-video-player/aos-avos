@@ -28,6 +28,11 @@
 
 #define MAX_TIMERS 32
 
+#ifdef CONFIG_FB_QVFB
+// Longest time the main loop may sleep before it services SDL events again.
+#define SDL_POLL_MSEC 20
+#endif
+
 static Timer gui_timer_data[MAX_TIMERS];
 
 Timers gui_timers = {
@@ -126,6 +131,15 @@ void mainloop_enter( void )
 				}
 			}
 		}
+#ifdef CONFIG_FB_QVFB
+		// SDL's event queue (window close, Escape/Q, and the compositor ping/configure
+		// handling Wayland and X11 need to keep the window alive) is only serviced from
+		// this loop, so never sleep longer than SDL_POLL_MSEC, even when paused,
+		// buffering, or when no timer is pending.
+		if( next_timer_msec < 0 || next_timer_msec > SDL_POLL_MSEC ) {
+			next_timer_msec = SDL_POLL_MSEC;
+		}
+#endif
 		if( next_timer_msec < 0 ){
 			// No timers, we sleep indefinitely,
 			// avos will be only woken up by a data_event.
@@ -141,7 +155,8 @@ void mainloop_enter( void )
     int ret, quit = 0;
     SDL_Event event;
 
-    if (SDL_PollEvent(&event)){
+    // drain the whole queue, one event per wakeup would let it back up
+    while (SDL_PollEvent(&event)){
         switch (event.type) {
         case SDL_KEYDOWN:
             switch (event.key.keysym.sym) {

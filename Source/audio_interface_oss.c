@@ -67,6 +67,13 @@ static struct audio_ctx *oss_ctx;
 static int oss_init(void)
 {
 DBG serprintf( "oss_init\n" );
+	// Only claim the OSS backend if there is a dsp device to open. Modern desktops
+	// (PipeWire/PulseAudio) have no /dev/dsp; failing here lets audio_interface_init()
+	// fall back to the SDL backend instead of selecting OSS and failing at open time.
+	if( access( "/dev/dsp", W_OK ) != 0 && access( "/dev/snd/dsp", W_OK ) != 0 ) {
+		serprintf( "OSS: no dsp device found\n" );
+		return 1;
+	}
 	return 0;
 }
 

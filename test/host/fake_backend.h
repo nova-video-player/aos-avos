@@ -59,3 +59,8 @@ int     fake_backend_active_since_flush(void);
  * enough (while holding the engine lock, like a real libass feed of a big file) for a test to land a
  * pause / reselect / close in the middle of it. Process-wide; set it back to 0 when done. */
 void    fake_backend_set_feed_delay_us(int us);
+
+/* Called from inside a backend's feed() (on whatever thread fed it, with the engine lock held) for every
+ * cue, with the cue text. For tests that need to know exactly which cue is the last of a pass. */
+typedef void (*fake_feed_hook_fn)(const uint8_t *data, int size);
+void    fake_backend_set_feed_hook(fake_feed_hook_fn fn);

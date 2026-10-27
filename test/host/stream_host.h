@@ -68,6 +68,13 @@ int  hs_select(HOST_STREAM *h, int idx);
  * long it stays idle. */
 void hs_idle_sub_thread(HOST_STREAM *h, int hold_us);
 
+/* Like hs_idle_sub_thread(), but stays idle only until the running feed has NOTICED the request (the
+ * parse worker checks every 200 cues, so a shorter pulse would be missed and nothing would be
+ * interrupted): it waits for the engine's cue count to drop to 0 (the feed flushed), then lets the
+ * subtitle thread resume after `extra_us` more. Returns 1 if the feed was seen to react within
+ * timeout_ms, 0 if it never did (the pulse was wasted -- a test must not count it as an interruption). */
+int  hs_interrupt_feed(HOST_STREAM *h, int extra_us, int timeout_ms);
+
 /* Waits until the engine's current track holds exactly n cues. 1 if it did within timeout_ms. */
 int  hs_wait_cues(int n, int timeout_ms);
 /* After hs_wait_cues() succeeded: stays at n for settle_ms (no late flush, no duplicate feed). */

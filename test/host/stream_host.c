@@ -19,11 +19,14 @@
 #include "athread.h"
 #include "stream_alloc.h"
 #include "fake_backend.h"
+#include "debug.h"
 #include <dirent.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 void *stream_sub_dec_thread( void *data );     /* stream_subtitle.c */
@@ -44,6 +47,19 @@ WEAK STREAM_DEC_SUB *stream_get_new_dec_sub( int format )       { (void)format; 
 WEAK void  stream_yield_RT( void )                              { usleep( 100 ); }
 WEAK float audio_interface_get_audio_speed()                    { return 1.0f; }
 WEAK int   audio_interface_is_audio_speed_enabled()             { return 0; }
+
+/* The app's own log lines ("sub_ext_feed_engine: stream 1 ... parse_state 3", "stream_set_subtitle_stream( 0 )",
+ * ...): with HOST_TEST_LOG=1 they are printed, exactly what the bug report's log shows. Strong, so it
+ * overrides stubs.c's silent weak serprintf in the tests that link this file. */
+int serprintf( const char *fmt, ... )
+{
+    if( !getenv( "HOST_TEST_LOG" ) ) return 0;
+    va_list ap;
+    va_start( ap, fmt );
+    int n = vfprintf( stderr, fmt, ap );
+    va_end( ap );
+    return n;
+}
 
 /* ---------------------------------------------------------------------------------------------
  * Files
@@ -76,6 +92,7 @@ const char *hs_write_vtt( HOST_STREAM *h, const char *tag, char label, int n ) {
 HOST_STREAM *hs_create( void )
 {
     HOST_STREAM *h = calloc( 1, sizeof *h );
+    if( getenv( "HOST_TEST_LOG" ) ) { Debug[DBG_SUB] = 1; Debug[DBG_STREAM] = 1; }
     snprintf( h->dir, sizeof h->dir, "/tmp/avos-host-subs.XXXXXX" );
     if( !mkdtemp( h->dir ) ) { perror( "mkdtemp" ); exit( 3 ); }
     snprintf( h->video, sizeof h->video, "%s/movie.mkv", h->dir );
@@ -150,6 +167,22 @@ void hs_idle_sub_thread( HOST_STREAM *h, int hold_us )
     thread_state_set( &h->s->sub_tstate, THREAD_IDLE );
     if( hold_us > 0 ) usleep( (useconds_t)hold_us );
     thread_state_set( &h->s->sub_tstate, THREAD_RUNNING );
+}
+
+int hs_interrupt_feed( HOST_STREAM *h, int extra_us, int timeout_ms )
+{
+    thread_state_set( &h->s->sub_tstate, THREAD_IDLE );
+    int noticed = 0;
+    struct timespec a, b;
+    clock_gettime( CLOCK_MONOTONIC, &a );
+    for( ;; ) {                                /* spin: the resume must follow the feed's flush within microseconds */
+        noticed = fake_backend_active_since_flush() == 0;
+        clock_gettime( CLOCK_MONOTONIC, &b );
+        if( noticed || (b.tv_sec - a.tv_sec) * 1000L + (b.tv_nsec - a.tv_nsec) / 1000000L >= timeout_ms ) break;
+    }
+    if( noticed && extra_us > 0 ) usleep( (useconds_t)extra_us );
+    thread_state_set( &h->s->sub_tstate, THREAD_RUNNING );
+    return noticed;
 }
 
 static void remove_dir( const char *dir )

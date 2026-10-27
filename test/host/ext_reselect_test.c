@@ -46,15 +46,33 @@
 #define SHORT_CUES  150
 #define WAIT_MS     8000
 
+/* A track that is not fed within WAIT_MS is the bug (select returned 0, nothing was ever fed -- the
+ * report's `n_events=0`). Once one scenario has shown that, later waits are shortened so a broken
+ * build fails in seconds with every symptom listed, rather than minutes with none. */
+static int g_wait_ms = WAIT_MS;
+static int g_silent_failures;
+
 static HOST_STREAM *g_h;
 static int g_long, g_short;                     /* indexes into s->av.sub[] */
+
+static void note_result(int ok, int rc, int want, const char *what)
+{
+    int held = fake_backend_active_since_flush();
+    CHECK(ok, "%s: engine holds %d of %d cues (select rc=%d)", what, held, want, rc);
+    if (!ok && rc == 0 && held < want) {
+        g_silent_failures++;
+        g_wait_ms = 800;
+        printf("      ^ SILENT FAILURE: the selection was accepted (rc=0) but the track was never (fully) fed -- "
+               "the engine shows %d of %d cues, as in the bug report's n_events=0\n", held, want);
+    }
+}
 
 /* Selects `idx` and expects the engine to end up holding exactly `want` cues of that file. */
 static int select_and_expect(int idx, int want, const char *what)
 {
     int rc = hs_select(g_h, idx);
-    int ok = rc == 0 && hs_wait_cues(want, WAIT_MS) && hs_stays_at(want, 60);
-    CHECK(ok, "%s: engine holds %d of %d cues (select rc=%d)", what, fake_backend_active_since_flush(), want, rc);
+    int ok = rc == 0 && hs_wait_cues(want, g_wait_ms) && hs_stays_at(want, 60);
+    note_result(ok, rc, want, what);
     return ok;
 }
 
@@ -77,8 +95,8 @@ int main(int argc, char **argv)
 
     /* ---- first play: whichever track is the default must load by itself ---- */
     int def_want = g_h->s->av.subs == g_long ? LONG_CUES : SHORT_CUES;
-    CHECK(hs_wait_cues(def_want, WAIT_MS) && hs_stays_at(def_want, 60),
-          "first play: the default track loads without being touched (%d of %d cues)", fake_backend_active_since_flush(), def_want);
+    note_result(hs_wait_cues(def_want, g_wait_ms) && hs_stays_at(def_want, 60), 0, def_want,
+                "first play: the default track loads without being touched");
 
     /* ---- 1. the sequence from the report ---- */
     for (int round = 0; round < 4; round++) {
@@ -93,21 +111,22 @@ int main(int argc, char **argv)
     /* ---- 2. the app sends the same selection twice in a row ---- */
     hs_select(g_h, g_short);
     hs_select(g_h, g_short);
-    CHECK(hs_wait_cues(SHORT_CUES, WAIT_MS) && hs_stays_at(SHORT_CUES, 60),
-          "double select of the same track: complete, once (%d of %d)", fake_backend_active_since_flush(), SHORT_CUES);
+    note_result(hs_wait_cues(SHORT_CUES, g_wait_ms) && hs_stays_at(SHORT_CUES, 60), 0, SHORT_CUES,
+                "double select of the same track: complete, once");
 
     /* ---- 3. reselect while the track's own feed is still running ---- */
     fake_backend_set_feed_delay_us(150);          /* the long feed now takes ~150 ms: a window to reopen in */
     for (int i = 0; i < 6; i++) {
         hs_select(g_h, g_short);                  /* short and settled... */
-        hs_wait_cues(SHORT_CUES, WAIT_MS);
+        hs_wait_cues(SHORT_CUES, g_wait_ms);
         hs_select(g_h, g_long);                   /* ...long starts feeding... */
         for (int t = 0; t < 2000 && fake_backend_active_since_flush() < 80; t++) usleep(100);
         int mid = fake_backend_active_since_flush();
         hs_select(g_h, g_long);                   /* ...and is reopened half way: the old pass's cues are dropped */
-        int ok = hs_wait_cues(LONG_CUES, WAIT_MS) && hs_stays_at(LONG_CUES, 60);
-        CHECK(ok, "reopened mid-feed (engine held %d): long track still completes (%d of %d)",
-              mid, fake_backend_active_since_flush(), LONG_CUES);
+        int ok = hs_wait_cues(LONG_CUES, g_wait_ms) && hs_stays_at(LONG_CUES, 60);
+        char what[64];
+        snprintf(what, sizeof what, "reopened mid-feed (engine held %d): long track still completes", mid);
+        note_result(ok, 0, LONG_CUES, what);
     }
     fake_backend_set_feed_delay_us(0);
 
@@ -121,12 +140,13 @@ int main(int argc, char **argv)
     }
     fake_backend_set_feed_delay_us(0);
     int want = last == g_long ? LONG_CUES : SHORT_CUES;
-    int ok = hs_wait_cues(want, WAIT_MS) && hs_stays_at(want, 100);
-    CHECK(ok, "after 120 back-to-back selections the last one (%s) is complete: %d of %d cues",
-          last == g_long ? "long" : "short", fake_backend_active_since_flush(), want);
+    int ok = hs_wait_cues(want, g_wait_ms) && hs_stays_at(want, 100);
+    note_result(ok, 0, want, last == g_long ? "after 120 back-to-back selections the last one (long) is complete"
+                                             : "after 120 back-to-back selections the last one (short) is complete");
     CHECK(fake_backend_foreign() == 0, "still no foreign cue after the storm (foreign=%d)", fake_backend_foreign());
 
     hs_destroy(g_h);
     CHECK(fake_backend_live() == 0, "no engine backend leaked (%d live)", fake_backend_live());
+    CHECK(g_silent_failures == 0, "no silent failures: every accepted selection ended with its cues in the engine (%d did not)", g_silent_failures);
     return t_finish();
 }

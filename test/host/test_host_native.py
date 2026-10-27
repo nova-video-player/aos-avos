@@ -34,6 +34,12 @@ Environment:
     SANITIZERS    comma-separated -fsanitize= list; default "undefined"; "none" disables
     PKG_CONFIG_PATH  to select a host libass
     HOST_TEST_OUTPUT  set to print each test's raw stdout/stderr even when it passes
+    HOST_TEST_LOG     set to 1 to print the app's own log lines (serprintf) from the ext_* tests, in the same
+                      format as a device log: "stream_set_subtitle_stream( 1 )", "sub_ext_feed_engine: ..."
+    HOST_STREAM_SUB_EXT  path of another revision of stream_sub_ext.c to build the ext_* tests against instead
+                      of Source/stream_sub_ext.c -- to prove they FAIL on a buggy revision:
+                          git show <old-rev>:Source/stream_sub_ext.c > /tmp/old_ext.c
+                          HOST_STREAM_SUB_EXT=/tmp/old_ext.c python3 test/host/test_host_native.py -k ext_
     HOST_TEST_FONT, HOST_TEST_FONT_FAMILY   use this font file (and its family name) for the libass tests
     NO_COLOR      disable colour (colour is only used on a terminal)
 
@@ -93,14 +99,26 @@ close_open       Close a video and immediately open another while its parse work
                  the Java side rebuilding the engine: every engine destroyed exactly once and never
                  while held, no cross-video cues, no leaked backend. Orderly and hostile close
                  orders.
+ext_reselect     (SRT and VTT) Issue #2004 through the real stack: select 02, 01, 02, 01 ... each selection
+                 must leave exactly that file's cues in the engine; double open; reopen while the track's
+                 own feed is running; a storm of back-to-back selections. A track that is accepted but never
+                 fed is reported as a SILENT FAILURE (the report's n_events=0).
+ext_interrupt    (SRT and VTT) A pause/seek/rescan (idling the subtitle thread) landing late in a long feed
+                 must not leave the track empty or cache a truncated cue list (reselect replays the cache).
+ext_finish_race  (SRT and VTT) A reopen landing exactly as a feed job finishes. The few-instruction window is
+                 opened on purpose (a wrapped pthread_mutex_unlock sleeps on the worker), so the test is
+                 deterministic; it also checks the window really was opened every round.
 style_resize_paused  Style changes and surface resizes while paused: each renders once at the frozen
                  clock, geometry reaches the backend as a coalesced pair ending on the last
                  request, style + resize storms on two threads, pause state untouched.
 
-Scope: the four loading/seek/close/paused scenarios run against the real engine and the real
-generation-token and registry code, with the STREAM-level workers modelled by small threads in the
-tests (stream_sub_ext.c needs the whole STREAM to link). They prove the engine-side contract those
-workers rely on; they do not execute stream_sub_ext.c itself.
+Scope: the ext_* tests run the REAL external-subtitle stack -- stream_sub_ext.c (parse-worker pool, cue
+cache, SUBT_PARSE_* state machine, generation stamping), stream_subtitle.c (the subtitle decode thread,
+_get_next_ext_sub(), stream_set_subtitle_stream()), subtitle_formats.c, the SRT/VTT parsers and the real
+engine -- over real .srt/.vtt files, on a fake STREAM (stream_host.c). Only the engine's backend is fake.
+They are the regression tests for aos-AVP issue #2004 (an external track is selected but renders nothing).
+The older track_switch_loading / seek_pause_feed / close_open_parsing tests still MODEL the STREAM-level
+workers with small threads: they prove the engine-side contract those workers rely on, not stream_sub_ext.c.
 
 What this does NOT prove
 ------------------------
@@ -138,6 +156,22 @@ ENGINE = ('Source/sub_engine.c', 'Source/sub_render_gl.c', 'Source/sub_style.c',
           'Source/debug.c', HOST + 'stubs.c', HOST + 'fake_backend.c')
 JNI = ENGINE + ('Source/jni_sub_engine.c', 'Source/sub_engine_registry.c')
 LIFECYCLE = ENGINE + ('Source/sub_engine_registry.c',)   # real engine + real registry, fake backends
+
+# The real external-subtitle stack, driven through a fake STREAM (stream_host.c). stream_sub_ext.c and
+# stream_subtitle.c are the code under test; the rest is the real code they call, borrowed (-w).
+STREAM_EXT_SRC = 'Source/stream_sub_ext.c'
+STREAM_EXT = LIFECYCLE + (STREAM_EXT_SRC, 'Source/stream_subtitle.c', 'Source/subtitle_formats.c',
+                          'Source/subtitle_srt.c', 'Source/subtitle_vtt.c', 'Source/athread.c', 'Source/util.c',
+                          'Source/browse.c', 'Source/file.c', 'Source/i18n.c', 'Source/iso639.c',
+                          'Source/subtitle_idx.c', 'Source/subtitle_pgs.c', 'Source/stream_alloc.c',
+                          'Source/atime.c', HOST + 'stream_host.c')
+QUIET |= {'Source/subtitle_formats.c', 'Source/subtitle_srt.c', 'Source/subtitle_vtt.c', 'Source/athread.c',
+          'Source/util.c', 'Source/browse.c', 'Source/file.c', 'Source/i18n.c', 'Source/iso639.c',
+          'Source/subtitle_idx.c', 'Source/subtitle_pgs.c', 'Source/stream_alloc.c', 'Source/atime.c'}
+STREAM_FLAGS = ('-Wno-pointer-sign', '-Wno-unused-parameter', '-Wno-sign-compare',
+                '-D_GNU_SOURCE', '-DCONFIG_STREAM', '-DCONFIG_SUBTITLES')
+# ext_finish_race opens a few-instruction race window by sleeping in a wrapped pthread_mutex_unlock.
+WRAP_UNLOCK = ('-Wl,--wrap=pthread_mutex_unlock',)
 
 # Everything the engine links is JNI- or vtable-shaped (JNIEnv*/jobject on nearly every native
 # entry point, SUB_FORMAT_BACKEND's fixed callback signatures, the mock JNINativeInterface_), so
@@ -289,7 +323,7 @@ def _build_objects(cc, jobs):
 
 
 class HostTestCase(unittest.TestCase):
-    def build_and_run(self, main, sources=(), *, pkgs=(), flags=(), args=()):
+    def build_and_run(self, main, sources=(), *, pkgs=(), flags=(), args=(), ldflags=()):
         """Compile `main` (a file in this directory) with `sources` (repo-relative), link, run.
 
         Compiles run in parallel; the test itself runs alone because several of them are
@@ -302,11 +336,14 @@ class HostTestCase(unittest.TestCase):
         includes = ['-I', str(REPO / 'Include' / 'host_compat'), '-I', str(REPO / 'Include')]
         checked = tuple([*base, '-Wall', '-Wextra', '-Wno-deprecated-declarations',
                          *sanitize, *flags, *includes, *pkg_cflags])
-        quiet = tuple([*base, '-w', *includes])
+        quiet = tuple([*base, '-w', *[f for f in flags if f.startswith('-D')], *includes])
 
         jobs = [(HERE / main, checked)]
         for rel in sources:
-            jobs.append((REPO / rel, quiet if rel in QUIET else checked))
+            src = REPO / rel
+            if rel == STREAM_EXT_SRC and os.environ.get('HOST_STREAM_SUB_EXT'):
+                src = Path(os.environ['HOST_STREAM_SUB_EXT'])     # build against another revision (see the header)
+            jobs.append((src, quiet if rel in QUIET else checked))
         for src, _ in jobs:
             if not src.is_file():
                 self.fail('missing source file: %s' % src)
@@ -316,7 +353,7 @@ class HostTestCase(unittest.TestCase):
             self.fail('compile failed:\n' + '\n'.join(errors))
 
         exe = _BUILD / (Path(main).stem + '.bin')
-        link = subprocess.run([*cc, *sanitize, *map(str, objs), *pkg_libs, '-lpthread', '-o', str(exe)],
+        link = subprocess.run([*cc, *sanitize, *map(str, objs), *ldflags, *pkg_libs, '-lpthread', '-lm', '-o', str(exe)],
                               capture_output=True, text=True)
         if link.returncode:
             self.fail('link failed:\n' + link.stdout + link.stderr)
@@ -401,6 +438,33 @@ class HostNativeTests(HostTestCase):
     def test_close_open_parsing(self):
         """Close + immediately open a video while parsing, with engine rebuilds underneath."""
         self.build_and_run('close_open_parsing_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
+
+    def _ext(self, main, fmt, **kw):
+        self.build_and_run(main, STREAM_EXT, flags=(*ENGINE_FLAGS, *STREAM_FLAGS), args=(fmt,), **kw)
+
+    def test_ext_reselect_srt(self):
+        """#2004: every selection of an external SRT track ends with its cues in the engine (real stack)."""
+        self._ext('ext_reselect_test.c', 'srt')
+
+    def test_ext_reselect_vtt(self):
+        """#2004: every selection of an external VTT track ends with its cues in the engine (real stack)."""
+        self._ext('ext_reselect_test.c', 'vtt')
+
+    def test_ext_interrupt_srt(self):
+        """#2004: pause/seek mid-feed leaves neither an empty nor a truncated SRT track (real stack)."""
+        self._ext('ext_interrupt_test.c', 'srt')
+
+    def test_ext_interrupt_vtt(self):
+        """#2004: pause/seek mid-feed leaves neither an empty nor a truncated VTT track (real stack)."""
+        self._ext('ext_interrupt_test.c', 'vtt')
+
+    def test_ext_finish_race_srt(self):
+        """#2004: a reopen landing as the SRT feed job finishes still gets the track fed (real stack)."""
+        self._ext('ext_finish_race_test.c', 'srt', ldflags=WRAP_UNLOCK)
+
+    def test_ext_finish_race_vtt(self):
+        """#2004: a reopen landing as the VTT feed job finishes still gets the track fed (real stack)."""
+        self._ext('ext_finish_race_test.c', 'vtt', ldflags=WRAP_UNLOCK)
 
     def test_style_resize_paused(self):
         """Style change and surface resize while paused."""

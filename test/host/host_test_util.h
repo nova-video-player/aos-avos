@@ -37,6 +37,7 @@ static void t_watchdog_fired(int sig) {
 /* Call first thing in main(). `secs` should be several times a normal run's length. */
 static inline void t_watchdog(int secs, const char *name) {
     t_watchdog_name = name;
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* line-buffered even when piped: a killed/_exit()ed test must not lose its FAIL lines */
     signal(SIGALRM, t_watchdog_fired);
     alarm((unsigned)secs);
 }

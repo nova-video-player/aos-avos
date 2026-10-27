@@ -54,3 +54,8 @@ int     fake_backend_foreign(void);
 /* Feeds the MOST RECENTLY OPENED backend has accepted since its last flush (or since open). */
 int     fake_backend_active_since_flush(void);
 
+
+/* Per-cue delay inside the backend's feed(), in microseconds (default 0). Makes a bulk feed run long
+ * enough (while holding the engine lock, like a real libass feed of a big file) for a test to land a
+ * pause / reselect / close in the middle of it. Process-wide; set it back to 0 when done. */
+void    fake_backend_set_feed_delay_us(int us);

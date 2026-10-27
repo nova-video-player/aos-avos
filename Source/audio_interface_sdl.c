@@ -272,6 +272,12 @@ static int sdl_set_output_params( audio_ctx_t *ctx, int freq, int channels, int 
 				   obtained.format );
 
 	c->spec = obtained;
+
+	// SDL opens devices paused. If we are re-configured while playing (format/rate change),
+	// the caller may not call start() again, so resume the new device ourselves.
+	if( c->is_playing ) {
+		SDL_PauseAudioDevice( c->device_id, 0 );
+	}
 	return 0;
 }
 
@@ -356,8 +362,17 @@ static int sdl_get_delay( audio_ctx_t *ctx )
 	}
 
 	pthread_mutex_lock( &c->lock );
-	int delay = ( c->buffer.size / ( c->channels * c->byte_per_sample ) ) * 1000 / c->rate;
+	int queued = c->buffer.size;
 	pthread_mutex_unlock( &c->lock );
+
+	// stream_sync.c treats this as "time from write() until the sound is heard" (it feeds the
+	// audio->video anchor). Our ring buffer is only the first stage: SDL has already pulled one
+	// device buffer (spec.samples frames) out of it for the callback in flight. The audio server
+	// (PipeWire/Pulse) adds more on top, which we can't see from here.
+	int delay = ( queued / ( c->channels * c->byte_per_sample ) ) * 1000 / c->rate;
+	if( c->spec.samples && c->spec.freq ) {
+		delay += c->spec.samples * 1000 / c->spec.freq;
+	}
 
 	return delay;
 }
@@ -406,6 +421,24 @@ static int sdl_set_output_volume_l_r( audio_ctx_t *ctx, int vol_l, int vol_r )
 
 static int sdl_get_session_id( audio_ctx_t *ctx ) { return 0; }
 
+// stream_sync.c calls audio_sink->get_passthrough() on every delay computation, and the OSS
+// backend implements these hooks. Provide them (PCM only, no passthrough) instead of leaving
+// the pointers NULL.
+static int sdl_set_passthrough( audio_ctx_t *ctx, int passthrough )
+{
+	(void)ctx;
+	if( passthrough ) {
+		ERR serprintf( "SDL: passthrough is not supported, staying in PCM mode\r\n" );
+	}
+	return 0;
+}
+
+static int sdl_get_passthrough( audio_ctx_t *ctx )
+{
+	(void)ctx;
+	return 0;
+}
+
 const audio_interface_impl_t audio_interface_impl_sdl = {
 	.name = "sdl",
 	.init = sdl_init,
@@ -428,4 +461,6 @@ const audio_interface_impl_t audio_interface_impl_sdl = {
 	.set_output_volume = sdl_set_output_volume,
 	.set_output_volume_l_r = sdl_set_output_volume_l_r,
 	.get_session_id = sdl_get_session_id,
+	.set_passthrough = sdl_set_passthrough,
+	.get_passthrough = sdl_get_passthrough,
 };

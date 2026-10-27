@@ -24,7 +24,7 @@ Run (from anywhere):
 
     python3 test/host/test_host_native.py               # all
     python3 test/host/test_host_native.py -v -k race    # one test, every check listed
-    SANITIZERS=thread python3 test/host/test_host_native.py -k race -k registry -k switch
+    SANITIZERS=thread python3 test/host/test_host_native.py -k race -k registry -k ext_
     SANITIZERS=address,undefined python3 test/host/test_host_native.py -k jni
     HOST_TEST_OUTPUT=1 python3 test/host/test_host_native.py   # raw program output of every test
     NO_COLOR=1 python3 test/host/test_host_native.py           # plain text (also automatic when piped)
@@ -89,16 +89,6 @@ registry_lifetime  sub_engine_registry.c on its own: an engine is destroyed exac
 ssa_late_script  An external ASS script fed AFTER the first render: Custom (forced) settings must
                  apply without the user touching a setting. Compared against the same script fed
                  before the first render, with an unforced run proving the comparison can fail.
-track_switch     Rapid switches between two large SRT/VTT feeds (and close_track) with generation
-                 tokens: stale cues are dropped, none reach another track's backend, the last
-                 track loads completely, nothing leaks.
-seek_pause_feed  Pause / resume / seek racing the initial bulk feed, modelling the
-                 flush-then-raise-refeed-flag protocol: no deadlock, pause state exact, one full
-                 copy of the list afterwards.
-close_open       Close a video and immediately open another while its parse worker is active, with
-                 the Java side rebuilding the engine: every engine destroyed exactly once and never
-                 while held, no cross-video cues, no leaked backend. Orderly and hostile close
-                 orders.
 ext_reselect     (SRT and VTT) Issue #2004 through the real stack: select 02, 01, 02, 01 ... each selection
                  must leave exactly that file's cues in the engine; double open; reopen while the track's
                  own feed is running; a storm of back-to-back selections. A track that is accepted but never
@@ -117,8 +107,6 @@ cache, SUBT_PARSE_* state machine, generation stamping), stream_subtitle.c (the 
 _get_next_ext_sub(), stream_set_subtitle_stream()), subtitle_formats.c, the SRT/VTT parsers and the real
 engine -- over real .srt/.vtt files, on a fake STREAM (stream_host.c). Only the engine's backend is fake.
 They are the regression tests for aos-AVP issue #2004 (an external track is selected but renders nothing).
-The older track_switch_loading / seek_pause_feed / close_open_parsing tests still MODEL the STREAM-level
-workers with small threads: they prove the engine-side contract those workers rely on, not stream_sub_ext.c.
 
 What this does NOT prove
 ------------------------
@@ -426,18 +414,6 @@ class HostNativeTests(HostTestCase):
         """External ASS script arriving after the first render still gets Custom settings."""
         self.build_and_run('ssa_late_script_test.c', SSA_BACKEND, pkgs=['libass'],
                            flags=('-Wno-unused-parameter',))
-
-    def test_track_switch_loading(self):
-        """Rapid switches between two large tracks while loading: no stale or foreign cues."""
-        self.build_and_run('track_switch_loading_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
-
-    def test_seek_pause_feed(self):
-        """Pause/resume/seek during the initial feed: no deadlock, one full copy afterwards."""
-        self.build_and_run('seek_pause_feed_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
-
-    def test_close_open_parsing(self):
-        """Close + immediately open a video while parsing, with engine rebuilds underneath."""
-        self.build_and_run('close_open_parsing_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
 
     def _ext(self, main, fmt, **kw):
         self.build_and_run(main, STREAM_EXT, flags=(*ENGINE_FLAGS, *STREAM_FLAGS), args=(fmt,), **kw)

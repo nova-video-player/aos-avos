@@ -796,11 +796,11 @@ python3 test/host/test_host_native.py -v -k registry  # one test, every check li
 
 # Concurrency tests under ThreadSanitizer
 SANITIZERS=thread python3 test/host/test_host_native.py -v \
-  -k race -k registry -k switch -k seek -k close_open -k style_resize -k jni
+  -k race -k registry -k ext_ -k style_resize -k jni
 
 # Lifetime / use-after-free checks under AddressSanitizer
 SANITIZERS=address,undefined python3 test/host/test_host_native.py -v \
-  -k registry -k close_open -k jni
+  -k registry -k ext_ -k jni
 
 HOST_TEST_OUTPUT=1 python3 test/host/test_host_native.py   # print passing output too
 ```
@@ -819,8 +819,11 @@ deadlock, and the concurrency tests also arm their own watchdog that prints
 
 Last recorded full run: 12 of 12 tests passed with `SANITIZERS=undefined`, and the six
 concurrency tests (`registry`, `switch`, `seek`, `close_open`, `style_resize`, `jni`) passed
-under `SANITIZERS=thread` (2026-10-23, Linux). Record the compiler, libass version and
-sanitizer with any later baseline.
+under `SANITIZERS=thread` (2026-10-23, Linux). That run predates the `ext_*` tests; `switch`,
+`seek` and `close_open` have since been replaced by them. Last run of the six `ext_*` tests: 6 of 6
+passed with `SANITIZERS=undefined` (2026-10-27, Linux x86_64, gcc 13.3.0, no libass); not yet run
+under the thread or address sanitizers. Record the compiler, libass version and sanitizer with any
+later baseline.
 
 ### What is covered
 
@@ -834,24 +837,30 @@ sanitizer with any later baseline.
 | `push_policy` | The 3D "content changed" push: paused only, 3D only, once per generation, no locks held |
 | `jni_listener` | Listener global-ref and thread attach/detach lifetime against a mock JavaVM, including the deferred destroy: `nativeDestroy()` while a stream still holds the engine frees nothing, and the last release frees the engine and listener ref, attaching a native releasing thread itself |
 | `registry_lifetime` | `sub_engine_registry`: an engine is destroyed exactly once and never while held; immediately if unheld, otherwise by the last release; retract never blocks; a newer publish keeps older references; the destroy callback runs outside the registry lock; stray releases are ignored; concurrent acquire/release against publish/retract |
-| `track_switch_loading` | Rapid switches between two large SRT/VTT feeds (and `close_track()`) with generation tokens: stale cues dropped, none reach another track's backend, every accepted cue reaches exactly one backend, the last track loads completely, no backend leaks |
-| `seek_pause_feed` | Pause, resume and seek racing the initial bulk feed (flush, then raise the re-feed flag): no deadlock, pause state exact, one full copy of the list afterwards |
-| `close_open_parsing` | Closing a video and immediately opening another while its parse worker is active, with the Java side rebuilding the engine: each engine destroyed exactly once and never while held, no cross-video cues, no leaked backend; both an orderly and a hostile close order |
+| `ext_reselect` (SRT, VTT) | Issue #2004 through the **real** external-subtitle stack (`stream_sub_ext.c`, `stream_subtitle.c`, `subtitle_formats.c`, the SRT/VTT parsers, the real engine) over real files: select 02, 01, 02, 01 ... each selection leaves exactly that file's cues in the engine; double open; reopen while the track's own feed runs; a storm of back-to-back selections; no cue of one file reaches the other's track. A track that is accepted but never fed is reported as a `SILENT FAILURE` (the report's `n_events=0`) |
+| `ext_interrupt` (SRT, VTT) | A pause/seek/rescan (idling the subtitle thread) landing late in a long feed leaves the track complete, not empty, and does not cache a truncated cue list (a reselect replays the cache); a storm of pauses during one feed |
+| `ext_finish_race` (SRT, VTT) | A reopen landing exactly as a feed job finishes. The few-instruction window is opened on purpose (a wrapped `pthread_mutex_unlock` sleeps on the worker after the last cue), so it is deterministic; the test checks the window was opened every round |
 | `style_resize_paused` | Style changes and surface resizes while paused render once at the frozen clock, reach the backend as a coalesced canvas/box pair ending on the last request, survive concurrent style and resize storms, and leave the pause state untouched |
 
 ### Limits
 
-- The `track_switch_loading`, `seek_pause_feed` and `close_open_parsing` scenarios
-  exercise the real engine, generation-token and registry code, with the STREAM-level
-  workers modelled by small threads in the tests: `stream_sub_ext.c` needs the whole
-  STREAM to link and is **not executed** by these tests. They check the engine-side
-  contract those workers rely on.
+- The `ext_*` tests run the real `stream_sub_ext.c` / `stream_subtitle.c` on a fake `STREAM`
+  (`stream_host.c`). Stood in: the demuxer thread (it only acknowledges thread-state requests),
+  `stream_pause`/`stream_seek_time`/clock plumbing and the audio-speed lookup, and the engine's
+  backend. A pause/seek/rescan is produced by idling `sub_tstate` directly, as the real paths do;
+  `_seek_init()` and `stream_pause()` themselves are not executed (`_seek_init()` currently skips the
+  flush for external text tracks). Only external SRT and VTT are covered; SMI/SUB/MPL2, external
+  ASS and bitmap (PGS/VobSub) tracks are not.
+- `ext_interrupt` and `ext_finish_race` assert that they really exercised their window (the
+  feed was interrupted in at least 3/4 of the rounds; the unlock wrapper slept in every round), so
+  they fail rather than pass vacuously if the code under test is reorganised. Against a revision
+  from before the #2004 fixes all three `ext_*` tests fail. To check that again:
+  `git show <old-rev>:Source/stream_sub_ext.c > /tmp/old.c` then
+  `HOST_STREAM_SUB_EXT=/tmp/old.c python3 test/host/test_host_native.py -k ext_`.
+  `HOST_TEST_LOG=1` prints the app's own log lines for a failing run.
 - The mock JavaVM validates our use of the JNI contract, not a real ART.
 - The render thread never gets a real EGL surface (the same as production 3D mode
   without a window), so the GPU blend path is link-only here.
-- `track_switch_loading` asserts that the race was actually exercised (some feeders
-  were cut off mid-list). That depends on feeding being slower than a switch interval;
-  raise `BIG_CUES` if it ever fails on a much faster machine.
 - Smoke-test on a device as well: pause in 3D, switch or disable the subtitle track,
   and confirm the old cue clears and the new one appears without resuming; load an
   external `.ass` after playback has started with "Custom" settings active; seek inside

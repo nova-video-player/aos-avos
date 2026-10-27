@@ -193,23 +193,11 @@ static int _get_time( STREAM_SINK_VIDEO *sink )
 {
 	SINK_PRIV *p = sink->priv;
 
+	if( !p->venc_put_time ) {
+		return 0;
+	}
 	int diff = atime() - p->venc_ref_time;
 	p->venc_time = p->venc_put_time + diff;
-
-	// Account for audio latency to sync video with actual audio playback
-	if (sink->ctx) {
-		STREAM *stream = (STREAM *)sink->ctx;
-		if (stream->audio_ctx) {
-			int buffer_delay = stream_get_anchor_delay_ms(stream, 1);
-			// Add system audio latency (macOS typically 20-100ms)
-			// This is the latency from when audio is sent to OS until it's actually heard
-			int system_latency = 40;  // Adjust this value to fine-tune sync (typical: 20-100ms)
-			int total_delay = buffer_delay + system_latency;
-			p->venc_time -= total_delay;
-		}
-	}
-
-//serprintf("get %8d + %8d = %8d\n", p->venc_put_time, diff, p->venc_time );
 
 	return p->venc_time;
 }

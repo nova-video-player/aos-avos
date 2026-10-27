@@ -1476,9 +1476,20 @@ static stream_delay_status_t _stream_get_delay_status(STREAM *s, int allow_stati
 			status.source_tag = "static(phase1)";
 		}
 	}
-#else
+	#else
 	(void)allow_static;
-#endif
+	if( s && s->audio_sink ) {
+		int delay = _stream_sync_av_delay( s, !renderer_locked );
+		if( delay < 0 ) {
+			delay = 0;
+		}
+		status.effective_delay_ms = delay;
+		status.is_anchorable = 1;
+		status.is_delay_valid = 1;
+		status.source = STREAM_DELAY_SOURCE_DYNAMIC;
+		status.source_tag = "dynamic(host)";
+	}
+	#endif
 
 	return status;
 }

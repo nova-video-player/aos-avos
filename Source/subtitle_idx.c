@@ -216,7 +216,7 @@ DBG serprintf("stop\n");
 		} else if( parse && !strncmp( line, "timestamp:", strlen("timestamp:") ) ) {
 			uint32_t pos;
 			int timestamp = get_timestamp_and_pos( line, &pos );
-DBG serprintf("time: %8d  %08X\n", timestamp, pos );
+DBG2 serprintf("time: %8d  %08X\n", timestamp, pos );
 			if (timestamp < 0 || (sub->last && timestamp < sub->last->start)) {
 				line = subtitle_get_next_line(line, LINE_LEN, fd);
 				continue;

@@ -184,10 +184,13 @@ static int _decode(STREAM_DEC_SUB *dec, UCHAR *data, int size, int time, VIDEO_F
 	// note that when ffmpeg sub decoding provides 0 rect for pgs it means that the previous subtitle is over
 
 	my_dec_sub *self = (my_dec_sub*)dec;
-	DBG {
-		serprintf("codec_ffsub: ffsub decode\n", data, size);
-		Dump(data, size);
-	}
+	DBG serprintf("codec_ffsub: ffsub decode: size %d, time %d\n", size, time);
+	// Never hex-dump the whole packet: Dump() prints byte by byte and sleeps 100 ms every
+	// 512 bytes, and a PGS display set is tens of KB, so this ran for many seconds right here in
+	// the subtitle service. By the time decode returned the cue had already ended, and
+	// _feed_bitmap_to_engine() dropped it as expired -- bitmap subs vanished whenever dbgsub > 0.
+	// Only dump a short header, and only at dbgsub 2.
+	DBG2 if (data && size > 0) Dump(data, MIN(size, 64));
 
 	VIDEO_FRAME *frame = *pframe;
 	*pframe = NULL; // fragments and decode errors do not produce a display event

@@ -373,10 +373,46 @@ serprintf("video_set_subtitle_stream: %d (current %d, %d tracks)\r\n", next, cur
 	stream_set_subtitle_stream( v, next );
 }		
 
+// vsl   lists the subtitle tracks "vss" can select: index, name/language, format and, for external
+//       tracks, the file they came from. "*" marks the selected track.
+static void _video_list_subtitle_streams( int argc, char *argv[] )
+{
+	if( !v ) {
+serprintf("video_list_subtitle_streams: no stream playing\r\n");
+		return;
+	}
+
+	int off = __atomic_load_n( &v->subtitle_disabled, __ATOMIC_ACQUIRE );
+
+	pthread_mutex_lock( &v->subtitle_table_lock );
+	int subs_max = v->av.subs_max;
+	int cur      = v->av.subs;
+	if( subs_max <= 0 ) {
+		pthread_mutex_unlock( &v->subtitle_table_lock );
+serprintf("video_list_subtitle_streams: stream has no subtitle tracks\r\n");
+		return;
+	}
+serprintf("%d subtitle tracks, %s  (\"vss <n>\" selects, \"vss -1\" disables)\r\n", subs_max,
+          off ? "subtitles off" : "* = selected" );
+	for( int i = 0; i < subs_max; i++ ) {
+		SUB_PROPERTIES *sub = v->av.sub + i;
+		const char *base = strrchr( sub->path, '/' );
+		base = base ? base + 1 : sub->path;
+serprintf(" %c%2d  %-4s  %-16s  %-12s  %s\r\n",
+          ( i == cur && !off ) ? '*' : ' ', i,
+          sub->ext ? "ext" : "int",
+          sub->name[0] ? sub->name : "-",
+          sub_get_format_name( sub ),
+          sub->ext && base[0] ? base : "" );
+	}
+	pthread_mutex_unlock( &v->subtitle_table_lock );
+}
+
 DECLARE_DEBUG_COMMAND_VOID("fi", _file_info);
 DECLARE_DEBUG_COMMAND_VOID("ft", _file_type);
 DECLARE_DEBUG_TOGGLE      ("vidp", video_start_paused );
 DECLARE_DEBUG_COMMAND     ("vas", _video_set_audio_stream );
 DECLARE_DEBUG_COMMAND     ("vss", _video_set_subtitle_stream );
+DECLARE_DEBUG_COMMAND     ("vsl", _video_list_subtitle_streams );
 
 #endif

@@ -65,6 +65,21 @@ come from `pkg-config`, with plain `-lass`/`-lfreetype` only as a fallback.
 - Audio goes through SDL2 (ALSA/OSS are not used on macOS).
 - Video decoding is FFmpeg software decoding only; MediaCodec is Android-only.
 
+## Subtitles in the sim
+
+The sim draws subtitles itself: `Source/stream_sink_video_sim2.c` pulls the engine's CPU-blended
+frame (the path Android uses in 3D mode) and composites it over the video in the SDL window.
+Text (SRT/VTT/ASS) and bitmap (PGS, VobSub idx/sub) tracks all go through it.
+
+Debug commands, typed in `./build/avsh` (they also appear in `help`):
+
+| Command    | What it does |
+|------------|--------------|
+| `vsl`      | list the subtitle tracks: index, int/ext, name, format, source file |
+| `vss <n>`  | select track `n`; `vss -1` turns subtitles off; no argument cycles |
+| `subm`     | toggle "use margins": extend the subtitle canvas into the top/bottom letterbox bars |
+| `dbgsub n` | subtitle logging: 1 = track list and cue feeding, 2 = also idx cue times and packet headers |
+
 ## CI and tests
 
 `.github/workflows/avos-sim-build.yml` builds this target on `ubuntu-latest` and

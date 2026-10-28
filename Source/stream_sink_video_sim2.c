@@ -827,6 +827,10 @@ DBGS serprintf("stream_sink_video_open: WxH %d x %d  num_frames %d  cached %d\r\
 
 	// Initialize SDL BEFORE starting the venc_thread to avoid race condition
 	if( sdl_open(sink) ) {
+		// sink->is_open is still 0, so _close() will refuse to run: undo what _open() did
+		free_frames( p );
+		pthread_cond_destroy( &p->venc_cond );
+		pthread_mutex_destroy( &p->venc_mutex );
 		return 1;
 	}
 

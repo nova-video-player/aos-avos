@@ -35,7 +35,9 @@
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 
+#include <errno.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FB_QVFB
@@ -118,6 +120,8 @@ typedef struct SINK_PRIV {
 	int		lay_out_w, lay_out_h;	// layout cache key: renderer output size ...
 	int		lay_vw, lay_vh;		// ... video size ...
 	int		lay_margins;		// ... and margins setting
+	int		video_drawn;		// sdl_texture holds a video frame that has been presented, so the
+						// scene can be redrawn without a new frame (paused: see venc_idle_wait)
 
 	// venc_thread drops venc_mutex while it sleeps for a frame and while it renders one.
 	// _flush() runs in that window (seek) and hands every frame, including the one the thread
@@ -335,6 +339,71 @@ static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
     }
     sub_overlay_draw( p );
     SDL_RenderPresent(p->sdl_renderer);
+    p->video_drawn = 1;
+}
+
+// While paused no frame reaches venc_thread, so blit_video_frame() never runs and a subtitle
+// change (vss <n>, vss -1) or the margins toggle (subm) would stay invisible until playback
+// resumes. sdl_texture still holds the last video frame, so the scene can be redrawn from it.
+#define VENC_IDLE_POLL_MS	40
+
+// True when the overlay would look different from what is on screen. Drawing thread only.
+static int sub_overlay_redraw_pending( SINK_PRIV *p )
+{
+    if( !p->video_drawn || !p->sdl_texture || !p->sub_eng ) {
+        return 0;
+    }
+    if( ( _sub_use_margins ? 1 : 0 ) != p->lay_margins ) {
+        return 1;                                   // layout_update() will re-fit the canvas
+    }
+    if( !p->sub_tex || !p->sub_pix ) {
+        return 0;
+    }
+    return sub_engine_get_frame_generation( p->sub_eng ) != p->sub_gen;
+}
+
+// Same scene as blit_video_frame(), minus the texture upload of a new video frame.
+static void redraw_last_frame( SINK_PRIV *p )
+{
+    layout_update( p );
+
+    SDL_SetRenderDrawColor( p->sdl_renderer, 0, 0, 0, 255 );
+    if( SDL_RenderClear( p->sdl_renderer ) != 0 ||
+        SDL_RenderCopy( p->sdl_renderer, p->sdl_texture, NULL, &p->video_rect ) != 0 ) {
+        return;
+    }
+    sub_overlay_draw( p );
+    SDL_RenderPresent( p->sdl_renderer );
+}
+
+// Called with venc_mutex held and no frame queued. Blocks until _put()/_flush()/_close() signal
+// venc_cond, like a plain pthread_cond_wait(). Once a frame is on screen it also wakes every
+// VENC_IDLE_POLL_MS and redraws if the subtitle state changed in the meantime.
+static void venc_idle_wait( SINK_PRIV *p )
+{
+    if( !p->video_drawn ) {
+        pthread_cond_wait( &p->venc_cond, &p->venc_mutex );
+        return;
+    }
+
+    struct timespec ts;
+    clock_gettime( CLOCK_REALTIME, &ts );           // the default clock of a pthread_cond_t, Linux and macOS
+    ts.tv_nsec += VENC_IDLE_POLL_MS * 1000000L;
+    if( ts.tv_nsec >= 1000000000L ) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    if( pthread_cond_timedwait( &p->venc_cond, &p->venc_mutex, &ts ) != ETIMEDOUT ) {
+        return;
+    }
+    if( !p->venc_run || !sub_overlay_redraw_pending( p ) ) {
+        return;
+    }
+    // No frame is held and none is rendered from here, so _flush() has nothing to wait for;
+    // SDL is only ever used on this thread, which owns the GL context.
+    pthread_mutex_unlock( &p->venc_mutex );
+    redraw_last_frame( p );
+    pthread_mutex_lock( &p->venc_mutex );
 }
 
 
@@ -379,7 +448,7 @@ DBGS serprintf("venc_thread::Starting\r\n");
 		
 		// get frame
 		while (p->venc_run && !(p->out_frame = frame_q_get( &p->full )) ) {
-			pthread_cond_wait(&p->venc_cond, &p->venc_mutex);
+			venc_idle_wait( p );
 		}
  
 		if (!p->out_frame) {
@@ -692,6 +761,7 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
     p->sub_rect = p->video_rect;
     p->sub_gen = UINT64_MAX;
     p->sub_visible = 0;
+    p->video_drawn = 0;                              // the new sdl_texture has no frame in it yet
     // The sim's subtitle engine is created and published by cli.c; hold a reference for as
     // long as this sink is open. NULL (no engine published) just means no overlay.
     p->sub_eng = sub_engine_registry_acquire();

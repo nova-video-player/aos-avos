@@ -304,21 +304,43 @@ serprintf("video_set_audio_stream: %d\r\n", next );
 	stream_set_audio_stream( v, next );
 }
 
+// vss [n]   n >= 0 selects subtitle track n, n < 0 (e.g. "vss -1") disables subtitles (what the
+//           Android player does for track < 0), no argument cycles to the next track.
 static void _video_set_subtitle_stream( int argc, char *argv[] )
 {
-	if( !v || v->av.subs_max == 1 )
+	if( !v ) {
+serprintf("video_set_subtitle_stream: no stream playing\r\n");
 		return;
+	}
+
+	int subs_max;
+	int cur;
+	pthread_mutex_lock( &v->subtitle_table_lock );
+	subs_max = v->av.subs_max;
+	cur      = v->av.subs;
+	pthread_mutex_unlock( &v->subtitle_table_lock );
+
+	if( subs_max <= 0 ) {
+serprintf("video_set_subtitle_stream: stream has no subtitle tracks\r\n");
+		return;
+	}
 
 	int next = 0;
 	if( argc > 1 ) {
 		next = atoi( argv[1] );
 	} else {
-		next = v->av.subs + 1;
-		if( next == v->av.subs_max ) {
+		next = cur + 1;
+		if( next >= subs_max ) {
 			next = 0;
 		}
 	}
-serprintf("video_set_subtitle_stream: %d\r\n", next );
+
+	if( next < 0 ) {
+serprintf("video_set_subtitle_stream: off (%d tracks)\r\n", subs_max );
+		stream_disable_subtitles( v );
+		return;
+	}
+serprintf("video_set_subtitle_stream: %d (current %d, %d tracks)\r\n", next, cur, subs_max );
 	stream_set_subtitle_stream( v, next );
 }		
 

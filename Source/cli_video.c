@@ -93,9 +93,23 @@ static int64_t _sub_engine_clock( void *ctx )
 	return t < 0 ? 0 : t;
 }
 
+// Mirror the stream pause state into the engine, like avos_mp_video_pause()/_start() do on
+// Android, so it stops its clock-driven polling while paused and wakes up again on resume.
+static void _sub_engine_set_paused( STREAM *s, int paused )
+{
+	if( s && s->sub_engine )
+		sub_engine_set_paused( (SUB_ENGINE *)s->sub_engine, paused );
+}
+
 static void _video_stop( void *ctx, int resume )
 {
 	STREAM *s = ctx;
+
+	// Drop the global first: stream_delete() below frees the stream, and the debug commands
+	// (vss, vas) dereference v. They must see NULL, not a dangling pointer.
+	if( v == s )
+		v = NULL;
+
 	// Same teardown order as avos_mp_video_close(): grab the engine before stream_delete() frees
 	// the stream, stop its clock first (clock_ctx is the STREAM), close the track only once the
 	// stream threads are gone, and release the registry reference last.
@@ -114,8 +128,20 @@ serprintf("cli_video: sub engine %p released\n", eng);
 	comlink = NULL;
 }
 
-static int  _video_pause( void *ctx )                        { return stream_pause( (STREAM*)ctx ); }
-static void _video_un_pause( void *ctx, int was_paused )     { return stream_un_pause( (STREAM*)ctx, was_paused ); }
+static int  _video_pause( void *ctx )
+{
+	_sub_engine_set_paused( (STREAM*)ctx, 1 );
+	return stream_pause( (STREAM*)ctx );
+}
+
+static void _video_un_pause( void *ctx, int was_paused )
+{
+	// was_paused != 0 means the stream stays paused, so the engine does too
+	if( !was_paused )
+		_sub_engine_set_paused( (STREAM*)ctx, 0 );
+	stream_un_pause( (STREAM*)ctx, was_paused );
+}
+
 static int  _video_is_paused( void *ctx )                    { return stream_is_paused( (STREAM*)ctx ); }
 static int  _video_get_current_time( void *ctx, int *total ) { return stream_get_current_time( (STREAM*)ctx, total ); }
 
@@ -205,6 +231,9 @@ DBGV serprintf("etype: %d\n", etype);
 	v->sub_engine = (void *)sub_engine_registry_acquire();
 	if( v->sub_engine ) {
 		sub_engine_start( (SUB_ENGINE *)v->sub_engine, _sub_engine_clock, v );
+		// The stream was opened STREAM_PAUSED and is un-paused below. The engine is shared across
+		// streams, so do not inherit a stale paused state from the previous one.
+		_sub_engine_set_paused( v, 1 );
 serprintf("cli_video: sub engine %p attached to stream and started\n", v->sub_engine);
 	} else {
 serprintf("cli_video: no sub engine published, subtitles disabled\n");
@@ -216,7 +245,7 @@ serprintf("cli_video: no sub engine published, subtitles disabled\n");
 	FB_set_video_active(1);
 
 	if( !video_start_paused ) {
-		stream_un_pause( v, 0 );
+		_video_un_pause( v, 0 );
 	}
 	
 	return v;
@@ -232,9 +261,9 @@ void cli_handle_key( int key )
 			}
 		} else {
 			if ( !v->paused ) {
-				stream_pause( v );
+				_video_pause( v );
 			} else {
-				stream_un_pause( v, 0 );
+				_video_un_pause( v, 0 );
 			}
 		}
 		break;

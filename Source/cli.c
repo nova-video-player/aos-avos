@@ -21,8 +21,40 @@
 #include "fb.h"
 #include "app_av.h"
 #include "audio_interface.h"
+#include "sub_engine.h"
+#include "sub_engine_registry.h"
 
 void cli_play_video( const char *path, int etype );
+
+// The subtitle engine is created by Java (SubtitleEngine.nativeCreate) on Android. There is no
+// JVM in the CLI/sim build, so create it here, the same way fb_init()/audio_interface_init() bring up the
+// other host backends, and publish it to the registry so streams can acquire() it later.
+// Surfaceless: no ANativeWindow is attached, and the clock is not started yet.
+static SUB_ENGINE *sub_eng = NULL;
+
+static void sub_eng_init( void )
+{
+	if( sub_eng )
+		return;
+	sub_eng = sub_engine_create();
+	if( !sub_eng ) {
+serprintf("sub_eng_init: sub_engine_create FAILED\n");
+		return;
+	}
+	sub_engine_registry_publish( sub_eng );
+serprintf("sub_eng_init: sub engine %p created and published (surfaceless, clock not started)\n", sub_eng);
+}
+
+static void sub_eng_exit( void )
+{
+	if( !sub_eng )
+		return;
+	SUB_ENGINE *eng = sub_eng;
+	sub_eng = NULL;
+	// destroyed right here if no stream holds it, else by the last registry release
+	sub_engine_registry_retract( eng, sub_engine_destroy );
+serprintf("sub_eng_exit: sub engine %p retracted\n", eng);
+}
 
 static void fb_init( void )
 {
@@ -48,6 +80,7 @@ serprintf("\n");
 
 	fb_init();
 	audio_interface_init();
+	sub_eng_init();
 
 	if( argc > 1 ) {
 		int etype = 0;
@@ -63,6 +96,7 @@ void app_stop(void);
 void cli_stop( void )
 {
 	AV_stop();
+	sub_eng_exit();
 	app_stop();
 }
 

@@ -90,7 +90,7 @@ INCLUDES := -I$(SRC_PATH)/Include/host_compat $(INCLUDES)
 
 # Sources that exist in Source/ but are missing from the sim's source list
 # (found via undefined-reference errors at link time). Duplicates are harmless: $(sort) dedups.
-CSRC += sub_engine.c sub_style.c sub_render_gl.c
+CSRC += sub_engine.c sub_style.c sub_render_gl.c sub_engine_registry.c
 # OSS needs linux/soundcard.h (-> linux/ioctl.h), which doesn't exist on macOS.
 # audio_interface.c already guards all OSS references with #ifndef __APPLE__.
 ifneq ($(UNAME_S),Darwin)

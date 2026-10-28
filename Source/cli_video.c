@@ -28,6 +28,8 @@
 #include "fs.h"
 #include "fb.h"
 #include "app_key.h"
+#include "sub_engine.h"
+#include "sub_engine_registry.h"
 
 #define DBG  if(Debug[DBG_AUD] || Debug[DBG_VID])
 #define DBGA if(Debug[DBG_AUD])
@@ -75,11 +77,38 @@ static STREAM *v = NULL;
 static const char *url;
 static int etype;
 
+// Same clock the Android player gives the engine (engine_clock_cb in avos_mp_video.c): the stream's
+// current position in rst ms, minus the subtitle offset, or < 0 while there is no valid clock yet.
+static int64_t _sub_engine_clock( void *ctx )
+{
+	STREAM *s = (STREAM *)ctx;
+	if( !s )
+		return -1;
+
+	int ts = ( s->video && s->video->valid ) ? s->video_time : s->audio_time;
+	if( ts < 0 )
+		return -1;
+
+	int64_t t = TS_TO_RST_TIME( ts, int64_t ) - s->subtitle_offset;
+	return t < 0 ? 0 : t;
+}
+
 static void _video_stop( void *ctx, int resume )
 {
 	STREAM *s = ctx;
+	// Same teardown order as avos_mp_video_close(): grab the engine before stream_delete() frees
+	// the stream, stop its clock first (clock_ctx is the STREAM), close the track only once the
+	// stream threads are gone, and release the registry reference last.
+	SUB_ENGINE *eng = s->sub_engine ? (SUB_ENGINE *)s->sub_engine : NULL;
+	if( eng )
+		sub_engine_stop( eng );
 	stream_stop( s );
 	stream_delete( &s );
+	if( eng ) {
+		sub_engine_close_track( eng );
+		sub_engine_registry_release( eng );
+serprintf("cli_video: sub engine %p released\n", eng);
+	}
 	AV_set_state( AV_STOPPED, 0, 0, NULL, NULL );
 	threadcom_destroy(comlink);
 	comlink = NULL;
@@ -168,6 +197,17 @@ DBGV serprintf("etype: %d\n", etype);
 	if( stream_start( v ) ) {
 		stream_delete( &v );
 		return NULL;
+	}
+
+	// Hand the stream the engine cli_start() published (what avos_mp_video_open() does on Android)
+	// so embedded/external subtitle tracks are opened and fed into it. Matched by the release in
+	// _video_stop().
+	v->sub_engine = (void *)sub_engine_registry_acquire();
+	if( v->sub_engine ) {
+		sub_engine_start( (SUB_ENGINE *)v->sub_engine, _sub_engine_clock, v );
+serprintf("cli_video: sub engine %p attached to stream and started\n", v->sub_engine);
+	} else {
+serprintf("cli_video: no sub engine published, subtitles disabled\n");
 	}
 	
 	AV_set_state( AV_PLAYING, type, DEV_HDD, v, &_video_cbs );
@@ -264,21 +304,43 @@ serprintf("video_set_audio_stream: %d\r\n", next );
 	stream_set_audio_stream( v, next );
 }
 
+// vss [n]   n >= 0 selects subtitle track n, n < 0 (e.g. "vss -1") disables subtitles (what the
+//           Android player does for track < 0), no argument cycles to the next track.
 static void _video_set_subtitle_stream( int argc, char *argv[] )
 {
-	if( !v || v->av.subs_max == 1 )
+	if( !v ) {
+serprintf("video_set_subtitle_stream: no stream playing\r\n");
 		return;
+	}
+
+	int subs_max;
+	int cur;
+	pthread_mutex_lock( &v->subtitle_table_lock );
+	subs_max = v->av.subs_max;
+	cur      = v->av.subs;
+	pthread_mutex_unlock( &v->subtitle_table_lock );
+
+	if( subs_max <= 0 ) {
+serprintf("video_set_subtitle_stream: stream has no subtitle tracks\r\n");
+		return;
+	}
 
 	int next = 0;
 	if( argc > 1 ) {
 		next = atoi( argv[1] );
 	} else {
-		next = v->av.subs + 1;
-		if( next == v->av.subs_max ) {
+		next = cur + 1;
+		if( next >= subs_max ) {
 			next = 0;
 		}
 	}
-serprintf("video_set_subtitle_stream: %d\r\n", next );
+
+	if( next < 0 ) {
+serprintf("video_set_subtitle_stream: off (%d tracks)\r\n", subs_max );
+		stream_disable_subtitles( v );
+		return;
+	}
+serprintf("video_set_subtitle_stream: %d (current %d, %d tracks)\r\n", next, cur, subs_max );
 	stream_set_subtitle_stream( v, next );
 }		
 

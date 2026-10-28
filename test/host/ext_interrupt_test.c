@@ -34,7 +34,11 @@
  * long the job spends finishing after it raised the flag -- and requires:
  *   1. the track ends up complete (all cues, once), whatever the pause lasted;
  *   2. the cached list is complete: selecting another track and back still yields every cue.
- * Then a storm of pauses during one feed.
+ * Then a storm of pauses during one feed, and (what the old modelled seek_pause_feed test checked, now through
+ * the real stack) a storm of engine pause / resume / seek / subtitle-thread pauses racing one feed: no
+ * deadlock (watchdog), the engine's pause state always exactly what was last requested, exactly one full
+ * copy of the list afterwards, and it renders; also the documented refeed protocol (engine flushed + the
+ * refeed flag raised) on a loaded track.
  */
 #include "stream_host.h"
 #include "fake_backend.h"
@@ -118,6 +122,46 @@ int main(int argc, char **argv)
         }
         fake_backend_set_feed_delay_us(0);
         result(hs_wait_cues(CUES, g_wait_ms) && hs_stays_at(CUES, 60), "after 40 pauses during one feed", CUES);
+        hs_destroy(h);
+    }
+
+    /* ---- engine pause / resume / seek / subtitle-thread pause, all racing one feed ---- */
+    {
+        HOST_STREAM *h = hs_create();
+        (vtt ? hs_write_vtt : hs_write_srt)(h, "01", 'L', CUES);
+        hs_start(h);
+        int L = hs_track(h, "01");
+        sub_engine_set_paused(h->eng, 1);                         /* the first feed runs while the engine is PAUSED */
+        fake_backend_set_feed_delay_us(FEED_US);
+        hs_select(h, L);
+        int paused = 1, mismatch = 0, seeks = 0, rescans = 0;
+        for (int i = 0; i < 600; i++) {
+            switch (rand() % 5) {
+            case 0: sub_engine_set_paused(h->eng, 1); paused = 1; break;
+            case 1: sub_engine_set_paused(h->eng, 0); paused = 0; break;
+            case 2: sub_engine_force_wake(h->eng); seeks++; break;  /* a seek on an external text track: _seek_init() only wakes the render thread */
+            case 3: rescans += hs_interrupt_feed(h, rand() % 300, 3); break;
+            default: usleep((unsigned)(rand() % 800)); break;
+            }
+            if (sub_engine_is_paused(h->eng) != paused) mismatch++;
+        }
+        fake_backend_set_feed_delay_us(0);
+        CHECK(mismatch == 0, "pause state always matched the last request (%d mismatches over %d seeks, %d feed interruptions)", mismatch, seeks, rescans);
+        sub_engine_set_paused(h->eng, 0);
+        result(hs_wait_cues(CUES, g_wait_ms) && hs_stays_at(CUES, 60), "after the pause/seek storm: exactly one full copy", CUES);
+        CHECK(sub_engine_is_paused(h->eng) == 0, "resumed");
+        CHECK(hs_visible(h), "after resume the engine renders again");
+
+        /* the refeed protocol of _get_next_ext_sub(): engine flushed + subtitle_ext_needs_refeed raised, on a
+         * LOADED track (no feed running), must bring back one full copy. (Not while a feed is running: nothing
+         * flushes an external text track mid-feed today -- _seek_init() skips the flush for them.) */
+        for (int i = 0; i < 5; i++) {
+            sub_engine_flush(h->eng);
+            __atomic_store_n(&h->s->subtitle_ext_needs_refeed, 1, __ATOMIC_RELEASE);
+            char what[64];
+            snprintf(what, sizeof what, "flush + refeed flag on a loaded track, round %d", i);
+            result(hs_wait_cues(CUES, g_wait_ms) && hs_stays_at(CUES, 60), what, CUES);
+        }
         hs_destroy(h);
     }
 

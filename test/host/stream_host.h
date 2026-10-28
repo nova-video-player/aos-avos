@@ -44,6 +44,7 @@ typedef struct HOST_STREAM {
     char        video[300];
     pthread_t   sub_th, parser_th;
     int         started;
+    int         owns_engine;       /* 0: the engine came from the caller (e.g. the registry) and outlives this stream */
 } HOST_STREAM;
 
 /* Writes <dir>/movie.<tag>.srt (or .vtt) with n cues. Every cue's text starts with `label`, so the
@@ -53,6 +54,9 @@ const char *hs_write_srt(HOST_STREAM *h, const char *tag, char label, int n);
 const char *hs_write_vtt(HOST_STREAM *h, const char *tag, char label, int n);
 
 HOST_STREAM *hs_create(void);
+/* Same, on an engine owned by the caller (typically acquired from the sub-engine registry, like
+ * avos_mp_video_open() does). Starts the engine clock. Pair with hs_close_video(). */
+HOST_STREAM *hs_create_on(SUB_ENGINE *eng);
 /* Discovers the files (stream_sub_ext_check), selects track 0 and starts the subtitle thread and
  * the parser stand-in. Returns the number of external tracks found. */
 int  hs_start(HOST_STREAM *h);
@@ -60,6 +64,15 @@ int  hs_start(HOST_STREAM *h);
 int  hs_track(HOST_STREAM *h, const char *tag);
 /* Stops the threads, closes the external subtitle state like stream_stop() does, frees everything. */
 void hs_destroy(HOST_STREAM *h);
+
+/* What avos_mp_video_close() does, in its order: stop the engine clock; stop the stream (subtitle thread,
+ * parse workers via stream_sub_ext_close()); only then close the engine's track. The engine itself is NOT
+ * destroyed (the caller releases its registry reference afterwards). Frees the stream. For a stream made
+ * by hs_create_on(). */
+void hs_close_video(HOST_STREAM *h);
+/* True if the engine can currently produce a frame for the screen (something is visible). Emits a frame
+ * from the fake backend first, so "visible" means "the engine has a live track and renders it". */
+int  hs_visible(HOST_STREAM *h);
 
 /* The app's "select this subtitle track" (stream_set_subtitle_stream). Returns its result (0 = ok). */
 int  hs_select(HOST_STREAM *h, int idx);

@@ -31,7 +31,13 @@
  *   2. the double open at first play (setsubtitletrack(0) twice within milliseconds);
  *   3. reselect the track while its own feed is still running (the engine drops the old pass's cues);
  *   4. a storm of back-to-back selections of both tracks, ending on one: that track must be complete,
- *      with no cue from the other file and no duplicates.
+ *      with no cue from the other file and no duplicates;
+ *   5. selecting and feeding while the ENGINE is paused (avos_mp_video_pause() -> sub_engine_set_paused):
+ *      nothing may depend on the engine running, and the pause state must not change;
+ *   6. subtitles switched off in the middle of a feed (avos_mp_video_set_sub_track(<0) closes the engine
+ *      track with a bare sub_engine_close_track()): nothing may be visible afterwards and no cue of the
+ *      still-running feed may land; switching the same track back on must then load it completely;
+ *   7. the finished track renders.
  *
  * argv[1] = srt | vtt.
  */
@@ -115,6 +121,7 @@ int main(int argc, char **argv)
                 "double select of the same track: complete, once");
 
     /* ---- 3. reselect while the track's own feed is still running ---- */
+    int mid_feed = 0;
     fake_backend_set_feed_delay_us(150);          /* the long feed now takes ~150 ms: a window to reopen in */
     for (int i = 0; i < 6; i++) {
         hs_select(g_h, g_short);                  /* short and settled... */
@@ -127,8 +134,10 @@ int main(int argc, char **argv)
         char what[64];
         snprintf(what, sizeof what, "reopened mid-feed (engine held %d): long track still completes", mid);
         note_result(ok, 0, LONG_CUES, what);
+        mid_feed += mid > 0 && mid < LONG_CUES;
     }
     fake_backend_set_feed_delay_us(0);
+    CHECK(mid_feed == 6, "every reopen really landed in the middle of the feed (%d of 6) -- otherwise this proves nothing", mid_feed);
 
     /* ---- 4. storm of selections, no waiting between them ---- */
     fake_backend_set_feed_delay_us(20);
@@ -144,6 +153,41 @@ int main(int argc, char **argv)
     note_result(ok, 0, want, last == g_long ? "after 120 back-to-back selections the last one (long) is complete"
                                              : "after 120 back-to-back selections the last one (short) is complete");
     CHECK(fake_backend_foreign() == 0, "still no foreign cue after the storm (foreign=%d)", fake_backend_foreign());
+
+    /* ---- 5. the engine is paused (user paused / 3D UI): loading and selecting must not depend on it running ---- */
+    sub_engine_set_paused(g_h->eng, 1);
+    select_and_expect(g_short, SHORT_CUES, "engine paused: select short");
+    select_and_expect(g_long, LONG_CUES, "engine paused: select long");
+    select_and_expect(g_short, SHORT_CUES, "engine paused: select short again");
+    CHECK(sub_engine_is_paused(g_h->eng) == 1, "selecting and feeding did not change the engine's pause state");
+    sub_engine_set_paused(g_h->eng, 0);
+    CHECK(sub_engine_is_paused(g_h->eng) == 0, "resumed");
+
+    /* ---- 6. subtitles switched off while a feed is running, then switched back on ---- */
+    int off_visible = 0, off_landed = 0, off_cut = 0;
+    for (int i = 0; i < 8; i++) {
+        fake_backend_set_feed_delay_us(100);
+        hs_select(g_h, g_long);
+        for (int t = 0; t < 2000 && fake_backend_active_since_flush() < 40; t++) usleep(100);
+        int mid = fake_backend_active_since_flush();
+        sub_engine_close_track(g_h->eng);                 /* what avos_mp_video_set_sub_track(<0) does */
+        off_cut += mid > 0 && mid < LONG_CUES;
+        if (hs_visible(g_h)) off_visible++;
+        for (int t = 0; t < 60; t++) {                    /* the worker is still feeding: nothing may land */
+            if (fake_backend_active_since_flush() != -1) { off_landed++; break; }
+            usleep(1000);
+        }
+        fake_backend_set_feed_delay_us(0);
+        char what[80];
+        snprintf(what, sizeof what, "switched back on after being off mid-feed (engine held %d): long track completes", mid);
+        select_and_expect(g_long, LONG_CUES, what);
+    }
+    CHECK(off_cut == 8, "every switch-off really landed mid-feed (%d of 8)", off_cut);
+    CHECK(off_visible == 0, "nothing was visible after the track was closed (%d of 8 times something was)", off_visible);
+    CHECK(off_landed == 0, "no cue of the still-running feed landed in the engine after the track was closed (%d of 8 times one did)", off_landed);
+
+    /* ---- 7. the finished track renders ---- */
+    CHECK(hs_visible(g_h), "the finished track can render (the engine produces a frame)");
 
     hs_destroy(g_h);
     CHECK(fake_backend_live() == 0, "no engine backend leaked (%d live)", fake_backend_live());

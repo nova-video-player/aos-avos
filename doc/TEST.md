@@ -820,8 +820,7 @@ deadlock, and the concurrency tests also arm their own watchdog that prints
 Last recorded full run: 12 of 12 tests passed with `SANITIZERS=undefined`, and the six
 concurrency tests (`registry`, `switch`, `seek`, `close_open`, `style_resize`, `jni`) passed
 under `SANITIZERS=thread` (2026-10-23, Linux). That run predates the `ext_*` tests; `switch`,
-`seek` and `close_open` have since been replaced by them. Last run of the six `ext_*` tests: 6 of 6
-passed with `SANITIZERS=undefined` (2026-10-27, Linux x86_64, gcc 13.3.0, no libass); not yet run
+`seek` and `close_open` have since been replaced by them. Last run of the `ext_*` tests and `gen_token`: all passed with `SANITIZERS=undefined` (2026-10-27, Linux x86_64, gcc 13.3.0, no libass); not yet run
 under the thread or address sanitizers. Record the compiler, libass version and sanitizer with any
 later baseline.
 
@@ -837,8 +836,10 @@ later baseline.
 | `push_policy` | The 3D "content changed" push: paused only, 3D only, once per generation, no locks held |
 | `jni_listener` | Listener global-ref and thread attach/detach lifetime against a mock JavaVM, including the deferred destroy: `nativeDestroy()` while a stream still holds the engine frees nothing, and the last release frees the engine and listener ref, attaching a native releasing thread itself |
 | `registry_lifetime` | `sub_engine_registry`: an engine is destroyed exactly once and never while held; immediately if unheld, otherwise by the last release; retract never blocks; a newer publish keeps older references; the destroy callback runs outside the registry lock; stray releases are ignored; concurrent acquire/release against publish/retract |
-| `ext_reselect` (SRT, VTT) | Issue #2004 through the **real** external-subtitle stack (`stream_sub_ext.c`, `stream_subtitle.c`, `subtitle_formats.c`, the SRT/VTT parsers, the real engine) over real files: select 02, 01, 02, 01 ... each selection leaves exactly that file's cues in the engine; double open; reopen while the track's own feed runs; a storm of back-to-back selections; no cue of one file reaches the other's track. A track that is accepted but never fed is reported as a `SILENT FAILURE` (the report's `n_events=0`) |
-| `ext_interrupt` (SRT, VTT) | A pause/seek/rescan (idling the subtitle thread) landing late in a long feed leaves the track complete, not empty, and does not cache a truncated cue list (a reselect replays the cache); a storm of pauses during one feed |
+| `ext_reselect` (SRT, VTT) | Issue #2004 through the **real** external-subtitle stack (`stream_sub_ext.c`, `stream_subtitle.c`, `subtitle_formats.c`, the SRT/VTT parsers, the real engine) over real files: select 02, 01, 02, 01 ... each selection leaves exactly that file's cues in the engine; double open; reopen while the track's own feed runs; a storm of back-to-back selections; no cue of one file reaches the other's track; selecting while the engine is paused (pause state untouched); subtitles switched off mid-feed (`sub_engine_close_track()`, as `avos_mp_video_set_sub_track(<0)` does: nothing visible, no late cue) and back on; the finished track renders. A track that is accepted but never fed is reported as a `SILENT FAILURE` (the report's `n_events=0`) |
+| `ext_interrupt` (SRT, VTT) | A pause/seek/rescan (idling the subtitle thread) landing late in a long feed leaves the track complete, not empty, and does not cache a truncated cue list (a reselect replays the cache); a storm of pauses during one feed; a storm of engine pause / resume / seek / subtitle-thread pauses racing one feed (pause state always exact, one full copy afterwards, renders); the flush + refeed-flag protocol on a loaded track |
+| `ext_close_open` (SRT, VTT) | Closing a video and immediately opening another while its real parse worker is mid-feed, with the Java side rebuilding the engine (registry publish/retract in either order), in `avos_mp_video_close()`'s order: each engine destroyed exactly once and never while held, no cross-video cues, no leaked backend, no hang while the worker pool is torn down mid-feed. Replaces `close_open_parsing` |
+| `gen_token` | **Engine-level** (plain feeder threads, not `stream_sub_ext.c`): the track-generation token contract. A stale token's feed and flush never reach the new track; every cue a feeder saw accepted reached exactly one backend (none lost, none doubled) across 300 switches and `close_track()`s; nothing visible after `close_track()`; the last track loads completely and renders. Kept from `track_switch_loading` because the accepted-equals-delivered accounting cannot be observed through the real stack |
 | `ext_finish_race` (SRT, VTT) | A reopen landing exactly as a feed job finishes. The few-instruction window is opened on purpose (a wrapped `pthread_mutex_unlock` sleeps on the worker after the last cue), so it is deterministic; the test checks the window was opened every round |
 | `style_resize_paused` | Style changes and surface resizes while paused render once at the frozen clock, reach the backend as a coalesced canvas/box pair ending on the last request, survive concurrent style and resize storms, and leave the pause state untouched |
 
@@ -851,6 +852,10 @@ later baseline.
   `_seek_init()` and `stream_pause()` themselves are not executed (`_seek_init()` currently skips the
   flush for external text tracks). Only external SRT and VTT are covered; SMI/SUB/MPL2, external
   ASS and bitmap (PGS/VobSub) tracks are not.
+- Not reproduced through the real stack: a flush of an external text track **while its feed is
+  running**. `_seek_init()` used to do that (flush, then raise the refeed flag) and now skips it for
+  external text tracks; the in-flight job would finish DONE with a partial engine. Nothing else calls
+  `sub_engine_flush()`. If that skip is ever removed, add that scenario to `ext_interrupt`.
 - `ext_interrupt` and `ext_finish_race` assert that they really exercised their window (the
   feed was interrupted in at least 3/4 of the rounds; the unlock wrapper slept in every round), so
   they fail rather than pass vacuously if the code under test is reorganised. Against a revision

@@ -89,7 +89,7 @@ const char *hs_write_vtt( HOST_STREAM *h, const char *tag, char label, int n ) {
 /* ---------------------------------------------------------------------------------------------
  * The stream
  * ------------------------------------------------------------------------------------------- */
-HOST_STREAM *hs_create( void )
+static HOST_STREAM *create_common( SUB_ENGINE *eng )
 {
     HOST_STREAM *h = calloc( 1, sizeof *h );
     if( getenv( "HOST_TEST_LOG" ) ) { Debug[DBG_SUB] = 1; Debug[DBG_STREAM] = 1; }
@@ -111,11 +111,14 @@ HOST_STREAM *hs_create( void )
     s->video_time = 0;
     s->src.url   = strdup( h->video );
 
-    h->eng = sub_engine_create();
+    h->owns_engine = eng == NULL;
+    h->eng = eng ? eng : sub_engine_create();
     sub_engine_start( h->eng, fake_clock, NULL );
     s->sub_engine = h->eng;
     return h;
 }
+HOST_STREAM *hs_create( void )                   { return create_common( NULL ); }
+HOST_STREAM *hs_create_on( SUB_ENGINE *eng )     { return create_common( eng ); }
 
 /* The demuxer thread's only job as far as the subtitle code can tell: be acknowledging
  * thread-state requests (stream_set_subtitle_stream() idles it before swapping an external track). */
@@ -201,17 +204,19 @@ static void remove_dir( const char *dir )
     rmdir( dir );
 }
 
-void hs_destroy( HOST_STREAM *h )
+/* Stops the stream the way stream_stop() does and frees it; returns the engine. */
+static SUB_ENGINE *teardown( HOST_STREAM *h, int close_track )
 {
     STREAM *s = h->s;
+    SUB_ENGINE *eng = h->eng;
+    sub_engine_stop( eng );                    /* the clock's context is the STREAM: stop it before the STREAM goes */
     if( h->started ) {
         thread_state_set( &s->sub_tstate, THREAD_EXIT );
         pthread_join( h->sub_th, NULL );
         thread_state_set( &s->parser_tstate, THREAD_EXIT );
         pthread_join( h->parser_th, NULL );
     }
-    stream_sub_ext_close( s );                 /* as stream_stop() does: stops the parse workers, frees the tracks */
-    sub_engine_destroy( h->eng );
+    stream_sub_ext_close( s );                 /* stops the parse workers (in-flight jobs finish), frees the tracks */
     pthread_mutex_destroy( &s->subtitle_owner_lock );
     pthread_cond_destroy(  &s->subtitle_owner_cond );
     pthread_mutex_destroy( &s->subtitle_table_lock );
@@ -220,7 +225,31 @@ void hs_destroy( HOST_STREAM *h )
     frame_free( s->subtitle_frame );
     free( s );
     remove_dir( h->dir );
+    if( close_track ) sub_engine_close_track( eng );   /* only AFTER the stream and its threads are gone */
+    return eng;
+}
+
+void hs_close_video( HOST_STREAM *h )
+{
+    teardown( h, 1 );
     free( h );
+}
+
+void hs_destroy( HOST_STREAM *h )
+{
+    SUB_ENGINE *eng = teardown( h, 0 );
+    if( h->owns_engine ) sub_engine_destroy( eng );
+    free( h );
+}
+
+int hs_visible( HOST_STREAM *h )
+{
+    fake_backend_emit();
+    sub_engine_force_wake( h->eng );
+    usleep( 50000 );
+    uint64_t gen;
+    uint8_t px[64];
+    return sub_engine_fill_bitmap( h->eng, px, 4, 4, 16, (uint64_t)-1, /*force=*/1, &gen ) == SUB_FILL_FRAME;
 }
 
 /* ---------------------------------------------------------------------------------------------

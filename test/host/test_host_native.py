@@ -91,10 +91,22 @@ ssa_late_script  An external ASS script fed AFTER the first render: Custom (forc
                  before the first render, with an unforced run proving the comparison can fail.
 ext_reselect     (SRT and VTT) Issue #2004 through the real stack: select 02, 01, 02, 01 ... each selection
                  must leave exactly that file's cues in the engine; double open; reopen while the track's
-                 own feed is running; a storm of back-to-back selections. A track that is accepted but never
-                 fed is reported as a SILENT FAILURE (the report's n_events=0).
+                 own feed is running; a storm of back-to-back selections; selecting while the engine is
+                 paused; subtitles switched off mid-feed (nothing visible, no late cue) and back on; the
+                 finished track renders. A track that is accepted but never fed is reported as a SILENT
+                 FAILURE (the report's n_events=0).
 ext_interrupt    (SRT and VTT) A pause/seek/rescan (idling the subtitle thread) landing late in a long feed
-                 must not leave the track empty or cache a truncated cue list (reselect replays the cache).
+                 must not leave the track empty or cache a truncated cue list (reselect replays the cache);
+                 a storm of engine pause / resume / seek / subtitle-thread pauses racing one feed (pause
+                 state exact, one full copy, renders); the flush + refeed-flag protocol on a loaded track.
+ext_close_open   (SRT and VTT) Close a video and immediately open another while its real parse worker is
+                 mid-feed, with the Java side rebuilding the engine (registry publish/retract), in
+                 avos_mp_video_close()'s order: every engine destroyed exactly once and never while held, no
+                 cross-video cues, no leaked backend, no hang while the pool is torn down mid-feed.
+gen_token        ENGINE-LEVEL (plain feeder threads, not stream_sub_ext.c): the track-generation token
+                 contract -- a stale token's feed/flush never reaches the new track, every cue a feeder saw
+                 accepted reached exactly one backend (none lost, none doubled) across 300 switches and
+                 closes, nothing visible after close_track(), the last track loads and renders.
 ext_finish_race  (SRT and VTT) A reopen landing exactly as a feed job finishes. The few-instruction window is
                  opened on purpose (a wrapped pthread_mutex_unlock sleeps on the worker), so the test is
                  deterministic; it also checks the window really was opened every round.
@@ -433,6 +445,18 @@ class HostNativeTests(HostTestCase):
     def test_ext_interrupt_vtt(self):
         """#2004: pause/seek mid-feed leaves neither an empty nor a truncated VTT track (real stack)."""
         self._ext('ext_interrupt_test.c', 'vtt')
+
+    def test_ext_close_open_srt(self):
+        """Close + immediately open a video while its real SRT parse worker runs, engine rebuilt underneath."""
+        self._ext('ext_close_open_test.c', 'srt')
+
+    def test_ext_close_open_vtt(self):
+        """Close + immediately open a video while its real VTT parse worker runs, engine rebuilt underneath."""
+        self._ext('ext_close_open_test.c', 'vtt')
+
+    def test_gen_token(self):
+        """Engine track-generation token contract: stale cues dropped, accepted == delivered (engine-level)."""
+        self.build_and_run('gen_token_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
 
     def test_ext_finish_race_srt(self):
         """#2004: a reopen landing as the SRT feed job finishes still gets the track fed (real stack)."""

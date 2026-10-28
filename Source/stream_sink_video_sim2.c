@@ -675,6 +675,8 @@ static int _clear( STREAM_SINK_VIDEO *sink )
 	return 0;
 }
 
+static int sdl_close( STREAM_SINK_VIDEO *sink );
+
 static int sdl_open( STREAM_SINK_VIDEO *sink )
 {
     SINK_PRIV *p = sink->priv;
@@ -777,6 +779,10 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
                                             p->width, p->height);
     if (!p->sdl_texture) {
         serprintf("SDL_CreateTexture failed: %s\n", SDL_GetError());
+        // _open() does not call sdl_close() when this fails, so undo what was set up above:
+        // the engine reference taken by sub_engine_registry_acquire(), and the GL context that
+        // the presents above left bound to this thread (the next stream may open on another one).
+        sdl_close( sink );
         return -1;
     }
 

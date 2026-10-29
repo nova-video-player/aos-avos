@@ -11,6 +11,7 @@ class AndroidPublicBufferTest(unittest.TestCase):
     def test_cancel_reuse_and_failure_cleanup(self):
         source = C_SOURCE.read_text()
         functions = [
+            'static int android_buffer_size(',
             'static int android_public_buffer_lock(',
             'static int android_public_buffer_release(',
             'void android_surface_destroy(',
@@ -25,16 +26,19 @@ class AndroidPublicBufferTest(unittest.TestCase):
         ]
         run_c(r'''
 #include <assert.h>
+#include <limits.h>
+#include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include "''' + str(ROOT / 'external/android/libavos_android/include/android_buffer.h') + r'''"
+#include "''' + str(ROOT / 'external/android/include/21/system/core/include/system/graphics.h') + r'''"
 #define AVOSLOG(...) ((void)0)
 #define NO_ERROR 0
 #define CHECK_ERR() do { if (err != NO_ERROR) return -1; } while (0)
 #define NATIVE_WINDOW_API_MEDIA 2
 typedef int status_t;
-typedef struct { void *handle; int width, height, stride; } ANativeWindowBuffer_t;
-typedef struct { void *bits; int width, height, stride; } ANativeWindow_Buffer;
+typedef struct { void *handle; int width, height, stride, format; } ANativeWindowBuffer_t;
+typedef struct { void *bits; int width, height, stride, format; } ANativeWindow_Buffer;
 typedef struct ANativeWindow {
     int (*dequeueBuffer_DEPRECATED)(struct ANativeWindow *, ANativeWindowBuffer_t **);
     int (*lockBuffer_DEPRECATED)(struct ANativeWindow *, ANativeWindowBuffer_t *);
@@ -47,12 +51,13 @@ typedef struct gralloc_module {
 } gralloc_module_t;
 static int locks, posts, held, lock_error, post_error, allocations, fail_alloc;
 static unsigned char pixels[4096];
+static int width = 16, height = 16, stride = 16, format = HAL_PIXEL_FORMAT_RGBX_8888;
 static int ANativeWindow_lock(ANativeWindow *window, ANativeWindow_Buffer *buffer, void *dirty) {
     assert(window && buffer && !dirty && !held);
     locks++;
     if (lock_error) return -1;
     held = 1;
-    *buffer = (ANativeWindow_Buffer){pixels, 16, 16, 16};
+    *buffer = (ANativeWindow_Buffer){pixels, width, height, stride, format};
     return 0;
 }
 static int ANativeWindow_unlockAndPost(ANativeWindow *window) {
@@ -90,6 +95,7 @@ int main(void) {
     assert(!android_buffer_alloc(as, &buffer));
     void *handle = buffer.handle, *next = NULL;
     assert(handle && allocations == 2);
+    assert(buffer.size == 1024 && buffer.hal_format == HAL_PIXEL_FORMAT_RGBX_8888);
     assert(!android_buffer_cancel(as, handle));
     assert(as->anbp == handle && allocations == 2 && posts == 1);
     /* A second cancel must neither post nor free the retained descriptor. */
@@ -121,6 +127,42 @@ int main(void) {
     assert(allocations == 2);
     android_surface_destroy(&as);
     assert(!as && allocations == 0 && posts == before);
+    /* Exercise both size-reporting entry points with padded rows. */
+    as = calloc(1, sizeof(*as)); as->anw = &window;
+    int formats[] = {HAL_PIXEL_FORMAT_RGBA_8888, HAL_PIXEL_FORMAT_RGBX_8888,
+        HAL_PIXEL_FORMAT_BGRA_8888, HAL_PIXEL_FORMAT_RGB_888, HAL_PIXEL_FORMAT_RGB_565,
+        HAL_PIXEL_FORMAT_YV12, HAL_PIXEL_FORMAT_YCrCb_420_SP};
+    size_t sizes[] = {2560, 2560, 2560, 1920, 1280, 1024, 960};
+    width = 30; height = 8; stride = 80;
+    for (unsigned i = 0; i < sizeof(formats)/sizeof(*formats); i++) {
+        format = formats[i];
+        assert(!android_buffer_alloc(as, &buffer));
+        assert(buffer.size == sizes[i] && buffer.hal_format == format);
+        assert(!android_buffer_queue(as, buffer.handle));
+        assert(!android_buffer_dequeue_with_buffer(as, &next, &buffer));
+        assert(buffer.size == sizes[i] && buffer.hal_format == format);
+        assert(!android_buffer_cancel(as, next));
+    }
+    /* Reject invalid metadata after releasing the acquired window lock. */
+    format = HAL_PIXEL_FORMAT_YV12; height = 7;
+    assert(android_buffer_alloc(as, &buffer) == -1 && !held && !buffer.handle);
+    height = 8; format = 0x7fffffff;
+    assert(android_buffer_dequeue_with_buffer(as, &next, &buffer) == -1);
+    assert(!held && !next && !buffer.data && !buffer.size);
+    format = HAL_PIXEL_FORMAT_RGBX_8888;
+    width = height = stride = INT_MAX;
+    assert(android_buffer_alloc(as, &buffer) == -1 && !held);
+    size_t size;
+    assert(android_buffer_size(-1, 8, 80, format, 0, &size) == -1);
+    assert(android_buffer_size(80, 8, 30, format, 0, &size) == -1);
+    assert(android_buffer_size(30, 8, 80, 0x7fffffff, 1, &size) == 0 && size == 960);
+    assert(android_buffer_size(INT_MAX, INT_MAX, INT_MAX, 0x7fffffff, 1, &size) == -1);
+    assert(android_buffer_size(30, 8, 30, HAL_PIXEL_FORMAT_YV12, 0, &size) == -1);
+    width = height = stride = 16;
+    assert(!android_buffer_alloc(as, &buffer));
+    assert(!android_buffer_queue(as, buffer.handle));
+    android_surface_destroy(&as);
+    assert(!as && !held && allocations == 0);
     /* Partial-open cleanup must release an outstanding lock exactly once. */
     as = calloc(1, sizeof(*as)); as->anw = &window;
     assert(!android_buffer_alloc(as, &buffer));

@@ -15,6 +15,7 @@
  */
 
 #include <stdlib.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <dlfcn.h>
@@ -44,6 +45,53 @@ struct android_surface {
 	int usage;
 	gralloc_module_t const* gralloc;
 };
+
+/* Stride is in pixels for packed RGB. YV12 has separately aligned chroma
+ * rows. Vendor gralloc layouts retain their historical 4:2:0 size estimate;
+ * do not apply that estimate to an unknown public-window format. */
+static int android_buffer_size(int width, int height, int stride, int format,
+		int vendor_layout, size_t *size)
+{
+	*size = 0;
+	if (width <= 0 || height <= 0 || stride < width)
+		return -1;
+
+	uint64_t pixels = (uint64_t)stride * height;
+	uint64_t bytes;
+	switch (format) {
+	case HAL_PIXEL_FORMAT_RGBA_8888:
+	case HAL_PIXEL_FORMAT_RGBX_8888:
+	case HAL_PIXEL_FORMAT_BGRA_8888:
+		bytes = pixels * 4;
+		break;
+	case HAL_PIXEL_FORMAT_RGB_888:
+		bytes = pixels * 3;
+		break;
+	case HAL_PIXEL_FORMAT_RGB_565:
+		bytes = pixels * 2;
+		break;
+	case HAL_PIXEL_FORMAT_YV12:
+		if ((width & 1) || (height & 1) || (stride & 15))
+			return -1;
+		bytes = pixels + (((uint64_t)stride / 2 + 15) & ~UINT64_C(15)) * height;
+		break;
+	case HAL_PIXEL_FORMAT_YCrCb_420_SP:
+		if ((width & 1) || (height & 1) || (stride & 1))
+			return -1;
+		bytes = pixels + pixels / 2;
+		break;
+	default:
+		if (!vendor_layout)
+			return -1;
+		bytes = pixels * 3 / 2;
+		break;
+	}
+	/* VIDEO_FRAME stores capacity in signed int fields, also on 64-bit. */
+	if (bytes > INT_MAX)
+		return -1;
+	*size = (size_t)bytes;
+	return 0;
+}
 
 /* Public windows allow one CPU-locked buffer. Keep its descriptor stable for
  * the lifetime of the surface: the sink retains this address as its handle. */
@@ -294,14 +342,20 @@ int android_buffer_dequeue_with_buffer(android_surface_t *as, void **handle, and
 		*handle = as->anbp;
 
 		buffer->type = as->buffer_type;
-		buffer->hal_format = as->hal_format;
+		buffer->hal_format = as->anbp->format;
 		buffer->handle = as->anbp;
 		buffer->img_handle = as->anbp; //todo check
 		buffer->data = (uint8_t *) as->anbp->bits;
 		buffer->width = as->anbp->width;
 		buffer->height = as->anbp->height;
 		buffer->stride = as->anbp->stride;
-		buffer->size = buffer->height * buffer->stride * 3 / 2;
+		if (android_buffer_size(as->anbp->width, as->anbp->height,
+		    as->anbp->stride, as->anbp->format, 0, &buffer->size)) {
+			android_public_buffer_release(as, as->anbp);
+			memset(buffer, 0, sizeof(*buffer));
+			*handle = NULL;
+			return -1;
+		}
 
 	}
 	return 0;
@@ -349,12 +403,14 @@ int android_buffer_alloc(android_surface_t *as, android_buffer_t *buffer)
 		err = android_buffer_lock_data(as, anb, &data);
 		CHECK_ERR();
 		buffer->data = (uint8_t *) data;
+		buffer->hal_format = anb->format;
 		buffer->width = anb->width;
 		buffer->height = anb->height;
 		buffer->stride = anb->stride;
 	} else {
 		err = android_public_buffer_lock(as);
 		CHECK_ERR();
+		buffer->hal_format = as->anbp->format;
 		buffer->handle = as->anbp;
 		buffer->img_handle = as->anbp; //todo check
 		buffer->data = (uint8_t *) as->anbp->bits;
@@ -363,7 +419,12 @@ int android_buffer_alloc(android_surface_t *as, android_buffer_t *buffer)
 		buffer->stride = as->anbp->stride;
 	}
 
-	buffer->size = buffer->height * buffer->stride * 3 / 2;
+	if (android_buffer_size(buffer->width, buffer->height, buffer->stride,
+	    buffer->hal_format, as->gralloc != NULL, &buffer->size)) {
+		android_buffer_cancel(as, buffer->handle);
+		memset(buffer, 0, sizeof(*buffer));
+		return -1;
+	}
 	return 0;
 }
 

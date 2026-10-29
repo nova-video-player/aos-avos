@@ -125,7 +125,8 @@ android_surface_t *android_surface_create(void *surface_handle)
 {
 	android_surface_t *as = NULL;
 	ANativeWindow *anw = (ANativeWindow *)surface_handle;
-	if (!anw) return NULL;
+	if (!anw || anw->common.magic != ANDROID_NATIVE_WINDOW_MAGIC)
+		return NULL;
 	AVOSLOG("surface_handle: %p, anw: %p", surface_handle, anw);
 
 	as = (android_surface_t *) calloc(1, sizeof(android_surface_t));
@@ -133,9 +134,6 @@ android_surface_t *android_surface_create(void *surface_handle)
 		return NULL;
 
 	as->anw = anw;
-	if (as->anw->common.magic != ANDROID_NATIVE_WINDOW_MAGIC &&
-			as->anw->common.version != sizeof(ANativeWindow))
-		goto err;
 
 	hw_module_t const* module;
 	int (*hw_get_module) (const char *id, const struct hw_module_t **module) = NULL;

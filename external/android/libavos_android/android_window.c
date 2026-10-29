@@ -16,21 +16,13 @@
 
 #include <system/window.h>
 
-#define CHECK_ANW() do {\
-    if (((ANativeWindow*)anw)->common.magic != ANDROID_NATIVE_WINDOW_MAGIC &&\
-            ((ANativeWindow*)anw)->common.version != sizeof(ANativeWindow)) {\
-        return -1;\
-    }\
-} while (0)
-
 int android_window_set_buffers_rotation(void *anw, int rotation)
 {
 	uint32_t transform;
 
-	if (!anw)
+	if (!anw || ((ANativeWindow *)anw)->common.magic != ANDROID_NATIVE_WINDOW_MAGIC)
 		return -1;
 
-	CHECK_ANW();
 	switch (rotation) {
 		case 0: transform = 0; break;
 		case 90: transform = HAL_TRANSFORM_ROT_90; break;

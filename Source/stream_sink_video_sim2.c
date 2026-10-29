@@ -347,10 +347,22 @@ static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
 // resumes. sdl_texture still holds the last video frame, so the scene can be redrawn from it.
 #define VENC_IDLE_POLL_MS	40
 
-// True when the overlay would look different from what is on screen. Drawing thread only.
-static int sub_overlay_redraw_pending( SINK_PRIV *p )
+// True when the scene (video box or subtitle overlay) would look different from what is on
+// screen. Drawing thread only.
+static int scene_redraw_pending( SINK_PRIV *p )
 {
-    if( !p->video_drawn || !p->sdl_texture || !p->sub_eng ) {
+    if( !p->video_drawn || !p->sdl_texture ) {
+        return 0;
+    }
+    // A window resize (or fullscreen toggle) changes the renderer output size. Nothing else in the
+    // sim reacts to it: mainloop.c drains SDL_WINDOWEVENT_RESIZED without acting, and layout_update()
+    // only runs per frame. This needs no subtitle engine: the video box moves too.
+    int dw = 0, dh = 0;
+    if( SDL_GetRendererOutputSize( p->sdl_renderer, &dw, &dh ) == 0 && dw > 0 && dh > 0 &&
+        ( dw != p->lay_out_w || dh != p->lay_out_h ) ) {
+        return 1;                                   // layout_update() will re-fit video box and canvas
+    }
+    if( !p->sub_eng ) {
         return 0;
     }
     if( ( _sub_use_margins ? 1 : 0 ) != p->lay_margins ) {
@@ -396,7 +408,7 @@ static void venc_idle_wait( SINK_PRIV *p )
     if( pthread_cond_timedwait( &p->venc_cond, &p->venc_mutex, &ts ) != ETIMEDOUT ) {
         return;
     }
-    if( !p->venc_run || !sub_overlay_redraw_pending( p ) ) {
+    if( !p->venc_run || !scene_redraw_pending( p ) ) {
         return;
     }
     // No frame is held and none is rendered from here, so _flush() has nothing to wait for;

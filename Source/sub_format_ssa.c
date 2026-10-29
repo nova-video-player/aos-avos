@@ -706,6 +706,15 @@ static void ssa_apply_geometry(SSA_BACKEND *ctx) {
     }
 }
 
+// System font provider handed to ass_set_fonts(). Android's prebuilt libass only has fontconfig;
+// everywhere else let libass autodetect what the host build offers (CoreText for Homebrew's libass
+// on macOS, fontconfig on Linux, DirectWrite on Windows).
+#ifdef __ANDROID__
+#define SSA_FONT_PROVIDER ASS_FONTPROVIDER_FONTCONFIG
+#else
+#define SSA_FONT_PROVIDER ASS_FONTPROVIDER_AUTODETECT
+#endif
+
 static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params) {
     SSA_BACKEND *ctx = calloc(1, sizeof(SSA_BACKEND));
     if (!ctx) return -1;
@@ -789,10 +798,10 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     // that here instead of the locked internal default, SUB_DEFAULT_FONT_FAMILY
     // (see sub_style.h).
     //
-    // Note this does NOT disable fontconfig: ASS_FONTPROVIDER_FONTCONFIG is
-    // still passed as the provider for names that aren't in the custom
-    // fonts folder (e.g. an embedded ASS track's own named style), so system
-    // fonts keep working exactly as before for everything else.
+    // Note this does NOT disable the system font provider (SSA_FONT_PROVIDER,
+    // see above ssa_open()): it is still passed for names that aren't in the
+    // custom fonts folder (e.g. an embedded ASS track's own named style), so
+    // system fonts keep working exactly as before for everything else.
     char default_font[256] = SUB_DEFAULT_FONT_FAMILY;
     int resolved_ok = 0;
     if (params->default_font_name && params->default_font_name[0] &&
@@ -827,7 +836,7 @@ static int ssa_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     DBG serprintf("SUB_FONTS: requesting default/fallback family '%s' from libass "
          "(custom fonts folder %s)\n", default_font,
          (params->fonts_dir && params->fonts_dir[0]) ? "ACTIVE" : "not set");
-    ass_set_fonts(ctx->renderer, NULL, default_font, ASS_FONTPROVIDER_FONTCONFIG, NULL, 1);
+    ass_set_fonts(ctx->renderer, NULL, default_font, SSA_FONT_PROVIDER, NULL, 1);
     // ass_set_fonts() itself doesn't return whether default_font actually
     // resolved to something -- that only becomes visible the first time
     // libass tries to RENDER text and has to pick a face, at which point it

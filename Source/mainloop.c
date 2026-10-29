@@ -24,6 +24,7 @@
 
 #ifdef CONFIG_FB_QVFB
 #include <SDL2/SDL.h>
+#include "stream_sink_video.h"
 #endif
 
 #define MAX_TIMERS 32
@@ -163,6 +164,18 @@ void mainloop_enter( void )
             case SDLK_ESCAPE:
             case SDLK_q:
                 quit = 1;
+                break;
+            case SDLK_F11:
+                if( !event.key.repeat ) {
+                    stream_sink_video_sim_toggle_fullscreen();
+                }
+                break;
+            case SDLK_f:
+                // plain "f" only: on macOS Ctrl+Cmd+F is SDL's own "Toggle Full Screen" menu
+                // item, so it must not also toggle here
+                if( !( event.key.keysym.mod & ( KMOD_CTRL | KMOD_GUI | KMOD_ALT ) ) && !event.key.repeat ) {
+                    stream_sink_video_sim_toggle_fullscreen();
+                }
                 break;
             default:
                 break;

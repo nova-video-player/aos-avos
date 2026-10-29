@@ -29,11 +29,15 @@
 #include "frame_q.h"
 #include "image.h"
 #include "athread.h"
+#include "sub_engine.h"
+#include "sub_engine_registry.h"
 
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 
+#include <errno.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef CONFIG_STREAM
 #ifdef CONFIG_FB_QVFB
@@ -56,8 +60,36 @@ typedef struct {
 
 static SDL_GLOBAL_CONTEXT _sdl_global = {NULL, NULL};
 
+static int sdl_window_is_fullscreen( SDL_Window *w )
+{
+    // SDL_WINDOW_FULLSCREEN_DESKTOP includes the SDL_WINDOW_FULLSCREEN bit
+    return w && ( SDL_GetWindowFlags( w ) & SDL_WINDOW_FULLSCREEN ) != 0;
+}
+
+// Borderless desktop fullscreen, not a display mode change, so it also behaves on scaled
+// Wayland displays. The next frame (or the paused redraw) picks the new size up through
+// layout_update(). On macOS this uses native Spaces fullscreen, same as SDL's own Ctrl+Cmd+F.
+void stream_sink_video_sim_toggle_fullscreen( void )
+{
+    SDL_Window *w = _sdl_global.window;
+    if( !w ) {
+        return;
+    }
+    const int on = !sdl_window_is_fullscreen( w );
+    if( SDL_SetWindowFullscreen( w, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0 ) != 0 ) {
+        serprintf("fullscreen %s failed: %s\n", on ? "on" : "off", SDL_GetError());
+    }
+}
+
+// Mirror of the Android "use subtitle margins" preference (SurfaceController.mUseSubMargins):
+// 1 = the subtitle canvas is extended into the top/bottom letterbox bars, 0 = it is clipped
+// to the video's own on-screen box. Left/right bars are never used, as on Android.
+// Toggle at runtime with the debug command "subm".
+static int _sub_use_margins = 1;
+
 #ifdef DEBUG_MSG
 DECLARE_DEBUG_TOGGLE("sfsf", _sink_force_single_frame );
+DECLARE_DEBUG_TOGGLE("subm", _sub_use_margins );
 #endif
 
 typedef struct SINK_PRIV {
@@ -94,6 +126,23 @@ typedef struct SINK_PRIV {
     int sdl_fullscreen;
     int sdl_window_width, sdl_window_height;
     int sdl_renderer_is_gl;	// renderer owns an OpenGL/GLES context (bound to one thread at a time)
+
+	// --- subtitle overlay (CPU-blend pull, same path Android uses for 3D) ---
+	// Everything below is touched only by the thread that draws (venc_thread), except that
+	// sdl_open()/sdl_close() set up and tear down before/after that thread runs.
+	SUB_ENGINE	*sub_eng;		// registry reference, released in sdl_close()
+	SDL_Texture	*sub_tex;		// RGBA32, exactly the canvas size
+	uint8_t		*sub_pix;		// CPU staging buffer the engine blends into
+	int		sub_w, sub_h;		// canvas size == sub_tex size == sub_pix size
+	uint64_t	sub_gen;		// generation last pulled; UINT64_MAX = nothing valid
+	int		sub_visible;		// last pull said FRAME (1) or CLEAR (0)
+	SDL_Rect	video_rect;		// where the video is drawn, in renderer output pixels
+	SDL_Rect	sub_rect;		// where the subtitle canvas is drawn, same space
+	int		lay_out_w, lay_out_h;	// layout cache key: renderer output size ...
+	int		lay_vw, lay_vh;		// ... video size ...
+	int		lay_margins;		// ... and margins setting
+	int		video_drawn;		// sdl_texture holds a video frame that has been presented, so the
+						// scene can be redrawn without a new frame (paused: see venc_idle_wait)
 
 	// venc_thread drops venc_mutex while it sleeps for a frame and while it renders one.
 	// _flush() runs in that window (seek) and hands every frame, including the one the thread
@@ -148,6 +197,146 @@ static void sdl_fit_window_size( SINK_PRIV *p, int *out_w, int *out_h )
     *out_h = h > 0 ? h : 1;
 }
 
+// ---------------------------------------------------------------------------------------
+// Subtitle overlay.
+//
+// There is no native window / EGL surface in the sim, so the engine's GL path is never
+// attached. Instead we use the CPU-blend pull Android uses for 3D (SubtitleEngine.java's
+// draw3DSubtitlesInternal): sub_engine_fill_bitmap() blends the current frame into an RGBA
+// buffer and tells us, by generation, whether it is UNCHANGED / CLEAR / FRAME. The buffer is
+// uploaded to an SDL texture only on FRAME; every other video frame costs one SDL_RenderCopy.
+//
+// Geometry mirrors SurfaceController.updateSurface() (ORIGINAL aspect mode, no cutouts):
+//   video box   = the video fitted into the renderer output, centred (letterbox/pillarbox)
+//   canvas      = _sub_use_margins && top/bottom bars exist ? full output height : video box
+//                 (width is always the video box's: left/right bars are never used)
+//   video box within the canvas = (0, (dh - dch)/2) when extended, else (0, 0)
+// The engine needs both the canvas size and that box (GFX PGS/VobSub placement, libass
+// frame size); see sub_engine_set_video_box() in sub_engine.h.
+// ---------------------------------------------------------------------------------------
+
+static void sub_overlay_free( SINK_PRIV *p )
+{
+    if( p->sub_tex ) {
+        SDL_DestroyTexture( p->sub_tex );
+        p->sub_tex = NULL;
+    }
+    free( p->sub_pix );
+    p->sub_pix = NULL;
+    p->sub_w = p->sub_h = 0;
+    p->sub_gen = UINT64_MAX;
+    p->sub_visible = 0;
+}
+
+// Recomputes video_rect / sub_rect and pushes canvas + box to the engine, but only when the
+// renderer output size, the video size or the margins setting changed. Runs on the drawing
+// thread, so the SDL texture calls below happen on the thread that owns the GL context.
+static void layout_update( SINK_PRIV *p )
+{
+    int dw = 0, dh = 0;
+    if( SDL_GetRendererOutputSize( p->sdl_renderer, &dw, &dh ) != 0 || dw <= 0 || dh <= 0 ) {
+        return;
+    }
+    const int margins = _sub_use_margins ? 1 : 0;
+    if( dw == p->lay_out_w && dh == p->lay_out_h && p->width == p->lay_vw && p->height == p->lay_vh &&
+        margins == p->lay_margins ) {
+        return;
+    }
+
+    // video box: fit the video into the output, keeping its aspect ratio
+    int dcw, dch;
+    if( (long long)dw * p->height < (long long)dh * p->width ) {
+        dcw = dw;                                              // display narrower: bars top/bottom
+        dch = (int)( (long long)dw * p->height / p->width );
+    } else {
+        dch = dh;                                              // display wider (or equal): bars left/right
+        dcw = (int)( (long long)dh * p->width / p->height );
+    }
+    if( dcw < 1 ) dcw = 1;
+    if( dch < 1 ) dch = 1;
+    p->video_rect.x = ( dw - dcw ) / 2;
+    p->video_rect.y = ( dh - dch ) / 2;
+    p->video_rect.w = dcw;
+    p->video_rect.h = dch;
+
+    // canvas: extend vertically into the bars only when they exist (willStretchY)
+    const int extend = margins && dch < dh;
+    p->sub_rect = extend ? (SDL_Rect){ p->video_rect.x, 0, dcw, dh } : p->video_rect;
+
+    p->lay_out_w = dw;  p->lay_out_h = dh;
+    p->lay_vw = p->width;  p->lay_vh = p->height;
+    p->lay_margins = margins;
+
+    SDL_RenderSetLogicalSize( p->sdl_renderer, 0, 0 );         // we position in output pixels now
+
+    // This is the layout of the whole scene (video box and subtitle canvas), so it is logged as
+    // such, before the engine part below: that can wait for a render, and does not run at all
+    // when no engine is published.
+    if( p->sub_eng ) {
+        serprintf("layout: output %dx%d  video box (%d,%d %dx%d)  sub canvas (%d,%d %dx%d)  margins=%d\n",
+                  dw, dh, p->video_rect.x, p->video_rect.y, dcw, dch,
+                  p->sub_rect.x, p->sub_rect.y, p->sub_rect.w, p->sub_rect.h, margins );
+    } else {
+        serprintf("layout: output %dx%d  video box (%d,%d %dx%d)  no subtitle engine\n",
+                  dw, dh, p->video_rect.x, p->video_rect.y, dcw, dch );
+    }
+
+    if( !p->sub_eng ) return;
+
+    if( !p->sub_tex || p->sub_rect.w != p->sub_w || p->sub_rect.h != p->sub_h ) {
+        sub_overlay_free( p );
+        p->sub_w = p->sub_rect.w;
+        p->sub_h = p->sub_rect.h;
+        p->sub_pix = calloc( (size_t)p->sub_w * p->sub_h, 4 );
+        p->sub_tex = SDL_CreateTexture( p->sdl_renderer, SDL_PIXELFORMAT_RGBA32,
+                                        SDL_TEXTUREACCESS_STREAMING, p->sub_w, p->sub_h );
+        if( !p->sub_pix || !p->sub_tex ) {
+            serprintf("sub overlay: cannot create %dx%d texture: %s\n", p->sub_w, p->sub_h, SDL_GetError());
+            sub_overlay_free( p );
+            return;
+        }
+        SDL_SetTextureBlendMode( p->sub_tex, SDL_BLENDMODE_BLEND );
+    }
+
+    // canvas first, then the box: the engine applies the pair together on its next poll
+    sub_engine_surface_resized( p->sub_eng, p->sub_w, p->sub_h );
+    sub_engine_set_video_box( p->sub_eng, p->video_rect.x - p->sub_rect.x, p->video_rect.y - p->sub_rect.y, dcw, dch );
+
+    // What we last pulled was laid out for the old geometry: forget it, then give the render
+    // thread a moment to re-render for the new one (same wake+wait the JNI sync path does).
+    p->sub_gen = UINT64_MAX;
+    uint64_t target = sub_engine_force_wake_and_get_generation( p->sub_eng );
+    sub_engine_wait_for_render( p->sub_eng, target, 50 );
+}
+
+static void sub_overlay_draw( SINK_PRIV *p )
+{
+    if( !p->sub_eng || !p->sub_tex || !p->sub_pix ) return;
+
+    uint64_t gen = 0;
+    SUB_FILL_RESULT r = sub_engine_fill_bitmap( p->sub_eng, p->sub_pix, p->sub_w, p->sub_h, p->sub_w * 4,
+                                                p->sub_gen, 0, &gen );
+    switch( r ) {
+    case SUB_FILL_FRAME:
+        SDL_UpdateTexture( p->sub_tex, NULL, p->sub_pix, p->sub_w * 4 );
+        p->sub_visible = 1;
+        p->sub_gen = gen;
+        break;
+    case SUB_FILL_CLEAR:
+        p->sub_visible = 0;            // pixels untouched; just stop drawing the texture
+        p->sub_gen = gen;
+        break;
+    case SUB_FILL_UNCHANGED:
+        p->sub_gen = gen;
+        break;
+    default:                           // SUB_FILL_ERROR: decided nothing, keep what we have
+        break;
+    }
+    if( p->sub_visible ) {
+        SDL_RenderCopy( p->sdl_renderer, p->sub_tex, NULL, &p->sub_rect );
+    }
+}
+
 static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
 {
     static int errors = 0;
@@ -160,21 +349,102 @@ static void blit_video_frame( SINK_PRIV *p, VIDEO_FRAME *frame )
         return;
     }
 
+    layout_update( p );
+
     av_image_fill_arrays(data, linesize,
                              indata,
                              AV_PIX_FMT_BGR32,
                              p->width,
                              p->height, 1);
 
+    SDL_SetRenderDrawColor( p->sdl_renderer, 0, 0, 0, 255 );
     if( SDL_UpdateTexture(p->sdl_texture, NULL, data[0], linesize[0]) != 0 ||
         SDL_RenderClear(p->sdl_renderer) != 0 ||
-        SDL_RenderCopy(p->sdl_renderer, p->sdl_texture, NULL, NULL) != 0 ) {
+        SDL_RenderCopy(p->sdl_renderer, p->sdl_texture, NULL, &p->video_rect) != 0 ) {
         if( errors++ < 10 ) {
             serprintf("blit_video_frame: SDL error: %s\n", SDL_GetError());
         }
         return;
     }
+    sub_overlay_draw( p );
     SDL_RenderPresent(p->sdl_renderer);
+    p->video_drawn = 1;
+}
+
+// While paused no frame reaches venc_thread, so blit_video_frame() never runs and a subtitle
+// change (vss <n>, vss -1) or the margins toggle (subm) would stay invisible until playback
+// resumes. sdl_texture still holds the last video frame, so the scene can be redrawn from it.
+#define VENC_IDLE_POLL_MS	40
+
+// True when the scene (video box or subtitle overlay) would look different from what is on
+// screen. Drawing thread only.
+static int scene_redraw_pending( SINK_PRIV *p )
+{
+    if( !p->video_drawn || !p->sdl_texture ) {
+        return 0;
+    }
+    // A window resize (or fullscreen toggle) changes the renderer output size. Nothing else in the
+    // sim reacts to it: mainloop.c drains SDL_WINDOWEVENT_RESIZED without acting, and layout_update()
+    // only runs per frame. This needs no subtitle engine: the video box moves too.
+    int dw = 0, dh = 0;
+    if( SDL_GetRendererOutputSize( p->sdl_renderer, &dw, &dh ) == 0 && dw > 0 && dh > 0 &&
+        ( dw != p->lay_out_w || dh != p->lay_out_h ) ) {
+        return 1;                                   // layout_update() will re-fit video box and canvas
+    }
+    if( !p->sub_eng ) {
+        return 0;
+    }
+    if( ( _sub_use_margins ? 1 : 0 ) != p->lay_margins ) {
+        return 1;                                   // layout_update() will re-fit the canvas
+    }
+    if( !p->sub_tex || !p->sub_pix ) {
+        return 0;
+    }
+    return sub_engine_get_frame_generation( p->sub_eng ) != p->sub_gen;
+}
+
+// Same scene as blit_video_frame(), minus the texture upload of a new video frame.
+static void redraw_last_frame( SINK_PRIV *p )
+{
+    layout_update( p );
+
+    SDL_SetRenderDrawColor( p->sdl_renderer, 0, 0, 0, 255 );
+    if( SDL_RenderClear( p->sdl_renderer ) != 0 ||
+        SDL_RenderCopy( p->sdl_renderer, p->sdl_texture, NULL, &p->video_rect ) != 0 ) {
+        return;
+    }
+    sub_overlay_draw( p );
+    SDL_RenderPresent( p->sdl_renderer );
+}
+
+// Called with venc_mutex held and no frame queued. Blocks until _put()/_flush()/_close() signal
+// venc_cond, like a plain pthread_cond_wait(). Once a frame is on screen it also wakes every
+// VENC_IDLE_POLL_MS and redraws if the subtitle state changed in the meantime.
+static void venc_idle_wait( SINK_PRIV *p )
+{
+    if( !p->video_drawn ) {
+        pthread_cond_wait( &p->venc_cond, &p->venc_mutex );
+        return;
+    }
+
+    struct timespec ts;
+    clock_gettime( CLOCK_REALTIME, &ts );           // the default clock of a pthread_cond_t, Linux and macOS
+    ts.tv_nsec += VENC_IDLE_POLL_MS * 1000000L;
+    if( ts.tv_nsec >= 1000000000L ) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    if( pthread_cond_timedwait( &p->venc_cond, &p->venc_mutex, &ts ) != ETIMEDOUT ) {
+        return;
+    }
+    if( !p->venc_run || !scene_redraw_pending( p ) ) {
+        return;
+    }
+    // No frame is held and none is rendered from here, so _flush() has nothing to wait for;
+    // SDL is only ever used on this thread, which owns the GL context.
+    pthread_mutex_unlock( &p->venc_mutex );
+    redraw_last_frame( p );
+    pthread_mutex_lock( &p->venc_mutex );
 }
 
 
@@ -219,7 +489,7 @@ DBGS serprintf("venc_thread::Starting\r\n");
 		
 		// get frame
 		while (p->venc_run && !(p->out_frame = frame_q_get( &p->full )) ) {
-			pthread_cond_wait(&p->venc_cond, &p->venc_mutex);
+			venc_idle_wait( p );
 		}
  
 		if (!p->out_frame) {
@@ -446,6 +716,8 @@ static int _clear( STREAM_SINK_VIDEO *sink )
 	return 0;
 }
 
+static int sdl_close( STREAM_SINK_VIDEO *sink );
+
 static int sdl_open( STREAM_SINK_VIDEO *sink )
 {
     SINK_PRIV *p = sink->priv;
@@ -479,7 +751,8 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
         // Reuse global renderer
         p->sdl_window = _sdl_global.window;
         p->sdl_renderer = _sdl_global.renderer;
-        if (!p->sdl_fullscreen) {
+        // leave a fullscreen window alone: resizing it would only change the size it returns to
+        if (!p->sdl_fullscreen && !sdl_window_is_fullscreen(p->sdl_window)) {
             SDL_SetWindowSize(p->sdl_window, win_w, win_h);
         }
     } else {
@@ -523,8 +796,19 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
               SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?",
               info.name ? info.name : "?", win_w, win_h);
 
-    // letterbox the video into whatever size the window currently has
-    SDL_RenderSetLogicalSize(p->sdl_renderer, p->width, p->height);
+    // The video box and subtitle canvas are positioned in output pixels by layout_update()
+    // (it has to, to reach into the letterbox bars), so no SDL logical size. The renderer is
+    // shared across streams: clear any logical size an earlier stream may have left behind.
+    SDL_RenderSetLogicalSize(p->sdl_renderer, 0, 0);
+    p->lay_out_w = p->lay_out_h = 0;                 // force layout_update() on the first frame
+    p->video_rect = (SDL_Rect){ 0, 0, p->width, p->height };
+    p->sub_rect = p->video_rect;
+    p->sub_gen = UINT64_MAX;
+    p->sub_visible = 0;
+    p->video_drawn = 0;                              // the new sdl_texture has no frame in it yet
+    // The sim's subtitle engine is created and published by cli.c; hold a reference for as
+    // long as this sink is open. NULL (no engine published) just means no overlay.
+    p->sub_eng = sub_engine_registry_acquire();
 
     // present once right away: Wayland doesn't map a window until it has a buffer
     SDL_SetRenderDrawColor(p->sdl_renderer, 0, 0, 0, 255);
@@ -537,6 +821,10 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
                                             p->width, p->height);
     if (!p->sdl_texture) {
         serprintf("SDL_CreateTexture failed: %s\n", SDL_GetError());
+        // _open() does not call sdl_close() when this fails, so undo what was set up above:
+        // the engine reference taken by sub_engine_registry_acquire(), and the GL context that
+        // the presents above left bound to this thread (the next stream may open on another one).
+        sdl_close( sink );
         return -1;
     }
 
@@ -581,6 +869,10 @@ DBGS serprintf("stream_sink_video_open: WxH %d x %d  num_frames %d  cached %d\r\
 
 	// Initialize SDL BEFORE starting the venc_thread to avoid race condition
 	if( sdl_open(sink) ) {
+		// sink->is_open is still 0, so _close() will refuse to run: undo what _open() did
+		free_frames( p );
+		pthread_cond_destroy( &p->venc_cond );
+		pthread_mutex_destroy( &p->venc_mutex );
 		return 1;
 	}
 
@@ -599,7 +891,12 @@ DBGS serprintf("stream_sink_video_open: WxH %d x %d  num_frames %d  cached %d\r\
 static int sdl_close( STREAM_SINK_VIDEO *sink ) {
     SINK_PRIV *p = sink->priv;
 
-    // Only destroy the texture - keep window and renderer for next stream
+    // Only destroy the textures - keep window and renderer for next stream
+    sub_overlay_free( p );
+    if (p->sub_eng) {
+        sub_engine_registry_release( p->sub_eng );
+        p->sub_eng = NULL;
+    }
     if (p->sdl_texture) {
         SDL_DestroyTexture(p->sdl_texture);
         p->sdl_texture = NULL;

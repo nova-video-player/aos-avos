@@ -357,7 +357,12 @@ DBG {
 	serprintf("count %d\n", sub_array->cnt );
 	int i;
 	for( i = 0; i < sub_array->cnt; i++ ) {
-		serprintf("subs for %d [%s]\n", i, sub_array->converted[i]->identifier );
+		uni_sub *u = sub_array->converted[i];
+		const char *path = u->spex && u->spex->filename ? u->spex->filename : "?";
+		const char *base = strrchr( path, '/' );
+		serprintf("subs for %d: file [%s]  lang [%s]  format [%s]\n", i,
+		          base ? base + 1 : path, u->identifier ? u->identifier : "?",
+		          u->spex && u->spex->format && u->spex->format->name ? u->spex->format->name : "?" );
 	}
 }
 	return sub_array;

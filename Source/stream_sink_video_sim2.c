@@ -248,6 +248,18 @@ static void layout_update( SINK_PRIV *p )
 
     SDL_RenderSetLogicalSize( p->sdl_renderer, 0, 0 );         // we position in output pixels now
 
+    // This is the layout of the whole scene (video box and subtitle canvas), so it is logged as
+    // such, before the engine part below: that can wait for a render, and does not run at all
+    // when no engine is published.
+    if( p->sub_eng ) {
+        serprintf("layout: output %dx%d  video box (%d,%d %dx%d)  sub canvas (%d,%d %dx%d)  margins=%d\n",
+                  dw, dh, p->video_rect.x, p->video_rect.y, dcw, dch,
+                  p->sub_rect.x, p->sub_rect.y, p->sub_rect.w, p->sub_rect.h, margins );
+    } else {
+        serprintf("layout: output %dx%d  video box (%d,%d %dx%d)  no subtitle engine\n",
+                  dw, dh, p->video_rect.x, p->video_rect.y, dcw, dch );
+    }
+
     if( !p->sub_eng ) return;
 
     if( !p->sub_tex || p->sub_rect.w != p->sub_w || p->sub_rect.h != p->sub_h ) {
@@ -274,10 +286,6 @@ static void layout_update( SINK_PRIV *p )
     p->sub_gen = UINT64_MAX;
     uint64_t target = sub_engine_force_wake_and_get_generation( p->sub_eng );
     sub_engine_wait_for_render( p->sub_eng, target, 50 );
-
-serprintf("sub overlay: output %dx%d video box (%d,%d %dx%d) canvas (%d,%d %dx%d) margins=%d\n",
-          dw, dh, p->video_rect.x, p->video_rect.y, dcw, dch,
-          p->sub_rect.x, p->sub_rect.y, p->sub_rect.w, p->sub_rect.h, margins );
 }
 
 static void sub_overlay_draw( SINK_PRIV *p )

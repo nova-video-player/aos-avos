@@ -38,11 +38,40 @@ typedef int32_t status_t;
 struct android_surface {
 	ANativeWindow *anw;
 	ANativeWindow_Buffer *anbp;
+	int public_buffer_locked;
 	int buffer_type;
 	int hal_format;
 	int usage;
 	gralloc_module_t const* gralloc;
 };
+
+/* Public windows allow one CPU-locked buffer. Keep its descriptor stable for
+ * the lifetime of the surface: the sink retains this address as its handle. */
+static int android_public_buffer_lock(android_surface_t *as)
+{
+	if (as->public_buffer_locked)
+		return -1;
+	if (!as->anbp) {
+		as->anbp = calloc(1, sizeof(*as->anbp));
+		if (!as->anbp)
+			return -1;
+	}
+	int err = ANativeWindow_lock(as->anw, as->anbp, NULL);
+	if (!err)
+		as->public_buffer_locked = 1;
+	return err;
+}
+
+static int android_public_buffer_release(android_surface_t *as, void *handle)
+{
+	if (!as->public_buffer_locked || handle != as->anbp)
+		return -1;
+	/* There is no public cancel API. Even cancellation must post the buffer.
+	 * unlockAndPost consumes the lock, including when queueing fails; do not
+	 * try to unlock it a second time from the caller's error cleanup. */
+	as->public_buffer_locked = 0;
+	return ANativeWindow_unlockAndPost(as->anw);
+}
 
 android_surface_t *android_surface_create(void *surface_handle)
 {
@@ -85,6 +114,9 @@ void android_surface_destroy(android_surface_t **pas)
 #ifdef MEM_OPTIM_HACK
 	mem_optim_hack_disable(as);
 #endif
+	if (!as->gralloc && as->public_buffer_locked)
+		android_public_buffer_release(as, as->anbp);
+	free(as->anbp);
 	free(as);
 	*pas = NULL;
 }
@@ -163,6 +195,8 @@ int android_buffer_close(android_surface_t *as)
 		return -1;
 	if (as->gralloc)
 		native_window_api_disconnect(as->anw, NATIVE_WINDOW_API_MEDIA);
+	else if (as->public_buffer_locked)
+		return android_public_buffer_release(as, as->anbp);
 	return 0;
 }
 
@@ -228,7 +262,7 @@ int android_buffer_dequeue(android_surface_t *as, void **handle)
 		err = android_buffer_lock_data(as, anb, NULL);
 		CHECK_ERR();
 	} else {
-		err = ANativeWindow_lock(as->anw, as->anbp, NULL);
+		err = android_public_buffer_lock(as);
 		CHECK_ERR();
 		*handle = as->anbp;
 	}
@@ -255,7 +289,7 @@ int android_buffer_dequeue_with_buffer(android_surface_t *as, void **handle, and
 		err = android_buffer_lock_data(as, anb, NULL);
 		CHECK_ERR();
 	} else {
-		err = ANativeWindow_lock(as->anw, as->anbp, NULL);
+		err = android_public_buffer_lock(as);
 		CHECK_ERR();
 		*handle = as->anbp;
 
@@ -289,7 +323,7 @@ int android_buffer_queue(android_surface_t *as, void *handle)
 		err = as->anw->queueBuffer_DEPRECATED(as->anw, anb);
 		CHECK_ERR();
 	} else {
-		err = ANativeWindow_unlockAndPost(as->anw);
+		err = android_public_buffer_release(as, handle);
 		CHECK_ERR();
 	}
 	return 0;
@@ -319,9 +353,7 @@ int android_buffer_alloc(android_surface_t *as, android_buffer_t *buffer)
 		buffer->height = anb->height;
 		buffer->stride = anb->stride;
 	} else {
-		if (!as->anbp)
-			as->anbp = calloc(1, sizeof(ANativeWindow_Buffer));
-		err = ANativeWindow_lock(as->anw, as->anbp, NULL);
+		err = android_public_buffer_lock(as);
 		CHECK_ERR();
 		buffer->handle = as->anbp;
 		buffer->img_handle = as->anbp; //todo check
@@ -358,10 +390,8 @@ int android_buffer_cancel(android_surface_t *as, void *handle)
 		CHECK_ERR();
 	} else {
 		AVOSLOG("using public native window\n");
-		err = ANativeWindow_unlockAndPost(as->anw);
+		err = android_public_buffer_release(as, handle);
 		CHECK_ERR();
-		free(as->anbp);
-		as->anbp = NULL;
 	}
 
 	return 0;

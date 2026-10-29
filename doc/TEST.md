@@ -817,12 +817,16 @@ sanitizer, so a pasted run carries its own environment. Colour is used only on a
 deadlock, and the concurrency tests also arm their own watchdog that prints
 `FAIL: watchdog expired` instead of hanging.
 
-Last recorded full run: 12 of 12 tests passed with `SANITIZERS=undefined`, and the six
-concurrency tests (`registry`, `switch`, `seek`, `close_open`, `style_resize`, `jni`) passed
-under `SANITIZERS=thread` (2026-10-23, Linux). That run predates the `ext_*` tests; `switch`,
-`seek` and `close_open` have since been replaced by them. Last run of the `ext_*` tests and `gen_token`: all passed with `SANITIZERS=undefined` (2026-10-27, Linux x86_64, gcc 13.3.0, no libass); not yet run
-under the thread or address sanitizers. Record the compiler, libass version and sanitizer with any
-later baseline.
+Last recorded runs of the `ext_*` tests and `gen_token` (2026-10-29, Linux x86_64, on v6.6 `0033b6d`):
+all pass with `SANITIZERS=undefined` (full host runner on gcc 16.2, libass 0.17.5: 19 of 19) and with
+`SANITIZERS=address,undefined` (2026-10-27, previous v6.6 base: 9 of 9). Under `SANITIZERS=thread`
+`ext_close_open_srt`, `ext_interrupt_srt/vtt` and `ext_reselect_srt/vtt` exit 66 even though every
+functional check passes; `ext_finish_race_*`, `ext_close_open_vtt` and `gen_token` passed. The reports are
+data races in the code under test, not in the tests: `s->subtitle` is written under `subtitle_table_lock`
+(`_commit_subtitle_selection`) and read without it by the parse workers, and the thread-state flags
+(`thread_state_get()` / `thread_state_asked()` in `athread.h`) are read without the lock their
+writers hold. See the PR for #2004. Record the compiler, libass version and sanitizer with any later
+baseline.
 
 ### What is covered
 

@@ -80,6 +80,19 @@ Debug commands, typed in `./build/avsh` (they also appear in `help`):
 | `subm`     | toggle "use margins": extend the subtitle canvas into the top/bottom letterbox bars |
 | `dbgsub n` | subtitle logging: 1 = track list and cue feeding, 2 = also idx cue times and packet headers |
 
+## Window keys
+
+With the video window focused:
+
+| Key | What it does |
+|-----|--------------|
+| `F11` or `f` | toggle borderless (desktop) fullscreen |
+| `Ctrl+Cmd+F` (macOS) | the same, through SDL's own "Toggle Full Screen" menu item; F11 is usually taken by macOS |
+| `Esc` or `q` | quit |
+
+Fullscreen is borderless desktop fullscreen, not a display mode change. The video box and
+the subtitle canvas are re-fitted to the new window size, also while paused.
+
 ## CI and tests
 
 `.github/workflows/avos-sim-build.yml` builds this target on `ubuntu-latest` and

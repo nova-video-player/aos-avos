@@ -98,9 +98,15 @@ static inline int stream_sink_video_set_output( struct STREAM_SINK_VIDEO *sink, 
 
 static inline int stream_sink_video_allocates_frames( struct STREAM_SINK_VIDEO *sink )
 {
-	if( !sink || !sink->allocates_frames ) 
+	if( !sink || !sink->allocates_frames )
 		return 0;
 	return 1;
-} 
+}
+
+#ifdef CONFIG_FB_QVFB
+// Sim only (stream_sink_video_sim2.c): toggles the SDL window between windowed and desktop
+// fullscreen. Call it from the thread that pumps SDL events. Does nothing before a window exists.
+void stream_sink_video_sim_toggle_fullscreen( void );
+#endif
 
 #endif

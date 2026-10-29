@@ -60,6 +60,27 @@ typedef struct {
 
 static SDL_GLOBAL_CONTEXT _sdl_global = {NULL, NULL};
 
+static int sdl_window_is_fullscreen( SDL_Window *w )
+{
+    // SDL_WINDOW_FULLSCREEN_DESKTOP includes the SDL_WINDOW_FULLSCREEN bit
+    return w && ( SDL_GetWindowFlags( w ) & SDL_WINDOW_FULLSCREEN ) != 0;
+}
+
+// Borderless desktop fullscreen, not a display mode change, so it also behaves on scaled
+// Wayland displays. The next frame (or the paused redraw) picks the new size up through
+// layout_update(). On macOS this uses native Spaces fullscreen, same as SDL's own Ctrl+Cmd+F.
+void stream_sink_video_sim_toggle_fullscreen( void )
+{
+    SDL_Window *w = _sdl_global.window;
+    if( !w ) {
+        return;
+    }
+    const int on = !sdl_window_is_fullscreen( w );
+    if( SDL_SetWindowFullscreen( w, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0 ) != 0 ) {
+        serprintf("fullscreen %s failed: %s\n", on ? "on" : "off", SDL_GetError());
+    }
+}
+
 // Mirror of the Android "use subtitle margins" preference (SurfaceController.mUseSubMargins):
 // 1 = the subtitle canvas is extended into the top/bottom letterbox bars, 0 = it is clipped
 // to the video's own on-screen box. Left/right bars are never used, as on Android.
@@ -730,7 +751,8 @@ static int sdl_open( STREAM_SINK_VIDEO *sink )
         // Reuse global renderer
         p->sdl_window = _sdl_global.window;
         p->sdl_renderer = _sdl_global.renderer;
-        if (!p->sdl_fullscreen) {
+        // leave a fullscreen window alone: resizing it would only change the size it returns to
+        if (!p->sdl_fullscreen && !sdl_window_is_fullscreen(p->sdl_window)) {
             SDL_SetWindowSize(p->sdl_window, win_w, win_h);
         }
     } else {

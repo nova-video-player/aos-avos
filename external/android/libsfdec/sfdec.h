@@ -28,9 +28,9 @@ typedef struct sfdec sfdec_t;
 typedef struct sfbuf sfbuf_t;
 
 typedef enum sfdec_type {
-	SFDEC_TYPE_UNKNOWN,
-	SFDEC_TYPE_OMXCODEC,
-	SFDEC_TYPE_MEDIACODEC,
+	SFDEC_TYPE_UNKNOWN = 0,
+	/* Value 1 is reserved for the removed OMXCODEC implementation. */
+	SFDEC_TYPE_MEDIACODEC = 2,
 } sfdec_type_t;
 
 typedef enum sfdec_codec_type {

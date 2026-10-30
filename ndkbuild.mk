@@ -38,7 +38,6 @@ LOCAL_SRC_FILES := $(addprefix Source/, $(CSRC)) \
 	$(addprefix Source/, $(XASRC))
 
 LOCAL_C_INCLUDES := $(patsubst -I%,%,$(INCLUDES))
-LOCAL_C_INCLUDES += $(OMX_INCLUDES)
 LOCAL_C_INCLUDES += $(ANDROID_DIR)/libavos_android/include
 LOCAL_CFLAGS := $(CFLAGS) $(DEFINES)
 

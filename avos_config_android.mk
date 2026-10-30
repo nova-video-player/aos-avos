@@ -21,7 +21,7 @@ AUDIO_COMPRESS		= ON
 AUDIO_AC3		= ON
 
 AUDIO_LIBAV		= ON
-OMX			= IOMX
+OMX			=
 SFDEC			= ON
 SINK_VIDEO		= ANDROID
 
@@ -41,7 +41,7 @@ VIDEO_FF_HEVC		= ON
 VIDEO_FF_WMV		= ON
 VIDEO_FF_RV3040		= ON
 
-# IOMX:
+# MediaCodec format registrations (historical VIDEO_OMX names):
 VIDEO_OMX_MPEG2		= ON
 VIDEO_OMX_MPEG4		= ON
 VIDEO_OMX_H264		= ON

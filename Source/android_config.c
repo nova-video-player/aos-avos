@@ -75,37 +75,6 @@ static hw_config_t hw_config_omap4 = {
 	}
 };
 
-static hw_config_t hw_config_archos_omap4 = {
-	HW_TYPE_ARCHOS_OMAP4,
-	OMXHW,
-	{
-		{ AV_IMAGE_BGRA_32, HAL_PIXEL_FORMAT_BGRA_8888, BUFFER_TYPE_SW, ANDROID_VERSION_UNKNOWN },
-		{ AV_IMAGE_NV12,    HAL_PIXEL_FORMAT_NV12_TI,   BUFFER_TYPE_HW, ANDROID_VERSION_UNKNOWN },
-		{ -1, 0, -1, ANDROID_VERSION_UNKNOWN },
-	}
-};
-
-static hw_config_t hw_config_rk29 = {
-	HW_TYPE_RK29,
-	SFDEC_OMXCODEC,
-	{
-		{ AV_IMAGE_NV12, HAL_PIXEL_FORMAT_NV12_RK, BUFFER_TYPE_SW, ANDROID_VERSION_UNKNOWN },
-		{ AV_IMAGE_NV12, HAL_PIXEL_FORMAT_NV12_RK, BUFFER_TYPE_HW, ANDROID_VERSION_UNKNOWN },
-		{ -1, 0, -1, ANDROID_VERSION_UNKNOWN },
-	}
-};
-
-static hw_config_t hw_config_rk30 = {
-	HW_TYPE_RK30,
-	SFDEC_OMXCODEC,
-	{
-		{ AV_IMAGE_YV12, HAL_PIXEL_FORMAT_YV12, BUFFER_TYPE_SW, ANDROID_VERSION_UNKNOWN },
-		// rk wants RGB565 for output (the conv is done in surfaceflinger
-		{ AV_IMAGE_BGRA_32, HAL_PIXEL_FORMAT_RGBA_8888, BUFFER_TYPE_HW, ANDROID_VERSION_UNKNOWN },
-		{ -1, 0, -1, ANDROID_VERSION_UNKNOWN },
-	}
-};
-
 static hw_config_t hw_config_tegra3 = {
 	HW_TYPE_TEGRA3,
 	SFDEC_DEFAULT,
@@ -225,9 +194,6 @@ static hw_config_t *hw_config_table [] = {
 	&hw_config_unknown,
 	&hw_config_default_kk,
 	&hw_config_omap4,
-	&hw_config_archos_omap4,
-	&hw_config_rk29,
-	&hw_config_rk30,
 	&hw_config_tegra2,
 	&hw_config_tegra3,
 	&hw_config_qcom_s1,

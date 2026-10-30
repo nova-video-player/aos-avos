@@ -42,9 +42,6 @@ sfdec_t* sfdec_new(sfdec_type_t type,
 
 	dlerror();
 	switch (type) {
-		case SFDEC_TYPE_OMXCODEC:
-			itf = dlsym(RTLD_DEFAULT, "sfdec_itf_omxcodec");
-			break;
 		case SFDEC_TYPE_MEDIACODEC:
 			itf = dlsym(RTLD_DEFAULT, "sfdec_itf_mediacodec");
 			break;

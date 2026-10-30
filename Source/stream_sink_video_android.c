@@ -396,11 +396,7 @@ static int allocate_buffers(STREAM_SINK_VIDEO *sink, VIDEO_FRAME *(*frames)[], i
 
 		frame->index = i;
 		frame->handle[0]  = android_buffer.handle;
-#ifdef CONFIG_OMX_IOMX
-		frame->android_handle = android_buffer.handle;
-#else
 		frame->android_handle = android_buffer.img_handle;
-#endif
 		if (android_buffer.type == BUFFER_TYPE_HW) {
 			DBGLOG("android_buffer(hw) %dx%d/%d  siz %d", android_buffer.width, android_buffer.height, android_buffer.stride, android_buffer.size);
 			frame->data[0]      = NULL;
@@ -462,34 +458,17 @@ DBGS serprintf("stream_sink_video_android: open  num_frames %d  cpu_type %d\n", 
 		goto err;
 	}
 
-	if (rc->cpu_type == OMXHW) {
-		buffer_type = BUFFER_TYPE_HW;
-		hal_format = android_get_hal_format(colorspace, buffer_type);
-		LOG("using HW, colorspace: %d hal_format: 0x%X", colorspace, hal_format);
-	} else {
-		buffer_type = BUFFER_TYPE_SW;
-		if (rc->cpu_type == OMXSW) {
-			p->copy_buffers = 1;
-			colorspace  = android_get_av_color(buffer_type);
-			hal_format  = android_get_hal_format(colorspace, buffer_type);
- 			if (hal_format == 0) {
- 				colorspace  = android_get_av_color_unknown(buffer_type);
- 				hal_format  = android_get_hal_format_unknown(colorspace, buffer_type);
- 			}
-			LOG("copy HW to SW, colorspace: %d hal_format: 0x%X", colorspace, hal_format);
-		} else {
-			colorspace  = android_get_av_color(buffer_type);
-			hal_format  = android_get_hal_format(colorspace, buffer_type);
-			if (hal_format == 0) {
-				colorspace  = android_get_av_color_unknown(buffer_type);
-				hal_format  = android_get_hal_format_unknown(colorspace, buffer_type);
-			}
-			LOG("using SW, colorspace: %d hal_format: 0x%X", colorspace, hal_format);
-		}
-		if (!color_conversion_supported(colorspace, avimage2pixfmt(video->colorspace)) && (colorspace != video->colorspace)) {
-			LOG("copy HW to SW: color conversion not supported: %d to %d", colorspace, video->colorspace);
-			goto err;
-		}
+	buffer_type = BUFFER_TYPE_SW;
+	colorspace = android_get_av_color(buffer_type);
+	hal_format = android_get_hal_format(colorspace, buffer_type);
+	if (hal_format == 0) {
+		colorspace = android_get_av_color_unknown(buffer_type);
+		hal_format = android_get_hal_format_unknown(colorspace, buffer_type);
+	}
+	LOG("using SW, colorspace: %d hal_format: 0x%X", colorspace, hal_format);
+	if (!color_conversion_supported(colorspace, avimage2pixfmt(video->colorspace)) && (colorspace != video->colorspace)) {
+		LOG("color conversion not supported: %d to %d", colorspace, video->colorspace);
+		goto err;
 	}
 	if (hal_format == 0) {
 		LOG("hal_format not found");

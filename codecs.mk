@@ -227,23 +227,10 @@ ifeq ($(VIDEO),ON)
 			CSRC_STREAM_SINK += stream_sink_video_android3.c
 			DEFINES += -DCONFIG_SINK_VIDEO_ANDROID
 		endif
-		OMX-y :=
-		ifeq ($(OMX),IOMX)
-			OMX-y := ON
-		endif
-		ifeq ($(OMX),CORE)
-			OMX-y := ON
-		endif
-		ifeq ($(OMX-y),ON)
-			DEFINES += -DCONFIG_OMX
-			DEFINES += -DCONFIG_OMX_$(OMX)
-			CSRC_STREAM_CODEC += codec_OMX.c OMX_utils.c
-			INCLUDES += -I$(OMX_INCLUDES)
-		endif
 		ifeq ($(SFDEC),ON)
 			DEFINES += -DCONFIG_SFDEC
 			AVOS_SHARED_LIBS += -lsfdec
-			CSRC_STREAM_CODEC += codec_sfdec.c codec_sfdec2.c codec_mediacodec_audio.c 
+			CSRC_STREAM_CODEC += codec_sfdec2.c codec_mediacodec_audio.c
 			INCLUDES += -I$(ANDROID_DIR)/libsfdec
 		endif
 	endif

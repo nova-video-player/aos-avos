@@ -145,11 +145,7 @@ static int update_frame_pointers(VIDEO_FRAME * frame, int colorspace, android_bu
 	frame->height = android_buffer.height;
 	frame->colorspace = colorspace;
 	frame->handle[0]  = android_buffer.handle;
-#ifdef CONFIG_OMX_IOMX
-	frame->android_handle = android_buffer.handle;
-#else
 	frame->android_handle = android_buffer.img_handle;
-#endif
 	if (android_buffer.type == BUFFER_TYPE_HW) {
 //DBGLOG("android_buffer(hw) %d x %d / %d  siz %d", android_buffer.width, android_buffer.height, android_buffer.stride, android_buffer.size);
 		frame->data[0]      = NULL;

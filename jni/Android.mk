@@ -66,11 +66,6 @@ include $(LOCAL_PATH)/ndkbuild.mk
 LOCAL_PATH := $(EXTERNAL_DIR)/libdeinterlace
 include $(LOCAL_PATH)/ndkbuild.mk
 
-### colorconversion ###
-
-LOCAL_PATH := $(ANDROID_DIR)/colorconversion/
-include $(LOCAL_PATH)/ndkbuild.mk
-
 ### libcputest ###
 
 LOCAL_PATH := $(AVOS_JNI_DIR)/libcputest

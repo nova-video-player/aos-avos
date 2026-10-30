@@ -13,26 +13,25 @@
 // limitations under the License.
 
 /*
- * Close one video and immediately open another while subtitle parsing is still active, with the
- * Java side rebuilding the SubtitleEngine underneath.
+ * Close one video and immediately open another while its external-subtitle parse worker is active, with
+ * the Java side rebuilding the SubtitleEngine underneath -- through the REAL external-subtitle stack
+ * (see stream_host.h). Replaces the old close_open_parsing test, which modelled the worker with a thread.
  *
- * Each "video" mirrors avos_mp_video_open()/close(): acquire the published engine from the
- * registry, start the clock, open a track and start a parse worker feeding a large cue list with
- * the track's generation token; close = stop the clock, stop and join the worker, close the track,
- * release the engine. Two close orders are exercised:
+ * Each "video" mirrors avos_mp_video_open()/avos_mp_video_close(): acquire the published engine from the
+ * registry, start the clock, a real STREAM discovers a real .srt/.vtt file, the real subtitle thread opens
+ * the engine track and the real parse-worker pool starts feeding it. Close is avos_mp_video_close()'s
+ * order: stop the engine clock, stop the stream (subtitle thread, then stream_sub_ext_close() with the
+ * pool possibly mid-feed), only then close the engine's track, then release the registry reference.
+ * A "Java" thread meanwhile rebuilds the engine (create + publish new, retract old, in either order). A
+ * video that still holds the old engine keeps it alive and the last release destroys it; the next video
+ * gets the new one.
  *
- *   orderly  : stop worker, join, close_track, release      (what stream_delete() guarantees)
- *   hostile  : close_track while the worker is still mid-list, join afterwards; proves that even a
- *              worker that has not noticed the cancellation yet cannot leak cues into whatever
- *              is opened next (the token check) and cannot touch freed memory.
- *
- * A "Java" thread meanwhile rebuilds the engine (create+publish new, retract old, in either
- * order). A video that still holds the old engine keeps it alive; the next video gets the new one.
- * Checks: every engine created is destroyed exactly once, never while a video holds it; no cue from
- * a closed video reaches the next video's backend; no backend leaks. Run it under AddressSanitizer
- * (use-after-free on a destroyed engine) and ThreadSanitizer (see test_host_native.py).
+ * Checks: every engine created is destroyed exactly once and never while a video holds it; no cue from a
+ * closed video reaches another video's backend; no backend leaks; no deadlock or hang while the pool is
+ * torn down mid-feed. Run it under AddressSanitizer (use-after-free of an engine or STREAM) and
+ * ThreadSanitizer too. argv[1] = srt | vtt, argv[2] = number of videos.
  */
-#include "sub_engine.h"
+#include "stream_host.h"
 #include "sub_engine_registry.h"
 #include "fake_backend.h"
 #include "host_test_util.h"
@@ -40,22 +39,22 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define BIG_CUES 30000
+#define CUES 3000
 
 static atomic_int g_created, g_destroyed, g_stop_java, g_destroyed_while_held;
 
-/* How many videos currently hold each engine, so destroy can assert it never runs under a holder.
- * (ASan would catch the resulting use-after-free too, but only when it is built in.) */
+/* How many videos currently hold each engine, so destroy can assert it never runs under a holder. */
 typedef struct { SUB_ENGINE *e; atomic_int holders; } SLOT;
-static SLOT g_slots[1024];
+static SLOT g_slots[2048];
 static int g_nslots;
 static pthread_mutex_t g_slots_m = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int *holders_of(SUB_ENGINE *e) {
     pthread_mutex_lock(&g_slots_m);
     atomic_int *h = NULL;
     for (int i = 0; i < g_nslots && !h; i++) if (g_slots[i].e == e) h = &g_slots[i].holders;
-    if (!h && g_nslots < 1024) { g_slots[g_nslots].e = e; h = &g_slots[g_nslots++].holders; }
+    if (!h && g_nslots < 2048) { g_slots[g_nslots].e = e; h = &g_slots[g_nslots++].holders; }
     pthread_mutex_unlock(&g_slots_m);
     return h;
 }
@@ -76,7 +75,7 @@ static void *java_thread(void *arg) {
         if (rand() & 1) {                         /* new first: both engines exist, newest is published */
             sub_engine_registry_publish(next);
             sub_engine_registry_retract(cur, destroy_cb);
-        } else {                                  /* old first: a stream opening now may see no engine at all */
+        } else {                                  /* old first: a video opening now may see no engine at all */
             sub_engine_registry_retract(cur, destroy_cb);
             usleep((unsigned)(rand() % 300));
             sub_engine_registry_publish(next);
@@ -87,69 +86,52 @@ static void *java_thread(void *arg) {
 }
 
 /* ---- one "video" ---- */
-typedef struct { SUB_ENGINE *e; uint64_t tok; char label; int accepted, stopped_early; atomic_int stop; pthread_t th; } VIDEO;
+typedef struct { HOST_STREAM *h; SUB_ENGINE *e; } VIDEO;
 
-static void *parse_worker(void *arg) {
-    VIDEO *v = arg;
-    char buf[24];
-    for (int i = 0; i < BIG_CUES && !atomic_load(&v->stop); i++) {
-        int n = snprintf(buf, sizeof buf, "%c%d", v->label, i);
-        if (!sub_engine_feed_gen(v->e, v->tok, (const uint8_t *)buf, n, (int64_t)i * 40, 2000)) { v->stopped_early = 1; break; }
-        v->accepted++;
-    }
-    return NULL;
-}
-
-static VIDEO *video_open(char label) {
+static VIDEO *video_open(int vtt, char label) {
     SUB_ENGINE *e = sub_engine_registry_acquire();
     if (!e) return NULL;                          /* Java is between engines: this video has no subtitles */
-    VIDEO *v = calloc(1, sizeof *v);
-    v->e = e; v->label = label;
     atomic_fetch_add(holders_of(e), 1);
-    sub_engine_start(e, fake_clock, NULL);
-    sub_engine_open_track(e, SUB_FMT_SRT, 1920, 1080, NULL, 0, NULL, 0, &v->tok);
-    pthread_create(&v->th, NULL, parse_worker, v);
+    VIDEO *v = calloc(1, sizeof *v);
+    v->e = e;
+    v->h = hs_create_on(e);                       /* starts the engine clock, like avos_mp_video_open() */
+    (vtt ? hs_write_vtt : hs_write_srt)(v->h, "01", label, CUES);
+    hs_start(v->h);                               /* discovery, subtitle thread -> engine track -> parse worker feed */
     return v;
 }
 
-/* Returns how many cues this video's worker had accepted. */
-static int video_close(VIDEO *v, int hostile) {
-    sub_engine_stop(v->e);
-    if (hostile) {
-        sub_engine_close_track(v->e);             /* worker still mid-list */
-        pthread_join(v->th, NULL);
-    } else {
-        atomic_store(&v->stop, 1);
-        pthread_join(v->th, NULL);
-        sub_engine_close_track(v->e);
-    }
-    int accepted = v->accepted;
-    atomic_fetch_sub(holders_of(v->e), 1);
-    sub_engine_registry_release(v->e);            /* after the last use of v->e */
+static void video_close(VIDEO *v) {
+    SUB_ENGINE *e = v->e;
+    hs_close_video(v->h);                         /* avos_mp_video_close(): clock, stream (+ pool), then close_track */
+    atomic_fetch_sub(holders_of(e), 1);
+    sub_engine_registry_release(e);               /* after the last use of the engine */
     free(v);
-    return accepted;
 }
 
 int main(int argc, char **argv) {
-    t_watchdog(150, "close_open_parsing");
-    int iters = argc > 1 ? atoi(argv[1]) : 150;
+    int vtt = argc > 1 && !strcmp(argv[1], "vtt");
+    int iters = argc > 2 ? atoi(argv[2]) : 120;
+    t_watchdog(200, vtt ? "ext_close_open_vtt" : "ext_close_open_srt");
     fake_backend_set_mode(FAKE_EMIT_ON_DEMAND);
     fake_backend_reset_counters();
+    fake_backend_set_feed_delay_us(8);            /* a feed takes ~25 ms: videos are closed while it runs */
 
     SUB_ENGINE *first = new_engine();
     sub_engine_registry_publish(first);
     pthread_t jt;
     pthread_create(&jt, NULL, java_thread, first);
 
-    long accepted_total = 0; int no_engine = 0, videos = 0;
+    int no_engine = 0, videos = 0, mid_feed = 0;
     for (int i = 0; i < iters; i++) {
-        VIDEO *v = video_open((i & 1) ? 'B' : 'A');
+        VIDEO *v = video_open(vtt, (i & 1) ? 'B' : 'A');
         if (!v) { no_engine++; usleep(200); continue; }
         videos++;
-        usleep((unsigned)(rand() % 1500));        /* parsing is active when we close */
-        /* close, then loop straight into the next open: no pause between the two */
-        accepted_total += video_close(v, (i % 3) == 2);
+        usleep((unsigned)(rand() % 20000));       /* parsing is (usually) still active when we close */
+        int held = fake_backend_active_since_flush();
+        mid_feed += held >= 0 && held < CUES;
+        video_close(v);                           /* ...and straight into the next open: no pause between the two */
     }
+    fake_backend_set_feed_delay_us(0);
 
     atomic_store(&g_stop_java, 1);
     void *cur_ret = NULL;
@@ -157,9 +139,8 @@ int main(int argc, char **argv) {
     SUB_ENGINE *cur = cur_ret;
 
     CHECK(videos > iters / 2, "most videos found an engine (%d of %d; %d hit a rebuild gap)", videos, iters, no_engine);
+    CHECK(mid_feed > videos / 4, "videos really were closed while their feed was running (%d of %d)", mid_feed, videos);
     CHECK(fake_backend_foreign() == 0, "no cue from a closed video reached another video's backend (foreign=%d)", fake_backend_foreign());
-    CHECK(fake_backend_feeds() == accepted_total,
-          "every cue a worker saw accepted reached exactly one backend, none were duplicated or lost (%ld vs %d)", accepted_total, fake_backend_feeds());
     CHECK(fake_backend_live() == 0, "every track backend was closed (%d live)", fake_backend_live());
 
     int r = sub_engine_registry_retract(cur, destroy_cb);

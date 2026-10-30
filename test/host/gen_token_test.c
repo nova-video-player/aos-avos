@@ -13,20 +13,20 @@
 // limitations under the License.
 
 /*
- * Rapidly switching between two large external SRT/VTT tracks while they are still loading.
+ * The engine's track-generation token contract (sub_engine_feed_gen / sub_engine_flush_gen).
  *
- * stream_sub_ext.c feeds a big cue list from a background worker, one sub_engine_feed_gen() per
- * cue, each stamped with the engine's track-generation token captured when the track was opened.
- * Switching tracks calls open_track() again, which bumps the generation, so every cue still in
- * flight from the previous track must be dropped -- never routed into the new track's backend and
- * never left on screen. The fake backend labels each backend with the first byte of its first cue
- * ('A...' / 'B...'), so a cue from the other track reaching it is counted as "foreign".
+ * ENGINE-LEVEL test: the feeders below are plain threads, NOT stream_sub_ext.c (the ext_* tests run
+ * that, for real). It is kept because three things can only be observed here, where the feeder knows
+ * exactly how many cues it was told were accepted:
  *
- *   1. deterministic: a stale token is dropped (feed and flush), a current one is accepted;
- *   2. 300 rapid A/B switches (plus an occasional close_track) racing large feeders;
- *      invariant: every cue a feeder saw accepted reached exactly one backend (sum(accepted) ==
- *      backend feeds), and none reached a backend of the other track;
- *   3. the track opened last still loads completely, and nothing leaks.
+ *   1. deterministic: a stale token is dropped (feed and flush) and never reaches the new track's backend,
+ *      a current token is accepted, and opening a track moves the generation;
+ *   2. 300 rapid A/B switches (SRT-wrapped vs SSA-wrapped backends, plus an occasional close_track: the
+ *      subtitles turned off) racing large feeders; invariant: every cue a feeder saw ACCEPTED reached
+ *      exactly one backend (sum(accepted) == backend feeds) -- no cue accepted and lost, none delivered
+ *      twice -- and none reached a backend of the other track;
+ *   3. nothing is visible after close_track(), the track opened last still loads completely and renders,
+ *      and nothing leaks.
  * Meant to run under ThreadSanitizer as well (see test_host_native.py).
  */
 #include "sub_engine.h"
@@ -68,7 +68,7 @@ static int something_visible(SUB_ENGINE *e) {
 }
 
 int main(int argc, char **argv) {
-    t_watchdog(150, "track_switch_loading");
+    t_watchdog(150, "gen_token");
     int iters = argc > 1 ? atoi(argv[1]) : 300;
     fake_backend_set_mode(FAKE_EMIT_ON_DEMAND);
     fake_backend_reset_counters();

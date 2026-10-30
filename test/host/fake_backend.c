@@ -20,9 +20,12 @@
 #include <unistd.h>
 
 #include <pthread.h>
+#include <time.h>
 
 static volatile int  g_emit = 0;
 static volatile int  g_mode = FAKE_EMIT_ON_DEMAND;
+static volatile int  g_feed_delay_us = 0;
+static fake_feed_hook_fn g_feed_hook;
 
 typedef struct { int label; int feeds; int since_flush; } FAKE_CTX;
 static int g_live, g_feeds, g_flushes, g_renders, g_resizes, g_boxes, g_foreign;
@@ -58,6 +61,8 @@ int fake_backend_active_since_flush(void) {
     return n;
 }
 
+void fake_backend_set_feed_hook(fake_feed_hook_fn fn) { __atomic_store_n(&g_feed_hook, fn, __ATOMIC_RELEASE); }
+void fake_backend_set_feed_delay_us(int us) { __atomic_store_n(&g_feed_delay_us, us, __ATOMIC_RELEASE); }
 void fake_backend_set_mode(FAKE_MODE m) { __atomic_store_n(&g_mode, (int)m, __ATOMIC_RELEASE); }
 void fake_backend_emit(void)            { __atomic_store_n(&g_emit, 1, __ATOMIC_RELEASE); }
 int64_t fake_clock(void *ctx)           { (void)ctx; return 1000; }
@@ -106,12 +111,24 @@ static int fake_close(SUB_FORMAT_BACKEND *be) {
 static int fake_feed(SUB_FORMAT_BACKEND *be, const uint8_t *data, int size, int64_t pts, int64_t dur) {
     (void)pts; (void)dur;
     FAKE_CTX *ctx = (FAKE_CTX *)be->priv;
+    int delay = __atomic_load_n(&g_feed_delay_us, __ATOMIC_ACQUIRE);
+    if (delay > 0) {                                   /* a slow backend: gives a feed a long, interruptible run */
+        if (delay >= 100) usleep((useconds_t)delay);
+        else {                                         /* usleep() can't do less than ~50 us: spin for short delays */
+            struct timespec a, b;
+            clock_gettime(CLOCK_MONOTONIC, &a);
+            do { clock_gettime(CLOCK_MONOTONIC, &b); }
+            while ((b.tv_sec - a.tv_sec) * 1000000L + (b.tv_nsec - a.tv_nsec) / 1000L < delay);
+        }
+    }
     int label = size > 0 ? data[0] : 0;
     if (!ctx->label) ctx->label = label;
     else if (ctx->label != label) INC(g_foreign);
     ctx->feeds++;
     __atomic_fetch_add(&ctx->since_flush, 1, __ATOMIC_RELAXED);
     INC(g_feeds);
+    fake_feed_hook_fn hook = __atomic_load_n(&g_feed_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(data, size);
     return 1;
 }
 static int fake_flush(SUB_FORMAT_BACKEND *be) {

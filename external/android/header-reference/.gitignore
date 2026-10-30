@@ -1,0 +1,10 @@
+# Audit data stays local; commit only tools and written documentation.
+/snapshots/
+/baseline/
+/http-cache/
+/layouts/
+/evidence/
+/constants.json
+/helpers.json
+/inventory.json
+__pycache__/

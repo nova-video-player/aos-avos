@@ -19,7 +19,16 @@ clean NDK dependency files for all four supported ABIs identified only
 `android_buffer.c` and `android_window.c` as consumers of this set. Pruning does
 not remove gralloc, migrate rotation, or change the public-window fallback.
 
-`dump.sh` is a historical bulk-import tool, not a reproducible updater for this
-subset. Do not use it to regenerate this directory as part of routine builds;
-it would restore unused headers and could replace private ABI definitions.
-Any future header update requires a separate compatibility review.
+`dump.sh` downloads audit references into `../header-reference/snapshots/` using
+the manifest-aware downloader. It never regenerates this directory or changes
+build include paths. The old `<aosp_path> <api>` import interface is removed.
+
+```sh
+# From the repository root; omit --api to download all selected API 23-37 releases.
+./external/android/include/dump.sh --api 23 --jobs 2
+```
+
+Downloaded reference headers and HTTP archives are ignored by Git. Keep only
+scripts and written audit documentation as described in
+[the reference README](../header-reference/README.md). Any production-header
+update still requires a separate compatibility review.

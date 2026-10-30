@@ -30,6 +30,7 @@ typedef hw_module_t gralloc_module_t;
 typedef struct android_surface android_surface_t;
 static int allocations, fail_allocation, lookups, module_calls, probe_mode, rotations;
 static uint32_t last_transform;
+static int transform_error;
 static gralloc_module_t module;
 static void *counted_calloc(size_t count, size_t size) {
     allocations++;
@@ -48,10 +49,11 @@ static void *dlsym(void *handle, const char *name) {
     lookups++;
     return probe_mode == 0 ? NULL : (void *)mock_hw_get_module;
 }
-static void native_window_set_buffers_transform(ANativeWindow *window, uint32_t transform) {
+static int native_window_set_buffers_transform(ANativeWindow *window, uint32_t transform) {
     assert(window && window->common.magic == ANDROID_NATIVE_WINDOW_MAGIC);
     rotations++;
-    last_transform = transform;
+    if (!transform_error) last_transform = transform;
+    return transform_error;
 }
 #define calloc counted_calloc
 ''' + extract(source, 'struct android_surface {') + ';\n' +
@@ -87,7 +89,36 @@ int main(void) {
     assert(rotations == 2 && last_transform == HAL_TRANSFORM_ROT_180);
     assert(!android_window_set_buffers_rotation(&window, 270));
     assert(rotations == 3 && last_transform == HAL_TRANSFORM_ROT_270);
-    assert(!android_window_set_buffers_rotation(&window, 0) && rotations == 3);
+    /* Reuse the same window: every rotated-to-zero transition must clear it. */
+    const int angles[] = { 90, 180, 270 };
+    const uint32_t transforms[] = {
+        HAL_TRANSFORM_ROT_90, HAL_TRANSFORM_ROT_180, HAL_TRANSFORM_ROT_270
+    };
+    for (int i = 0; i < 3; i++) {
+        int before = rotations;
+        assert(!android_window_set_buffers_rotation(&window, angles[i]));
+        assert(rotations == before + 1 && last_transform == transforms[i]);
+        assert(!android_window_set_buffers_rotation(&window, 0));
+        assert(rotations == before + 2 && last_transform == 0);
+    }
+    int before = rotations;
+    assert(!android_window_set_buffers_rotation(&window, 0));
+    assert(rotations == before + 1 && last_transform == 0);
+    /* Both setting and clearing a transform must propagate window failures. */
+    assert(!android_window_set_buffers_rotation(&window, 90));
+    transform_error = -38;
+    before = rotations;
+    assert(android_window_set_buffers_rotation(&window, 180) == -38);
+    assert(android_window_set_buffers_rotation(&window, 0) == -38);
+    assert(rotations == before + 2 && last_transform == HAL_TRANSFORM_ROT_90);
+    transform_error = 0;
+    assert(!android_window_set_buffers_rotation(&window, 0));
+    assert(last_transform == 0);
+    /* Unsupported metadata keeps its existing no-op behavior. */
+    before = rotations;
+    assert(!android_window_set_buffers_rotation(&window, 45));
+    assert(!android_window_set_buffers_rotation(&window, -90));
+    assert(rotations == before);
     window.common.version = sizeof(ANativeWindow);
     android_surface_t *as = android_surface_create(&window);
     assert(as && as->gralloc == &module);

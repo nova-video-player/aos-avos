@@ -28,11 +28,9 @@ int android_window_set_buffers_rotation(void *anw, int rotation)
 		case 90: transform = HAL_TRANSFORM_ROT_90; break;
 		case 180: transform = HAL_TRANSFORM_ROT_180; break;
 		case 270: transform = HAL_TRANSFORM_ROT_270; break;
-		default: transform = 0; break;
+		default: return 0; /* Preserve the no-op for unsupported angles. */
 	}
 
-	if (transform)
-		native_window_set_buffers_transform((ANativeWindow*)anw, transform);
-
-	return 0;
+	/* Zero must clear any transform left on a reused surface. */
+	return native_window_set_buffers_transform((ANativeWindow*)anw, transform);
 }

@@ -47,6 +47,9 @@ WEAK STREAM_DEC_SUB *stream_get_new_dec_sub( int format )       { (void)format; 
 WEAK void  stream_yield_RT( void )                              { usleep( 100 ); }
 WEAK float audio_interface_get_audio_speed()                    { return 1.0f; }
 WEAK int   audio_interface_is_audio_speed_enabled()             { return 0; }
+/* Revisions from before the sticky "none" selection (HOST_BASELINE_REV) have no stream_disable_subtitles(): what the
+ * app did then was close the engine's track. The real one, when the revision has it, wins over this weak one. */
+WEAK void  stream_disable_subtitles( STREAM *s )                { if( s && s->sub_engine ) sub_engine_close_track( (SUB_ENGINE*)s->sub_engine ); }
 
 /* The app's own log lines ("sub_ext_feed_engine: stream 1 ... parse_state 3", "stream_set_subtitle_stream( 0 )",
  * ...): with HOST_TEST_LOG=1 they are printed, exactly what the bug report's log shows. Strong, so it

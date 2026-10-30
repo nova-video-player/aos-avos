@@ -74,6 +74,10 @@ void hs_close_video(HOST_STREAM *h);
  * from the fake backend first, so "visible" means "the engine has a live track and renders it". */
 int  hs_visible(HOST_STREAM *h);
 
+/* The app's "subtitles: none" (avos_mp_video_set_sub_track(<0)). Declared here too: revisions before the sticky "none"
+ * (HOST_BASELINE_REV) do not declare it in stream.h; stream_host.c then supplies the old behaviour. */
+void stream_disable_subtitles(STREAM *s);
+
 /* The app's "select this subtitle track" (stream_set_subtitle_stream). Returns its result (0 = ok). */
 int  hs_select(HOST_STREAM *h, int idx);
 /* Idle then resume the subtitle thread: what pause-for-reconfigure, speed change, a seek and a

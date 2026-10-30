@@ -36,10 +36,14 @@ Environment:
     HOST_TEST_OUTPUT  set to print each test's raw stdout/stderr even when it passes
     HOST_TEST_LOG     set to 1 to print the app's own log lines (serprintf) from the ext_* tests, in the same
                       format as a device log: "stream_set_subtitle_stream( 1 )", "sub_ext_feed_engine: ..."
-    HOST_STREAM_SUB_EXT  path of another revision of stream_sub_ext.c to build the ext_* tests against instead
-                      of Source/stream_sub_ext.c -- to prove they FAIL on a buggy revision:
-                          git show <old-rev>:Source/stream_sub_ext.c > /tmp/old_ext.c
-                          HOST_STREAM_SUB_EXT=/tmp/old_ext.c python3 test/host/test_host_native.py -k ext_
+    HOST_BASELINE_REV  a git revision to build the ext_* tests' CODE UNDER TEST from: every Source/ file of
+                      the real stack and the whole Include/ come from that one revision (only the test
+                      files and the host stand-ins stay current), so the stack is consistent -- one file
+                      from an old revision on top of today's others is not a baseline, because fixes live in
+                      more than one file (the forced refeed in stream_subtitle.c, for one). To prove the
+                      tests FAIL on a buggy revision, use the parent of the first #2004 fix:
+                          HOST_BASELINE_REV=c4cfcb8~1 python3 test/host/test_host_native.py -k ext_
+                      (needs a git checkout that has the revision)
     HOST_TEST_FONT, HOST_TEST_FONT_FAMILY   use this font file (and its family name) for the libass tests
     NO_COLOR      disable colour (colour is only used on a terminal)
 
@@ -92,7 +96,7 @@ ssa_late_script  An external ASS script fed AFTER the first render: Custom (forc
 ext_reselect     (SRT and VTT) Issue #2004 through the real stack: select 02, 01, 02, 01 ... each selection
                  must leave exactly that file's cues in the engine; double open; reopen while the track's
                  own feed is running; a storm of back-to-back selections; selecting while the engine is
-                 paused; subtitles switched off mid-feed (nothing visible, no late cue) and back on; the
+                 paused; subtitles switched off mid-feed with stream_disable_subtitles() (nothing visible, no late cue, no reopen) and back on; the
                  finished track renders. A track that is accepted but never fed is reported as a SILENT
                  FAILURE (the report's n_events=0).
 ext_interrupt    (SRT and VTT) A pause/seek/rescan (idling the subtitle thread) landing late in a long feed
@@ -108,7 +112,7 @@ gen_token        ENGINE-LEVEL (plain feeder threads, not stream_sub_ext.c): the 
                  accepted reached exactly one backend (none lost, none doubled) across 300 switches and
                  closes, nothing visible after close_track(), the last track loads and renders.
 ext_finish_race  (SRT and VTT) A reopen landing exactly as a feed job finishes. The few-instruction window is
-                 opened on purpose (a wrapped pthread_mutex_unlock sleeps on the worker), so the test is
+                 opened on purpose (a hooked pthread_mutex_unlock sleeps on the worker), so the test is
                  deterministic; it also checks the window really was opened every round.
 style_resize_paused  Style changes and surface resizes while paused: each renders once at the frozen
                  clock, geometry reaches the backend as a coalesced pair ending on the last
@@ -170,8 +174,10 @@ QUIET |= {'Source/subtitle_formats.c', 'Source/subtitle_srt.c', 'Source/subtitle
           'Source/subtitle_idx.c', 'Source/subtitle_pgs.c', 'Source/stream_alloc.c', 'Source/atime.c'}
 STREAM_FLAGS = ('-Wno-pointer-sign', '-Wno-unused-parameter', '-Wno-sign-compare',
                 '-D_GNU_SOURCE', '-DCONFIG_STREAM', '-DCONFIG_SUBTITLES')
-# ext_finish_race opens a few-instruction race window by sleeping in a wrapped pthread_mutex_unlock.
-WRAP_UNLOCK = ('-Wl,--wrap=pthread_mutex_unlock',)
+# ext_finish_race opens a few-instruction race window by sleeping in a hooked pthread_mutex_unlock. The hook is a
+# compile-time rename (every object of the test calls host_unlock_hook(), which the test defines and which calls the
+# real function), not a linker --wrap: Apple's ld has no --wrap.
+HOOK_UNLOCK = ('-Dpthread_mutex_unlock=host_unlock_hook',)
 
 # Everything the engine links is JNI- or vtable-shaped (JNIEnv*/jobject on nearly every native
 # entry point, SUB_FORMAT_BACKEND's fixed callback signatures, the mock JNINativeInterface_), so
@@ -274,6 +280,27 @@ def tearDownModule():
     shutil.rmtree(_BUILD, ignore_errors=True)
 
 
+_BASELINES = {}
+
+
+def _baseline_tree(rev):
+    """Extract Source/ and Include/ of git revision `rev` into the build dir (once); returns its root."""
+    if rev in _BASELINES:
+        return _BASELINES[rev]
+    try:
+        sha = subprocess.run(['git', '-C', str(REPO), 'rev-parse', '--verify', rev + '^{commit}'],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        dest = _BUILD / ('baseline-' + sha[:12])
+        dest.mkdir()
+        tar = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar', sha, 'Source', 'Include'],
+                             capture_output=True, check=True).stdout
+        subprocess.run(['tar', '-x', '-C', str(dest)], input=tar, check=True)
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise RuntimeError('HOST_BASELINE_REV=%s: cannot extract it from git (%s)' % (rev, getattr(e, 'stderr', e))) from e
+    _BASELINES[rev] = dest
+    return dest
+
+
 def _sanitize_flags():
     sanitizers = os.environ.get('SANITIZERS') or 'undefined'
     return [] if sanitizers == 'none' else ['-fsanitize=' + sanitizers, '-fno-omit-frame-pointer']
@@ -323,7 +350,7 @@ def _build_objects(cc, jobs):
 
 
 class HostTestCase(unittest.TestCase):
-    def build_and_run(self, main, sources=(), *, pkgs=(), flags=(), args=(), ldflags=()):
+    def build_and_run(self, main, sources=(), *, pkgs=(), flags=(), args=()):
         """Compile `main` (a file in this directory) with `sources` (repo-relative), link, run.
 
         Compiles run in parallel; the test itself runs alone because several of them are
@@ -333,16 +360,19 @@ class HostTestCase(unittest.TestCase):
         pkg_cflags, pkg_libs = _pkg_config('--cflags', pkgs), _pkg_config('--libs', pkgs)
         sanitize = _sanitize_flags()
         base = ['-std=gnu11', '-g', '-O1']
-        includes = ['-I', str(REPO / 'Include' / 'host_compat'), '-I', str(REPO / 'Include')]
+        rev = os.environ.get('HOST_BASELINE_REV') if STREAM_EXT_SRC in sources else None
+        try:
+            root = _baseline_tree(rev) if rev else REPO
+        except RuntimeError as e:
+            self.fail(str(e))
+        includes = ['-I', str(REPO / 'Include' / 'host_compat'), '-I', str(root / 'Include')]
         checked = tuple([*base, '-Wall', '-Wextra', '-Wno-deprecated-declarations',
                          *sanitize, *flags, *includes, *pkg_cflags])
         quiet = tuple([*base, '-w', *[f for f in flags if f.startswith('-D')], *includes])
 
         jobs = [(HERE / main, checked)]
         for rel in sources:
-            src = REPO / rel
-            if rel == STREAM_EXT_SRC and os.environ.get('HOST_STREAM_SUB_EXT'):
-                src = Path(os.environ['HOST_STREAM_SUB_EXT'])     # build against another revision (see the header)
+            src = (root if rel.startswith('Source/') else REPO) / rel      # HOST_BASELINE_REV: code under test from one revision
             jobs.append((src, quiet if rel in QUIET else checked))
         for src, _ in jobs:
             if not src.is_file():
@@ -353,7 +383,7 @@ class HostTestCase(unittest.TestCase):
             self.fail('compile failed:\n' + '\n'.join(errors))
 
         exe = _BUILD / (Path(main).stem + '.bin')
-        link = subprocess.run([*cc, *sanitize, *map(str, objs), *ldflags, *pkg_libs, '-lpthread', '-lm', '-o', str(exe)],
+        link = subprocess.run([*cc, *sanitize, *map(str, objs), *pkg_libs, '-lpthread', '-lm', '-o', str(exe)],
                               capture_output=True, text=True)
         if link.returncode:
             self.fail('link failed:\n' + link.stdout + link.stderr)
@@ -427,8 +457,8 @@ class HostNativeTests(HostTestCase):
         self.build_and_run('ssa_late_script_test.c', SSA_BACKEND, pkgs=['libass'],
                            flags=('-Wno-unused-parameter',))
 
-    def _ext(self, main, fmt, **kw):
-        self.build_and_run(main, STREAM_EXT, flags=(*ENGINE_FLAGS, *STREAM_FLAGS), args=(fmt,), **kw)
+    def _ext(self, main, fmt, flags=()):
+        self.build_and_run(main, STREAM_EXT, flags=(*ENGINE_FLAGS, *STREAM_FLAGS, *flags), args=(fmt,))
 
     def test_ext_reselect_srt(self):
         """#2004: every selection of an external SRT track ends with its cues in the engine (real stack)."""
@@ -460,11 +490,11 @@ class HostNativeTests(HostTestCase):
 
     def test_ext_finish_race_srt(self):
         """#2004: a reopen landing as the SRT feed job finishes still gets the track fed (real stack)."""
-        self._ext('ext_finish_race_test.c', 'srt', ldflags=WRAP_UNLOCK)
+        self._ext('ext_finish_race_test.c', 'srt', flags=HOOK_UNLOCK)
 
     def test_ext_finish_race_vtt(self):
         """#2004: a reopen landing as the VTT feed job finishes still gets the track fed (real stack)."""
-        self._ext('ext_finish_race_test.c', 'vtt', ldflags=WRAP_UNLOCK)
+        self._ext('ext_finish_race_test.c', 'vtt', flags=HOOK_UNLOCK)
 
     def test_style_resize_paused(self):
         """Style change and surface resize while paused."""

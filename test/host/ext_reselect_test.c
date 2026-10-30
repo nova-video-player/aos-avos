@@ -34,9 +34,10 @@
  *      with no cue from the other file and no duplicates;
  *   5. selecting and feeding while the ENGINE is paused (avos_mp_video_pause() -> sub_engine_set_paused):
  *      nothing may depend on the engine running, and the pause state must not change;
- *   6. subtitles switched off in the middle of a feed (avos_mp_video_set_sub_track(<0) closes the engine
- *      track with a bare sub_engine_close_track()): nothing may be visible afterwards and no cue of the
- *      still-running feed may land; switching the same track back on must then load it completely;
+ *   6. subtitles switched off in the middle of a feed with stream_disable_subtitles() (what
+ *      avos_mp_video_set_sub_track(<0) calls: a sticky "none" that also stops the subtitle thread from
+ *      reopening the track): nothing may be visible afterwards, no cue of the still-running feed may land,
+ *      the track must stay closed; switching the same track back on must then load it completely;
  *   7. the finished track renders.
  *
  * argv[1] = srt | vtt.
@@ -164,19 +165,20 @@ int main(int argc, char **argv)
     CHECK(sub_engine_is_paused(g_h->eng) == 0, "resumed");
 
     /* ---- 6. subtitles switched off while a feed is running, then switched back on ---- */
-    int off_visible = 0, off_landed = 0, off_cut = 0;
+    int off_visible = 0, off_landed = 0, off_cut = 0, off_reopened = 0;
     for (int i = 0; i < 8; i++) {
         fake_backend_set_feed_delay_us(100);
         hs_select(g_h, g_long);
         for (int t = 0; t < 2000 && fake_backend_active_since_flush() < 40; t++) usleep(100);
         int mid = fake_backend_active_since_flush();
-        sub_engine_close_track(g_h->eng);                 /* what avos_mp_video_set_sub_track(<0) does */
+        stream_disable_subtitles(g_h->s);                 /* what avos_mp_video_set_sub_track(<0) does: sticky "none" */
         off_cut += mid > 0 && mid < LONG_CUES;
         if (hs_visible(g_h)) off_visible++;
-        for (int t = 0; t < 60; t++) {                    /* the worker is still feeding: nothing may land */
+        for (int t = 0; t < 150; t++) {                   /* the worker is still feeding: nothing may land, nothing reopens */
             if (fake_backend_active_since_flush() != -1) { off_landed++; break; }
             usleep(1000);
         }
+        if (fake_backend_live() != 0) off_reopened++;     /* the sticky flag keeps the subtitle thread from reopening the track */
         fake_backend_set_feed_delay_us(0);
         char what[80];
         snprintf(what, sizeof what, "switched back on after being off mid-feed (engine held %d): long track completes", mid);
@@ -185,6 +187,7 @@ int main(int argc, char **argv)
     CHECK(off_cut == 8, "every switch-off really landed mid-feed (%d of 8)", off_cut);
     CHECK(off_visible == 0, "nothing was visible after the track was closed (%d of 8 times something was)", off_visible);
     CHECK(off_landed == 0, "no cue of the still-running feed landed in the engine after the track was closed (%d of 8 times one did)", off_landed);
+    CHECK(off_reopened == 0, "the subtitle thread did not reopen the track while subtitles were off (%d of 8 times it did)", off_reopened);
 
     /* ---- 7. the finished track renders ---- */
     CHECK(hs_visible(g_h), "the finished track can render (the engine produces a frame)");

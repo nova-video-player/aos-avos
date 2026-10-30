@@ -21,7 +21,9 @@
  *
  *   - the fake backend reports every cue to a hook, which tells us when the LAST cue of the pass has
  *     been fed (the worker is then in the job's tail);
- *   - the build wraps pthread_mutex_unlock (-Wl,--wrap=pthread_mutex_unlock). On the worker thread, after
+ *   - the build renames pthread_mutex_unlock to host_unlock_hook in every object of this test
+ *     (-Dpthread_mutex_unlock=host_unlock_hook: a compile-time rename, so it needs no linker support -- Apple's ld has no
+ *     --wrap -- and reaches the same call sites). On the worker thread, after
  *     the last cue, the first unlock of a mutex other than the engine lock is the job's parse_mutex
  *     unlock that ends the generation check (before the fix) or the combined check+state write (after
  *     it); we sleep there for INJECT_MS. Before the fix that sleep sits between the check and the state
@@ -38,10 +40,14 @@
 #include "fake_backend.h"
 #include "host_test_util.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef pthread_mutex_unlock
+#error "build with -Dpthread_mutex_unlock=host_unlock_hook (see test_host_native.py)"
+#endif
 #define CUES        300
 #define INJECT_MS   40
 #define ROUNDS      12
@@ -51,25 +57,26 @@
 static __thread int t_after_last;             /* this (worker) thread has just fed the last cue of the pass */
 static __thread void *t_engine_lock;          /* the engine lock it was holding when it did */
 static __thread int t_slept;
-static int g_injected;                        /* rounds in which the sleep was injected */
-static volatile int g_arm;                    /* armed for the current round */
+static atomic_int g_injected;                 /* rounds in which the sleep was injected (worker adds, main reads) */
+static atomic_int g_arm;                      /* armed for the current round (main writes, the worker's feed hook reads) */
 
 static void feed_hook(const uint8_t *data, int size)
 {
-    if (!g_arm || size < 2) return;
+    if (!atomic_load(&g_arm) || size < 2) return;
     if (atoi((const char *)data + 1) == CUES - 1) { t_after_last = 1; t_engine_lock = NULL; t_slept = 0; }
 }
 
-extern int __real_pthread_mutex_unlock(pthread_mutex_t *m);
-int __wrap_pthread_mutex_unlock(pthread_mutex_t *m)
+#undef pthread_mutex_unlock                  /* from here on, the real function; the rename is in force everywhere else */
+extern int pthread_mutex_unlock(pthread_mutex_t *m);
+int host_unlock_hook(pthread_mutex_t *m)
 {
-    int rc = __real_pthread_mutex_unlock(m);
+    int rc = pthread_mutex_unlock(m);
     if (t_after_last && !t_slept) {
         if (!t_engine_lock) {
             t_engine_lock = m;                /* the first unlock after the hook is the engine lock (feed_gen returning) */
         } else if (m != t_engine_lock) {
             t_slept = 1;
-            __atomic_fetch_add(&g_injected, 1, __ATOMIC_RELAXED);
+            atomic_fetch_add(&g_injected, 1);
             usleep(INJECT_MS * 1000);
             t_after_last = 0;
         }
@@ -92,10 +99,10 @@ int main(int argc, char **argv)
         hs_start(h);                          /* the only track: selected and fed by itself */
         int L = hs_track(h, "01");
 
-        g_arm = 1;
+        atomic_store(&g_arm, 1);
         int fed = hs_wait_cues(CUES, WAIT_MS);                /* the last cue is in; the worker is in the job's tail */
         int rc = hs_select(h, L);                             /* ...and the app reselects the track right then */
-        g_arm = 0;
+        atomic_store(&g_arm, 0);
 
         int ok = fed && rc == 0 && hs_wait_cues(CUES, wait_ms) && hs_stays_at(CUES, 60);
         int held = fake_backend_active_since_flush();
@@ -111,7 +118,7 @@ int main(int argc, char **argv)
     }
     fake_backend_set_feed_hook(NULL);
 
-    CHECK(g_injected == ROUNDS, "the race window was opened in every round (%d of %d) -- otherwise this test proves nothing", g_injected, ROUNDS);
+    CHECK(atomic_load(&g_injected) == ROUNDS, "the race window was opened in every round (%d of %d) -- otherwise this test proves nothing", atomic_load(&g_injected), ROUNDS);
     CHECK(fake_backend_foreign() == 0, "no foreign cue (foreign=%d)", fake_backend_foreign());
     CHECK(fake_backend_live() == 0, "no engine backend leaked (%d live)", fake_backend_live());
     CHECK(failures == 0, "no silent failures (%d of %d rounds ended with an empty/short track)", failures, ROUNDS);

@@ -45,10 +45,10 @@ SUB_USER_STYLE* sub_style_create(void) {
     style->bg_mode       = 0;                          // Default: Floating Text
     style->bg_color      = argb_to_libass(0x88000000); // 50% Transparent Black
 
-    style->outline_width = 2;
+    style->outline_width = 0;
     style->outline_color = argb_to_libass(0xFF000000); // Solid Black
 
-    style->shadow_width  = 2;
+    style->shadow_width  = 0;
     style->shadow_color  = argb_to_libass(0xAA000000); // Drop Shadow
 
     style->margin_bottom = 0;

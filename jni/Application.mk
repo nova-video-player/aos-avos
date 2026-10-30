@@ -19,7 +19,8 @@ APP_ABI := armeabi-v7a
 else
 APP_ABI := $(NDK_APP_ABI)
 endif
-APP_PLATFORM := android-21
+# Keep native API availability aligned with Video/MediaLib minSdkVersion.
+APP_PLATFORM := android-23
 APP_STL := c++_static
 
 ifeq (1,$(ASAN))

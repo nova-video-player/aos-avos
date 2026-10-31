@@ -236,17 +236,20 @@ int android_buffer_setup(android_surface_t *as, int w, int h, int buffer_type, i
 		CHECK_ERR();
 		err = native_window_set_scaling_mode(as->anw, NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
 		CHECK_ERR();
-		as->anw->query(as->anw, NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS, min_undequeued);
+		int queried_min_undequeued = 0;
+		err = as->anw->query(as->anw, NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS,
+			&queried_min_undequeued);
 		CHECK_ERR();
-		if( force_undequeued ) {
-			*min_undequeued = force_undequeued;
-		}
+		*min_undequeued = force_undequeued ? force_undequeued : queried_min_undequeued;
 		*num_frames += *min_undequeued;
 		err = native_window_set_buffer_count(as->anw, *num_frames);
 		CHECK_ERR();
 
-		as->anw->query(as->anw, NATIVE_WINDOW_CONCRETE_TYPE, &concrete_type);
-		AVOSLOG("NATIVE_WINDOW_CONCRETE_TYPE: %d", concrete_type);
+		/* This query is diagnostic only; failure must not reject a usable window. */
+		if (!as->anw->query(as->anw, NATIVE_WINDOW_CONCRETE_TYPE, &concrete_type))
+			AVOSLOG("NATIVE_WINDOW_CONCRETE_TYPE: %d", concrete_type);
+		else
+			AVOSLOG("NATIVE_WINDOW_CONCRETE_TYPE unavailable");
 	} else {
 		err = ANativeWindow_setBuffersGeometry(as->anw, w, h, hal_format);
 		CHECK_ERR();

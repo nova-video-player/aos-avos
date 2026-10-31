@@ -147,8 +147,9 @@ interfaces: [NDK/API guidelines](https://android.googlesource.com/platform/devel
 ## Concrete follow-ups found in the consumer code
 
 These are pre-existing findings, not regressions introduced by the recent header
-pruning. The original audit changed no production code; the P1 guard below
-has since been implemented. The two P2 findings remain pending.
+pruning. The original audit changed no production code; the P1 guard and the
+P2 query-error fix below have since been implemented. Acquisition cleanup remains
+pending.
 
 All three findings apply only when the private gralloc branch is selected; they
 do not affect the public-window branch. Gralloc was observed on API 24/25
@@ -158,8 +159,9 @@ Physical API 23-25 devices are a validation priority, not the exclusive scope.
 
 The planned gralloc removal would eliminate these paths, but remains gated on
 compatibility and performance checks. If that migration is validated and is the
-next change, defer the two P2 fixes. The P1 guard now provides interim protection.
-If gralloc remains supported while migration is deferred, address both remaining P2s.
+next change, defer the remaining acquisition-cleanup fix. The P1 guard and
+query-error fix provide interim protection. If gralloc remains supported while
+migration is deferred, address the remaining cleanup gap.
 Do not remove the branch merely to close these findings.
 
 ### P1, conditional: validate gralloc kind before casting (implemented)
@@ -189,16 +191,18 @@ so reading gralloc0 callbacks before rejecting a newer major version faults the
 test. It also covers missing symbols/modules/callbacks, malformed headers and
 legacy minor versions. Device compatibility and performance remain to be checked.
 
-### P2: query errors are ignored during buffer setup
+### P2: query errors during buffer setup (implemented)
 
-`android_buffer_setup()` calls the `NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS` query
-without assigning its return value to `err`. The following `CHECK_ERR()` tests
-the previous operation's status. A failed query can therefore feed an unverified
-count into buffer negotiation. The diagnostic `NATIVE_WINDOW_CONCRETE_TYPE` query
-also ignores failure and may print an uninitialized local value.
+At the audit baseline, `android_buffer_setup()` ignored the return value of
+`NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS` and checked the previous operation's status.
+A failed query could feed an unverified count into buffer negotiation. The
+`NATIVE_WINDOW_CONCRETE_TYPE` diagnostic could print an uninitialized value.
 
-Recommended fix: check the functional query result before using it, and initialize
-or conditionally log the diagnostic result. No header update is required.
+Implemented: query the minimum into a local value and stop setup on failure,
+leaving the caller's counts untouched. Preserve the existing forced-minimum
+behavior after a successful query. Log the concrete type only after a successful
+diagnostic query; its failure remains non-fatal. Replay checks cover both query
+failures, forced counts, successful negotiation and public-window setup.
 
 ### P2: gralloc acquisitions are not unwound on later lock failure
 

@@ -51,6 +51,8 @@ SUB_USER_STYLE* sub_style_create(void) {
     style->shadow_width  = 0;
     style->shadow_color  = argb_to_libass(0xAA000000); // Drop Shadow
 
+    style->padding       = 2;
+
     style->margin_bottom = 0;
     style->override_mode = 1;                          // Default: Force Custom
     style->serial        = 1;
@@ -255,6 +257,17 @@ void sub_style_set_shadow_color(SUB_USER_STYLE *style, uint32_t argb) {
     pthread_mutex_lock(&style->lock);
     if (style->shadow_color != converted) {
         style->shadow_color = converted;
+        style->serial++;
+    }
+    pthread_mutex_unlock(&style->lock);
+}
+
+void sub_style_set_padding(SUB_USER_STYLE *style, float px) {
+    if (!style) return;
+    int w = (int)px;
+    pthread_mutex_lock(&style->lock);
+    if (style->padding != w) {
+        style->padding = w;
         style->serial++;
     }
     pthread_mutex_unlock(&style->lock);

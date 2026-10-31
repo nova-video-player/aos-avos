@@ -64,8 +64,11 @@ typedef struct SUB_USER_STYLE {
     int      outline_width;
     uint32_t outline_color;
 
-    int      shadow_width;  // Acts as Box Padding in Mode 2
+    int      shadow_width;  // Real drop-shadow offset (Mode 0 only)
     uint32_t shadow_color;
+
+    int      padding;       // Box padding (default 2) for bg_mode 1 (per-line) and 2 (unified); kept separate from
+                            // outline/shadow because libass reuses Outline/Shadow for it
 
     int      margin_bottom; // Vertical Offset (evades Android UI)
     int      override_mode; // 0 = Embedded, 1 = Force Custom, 2 = Scale Only
@@ -107,3 +110,4 @@ void sub_style_set_outline_width(SUB_USER_STYLE *style, float px);
 void sub_style_set_outline_color(SUB_USER_STYLE *style, uint32_t argb);
 void sub_style_set_shadow_width(SUB_USER_STYLE *style, float px);
 void sub_style_set_shadow_color(SUB_USER_STYLE *style, uint32_t argb);
+void sub_style_set_padding(SUB_USER_STYLE *style, float px);

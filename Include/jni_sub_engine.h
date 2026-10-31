@@ -52,6 +52,7 @@ extern "C" {
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetOutlineWidth(JNIEnv *env, jobject thiz, jlong handle, jfloat px);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetShadowColor(JNIEnv *env, jobject thiz, jlong handle, jint color);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetShadowWidth(JNIEnv *env, jobject thiz, jlong handle, jfloat px);
+    JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetPadding(JNIEnv *env, jobject thiz, jlong handle, jfloat px);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundMode(JNIEnv *env, jobject thiz, jlong handle, jint mode);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundColor(JNIEnv *env, jobject thiz, jlong handle, jint color);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundOpacity(JNIEnv *env, jobject thiz, jlong handle, jfloat opacity);

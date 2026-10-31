@@ -576,15 +576,13 @@ static int sync_styles(SSA_BACKEND *ctx) {
                     // IMPORTANT libass quirk: for BorderStyle=3, Outline is genuine uniform
                     // box padding (all 4 sides), not a stroke width around glyphs. Shadow is
                     // a real offset drop-shadow of the box and is intentionally left at 0.
-                    // Padding is now user-adjustable via the dedicated UI control (touch
-                    // dialog's boxed_line_padding_row / TV menu's Boxed-Line-only Padding
-                    // row), so 0 is a legitimate user choice (a tight box hugging the text)
-                    // rather than an unreachable default that needed a >0 safety fallback.
+                    // Padding has its own user value (u.padding), independent of the outline
+                    // width, so 0 is a legitimate user choice (a tight box hugging the text).
                     style->BorderStyle = 3;
                     style->BackColour = u.bg_color;
                     // Match OutlineColour to BackColour so the padding shares the exact alpha transparency
                     style->OutlineColour = u.bg_color;
-                    style->Outline = u.outline_width * font_res_scale;
+                    style->Outline = u.padding * font_res_scale;
                     style->Shadow = 0;
 
                 } else if (u.bg_mode == 2) {
@@ -593,7 +591,7 @@ static int sync_styles(SSA_BACKEND *ctx) {
                     style->OutlineColour = u.outline_color;
                     style->BackColour = u.bg_color;
                     style->Outline = u.outline_width * font_res_scale;
-                    style->Shadow = u.shadow_width * font_res_scale; // Hijacked for Padding!
+                    style->Shadow = u.padding * font_res_scale; // libass BorderStyle 4 reuses Shadow as box padding
 
                 } else {
                     // STANDARD OUTLINE + SHADOW

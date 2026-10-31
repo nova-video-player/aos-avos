@@ -319,6 +319,13 @@ JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_n
     sub_engine_force_wake(eng);
 }
 
+JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetPadding(JNIEnv *env, jobject thiz, jlong handle, jfloat px) {
+    SUB_ENGINE *eng = get_engine(handle);
+    if (!eng) return;
+    sub_style_set_padding(sub_engine_get_style(eng), px);
+    sub_engine_force_wake(eng);
+}
+
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBackgroundMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {
     SUB_ENGINE *eng = get_engine(handle);
     if (!eng) return;

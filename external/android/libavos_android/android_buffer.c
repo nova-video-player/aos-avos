@@ -135,7 +135,7 @@ android_surface_t *android_surface_create(void *surface_handle)
 
 	as->anw = anw;
 
-	hw_module_t const* module;
+	hw_module_t const* module = NULL;
 	int (*hw_get_module) (const char *id, const struct hw_module_t **module) = NULL;
 	dlerror();
 	hw_get_module = dlsym(RTLD_DEFAULT, "hw_get_module");
@@ -146,7 +146,26 @@ android_surface_t *android_surface_create(void *surface_handle)
 
 	if ((*hw_get_module)(GRALLOC_HARDWARE_MODULE_ID, &module) != 0)
 		goto err;
-	as->gralloc = (gralloc_module_t const *) module;
+	/* Inspect only the common header until the module is known to be gralloc0.
+	 * Gralloc1 and later interfaces do not have gralloc0's callback layout. */
+	if (!module || module->tag != HARDWARE_MODULE_TAG || !module->id ||
+	    strcmp(module->id, GRALLOC_HARDWARE_MODULE_ID)) {
+		AVOSLOG("invalid gralloc module header");
+		goto err;
+	}
+	if ((module->module_api_version >> 8) != 0) {
+		AVOSLOG("unsupported gralloc module API version 0x%04x",
+			(unsigned int)module->module_api_version);
+		goto err;
+	}
+	/* Keep all legacy 0.x minor versions; only the synchronous lock/unlock
+	 * callbacks are used here, not the optional YCbCr or fence extensions. */
+	gralloc_module_t const* gralloc = (gralloc_module_t const *) module;
+	if (!gralloc->lock || !gralloc->unlock) {
+		AVOSLOG("gralloc0 module missing lock/unlock callbacks");
+		goto err;
+	}
+	as->gralloc = gralloc;
 err:
 	if (!as->gralloc)
 		AVOSLOG("no gralloc: using public native window\n");

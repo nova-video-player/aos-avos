@@ -16,8 +16,11 @@ class AndroidSurfaceValidationTest(unittest.TestCase):
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #define ANDROID_NATIVE_WINDOW_MAGIC 0x5f776e64
 #define GRALLOC_HARDWARE_MODULE_ID "gralloc"
+#define HARDWARE_MODULE_TAG 0x48574d54
 #define RTLD_DEFAULT NULL
 #define AVOSLOG(...) ((void)0)
 #define HAL_TRANSFORM_ROT_90 4
@@ -25,13 +28,26 @@ class AndroidSurfaceValidationTest(unittest.TestCase):
 #define HAL_TRANSFORM_ROT_270 7
 typedef struct { struct { int magic, version; } common; } ANativeWindow;
 typedef struct { int unused; } ANativeWindow_Buffer;
-typedef struct hw_module_t { int unused; } hw_module_t;
-typedef hw_module_t gralloc_module_t;
+typedef struct hw_module_t {
+    uint32_t tag;
+    uint16_t module_api_version;
+    const char *id;
+} hw_module_t;
+typedef struct {
+    hw_module_t common;
+    int (*lock)(void);
+    int (*unlock)(void);
+} gralloc_module_t;
 typedef struct android_surface android_surface_t;
 static int allocations, fail_allocation, lookups, module_calls, probe_mode, rotations;
 static uint32_t last_transform;
 static int transform_error;
-static gralloc_module_t module;
+static int unused_callback(void) { assert(!"probe must not call lock/unlock"); return 0; }
+static gralloc_module_t module = {
+    .common = { HARDWARE_MODULE_TAG, 1, GRALLOC_HARDWARE_MODULE_ID },
+    .lock = unused_callback, .unlock = unused_callback
+};
+static const hw_module_t *lookup_module = &module.common;
 static void *counted_calloc(size_t count, size_t size) {
     allocations++;
     return fail_allocation ? NULL : calloc(count, size);
@@ -41,7 +57,8 @@ static int mock_hw_get_module(const char *id, const hw_module_t **out) {
     assert(!strcmp(id, GRALLOC_HARDWARE_MODULE_ID));
     module_calls++;
     if (probe_mode == 1) return -1;
-    *out = &module;
+    if (probe_mode == 3) return 0; /* Broken HAL: success without an output. */
+    *out = lookup_module;
     return 0;
 }
 static void *dlsym(void *handle, const char *name) {
@@ -83,6 +100,59 @@ int main(void) {
         free(as);
     }
     assert(allocations == 4 && lookups == 3 && module_calls == 2);
+    /* Every rejected module preserves the valid public-window surface. */
+    probe_mode = 3;
+    android_surface_t *fallback = android_surface_create(&window);
+    assert(fallback && fallback->anw == &window && !fallback->gralloc);
+    free(fallback);
+    probe_mode = 2;
+    lookup_module = NULL;
+    fallback = android_surface_create(&window);
+    assert(fallback && !fallback->gralloc);
+    free(fallback);
+    lookup_module = &module.common;
+    for (int invalid = 0; invalid < 5; invalid++) {
+        module.common.tag = invalid == 0 ? 0 : HARDWARE_MODULE_TAG;
+        module.common.id = invalid == 1 ? NULL :
+                           invalid == 2 ? "not-gralloc" : GRALLOC_HARDWARE_MODULE_ID;
+        module.lock = invalid == 3 ? NULL : unused_callback;
+        module.unlock = invalid == 4 ? NULL : unused_callback;
+        fallback = android_surface_create(&window);
+        assert(fallback && fallback->anw == &window && !fallback->gralloc);
+        free(fallback);
+    }
+    module.common.tag = HARDWARE_MODULE_TAG;
+    module.common.id = GRALLOC_HARDWARE_MODULE_ID;
+    module.lock = module.unlock = unused_callback;
+    /* All legacy minor versions remain accepted, including version zero. */
+    for (int minor = 0; minor <= 255; minor++) {
+        module.common.module_api_version = minor;
+        fallback = android_surface_create(&window);
+        assert(fallback && fallback->gralloc == &module);
+        free(fallback);
+    }
+    module.common.module_api_version = 1;
+    /* A non-gralloc0 module has only a common header. Put it immediately before
+       an inaccessible page: inspecting any gralloc0 callback would fault. */
+    long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 0);
+    char *pages = mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(pages != MAP_FAILED);
+    assert(!mprotect(pages + page_size, page_size, PROT_NONE));
+    hw_module_t *header = (hw_module_t *)(pages + page_size - sizeof(*header));
+    *header = module.common;
+    lookup_module = header;
+    const uint16_t versions[] = { 0x0100, 0x0101, 0x0200, 0xffff };
+    for (unsigned int i = 0; i < sizeof(versions) / sizeof(versions[0]); i++) {
+        header->module_api_version = versions[i];
+        fallback = android_surface_create(&window);
+        assert(fallback && fallback->anw == &window && !fallback->gralloc);
+        free(fallback);
+    }
+    lookup_module = &module.common;
+    assert(!munmap(pages, page_size * 2));
+
     assert(!android_window_set_buffers_rotation(&window, 90));
     assert(rotations == 1 && last_transform == HAL_TRANSFORM_ROT_90);
     assert(!android_window_set_buffers_rotation(&window, 180));

@@ -147,7 +147,8 @@ interfaces: [NDK/API guidelines](https://android.googlesource.com/platform/devel
 ## Concrete follow-ups found in the consumer code
 
 These are pre-existing findings, not regressions introduced by the recent header
-pruning. No production fixes are included in this audit.
+pruning. The original audit changed no production code; the P1 guard below
+has since been implemented. The two P2 findings remain pending.
 
 All three findings apply only when the private gralloc branch is selected; they
 do not affect the public-window branch. Gralloc was observed on API 24/25
@@ -157,16 +158,17 @@ Physical API 23-25 devices are a validation priority, not the exclusive scope.
 
 The planned gralloc removal would eliminate these paths, but remains gated on
 compatibility and performance checks. If that migration is validated and is the
-next change, defer the two P2 fixes; consider the P1 guard as interim protection.
-If gralloc remains supported while migration is deferred, address all three.
+next change, defer the two P2 fixes. The P1 guard now provides interim protection.
+If gralloc remains supported while migration is deferred, address both remaining P2s.
 Do not remove the branch merely to close these findings.
 
-### P1, conditional: validate gralloc kind before casting
+### P1, conditional: validate gralloc kind before casting (implemented)
 
-`android_surface_create()` accepts any successful `hw_get_module("gralloc", ...)`
-result and casts it to `gralloc_module_t`, without checking the module's major
+At the audit baseline, `android_surface_create()` accepted any successful
+`hw_get_module("gralloc", ...)`
+result and cast it to `gralloc_module_t`, without checking the module's major
 version or required lock/unlock callbacks. `android_surface_check_gralloc()` then
-selects a gralloc sink merely because this pointer is non-NULL.
+selected a gralloc sink merely because this pointer was non-NULL.
 
 The archived gralloc1 API has a distinct device/getFunction interface. AOSP's
 [GrallocLoader](../external/android/header-reference/snapshots/api-37_android-17.0.0_r1/hardware/interfaces/graphics/mapper/2.0/utils/passthrough/include/mapper-passthrough/2.0/GrallocLoader.h)
@@ -175,9 +177,17 @@ versions. Reading gralloc0 callback slots from another module shape can call
 invalid pointers. No affected device has been demonstrated here; the trigger is
 conditional on that incompatible module being visible to the app.
 
-Recommended fix: validate the returned module and accept only the supported
-legacy gralloc0 interface with required callbacks. Otherwise use the existing
-public-window fallback. Do not add gralloc1 support as part of this guard.
+Implemented: initialize the returned pointer to NULL and check the common
+module tag, gralloc ID and major version before accessing gralloc0 callbacks.
+Accept legacy major version 0 with both synchronous lock/unlock callbacks;
+retain all 0.x minor versions. Invalid, missing or unsupported modules keep the
+existing public-window fallback. This does not add gralloc1 support or impose
+an Android API cutoff.
+
+Host replay coverage includes a common header followed by an inaccessible page,
+so reading gralloc0 callbacks before rejecting a newer major version faults the
+test. It also covers missing symbols/modules/callbacks, malformed headers and
+legacy minor versions. Device compatibility and performance remain to be checked.
 
 ### P2: query errors are ignored during buffer setup
 

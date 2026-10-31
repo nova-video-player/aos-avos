@@ -9,8 +9,8 @@ This is a source and compiler-layout audit, not device validation.
 Keep the six vendored headers unchanged. Raising the application's minimum API
 from 21 to 23 does not require replacing this private-header snapshot. No change
 was found in the layouts, callback signatures or constants that the current code
-uses across the selected API 23–37 releases. There are concrete consumer-side
-error-handling gaps to address separately; a bulk AOSP update would not fix them.
+uses across the selected API 23–37 releases. The three consumer-side
+error-handling gaps found by this audit have been fixed without replacing headers.
 
 A newer header can change behavior even when its structures remain compatible:
 `native_window_set_usage()` starts issuing a different operation in the API-27
@@ -186,7 +186,9 @@ an Android API cutoff.
 Host replay coverage includes a common header followed by an inaccessible page,
 so reading gralloc0 callbacks before rejecting a newer major version faults the
 test. It also covers missing symbols/modules/callbacks, malformed headers and
-legacy minor versions. Device compatibility and performance remain to be checked.
+legacy minor versions. The API-25 emulator benchmark retained sink 2 with the
+guard enabled. Physical-device compatibility and error-path validation remain
+pending; emulator results do not establish vendor HAL compatibility.
 
 ### P2: query errors during buffer setup (implemented)
 
@@ -223,9 +225,36 @@ mapping. Existing public-window lifecycle coverage still passes. Successful
 playback behavior and sink selection are unchanged; device error-path validation
 remains pending.
 
-## Next action
+## Closure status (2026-10-31)
 
-Keep the current six headers and validate the retained gralloc error paths on
-devices. Public rotation/gralloc migration remains separately gated on device
-compatibility and performance checks. Do not run a new AOSP bulk dump over
-`external/android/include/21`.
+The scoped header audit and its three code follow-ups are complete:
+
+| Change | Commit |
+|---|---|
+| Lightweight audit tooling and report | `3f6b258` |
+| P1: validate gralloc0 modules before reading callbacks | `4be407a` |
+| P2: handle native-window query errors | `9aa2ad1` |
+| P2: cancel dequeued buffers after lock failure | `9f78efb` |
+
+Host replay checks for gralloc setup, buffer ownership and surface validation
+pass, and the changed native code builds for all four ABIs. These checks cover
+the simulated failure paths; they do not replace physical-device validation.
+The API-25 emulator benchmark confirmed that a valid gralloc0 module still
+selects sink 2 after the P1 guard. The P2 fixes have not received a device check.
+
+Keep the hardened gralloc path and the six retained headers for now. No further
+production changes are required to close these audit findings. On a physical
+device that selects sink 2, remaining validation should cover software playback,
+seek, pause/resume, close/reopen and surface recreation; ordinary playback alone
+does not exercise injected query or lock failures.
+
+Public rotation migration and gralloc removal remain deferred, separate work.
+Rotation reset/error reporting is already committed in `1329243`; replacing the
+private transform with MediaCodec rotation still requires its own compatibility
+checks. Gralloc removal additionally requires a physical-device comparison of
+sink 2 and the public-window path for pixel formats, subtitles, lifecycle and
+performance. Emulator benchmarks alone do not satisfy that gate.
+
+Downloaded snapshots, manifests, baselines and generated evidence remain local
+and ignored; only the audit tools and documentation are versioned. Do not run a
+new AOSP bulk dump over `external/android/include/21`.

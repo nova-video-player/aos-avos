@@ -310,6 +310,33 @@ static int android_buffer_unlock_data(android_surface_t *as, ANativeWindowBuffer
 	return 0;
 }
 
+/* A dequeued buffer belongs to us even if a later lock fails. Do not use
+ * android_buffer_cancel for those failures: it assumes the CPU lock succeeded. */
+static int android_gralloc_buffer_acquire(android_surface_t *as,
+		ANativeWindowBuffer_t **out, void **pdata)
+{
+	ANativeWindowBuffer_t *anb = NULL;
+	void *data = NULL;
+	*out = NULL;
+	if (pdata)
+		*pdata = NULL;
+	status_t err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
+	CHECK_ERR();
+	err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
+	if (err == NO_ERROR)
+		err = android_buffer_lock_data(as, anb, &data);
+	if (err != NO_ERROR) {
+		int cancel_err = as->anw->cancelBuffer_DEPRECATED(as->anw, anb);
+		if (cancel_err != NO_ERROR)
+			AVOSLOG("cancel after lock failure failed: %d", cancel_err);
+		CHECK_ERR();
+	}
+	*out = anb;
+	if (pdata)
+		*pdata = data;
+	return 0;
+}
+
 int android_buffer_dequeue(android_surface_t *as, void **handle)
 {
 	status_t err = NO_ERROR;
@@ -320,15 +347,11 @@ int android_buffer_dequeue(android_surface_t *as, void **handle)
 	}
 
 	if (as->gralloc) {
-		ANativeWindowBuffer_t *anb;
-		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
-		CHECK_ERR();
-		err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
+		ANativeWindowBuffer_t *anb = NULL;
+		*handle = NULL;
+		err = android_gralloc_buffer_acquire(as, &anb, NULL);
 		CHECK_ERR();
 		*handle = anb;
-
-		err = android_buffer_lock_data(as, anb, NULL);
-		CHECK_ERR();
 	} else {
 		err = android_public_buffer_lock(as);
 		CHECK_ERR();
@@ -347,15 +370,11 @@ int android_buffer_dequeue_with_buffer(android_surface_t *as, void **handle, and
 	}
 
 	if (as->gralloc) {
-		ANativeWindowBuffer_t *anb;
-		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
-		CHECK_ERR();
-		err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
+		ANativeWindowBuffer_t *anb = NULL;
+		*handle = NULL;
+		err = android_gralloc_buffer_acquire(as, &anb, NULL);
 		CHECK_ERR();
 		*handle = anb;
-
-		err = android_buffer_lock_data(as, anb, NULL);
-		CHECK_ERR();
 	} else {
 		err = android_public_buffer_lock(as);
 		CHECK_ERR();
@@ -413,15 +432,13 @@ int android_buffer_alloc(android_surface_t *as, android_buffer_t *buffer)
 	if (as->gralloc) {
 		ANativeWindowBuffer_t *anb = NULL;
 		void *data = NULL;
-		err = as->anw->dequeueBuffer_DEPRECATED(as->anw, &anb);
-		CHECK_ERR();
-		err = as->anw->lockBuffer_DEPRECATED(as->anw, anb);
-		CHECK_ERR();
+		err = android_gralloc_buffer_acquire(as, &anb, &data);
+		if (err != NO_ERROR) {
+			memset(buffer, 0, sizeof(*buffer));
+			return -1;
+		}
 		buffer->handle = anb;
 		buffer->img_handle = anb->handle;
-	
-		err = android_buffer_lock_data(as, anb, &data);
-		CHECK_ERR();
 		buffer->data = (uint8_t *) data;
 		buffer->hal_format = anb->format;
 		buffer->width = anb->width;

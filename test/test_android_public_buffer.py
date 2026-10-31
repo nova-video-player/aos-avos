@@ -1,4 +1,4 @@
-"""Replay public-window ownership through the production buffer entry points."""
+"""Replay public-window ownership and gralloc acquisition failure cleanup."""
 from pathlib import Path
 import unittest
 
@@ -18,6 +18,7 @@ class AndroidPublicBufferTest(unittest.TestCase):
             'int android_buffer_close(',
             'static int android_buffer_lock_data(',
             'static int android_buffer_unlock_data(',
+            'static int android_gralloc_buffer_acquire(',
             'int android_buffer_dequeue(',
             'int android_buffer_dequeue_with_buffer(',
             'int android_buffer_queue(',
@@ -52,6 +53,44 @@ typedef struct gralloc_module {
 static int locks, posts, held, lock_error, post_error, allocations, fail_alloc;
 static unsigned char pixels[4096];
 static int width = 16, height = 16, stride = 16, format = HAL_PIXEL_FORMAT_RGBX_8888;
+static ANativeWindowBuffer_t native_buffer;
+static int gralloc_owned, cpu_locked, fail_stage, cancel_error;
+static int dequeues, legacy_locks, cpu_locks, cpu_unlocks, cancels, queues;
+static int mock_dequeue(ANativeWindow *window, ANativeWindowBuffer_t **out) {
+    assert(window && out && !gralloc_owned && !cpu_locked);
+    dequeues++;
+    if (fail_stage == 1) return -11;
+    gralloc_owned = 1; *out = &native_buffer; return 0;
+}
+static int mock_legacy_lock(ANativeWindow *window, ANativeWindowBuffer_t *buffer) {
+    assert(window && buffer == &native_buffer && gralloc_owned && !cpu_locked);
+    legacy_locks++;
+    return fail_stage == 2 ? -22 : 0;
+}
+static int mock_cpu_lock(const gralloc_module_t *module, void *handle, int usage,
+                         int x, int y, int w, int h, void **data) {
+    (void)usage;
+    assert(module && handle == native_buffer.handle && gralloc_owned && !cpu_locked);
+    assert(!x && !y && w == native_buffer.width && h == native_buffer.height && data);
+    cpu_locks++;
+    if (fail_stage == 3) return -5;
+    cpu_locked = 1; *data = pixels; return 0;
+}
+static int mock_cpu_unlock(const gralloc_module_t *module, void *handle) {
+    assert(module && handle == native_buffer.handle && gralloc_owned && cpu_locked);
+    cpu_unlocks++; cpu_locked = 0; return 0;
+}
+static int mock_cancel(ANativeWindow *window, ANativeWindowBuffer_t *buffer) {
+    assert(window && buffer == &native_buffer && gralloc_owned && !cpu_locked);
+    cancels++;
+    if (cancel_error) return -5;
+    gralloc_owned = 0; return 0;
+}
+static int mock_queue(ANativeWindow *window, ANativeWindowBuffer_t *buffer) {
+    assert(window && buffer == &native_buffer && gralloc_owned && !cpu_locked);
+    queues++; gralloc_owned = 0; return 0;
+}
+
 static int ANativeWindow_lock(ANativeWindow *window, ANativeWindow_Buffer *buffer, void *dirty) {
     assert(window && buffer && !dirty && !held);
     locks++;
@@ -169,6 +208,71 @@ int main(void) {
     before = posts;
     android_surface_destroy(&as);
     assert(!as && !held && allocations == 0 && posts == before + 1);
+
+    /* All three gralloc entry points must release a dequeued buffer if either
+       lock fails, without unlocking an unacquired CPU mapping. */
+    gralloc_module_t gralloc = { mock_cpu_lock, mock_cpu_unlock };
+    ANativeWindow gralloc_window = { mock_dequeue, mock_legacy_lock, mock_queue, mock_cancel };
+    android_surface_t gralloc_surface = { .anw = &gralloc_window, .gralloc = &gralloc,
+                                         .buffer_type = BUFFER_TYPE_SW };
+    native_buffer = (ANativeWindowBuffer_t){pixels, 16, 16, 16, HAL_PIXEL_FORMAT_RGBX_8888};
+    for (int entry = 0; entry < 3; entry++) {
+        for (int stage = 1; stage <= 3; stage++) {
+            fail_stage = stage;
+            int dq = dequeues, ll = legacy_locks, cl = cpu_locks;
+            int ca = cancels, cu = cpu_unlocks, qu = queues;
+            next = &window;
+            memset(&buffer, 0, sizeof(buffer));
+            int result = entry == 0 ? android_buffer_alloc(&gralloc_surface, &buffer) :
+                         entry == 1 ? android_buffer_dequeue(&gralloc_surface, &next) :
+                         android_buffer_dequeue_with_buffer(&gralloc_surface, &next, &buffer);
+            assert(result == -1 && !gralloc_owned && !cpu_locked);
+            assert(dequeues == dq + 1 && legacy_locks == ll + (stage >= 2));
+            assert(cpu_locks == cl + (stage >= 3));
+            assert(cancels == ca + (stage >= 2) && cpu_unlocks == cu && queues == qu);
+            assert(entry == 0 ? (!buffer.handle && !buffer.data) : !next);
+            /* Immediately reuse the same one-buffer queue after each failure. */
+            fail_stage = 0;
+            result = entry == 0 ? android_buffer_alloc(&gralloc_surface, &buffer) :
+                     entry == 1 ? android_buffer_dequeue(&gralloc_surface, &next) :
+                     android_buffer_dequeue_with_buffer(&gralloc_surface, &next, &buffer);
+            assert(!result && gralloc_owned && cpu_locked);
+            void *acquired = entry == 0 ? buffer.handle : next;
+            assert(acquired == &native_buffer);
+            if (entry == 0) assert(buffer.data == pixels && buffer.size == 1024);
+            assert(!android_buffer_queue(&gralloc_surface, acquired));
+            assert(!gralloc_owned && !cpu_locked && cpu_unlocks == cu + 1 && queues == qu + 1);
+        }
+    }
+    /* A failing cancel is attempted once, without hiding the acquisition error
+       or publishing the unusable handle. The backend still owns the failure. */
+    for (int entry = 0; entry < 3; entry++) {
+        fail_stage = 3; cancel_error = 1;
+        int ca = cancels, cu = cpu_unlocks;
+        next = &window;
+        memset(&buffer, 0, sizeof(buffer));
+        int result = entry == 0 ? android_buffer_alloc(&gralloc_surface, &buffer) :
+                     entry == 1 ? android_buffer_dequeue(&gralloc_surface, &next) :
+                     android_buffer_dequeue_with_buffer(&gralloc_surface, &next, &buffer);
+        assert(result == -1 && cancels == ca + 1 && cpu_unlocks == cu && !cpu_locked);
+        assert(entry == 0 ? !buffer.handle : !next);
+        gralloc_owned = 0; /* Simulate backend teardown after its cancel failed. */
+    }
+    fail_stage = cancel_error = 0;
+    /* Failure after successful CPU locking must unlock, then cancel once. */
+    native_buffer.width = 17; native_buffer.stride = 16;
+    int ca = cancels, cu = cpu_unlocks;
+    assert(android_buffer_alloc(&gralloc_surface, &buffer) == -1);
+    assert(!buffer.handle && !buffer.data && !gralloc_owned && !cpu_locked);
+    assert(cancels == ca + 1 && cpu_unlocks == cu + 1);
+    native_buffer.width = 16;
+    /* Hardware buffers do not acquire or release a CPU mapping. */
+    gralloc_surface.buffer_type = BUFFER_TYPE_HW;
+    int cl = cpu_locks; cu = cpu_unlocks;
+    assert(!android_buffer_alloc(&gralloc_surface, &buffer));
+    assert(!buffer.data && !cpu_locked && gralloc_owned);
+    assert(!android_buffer_cancel(&gralloc_surface, buffer.handle));
+    assert(!gralloc_owned && cpu_locks == cl && cpu_unlocks == cu);
     return 0;
 }
 ''')

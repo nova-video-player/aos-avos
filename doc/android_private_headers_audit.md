@@ -147,9 +147,8 @@ interfaces: [NDK/API guidelines](https://android.googlesource.com/platform/devel
 ## Concrete follow-ups found in the consumer code
 
 These are pre-existing findings, not regressions introduced by the recent header
-pruning. The original audit changed no production code; the P1 guard and the
-P2 query-error fix below have since been implemented. Acquisition cleanup remains
-pending.
+pruning. The original audit changed no production code; the P1 guard and both
+P2 error-path fixes below have since been implemented.
 
 All three findings apply only when the private gralloc branch is selected; they
 do not affect the public-window branch. Gralloc was observed on API 24/25
@@ -158,10 +157,8 @@ an API cutoff: native selection tests module availability, not Android version.
 Physical API 23-25 devices are a validation priority, not the exclusive scope.
 
 The planned gralloc removal would eliminate these paths, but remains gated on
-compatibility and performance checks. If that migration is validated and is the
-next change, defer the remaining acquisition-cleanup fix. The P1 guard and
-query-error fix provide interim protection. If gralloc remains supported while
-migration is deferred, address the remaining cleanup gap.
+compatibility and performance checks. Gralloc is retained while that validation
+is pending, so all three findings were addressed without changing sink selection.
 Do not remove the branch merely to close these findings.
 
 ### P1, conditional: validate gralloc kind before casting (implemented)
@@ -204,23 +201,31 @@ behavior after a successful query. Log the concrete type only after a successful
 diagnostic query; its failure remains non-fatal. Replay checks cover both query
 failures, forced counts, successful negotiation and public-window setup.
 
-### P2: gralloc acquisitions are not unwound on later lock failure
+### P2: gralloc acquisitions after lock failure (implemented)
 
-In the gralloc branches of `android_buffer_alloc()`, `android_buffer_dequeue()`
-and `android_buffer_dequeue_with_buffer()`, a successful dequeue can be followed
-by a failed legacy lock or gralloc CPU lock. `CHECK_ERR()` returns immediately
-without cancelling the acquired native-window buffer. It is then absent from
-normal queue ownership and can exhaust available buffers if failures repeat.
-The public-window ownership fix does not cover this separate branch.
+At the audit baseline, the gralloc branches of `android_buffer_alloc()`,
+`android_buffer_dequeue()` and `android_buffer_dequeue_with_buffer()` returned
+after a legacy/CPU lock failure without cancelling the already dequeued buffer.
+Repeated failures could exhaust the queue.
 
-Recommended fix: unwind according to acquired state. Cancel a dequeued buffer
-on subsequent failure, unlock only after a successful CPU lock, and publish output
-handles only once acquisition succeeds. Verify failure paths with replay tests;
-keep successful gralloc and public-window behavior unchanged.
+Implemented: share acquisition and failure cleanup across the three entry points.
+A failed dequeue requires no cancellation. A failed legacy or CPU lock cancels
+the acquired buffer once, directly through the native window; it must not call
+`android_buffer_cancel()`, which assumes CPU locking succeeded. Publish handles
+only after successful acquisition. A failed cancellation is logged, with the
+acquisition still reported as failed; the code cannot guarantee recovery from
+a backend that refuses cancellation.
+
+Replay checks exercise each failure stage through all three entry points,
+immediate reuse after cleanup, failed cancellation, normal queue/unlock behavior,
+invalid geometry after successful CPU locking, and hardware buffers without CPU
+mapping. Existing public-window lifecycle coverage still passes. Successful
+playback behavior and sink selection are unchanged; device error-path validation
+remains pending.
 
 ## Next action
 
-Keep the current six headers. Choose the gralloc follow-up order according to
-the gated migration decision above, with any fixes in focused changes. Public rotation/gralloc migration remains separately gated on
-device compatibility and performance checks. Do not run a new AOSP bulk dump over
+Keep the current six headers and validate the retained gralloc error paths on
+devices. Public rotation/gralloc migration remains separately gated on device
+compatibility and performance checks. Do not run a new AOSP bulk dump over
 `external/android/include/21`.

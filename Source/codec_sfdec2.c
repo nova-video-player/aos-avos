@@ -35,6 +35,7 @@
 #include "sfdec.h"
 #include "android_window.h"
 #include "android_codec.h"
+#include "video_startup_watchdog.h"
 
 #include <time.h>
 #include <limits.h>
@@ -266,6 +267,7 @@ typedef struct priv {
 	int pts_repair_logged;
 	int input_eos;
 	int output_eos;
+	VIDEO_STARTUP_WATCHDOG startup_watchdog;
 	INT64 presentation_end_ns;
 	unsigned int render_generation; // invalidates peeked work across seek/flush
 
@@ -1835,6 +1837,20 @@ static int videodec_get_error(priv_t *p)
 	return error;
 }
 
+static void videodec_check_startup_l(priv_t *p, int accepted, int blocked, int draining)
+{
+	STREAM *s = p->dec->ctx;
+	int active = s && !s->paused && !s->paused_internal && !s->seek_paused &&
+		!s->play_n_video_frames && p->locked.run && !p->locked.error &&
+		!has_state_l(p, THREAD_STATE_FLUSHING);
+	if (video_startup_watchdog_step(&p->startup_watchdog, atime64(),
+	                               accepted, blocked, draining, active)) {
+		CLOG("no decoded frame after 10s of active input/draining; retry decoder");
+		p->locked.error = 1;
+		pthread_cond_broadcast(&p->locked.cond);
+	}
+}
+
 static int frame_release(sfdec_t *sfdec, VIDEO_FRAME *f)
 {
 	if (f->android_handle) {
@@ -2757,6 +2773,7 @@ DBGCV3 CLOG("sfdec_read <- size %dx%d (%d)", read_out.size.width, read_out.size.
 			frame_q_put_head(&p->locked.dec_q, f);
 			continue;
 		}
+		p->startup_watchdog.output_seen = 1;
 		int out_time;
 		int out_type;
 		int out_ID;
@@ -3006,6 +3023,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	p->pts_input_last = INT_MIN;
 	p->pts_repair_logged = 0;
 	p->input_eos = p->output_eos = 0;
+	video_startup_watchdog_reset(&p->startup_watchdog, video->dv_bitstream_profile != 0);
 	p->presentation_end_ns = 0;
 	if( p->repair_decode_order_pts ) {
 		CLOG("decode-order PTS repair armed: depth=%d", p->pts_reorder_depth);
@@ -3239,6 +3257,7 @@ DBGCV CLOG("%c %8d: %d/%d", frame_type(d->type), d->time, ret, d->size);
 			XDM_ts_put( &p->XDM_ctx, media_time );
 		}
 	}
+	videodec_check_startup_l(p, ret == d->size && ret > 0, ret == 0, 0);
 	rm_state_l(p, THREAD_STATE_WRITING);
 	pthread_mutex_unlock(&p->locked.mtx);
 	if (pdecoded) {
@@ -3303,6 +3322,7 @@ static int videodec_drain(STREAM_DEC_VIDEO *dec, VIDEO_FRAME **in,
 		rm_state_l(p, THREAD_STATE_WRITING);
 	}
 	*done = p->output_eos && !frame_q_count(&p->locked.out_q);
+	if (!*done) videodec_check_startup_l(p, 0, 0, 1);
 	int ret = p->locked.error;
 	pthread_mutex_unlock(&p->locked.mtx);
 	return ret;
@@ -3347,6 +3367,7 @@ DBGCV	CLOG();
 
 	add_state_l(p, THREAD_STATE_FLUSHING);
 	p->pcm_resume_pending = 0;
+	video_startup_watchdog_reset(&p->startup_watchdog, p->startup_watchdog.enabled);
 	p->pcm_resume_sample_stage = 0;
 	int keep_mode1_phase = p->s && p->s->seek_paused &&
 		mode1_phase_matches_audio_l(p, p->s);
@@ -3583,6 +3604,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 	int preserve_pcm_slew = !passthrough && preserves_output &&
 		p->pcm_resume_slew && p->pcm_startup_slew && pcm_resume_matches_audio_l(p, s);
 	if( paused ) {
+		video_startup_watchdog_suspend(&p->startup_watchdog);
 		p->mode2_cold_entry_until_ms = 0;
 		p->pcm_drift.samples = 0;
 		p->at_clock_handoff_pending = 0;

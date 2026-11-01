@@ -24,10 +24,10 @@ PREAMBLE = r'''
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
-enum { AV_CODEC_ID_HEVC = 1, AV_CODEC_ID_AV1 };
+enum { AV_CODEC_ID_HEVC = 1, AV_CODEC_ID_AV1, AV_CODEC_ID_H264 };
 enum { VIDEO_FORMAT_UNKNOWN, VIDEO_FORMAT_HEVC, VIDEO_FORMAT_AV1,
-       VIDEO_FORMAT_DOLBY_VISION };
-enum { VIDEO_FOURCC_HEVC = 1, VIDEO_FOURCC_AV01, VIDEO_FOURCC_DOLBY_VISION };
+       VIDEO_FORMAT_DOLBY_VISION, VIDEO_FORMAT_H264 };
+enum { VIDEO_FOURCC_HEVC = 1, VIDEO_FOURCC_AV01, VIDEO_FOURCC_DOLBY_VISION, VIDEO_FOURCC_H264 };
 typedef unsigned char UCHAR;
 typedef struct {
     int format, fourcc, codec_id, hvcc, nal_unit_size, extraDataSize, extraDataSize2;

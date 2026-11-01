@@ -112,7 +112,7 @@ static const char *acodecs_get_for_profile(const char *mime, int profile) {
 static VIDEO_PROPERTIES select_video(int base, int profile, int ccid, int mode,
                                      int supported, int match, size_t record_size) {
     VIDEO_PROPERTIES v = { .format = base, .codec_id = base == VIDEO_FORMAT_AV1 ?
-        AV_CODEC_ID_AV1 : AV_CODEC_ID_HEVC }, *video = &v;
+        AV_CODEC_ID_AV1 : base == VIDEO_FORMAT_H264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC }, *video = &v;
     AVDOVIDecoderConfigurationRecord record = {
         .dv_profile = profile, .dv_level = 6, .dv_bl_signal_compatibility_id = ccid,
         .rpu_present_flag = 1, .bl_present_flag = 1 };
@@ -131,6 +131,14 @@ int main(void) {
     assert(v.format == VIDEO_FORMAT_DOLBY_VISION && queried_profile == 1024);
     v = select_video(VIDEO_FORMAT_HEVC, 8, 1, 0, 1, 1, size);
     assert(v.format == VIDEO_FORMAT_DOLBY_VISION && queried_profile == 256);
+    v = select_video(VIDEO_FORMAT_H264, 9, 2, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && queried_profile == 512);
+    assert(video_dovi_use_base(&v));
+    assert(v.format == VIDEO_FORMAT_H264 && v.fourcc == VIDEO_FOURCC_H264);
+    v = select_video(VIDEO_FORMAT_H264, 9, 2, 0, 1, 0, size);
+    assert(v.format == VIDEO_FORMAT_H264);
+    v = select_video(VIDEO_FORMAT_H264, 9, 0, 0, 1, 1, size);
+    assert(!video_dovi_use_base(&v));
     /* Profile 7 retains its existing HDR base preference, unless forced. */
     v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 1, size);
     assert(v.format == VIDEO_FORMAT_HEVC && queried_profile == 256);

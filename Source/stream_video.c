@@ -2258,7 +2258,9 @@ serprintf("thumb crypted!r\n");
 		WMV_get_video_props( s->video );
 		// more ugly, I know...
 #ifdef CONFIG_H264
-		if( s->video->fourcc == VIDEO_FOURCC_H264 && s->video->extraDataSize && s->video->extraData[0] == 1 ) {
+        const int is_avc = s->video->fourcc == VIDEO_FOURCC_H264 ||
+            (s->video->fourcc == VIDEO_FOURCC_DOLBY_VISION && s->video->codec_id == AV_CODEC_ID_H264);
+		if( is_avc && s->video->extraDataSize && s->video->extraData[0] == 1 ) {
 			if( !H264_parse_avcc( s->video, NULL, NULL, &s->video->nal_unit_size ) ) {
 DBGP serprintf("AVCC!\r\n" );
 				s->video->avcc = 1;
@@ -2275,7 +2277,7 @@ serprintf("AVCC: height from SPS %d > %d\n", s->video->sps.height, s->video->hei
 			}
 		}
 		// and now with even moar ugly:
-		if( s->video->fourcc == VIDEO_FOURCC_H264 && !s->video->extraDataSize && !s->video->sps.valid ) {
+		if( is_avc && !s->video->extraDataSize && !s->video->sps.valid ) {
 DBGS serprintf("H264 with NO SPS in extradata!\n");
 			STREAM_CHUNK c = { 0 };
 			int count = 0;
@@ -2283,7 +2285,11 @@ DBGS serprintf("H264 with NO SPS in extradata!\n");
 			while( !stream_no_parser && count++ < 100 ) {
 				stream_parser_peek_video_chunk( s, &c );
 				if( c.valid == CHUNK_VALID && s->buffer && s->buffer->data ) {
+                    int format = s->video->format, fourcc = s->video->fourcc;
 					H264_get_video_props( s->video, s->buffer->data + c.buf, c.size, &s->video->sps );
+                    // SPS parsing describes AVC, but must retain the selected DV decoder.
+                    s->video->format = format;
+                    s->video->fourcc = fourcc;
 					break;
 				} 
 				s->parser->parse( s );

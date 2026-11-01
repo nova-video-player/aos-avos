@@ -740,13 +740,12 @@ serprintf("FF: parse H264 SPS\n");
                                     case 8:
                                         video->dv_profile = 256; //DolbyVisionProfileDvheSt, should be Dtb but Kodi says to use St
                                         break;
-                                    case 9:
-                                        video->dv_profile = 512; //DolbyVisionProfileDvavSe
-                                        break;
                                     default:
                                         serprintf("Unsupported Dolby HEVC profile %d", dovi_record->dv_profile);
                                         break;
                                 }
+                            } else if (video->format == VIDEO_FORMAT_H264 && dovi_record->dv_profile == 9) {
+                                video->dv_profile = 512; // DolbyVisionProfileDvavSe (AVC)
                             } else if (video->format == VIDEO_FORMAT_AV1) {
                                 if (dovi_record->dv_profile == 10) {
                                     video->dv_profile = 0x400;//DolbyVisionProfileDvav110 

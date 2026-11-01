@@ -38,6 +38,9 @@ static inline int video_dovi_base_format(const VIDEO_PROPERTIES *video)
 	default:
 		return VIDEO_FORMAT_UNKNOWN;
 	}
+	if (video->codec_id == AV_CODEC_ID_H264 && video->dv_bitstream_profile == 9 &&
+	    video->dv_bl_signal_compatibility_id == 2)
+		return VIDEO_FORMAT_H264;
 	if (video->codec_id == AV_CODEC_ID_AV1 && video->dv_bitstream_profile == 10)
 		return VIDEO_FORMAT_AV1;
 	if (video->codec_id == AV_CODEC_ID_HEVC &&
@@ -59,7 +62,8 @@ static inline int video_dovi_use_base(VIDEO_PROPERTIES *video)
 	if (format == VIDEO_FORMAT_UNKNOWN)
 		return 0;
 	video->format = format;
-	video->fourcc = format == VIDEO_FORMAT_AV1 ? VIDEO_FOURCC_AV01 : VIDEO_FOURCC_HEVC;
+	video->fourcc = format == VIDEO_FORMAT_AV1 ? VIDEO_FOURCC_AV01 :
+	    format == VIDEO_FORMAT_H264 ? VIDEO_FOURCC_H264 : VIDEO_FOURCC_HEVC;
 	return 1;
 }
 

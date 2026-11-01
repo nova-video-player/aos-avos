@@ -53,6 +53,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <signal.h>
+#include <libavcodec/codec_id.h>
 
 #ifdef CONFIG_STREAM
  
@@ -2279,7 +2280,10 @@ DBGS serprintf("H264 with NO SPS in extradata!\n");
 		}
 #endif				 
 #ifdef CONFIG_HEVC
-		if( (s->video->fourcc == VIDEO_FOURCC_HEVC || s->video->fourcc == VIDEO_FOURCC_DOLBY_VISION) && s->video->extraDataSize ) {
+		// Dolby Vision can carry AV1 too; only HEVC has HVCC/NAL framing.
+		if( (s->video->fourcc == VIDEO_FOURCC_HEVC ||
+		     (s->video->fourcc == VIDEO_FOURCC_DOLBY_VISION &&
+		      s->video->codec_id == AV_CODEC_ID_HEVC)) && s->video->extraDataSize ) {
 			// convert extradata from HVCC to annexB if needed
 			if( !HEVC_convert_extradata( s->video ) ) {
 DBGS serprintf("HVCC!\r\n" );

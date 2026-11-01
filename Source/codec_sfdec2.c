@@ -38,6 +38,7 @@
 
 #include <time.h>
 #include <limits.h>
+#include <libavcodec/codec_id.h>
 #ifdef CONFIG_ANDROID
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -2881,9 +2882,25 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
                 extradata_size = rcv_size;
 	}
 
+	// Match the ordinary AV1 path: sequence headers travel in the AV1 packets,
+	// not in the HEVC-style codec-config buffers used by the generic DV path.
+	if (video->format == VIDEO_FORMAT_DOLBY_VISION && video->codec_id == AV_CODEC_ID_AV1) {
+		extradata = NULL;
+		extradata_size = 0;
+	}
+
 	int effective_format = video->format;
 	int effective_fourcc = video->fourcc;
-	int tried_hevc_fallback = 0;
+	int fallback_format = VIDEO_FORMAT_UNKNOWN;
+	int fallback_fourcc = 0;
+	if (video->codec_id == AV_CODEC_ID_HEVC) {
+		fallback_format = VIDEO_FORMAT_HEVC;
+		fallback_fourcc = VIDEO_FOURCC_HEVC;
+	} else if (video->codec_id == AV_CODEC_ID_AV1) {
+		fallback_format = VIDEO_FORMAT_AV1;
+		fallback_fourcc = VIDEO_FOURCC_AV01;
+	}
+	int tried_base_fallback = 0;
 
 retry_decoder_open:
 	switch (effective_format) {
@@ -2981,11 +2998,12 @@ retry_decoder_open:
 			          decoder_name ? decoder_name : "(default)",
 			          sfdec_codec,
 			          flags);
-			if (!tried_hevc_fallback) {
-				tried_hevc_fallback = 1;
-				effective_format = VIDEO_FORMAT_HEVC;
-				effective_fourcc = VIDEO_FOURCC_HEVC;
-				serprintf("Dolby Vision fallback retry: reopening as HEVC after decoder init failure\n");
+			if (!tried_base_fallback && fallback_format != VIDEO_FORMAT_UNKNOWN) {
+				tried_base_fallback = 1;
+				effective_format = fallback_format;
+				effective_fourcc = fallback_fourcc;
+				serprintf("Dolby Vision fallback retry: reopening as %s after decoder init failure\n",
+				          fallback_format == VIDEO_FORMAT_AV1 ? "AV1" : "HEVC");
 				goto retry_decoder_open;
 			}
 		}
@@ -3020,11 +3038,13 @@ retry_decoder_open:
 	if (sfdec_start(p->sfdec) != 0) {
 		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",
 			sfdec_codec, flags, decoder_name ? decoder_name : "(default)");
-		if (effective_format == VIDEO_FORMAT_DOLBY_VISION && !tried_hevc_fallback) {
-			tried_hevc_fallback = 1;
-			effective_format = VIDEO_FORMAT_HEVC;
-			effective_fourcc = VIDEO_FOURCC_HEVC;
-			serprintf("Dolby Vision fallback retry: reopening as HEVC after decoder start failure\n");
+		if (effective_format == VIDEO_FORMAT_DOLBY_VISION && !tried_base_fallback &&
+		    fallback_format != VIDEO_FORMAT_UNKNOWN) {
+			tried_base_fallback = 1;
+			effective_format = fallback_format;
+			effective_fourcc = fallback_fourcc;
+			serprintf("Dolby Vision fallback retry: reopening as %s after decoder start failure\n",
+			          fallback_format == VIDEO_FORMAT_AV1 ? "AV1" : "HEVC");
 			sfdec_delete(p->sfdec);
 			p->sfdec = NULL;
 			goto retry_decoder_open;

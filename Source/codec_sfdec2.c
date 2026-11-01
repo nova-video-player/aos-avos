@@ -2987,7 +2987,8 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			p->surface_handle,
 			extradata, extradata_size,
 			&pts_reorder, decoder_name, video->frame_rate_den, video->frame_rate_num,
-			video->color_primaries, video->color_trc, video->color_space, video->color_range);
+			video->color_primaries, video->color_trc, video->color_space, video->color_range,
+            video->hdr_static_info, video->hdr_static_info_size);
 	apply_rotation(p, video->rotation, width, height, &width, &height);
 
 	if (!p->sfdec) {

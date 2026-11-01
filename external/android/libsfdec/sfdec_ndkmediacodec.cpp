@@ -17,6 +17,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <sys/system_properties.h>
 
 #include <media/NdkMediaCodec.h>
 
@@ -32,6 +33,13 @@ typedef struct sfdec_mediacodec sfdec_priv_t;
     printf("%s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__); \
     fflush(stdout); \
 } while (0)
+
+// Avoid android_get_device_api_level(), which is not available on API 23.
+static int sfdec_android_api_level(void)
+{
+    char value[PROP_VALUE_MAX] = {0};
+    return __system_property_get("ro.build.version.sdk", value) > 0 ? atoi(value) : 0;
+}
 
 static inline int64_t get_monotonic_ns(void)
 {
@@ -101,6 +109,7 @@ static int init_renderer(sfdec_priv_t *sfdec)
     AMediaFormat *format = AMediaCodec_getOutputFormat(sfdec->mCodec);
     if (!format)
         return -1;
+    LOG("output format: %s", AMediaFormat_toString(format));
     int32_t width = 0, height = 0;
     int valid = AMediaFormat_getInt32(format, "width", &width) &&
         AMediaFormat_getInt32(format, "height", &height) &&
@@ -144,6 +153,9 @@ static int map_color_transfer(int color_trc)
     case 1:  /* AVCOL_TRC_BT709 */        return 3; /* COLOR_TRANSFER_SDR_VIDEO */
     case 6:  /* AVCOL_TRC_SMPTE170M */    return 3; /* COLOR_TRANSFER_SDR_VIDEO */
     case 7:  /* AVCOL_TRC_SMPTE240M */    return 3; /* COLOR_TRANSFER_SDR_VIDEO */
+    case 8:  /* AVCOL_TRC_LINEAR */       return 1; /* COLOR_TRANSFER_LINEAR */
+    case 14: /* AVCOL_TRC_BT2020_10 */
+    case 15: /* AVCOL_TRC_BT2020_12 */    return 3; /* COLOR_TRANSFER_SDR_VIDEO */
     case 13: /* AVCOL_TRC_IEC61966_2_1 */ return 3; /* COLOR_TRANSFER_SDR_VIDEO (sRGB ~ BT.709) */
     case 16: /* AVCOL_TRC_SMPTE2084 */    return 6; /* COLOR_TRANSFER_ST2084 (PQ/HDR10) */
     case 18: /* AVCOL_TRC_ARIB_STD_B67 */ return 7; /* COLOR_TRANSFER_HLG */
@@ -154,20 +166,23 @@ static int map_color_transfer(int color_trc)
 // Map FFmpeg AVCOL_PRI_* to Android COLOR_STANDARD_*
 static int map_color_standard(int color_primaries, int color_space)
 {
-    // Use primaries as primary signal, fall back to matrix
-    if (color_primaries == 9 /* AVCOL_PRI_BT2020 */ ||
-        color_space == 9 /* AVCOL_SPC_BT2020_NCL */ ||
-        color_space == 10 /* AVCOL_SPC_BT2020_CL */)
-        return 6; /* COLOR_STANDARD_BT2020 */
-    if (color_primaries == 1 /* AVCOL_PRI_BT709 */ ||
-        color_space == 1 /* AVCOL_SPC_BT709 */)
-        return 1; /* COLOR_STANDARD_BT709 */
-    if (color_primaries == 6 /* AVCOL_PRI_SMPTE170M */ ||
-        color_primaries == 5 /* AVCOL_PRI_BT470BG */ ||
-        color_space == 6 /* AVCOL_SPC_SMPTE170M */ ||
-        color_space == 5 /* AVCOL_SPC_BT470BG */)
-        return 4; /* COLOR_STANDARD_BT601_NTSC / BT601_PAL */
-    return 0;
+    // Explicit primaries take precedence. Only infer from the matrix when
+    // primaries are unspecified; do not relabel an unsupported color space.
+    switch (color_primaries) {
+    case 9: return 6; /* BT.2020 */
+    case 1: return 1; /* BT.709 */
+    case 5: return 2; /* BT.470BG / BT.601 PAL */
+    case 6: return 4; /* SMPTE 170M / BT.601 NTSC */
+    case 2: break;    /* unspecified */
+    default: return 0;
+    }
+    switch (color_space) {
+    case 9: return 6; /* BT.2020 non-constant luminance */
+    case 1: return 1; /* BT.709 */
+    case 5: return 2; /* BT.470BG */
+    case 6: return 4; /* SMPTE 170M */
+    default: return 0;
+    }
 }
 
 // Map FFmpeg AVCOL_RANGE_* to Android COLOR_RANGE_*
@@ -188,6 +203,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             void *extradata, size_t extradata_size,
             int *pts_reorder,
             int color_primaries, int color_trc, int color_space, int color_range,
+            const void *hdr_static_info, size_t hdr_static_info_size,
             const char* codec_name, int video_frame_rate_den, int video_frame_rate_num)
 {
     media_status_t err;
@@ -259,8 +275,10 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     // Priority hint (0 = realtime priority)
     AMediaFormat_setInt32(sfdec->mFormat, "priority", 0);
 
-    // Set color metadata for HDR/color space signaling
-    {
+    // Standard color/HDR keys were introduced in API 24. API 23 retains
+    // bitstream-driven decoder output; do not import API 28 NDK key symbols.
+    const int api_level = sfdec_android_api_level();
+    if (api_level >= 24) {
         int android_transfer = map_color_transfer(color_trc);
         int android_standard = map_color_standard(color_primaries, color_space);
         int android_range = map_color_range(color_range);
@@ -278,6 +296,9 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
         }
     }
 
+    if (api_level >= 24 && hdr_static_info && hdr_static_info_size == 25) {
+        AMediaFormat_setBuffer(sfdec->mFormat, "hdr-static-info", hdr_static_info, hdr_static_info_size);
+    }
     err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, sfdec->mNativeWindow, NULL, 0);
     CHECK_STATUS(err);
 

@@ -671,6 +671,8 @@ typedef struct _video_props {
     int color_trc;          // AVCOL_TRC_* (e.g. BT709=1, SMPTE2084/PQ=16, HLG=18)
     int color_space;        // AVCOL_SPC_* (e.g. BT709=1, BT2020_NCL=9)
     int color_range;        // AVCOL_RANGE_* (MPEG=1/limited, JPEG=2/full)
+    unsigned char hdr_static_info[25]; // CTA-861.3, including descriptor ID
+    int hdr_static_info_size; // zero means absent
 
     int frame_rate_den;
     int frame_rate_num;

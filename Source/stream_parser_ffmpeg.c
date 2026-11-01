@@ -48,6 +48,7 @@
 #include <libavutil/dict.h>
 #include <libavutil/dovi_meta.h>
 #include "video_dovi.h"
+#include "video_hdr.h"
 #include <libavutil/time.h>
 
 #include <stddef.h>
@@ -645,6 +646,18 @@ serprintf("FF: parse H264 SPS\n");
 				video->color_trc       = codecpar->color_trc;
 				video->color_space     = codecpar->color_space;
 				video->color_range     = codecpar->color_range;
+                const AVMasteringDisplayMetadata *mastering = NULL;
+                const AVContentLightMetadata *light = NULL;
+                for (int j = 0; j < codecpar->nb_coded_side_data; ++j) {
+                    const AVPacketSideData *sd = &codecpar->coded_side_data[j];
+                    if (sd->data && sd->type == AV_PKT_DATA_MASTERING_DISPLAY_METADATA &&
+                        sd->size >= sizeof(*mastering))
+                        mastering = (const void *)sd->data;
+                    if (sd->data && sd->type == AV_PKT_DATA_CONTENT_LIGHT_LEVEL &&
+                        sd->size >= sizeof(*light))
+                        light = (const void *)sd->data;
+                }
+                video->hdr_static_info_size = video_hdr_static_info(video->hdr_static_info, mastering, light);
 
 				switch( video->format ) {
 				case VIDEO_FORMAT_MPEG:

@@ -27,6 +27,7 @@ typedef sfdec_priv_t* (*sfdec_init_t)(sfdec_codec_t codec,
 		    void *extradata, size_t extradata_size,
 		    int *pts_reorder,
 		    int color_primaries, int color_trc, int color_space, int color_range,
+            const void *hdr_static_info, size_t hdr_static_info_size,
 		    const char* codec_name, int video_frame_rate_den, int video_frame_rate_num);
 
 typedef void	(*sfdec_destroy_t)(sfdec_priv_t *sfdec);

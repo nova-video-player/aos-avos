@@ -35,7 +35,8 @@ sfdec_t* sfdec_new(sfdec_type_t type,
     void *surface_handle,
     void *extradata, size_t extradata_size,
     int *pts_reorder, const char* decoder_name, int video_frame_rate_den, int video_frame_rate_num,
-    int color_primaries, int color_trc, int color_space, int color_range)
+    int color_primaries, int color_trc, int color_space, int color_range,
+    const void *hdr_static_info, size_t hdr_static_info_size)
 {
 	sfdec_t *sfdec;
 	void *itf = NULL;
@@ -65,6 +66,7 @@ sfdec_t* sfdec_new(sfdec_type_t type,
 			surface_handle,
 			extradata, extradata_size, pts_reorder,
 			color_primaries, color_trc, color_space, color_range,
+            hdr_static_info, hdr_static_info_size,
 			decoder_name,
 			video_frame_rate_den, video_frame_rate_num);
 	if (!sfdec->priv) {

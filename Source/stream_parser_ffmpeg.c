@@ -47,8 +47,10 @@
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
 #include <libavutil/dovi_meta.h>
+#include "video_dovi.h"
 #include <libavutil/time.h>
 
+#include <stddef.h>
 #include <string.h>
 #include <strings.h>
 #include <math.h>
@@ -663,7 +665,7 @@ serprintf("FF: parse H264 SPS\n");
 				priv->av.vs_max ++;
 				discard = 0;
 
-                        int side_data_size = 0;
+                        size_t side_data_size = 0;
                         uint8_t* side_data = NULL;
 
                         // FFmpeg 8+ replacement for deprecated av_stream_get_side_data
@@ -680,7 +682,22 @@ serprintf("FF: parse H264 SPS\n");
                         dovi_codec_supported = acodecs_is_type_supported("video/dolby-vision", 0);
                         dovi_mode = acodecs_get_dovi_mode();
 #endif
-                        if(side_data && side_data_size > 0 && dovi_codec_supported) {
+                        video->dv_profile = 0;
+                        video->dv_bitstream_profile = 0;
+                        video->dv_bl_present_flag = 0;
+                        video->dv_bl_signal_compatibility_id = 0;
+                        // Read only fields present in all supported FFmpeg DV records.
+                        const size_t dovi_min_size = offsetof(AVDOVIDecoderConfigurationRecord,
+                            dv_bl_signal_compatibility_id) + sizeof(((AVDOVIDecoderConfigurationRecord*)0)->dv_bl_signal_compatibility_id);
+                        if (side_data && side_data_size >= dovi_min_size) {
+                            const AVDOVIDecoderConfigurationRecord *record = (const void*)side_data;
+                            video->dv_bitstream_profile = record->dv_profile;
+                            video->dv_bl_present_flag = record->bl_present_flag;
+                            video->dv_bl_signal_compatibility_id = record->dv_bl_signal_compatibility_id;
+                        }
+                        // Off remains an explicit user override. Auto/Force must not
+                        // silently decode proprietary DV colors as ordinary HDR/SDR.
+                        if(side_data && side_data_size >= dovi_min_size && dovi_mode != 1) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                             int force_dovi = 0;
                             int prefer_hevc_fallback = 0;
@@ -727,7 +744,7 @@ serprintf("FF: parse H264 SPS\n");
                                 serprintf("Dolby Vision in an unknown codec %d", video->format);
                             }
 
-                            if (video->dv_profile) {
+                            if (video->dv_profile && dovi_codec_supported) {
 #ifdef CONFIG_ANDROID
                                 dovi_decoder = (char*) acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
 #endif
@@ -741,11 +758,17 @@ serprintf("FF: parse H264 SPS\n");
                             if (video->format == VIDEO_FORMAT_HEVC &&
                                 dovi_record->dv_profile == 7 &&
                                 dovi_mode != 2 &&
-                                dovi_record->dv_bl_signal_compatibility_id != 0 &&
-                                dovi_record->dv_bl_signal_compatibility_id != 2 &&
-                                dovi_record->dv_bl_signal_compatibility_id != 3) {
+                                video_dovi_base_format(video) != VIDEO_FORMAT_UNKNOWN &&
+                                dovi_record->dv_bl_signal_compatibility_id != 2) {
                                 prefer_hevc_fallback = 1;
                                 force_dovi = 0;
+                            }
+
+                            if (video_dovi_base_format(video) == VIDEO_FORMAT_UNKNOWN) {
+                                force_dovi = 1;
+                                serprintf("Dolby Vision required: no compatible base layer (profile=%d bl_compat_id=%d bl=%d)\n",
+                                          video->dv_bitstream_profile, video->dv_bl_signal_compatibility_id,
+                                          video->dv_bl_present_flag);
                             }
 
                             if (force_dovi) {
@@ -771,7 +794,7 @@ serprintf("FF: parse H264 SPS\n");
 
                             if (dovi_decoder)
                                 afree(dovi_decoder);
-                        } else if (side_data && side_data_size > 0) {
+                        } else if (side_data && side_data_size >= dovi_min_size) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                             serprintf("Dolby Vision config ignored: codec=%d dv_profile=%d bl_compat_id=%d codec_supported=%d\r\n",
                                       video->format,

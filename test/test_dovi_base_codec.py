@@ -1,3 +1,19 @@
+#
+# Copyright 2026 Courville Software
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 """Replay Dolby Vision framing and decoder fallback without an Android device."""
 import unittest
 
@@ -88,48 +104,22 @@ int main(void) {
 }
 ''')
 
-    def test_av1_config_and_base_codec_retries(self):
-        decoder = source('codec_sfdec2.c')
-        setup = decoder[decoder.index('// Match the ordinary AV1 path:'):
-                        decoder.index('retry_decoder_open:')]
-        init_failure = extract(decoder, 'if (!p->sfdec) {')
-        start_failure = extract(decoder, 'if (sfdec_start(p->sfdec) != 0) {')
+    def test_av1_config_stays_in_band(self):
+        setup = extract(source('codec_sfdec2.c'),
+                        'if (video->format == VIDEO_FORMAT_DOLBY_VISION && video->codec_id == AV_CODEC_ID_AV1)')
         run_c(PREAMBLE + r'''
-static int deleted;
-static int sfdec_start(void *codec) { assert(codec); return -1; }
-static void sfdec_delete(void *codec) { assert(codec); deleted++; }
-static int open_failure(int codec_id, int start_failure, int *fourcc) {
+static void check(int codec_id, int clear) {
     VIDEO_PROPERTIES props = { .format = VIDEO_FORMAT_DOLBY_VISION,
-        .fourcc = VIDEO_FOURCC_DOLBY_VISION, .codec_id = codec_id }, *video = &props;
+        .codec_id = codec_id }, *video = &props;
     void *extradata = props.extraData;
     size_t extradata_size = 172;
-    struct { void *sfdec; } state = { start_failure ? &props : NULL }, *p = &state;
 ''' + setup + r'''
-    if (codec_id == AV_CODEC_ID_AV1) {
-        assert(!extradata && !extradata_size);
-    } else {
-        assert(extradata == props.extraData && extradata_size == 172);
-    }
-''' + init_failure + '\n' + start_failure + r'''
-    assert(!"expected decoder failure");
-err:
-    return VIDEO_FORMAT_UNKNOWN;
-retry_decoder_open:
-    assert(tried_base_fallback);
-    assert(!p->sfdec);
-    *fourcc = effective_fourcc;
-    return effective_format;
+    assert((extradata == NULL) == clear);
+    assert(extradata_size == (clear ? 0 : 172));
 }
 int main(void) {
-    for (int start_failure = 0; start_failure <= 1; start_failure++) {
-        int fourcc = 0;
-        assert(open_failure(AV_CODEC_ID_AV1, start_failure, &fourcc) == VIDEO_FORMAT_AV1);
-        assert(fourcc == VIDEO_FOURCC_AV01);
-        assert(open_failure(AV_CODEC_ID_HEVC, start_failure, &fourcc) == VIDEO_FORMAT_HEVC);
-        assert(fourcc == VIDEO_FOURCC_HEVC);
-        assert(open_failure(0, start_failure, &fourcc) == VIDEO_FORMAT_UNKNOWN);
-    }
-    assert(deleted == 2);
+    check(AV_CODEC_ID_AV1, 1);
+    check(AV_CODEC_ID_HEVC, 0);
     return 0;
 }
 ''')

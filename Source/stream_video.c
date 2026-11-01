@@ -43,6 +43,7 @@
 #include "wmv.h"
 #include "h264.h"
 #include "hevc.h"
+#include "video_dovi.h"
 
 #include "mpg4.h"
 #include "dts.h"
@@ -780,9 +781,11 @@ DBGS serprintf("stream_open_video_dec\r\n");
 	} else {
 		forced = 1;
 	}
+	const int first_prio = prio;
 	while( prio ) {
 		int try_prio = prio;
 		int decoder_owned_sink = 0;
+		int decoder_attempted = 0;
 		// reset previous error states
 		s->video_error           = VE_NO_ERROR;
 		s->video_error_qualifier = VEQ_NONE;
@@ -804,6 +807,7 @@ DBGS serprintf("stream_open_video_dec\r\n");
 			goto next;
 		}
 		// try to open the decoder
+		decoder_attempted = 1;
 		if( s->video_dec->open( s->video_dec, s->video, s, &s->video->flush_frames, &s->video->delay_frames ) ) {
 			// no dec
 serprintf("error opening video_dec[%s] cpu=%d at prio=%d (video_error=%d qual=%d desc=%s), fallback\n",
@@ -949,6 +953,14 @@ next:
 			s->use_sink_frames = 0;
 			s->vtime_post_sink = 0;
 			pthread_mutex_unlock( &s->video_sink_mutex );
+		}
+		// Retry a compatible base layer at the same priority before downgrading
+		// to software. If no DV candidate exists at all, restart the search with
+		// the base format, respecting an explicitly selected decoder priority.
+		if ((decoder_attempted || !prio) && video_dovi_use_base(s->video)) {
+			prio = decoder_attempted ? try_prio : first_prio;
+			serprintf("Dolby Vision fallback: retry base codec %s at priority %d\n",
+			          video_get_format_name(s->video), prio);
 		}
 	} 
 ErrorExit:
@@ -4579,13 +4591,19 @@ static int _handle_video_codec_error( STREAM *s )
 	stream_close_video_dec( s );
 	_stream_close_video_sink( s, 1 );
 
-	// lower the priority
-	cpu--;
+	// A runtime DV error gets one base-codec hardware attempt before the
+	// normal priority downgrade. Later failures already have the base format.
+	if (video_dovi_use_base(s->video)) {
+		serprintf("Dolby Vision runtime fallback: retry base codec %s at priority %d\n",
+		          video_get_format_name(s->video), cpu);
+	} else {
+		cpu--;
+		serprintf("_handle_video_codec_error: downgrade decoder priority %d -> %d\n", cpu + 1, cpu);
+	}
 	if( !cpu ) {
 serprintf("no lower prio possible!\n" ); 
 		return 1;
 	}	
-	serprintf("_handle_video_codec_error: downgrade decoder priority %d -> %d\n", cpu + 1, cpu);
 	stream_set_cpu_priority( s, cpu );
 
 	if( stream_open_video_dec( s, NULL ) ) {

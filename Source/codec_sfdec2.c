@@ -2962,8 +2962,27 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 		flags |= SFDEC_FLAG_SWDEC;
 
     const char *decoder_name = NULL;
+    const char *selection_mime = NULL;
+    int selection_profile = 0, candidate_index = 0;
+    double selection_rate = video->scale > 0 ? (double)video->rate / video->scale : 0;
     if (effective_format == VIDEO_FORMAT_DOLBY_VISION) {
-        decoder_name = acodecs_get_for_profile("video/dolby-vision", video->dv_profile);
+        selection_mime = "video/dolby-vision";
+        selection_profile = video->dv_profile;
+    } else if (video->dv_bitstream_profile && !(flags & SFDEC_FLAG_SWDEC)) {
+        // DV base codecs have known bit-depth/profile requirements. Keep the
+        // established selection path for unrelated codecs and explicit SW mode.
+        if (effective_format == VIDEO_FORMAT_HEVC) {
+            selection_mime = "video/hevc"; selection_profile = 2; // Main10
+        } else if (effective_format == VIDEO_FORMAT_AV1) {
+            selection_mime = "video/av01"; selection_profile = 2; // Main10
+        } else if (effective_format == VIDEO_FORMAT_H264) {
+            selection_mime = "video/avc"; selection_profile = 8; // High
+        }
+    }
+    if (selection_mime)
+        decoder_name = acodecs_get_video_decoder(selection_mime, selection_profile,
+            video->width, video->height, selection_rate, candidate_index);
+    if (effective_format == VIDEO_FORMAT_DOLBY_VISION) {
 		serprintf("Dolby Vision decoder selection: requested_profile=%d resolved_decoder=%s hdr_primaries=%d hdr_trc=%d hdr_space=%d hdr_range=%d\n",
 		          video->dv_profile,
 		          decoder_name ? decoder_name : "(default)",
@@ -2977,6 +2996,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
         }
     }
 
+retry_decoder_candidate:
 	width = video->width;
 	height = video->height;
 	p->sfdec = sfdec_new(SFDEC_TYPE_MEDIACODEC,
@@ -3001,7 +3021,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 			          sfdec_codec,
 			          flags);
 		}
-		goto err;
+		goto next_decoder_candidate;
 	}
 
 	if (p->reorder_pts && (pts_force_reorder || pts_reorder)) {
@@ -3033,7 +3053,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 	if (sfdec_start(p->sfdec) != 0) {
 		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",
 			sfdec_codec, flags, decoder_name ? decoder_name : "(default)");
-		goto err;
+		goto next_decoder_candidate;
 	}
 
 	if (decoder_name) {
@@ -3135,6 +3155,20 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 		*pneed_reorder = 0;
 
 	return 0;
+next_decoder_candidate:
+    if (p->sfdec) {
+        sfdec_delete(p->sfdec);
+        p->sfdec = NULL;
+    }
+    if (decoder_name && selection_mime && ++candidate_index < 16) {
+        afree((void *)decoder_name);
+        decoder_name = acodecs_get_video_decoder(selection_mime, selection_profile,
+            video->width, video->height, selection_rate, candidate_index);
+        if (decoder_name) {
+            CLOG("retry hardware decoder candidate %d: %s", candidate_index, decoder_name);
+            goto retry_decoder_candidate;
+        }
+    }
 err:
 	CLOG("open failed: format=%d %dx%d subfmt=%d profile=%d", video->format, video->width, video->height, video->subfmt, video->profile);
 	if (decoder_name) afree((void *)decoder_name);

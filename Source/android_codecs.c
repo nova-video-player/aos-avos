@@ -46,6 +46,8 @@ static jclass jCodecDiscoveryClass;
 static jmethodID jCodecSupportedMethod;
 static jmethodID jGetCodecForProfileMethod;
 static jmethodID jGetDoViModeMethod;
+static jmethodID jGetVideoCodecMethod;
+static jmethodID jGetDisplayHdrMethod;
 
 void acodecs_init(void) {
     int willDetach = 0;
@@ -99,6 +101,13 @@ void acodecs_init(void) {
         return;
     }
 
+    // Optional for compatibility with older Java clients of this native library.
+    jGetVideoCodecMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass,
+        "getVideoCodecForFormat", "(Ljava/lang/String;IIIDI)Ljava/lang/String;");
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    jGetDisplayHdrMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass,
+        "getPlaybackHdrCapabilities", "()I");
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 	if (willDetach)
 		(*myVm)->DetachCurrentThread(myVm);
 }
@@ -181,6 +190,58 @@ end:
 		(*myVm)->DetachCurrentThread(myVm);
 
 	return ret;
+}
+
+const char *acodecs_get_video_decoder(const char *mime, int profile,
+    int width, int height, double frame_rate, int index)
+{
+    if (!jGetVideoCodecMethod)
+        return index == 0 && !strcmp(mime, "video/dolby-vision")
+            ? acodecs_get_for_profile(mime, profile) : NULL;
+    JNIEnv *env = NULL;
+    int detach = 0;
+    char *name = NULL;
+    if ((*myVm)->GetEnv(myVm, (void **)&env, JNI_VERSION_1_4) != JNI_OK) {
+        if ((*myVm)->AttachCurrentThread(myVm, &env, NULL) != JNI_OK) return NULL;
+        detach = 1;
+    }
+    jstring type = (*env)->NewStringUTF(env, mime);
+    jstring result = NULL;
+    if (type) result = (*env)->CallStaticObjectMethod(env, jCodecDiscoveryClass,
+        jGetVideoCodecMethod, type, profile, width, height, frame_rate, index);
+    if (!(*env)->ExceptionCheck(env) && result) {
+        const char *utf = (*env)->GetStringUTFChars(env, result, NULL);
+        if (utf) {
+            name = strdup(utf);
+            (*env)->ReleaseStringUTFChars(env, result, utf);
+        }
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    if (result) (*env)->DeleteLocalRef(env, result);
+    if (type) (*env)->DeleteLocalRef(env, type);
+    if (detach) (*myVm)->DetachCurrentThread(myVm);
+    return name;
+}
+
+int acodecs_get_display_hdr_capabilities(void)
+{
+    if (!jGetDisplayHdrMethod) return -1;
+    JNIEnv *env = NULL;
+    int detach = 0;
+    if ((*myVm)->GetEnv(myVm, (void **)&env, JNI_VERSION_1_4) != JNI_OK) {
+        if ((*myVm)->AttachCurrentThread(myVm, &env, NULL) != JNI_OK) return -1;
+        detach = 1;
+    }
+    int caps = (*env)->CallStaticIntMethod(env, jCodecDiscoveryClass, jGetDisplayHdrMethod);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        caps = -1;
+    }
+    if (detach) (*myVm)->DetachCurrentThread(myVm);
+    return caps;
 }
 
 int acodecs_get_dovi_mode(void)

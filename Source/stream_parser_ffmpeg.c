@@ -776,6 +776,14 @@ serprintf("FF: parse H264 SPS\n");
                                 force_dovi = 0;
                             }
 
+#ifdef CONFIG_ANDROID
+                            int display_hdr = acodecs_get_display_hdr_capabilities();
+                            if (dovi_mode == 0 && display_hdr >= 0 && !(display_hdr & 8) &&
+                                video_dovi_base_format(video) != VIDEO_FORMAT_UNKNOWN) {
+                                force_dovi = 0;
+                                serprintf("Dolby Vision fallback: playback display does not advertise DV (hdr=%d)\n", display_hdr);
+                            }
+#endif
                             if (video_dovi_base_format(video) == VIDEO_FORMAT_UNKNOWN) {
                                 force_dovi = 1;
                                 serprintf("Dolby Vision required: no compatible base layer (profile=%d bl_compat_id=%d bl=%d)\n",

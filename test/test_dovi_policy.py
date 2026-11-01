@@ -103,7 +103,8 @@ typedef struct {
     uint8_t dv_profile, dv_level, rpu_present_flag, el_present_flag;
     uint8_t bl_present_flag, dv_bl_signal_compatibility_id;
 } AVDOVIDecoderConfigurationRecord;
-static int matches, queried_profile, queries;
+static int matches, queried_profile, queries, display_caps = -1;
+static int acodecs_get_display_hdr_capabilities(void) { return display_caps; }
 static const char *acodecs_get_for_profile(const char *mime, int profile) {
     assert(!strcmp(mime, "video/dolby-vision"));
     queried_profile = profile; queries++;
@@ -158,6 +159,16 @@ int main(void) {
     v = select_video(VIDEO_FORMAT_AV1, 10, 0, 1, 0, 0, size);
     assert(v.format == VIDEO_FORMAT_AV1 && queries == 0);
     v = select_video(VIDEO_FORMAT_AV1, 10, 1, 2, 1, 0, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION);
+    display_caps = 1; // HDR10-only display prefers compatible base in Auto.
+    v = select_video(VIDEO_FORMAT_AV1, 10, 1, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_AV1);
+    v = select_video(VIDEO_FORMAT_AV1, 10, 1, 2, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION);
+    v = select_video(VIDEO_FORMAT_HEVC, 5, 0, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION);
+    display_caps = 8;
+    v = select_video(VIDEO_FORMAT_AV1, 10, 1, 0, 1, 1, size);
     assert(v.format == VIDEO_FORMAT_DOLBY_VISION);
     /* Truncated records cannot supply profile/compatibility evidence. */
     v = select_video(VIDEO_FORMAT_AV1, 10, 1, 0, 1, 1, 1);

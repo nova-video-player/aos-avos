@@ -468,7 +468,7 @@ static int is_font_attachment( const char *mimetype, const char *filename )
 //
 // ************************************************************
 // REMARK: cannot use scaling by audio speed there because task is performed once
-static int _parse_format( int etype, FF_PRIV *priv ) 
+static int _parse_format( FF_PRIV *priv )
 {
 	AVFormatContext *fmt = priv->fmt;
 
@@ -480,7 +480,7 @@ DBGP serprintf("format   [%s]\r\n", fmt->iformat->name );
 		priv->size = size >= 0 ? (uint64_t)size : 0;
 DBGP serprintf("size     %lld\r\n", priv->size );
 	}
-	if( fmt->duration != AV_NOPTS_VALUE && etype != ETYPE_MPEG_TS ) {
+	if( fmt->duration != AV_NOPTS_VALUE && fmt->duration > 0 ) {
 		priv->duration = 1000 * (INT64)fmt->duration / AV_TIME_BASE; // rst domain
 		DBGP serprintf( "duration %d\r\n", priv->duration );
 	} else {
@@ -1202,7 +1202,7 @@ DBGP serprintf("info\r\n");
 		}
 	}
 
-	if (_parse_format(s->etype, ff_p)) goto ErrorExit4;
+	if (_parse_format(ff_p)) goto ErrorExit4;
 
 	memcpy( &s->av, &ff_p->av, sizeof( AV_PROPERTIES ) );
 
@@ -2664,7 +2664,7 @@ static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, 
 	// probe must not publish a cached success, even when it found some tracks.
 	if (avformat_find_stream_info(priv->fmt, NULL) < 0 || metadata_interrupted(&cancel)) goto out;
 	if (priv->fmt->pb && priv->fmt->pb->error < 0 && priv->fmt->pb->error != AVERROR_EOF) goto out;
-	if (_parse_format(info->etype, priv) || metadata_interrupted(&cancel)) goto out;
+	if (_parse_format(priv) || metadata_interrupted(&cancel)) goto out;
 	if (!priv->av.as_max && !priv->av.vs_max) goto out;
 	if (metadata_extract_tags(priv->fmt, &priv->tag, apic)) goto out;
 	memcpy(&info->av, &priv->av, sizeof(info->av));

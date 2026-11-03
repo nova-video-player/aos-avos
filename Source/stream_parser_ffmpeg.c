@@ -197,9 +197,6 @@ typedef struct FF_PRIV
 	int		buffer_size;
 	int 		sleeping;
 	
-	int 		time_base_den;
-	int 		time_base_num;
-
 	int 		packet_count;
 	
 	int read_failed;
@@ -581,8 +578,6 @@ DBGP serprintf( "vrate=%d; vscale=%d\n", video->rate, video->scale );
 serprintf( "untouched (!?) vrate=%d; vscale=%d\n", video->rate, video->scale );
 				}
 
-				priv->time_base_num = st->time_base.num/gcd;
-				priv->time_base_den = st->time_base.den/gcd;
 				video->frames = 0;
 				video->valid  = 1;
 				
@@ -1604,7 +1599,6 @@ extern int stream_drive_wake_sleep;
 // ts = rst/as: i.e. ts<rst when as>1
 
 #define GET_AUDIO_TS( ts ) ( ts == AV_NOPTS_VALUE ? STREAM_NO_PTS_VALUE : (INT64)ts * 1000 * (INT64)s->audio->scale / s->audio->rate )
-#define GET_VIDEO_TS( ts ) ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)ff_p->time_base_num / ff_p->time_base_den )
 #define GET_SUB_TS( ts )   ( ts == AV_NOPTS_VALUE ? -1 : (INT64)ts * 1000 * (INT64)s->subtitle->scale / s->subtitle->rate )
 
 // ************************************************************
@@ -1613,9 +1607,19 @@ extern int stream_drive_wake_sleep;
 //	Preserve original RST for video reordering; expose TS to the engine.
 //
 // ************************************************************
+static INT64 _get_video_timestamp(STREAM *s, const AVPacket *packet, int64_t timestamp)
+{
+	if (timestamp == AV_NOPTS_VALUE) return -1;
+	// Secondary video tracks (for example chapter thumbnails) can have a
+	// different clock. Always rescale using the stream that owns this packet.
+	AVRational time_base = ff_p->fmt->streams[packet->stream_index]->time_base;
+	return av_rescale_q_rnd(timestamp, time_base, (AVRational){1, 1000}, AV_ROUND_ZERO);
+}
+
 static int _get_video_media_time( STREAM *s, AVPacket *packet )
 {
-	int t = ( use_pts && packet->pts != AV_NOPTS_VALUE ) ? GET_VIDEO_TS( packet->pts ) : GET_VIDEO_TS( packet->dts );
+	int64_t timestamp = (use_pts && packet->pts != AV_NOPTS_VALUE) ? packet->pts : packet->dts;
+	int t = _get_video_timestamp(s, packet, timestamp);
 	if (t == -1) return -1;
 	return t - ff_p->start_time;
 }
@@ -1870,12 +1874,12 @@ DBGC1 serprintf("     AUDIO dts/pts %8lld/%8lld     %02X %02X %02X %02X  %d\r\n"
 			*timestamp = GET_AUDIO_TS( packet.pts );
 	} else if( s->video->valid && stream == s->video->stream ) {
 		_rt_video_pkts++;
-DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
+DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", _get_video_timestamp(s, &packet, packet.dts), _get_video_timestamp(s, &packet, packet.pts), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
-DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", GET_VIDEO_TS( packet.dts ), GET_VIDEO_TS( packet.pts ), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
+DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", _get_video_timestamp(s, &packet, packet.dts), _get_video_timestamp(s, &packet, packet.pts), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
 		if (enqueue_media_packet(s, &ff_p->vq, &packet, audio_starved)) goto QueueError;
-		if (timestamp) *timestamp = use_pts ? GET_VIDEO_TS(packet.pts) : GET_VIDEO_TS(packet.dts);
+		if (timestamp) *timestamp = use_pts ? _get_video_timestamp(s, &packet, packet.pts) : _get_video_timestamp(s, &packet, packet.dts);
 
 	} else if( _subtitle_props_for_stream(s, stream) ) {
 		_rt_sub_pkts++;
@@ -2466,8 +2470,8 @@ static int _calc_rate( STREAM *s ) {
 		PacketNode *first = (PacketNode*)ff_p->vq.list.first;
 		PacketNode *last  = (PacketNode*)ff_p->vq.list.last;
 		if( first && last ) {
-			int first_time   = GET_VIDEO_TS( first->packet.dts ); // rst domain
-			int last_time    = GET_VIDEO_TS( last->packet.dts ); // rst domain
+			int first_time   = _get_video_timestamp(s, &first->packet, first->packet.dts); // rst domain
+			int last_time    = _get_video_timestamp(s, &last->packet, last->packet.dts); // rst domain
 			UINT64 first_pos = first->packet.pos;
 			UINT64 last_pos  = last->packet.pos;
 

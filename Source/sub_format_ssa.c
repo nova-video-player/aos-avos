@@ -697,8 +697,10 @@ static void ssa_apply_geometry(SSA_BACKEND *ctx) {
     // displayed height steady (content_h unchanged) while the canvas shrinks to match it
     // (short_side changes), and a resize that keeps the video's aspect fit while growing the
     // window can move content_h without changing which side is shorter.
-    if (g.content_h != ctx->content_h || short_side != ctx->screen_short_side) {
-        ctx->content_h = g.content_h;
+    // content_h here means "the height libass scales ordinary dialogue against" (layout_h):
+    // identical to the video box height except when the box overflows the visible canvas.
+    if (g.layout_h != ctx->content_h || short_side != ctx->screen_short_side) {
+        ctx->content_h = g.layout_h;
         ctx->screen_short_side = short_side;
         ctx->last_serial = 0;
     }

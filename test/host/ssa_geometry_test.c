@@ -156,6 +156,49 @@ static void overflow_scenario(const char *name, int cw, int ch, int bw, int bh, 
     }
 }
 
+// Portrait: the video is scaled to the full height and is wider than the screen (Fit / Auto),
+// so the box overflows HORIZONTALLY (negative x). Same contract as the vertical case:
+//  - \pos events stay glued to the video (box origin x offset, same size);
+//  - ordinary dialogue is laid out against the visible canvas: centred, fully on screen, at the
+//    bottom. (Its size is libass's fit scale, layout_h / reference layout_h; sync_styles()
+//    compensates for that in production, so it is the position and containment checked here.)
+static void overflow_x_scenario(const char *name, int cw, int ch, int bw, int bh, int rw, int rh) {
+    int bx = (cw - bw) / 2;                         // negative
+    printf("\n== %s   canvas %dx%d  box (%d,0) %dx%d  coded %dx%d\n", name, cw, ch, bx, bw, bh, rw, rh);
+    SSA_GEOM g      = ssa_geom_compute(cw, ch, bx, 0, bw, bh, rw, rh);
+    SSA_GEOM screen = ssa_geom_compute(cw, ch, 0, 0, cw, ch, rw, rh);
+    SSA_GEOM boxref = ssa_geom_compute(bw, bh, 0, 0, bw, bh, rw, rh);
+    printf("   -> margins l=%d r=%d t=%d b=%d  content %dx%d layout_h %d (screen layout_h %d)\n",
+           g.margin_l, g.margin_r, g.margin_t, g.margin_b, g.content_w, g.content_h, g.layout_h, screen.layout_h);
+    check("overflow accepted (negative left margin)",  g.margin_l == bx, 1);
+    check("overflow accepted (negative right margin)", abs(g.margin_r - bx) <= 1, 1);
+    check("layout_h < visible height (fit scale)",     g.layout_h < ch, 1);
+
+    const char *reg[] = { HDR(1920,1080,"yes",0) EV("HHHH"), HDR(1280,720,"yes",0) EV("HHHH") };
+    for (unsigned i = 0; i < sizeof reg / sizeof *reg; i++) {
+        BB a = render(&g, reg[i]);
+        printf("   regular #%u   ink %3dx%-3d @(%4d,%4d)..(%4d,%4d)\n", i,
+               a.x1 - a.x0 + 1, a.y1 - a.y0 + 1, a.x0, a.y0, a.x1, a.y1);
+        check("regular: ink drawn",                a.n > 0, 1);
+        check("regular: fully on screen (left)",   a.x0 >= 0, 1);
+        check("regular: fully on screen (right)",  a.x1 < cw, 1);
+        check("regular: fully on screen (bottom)", a.y1 < ch, 1);
+        check("regular: horizontally centred",     abs((a.x0 + a.x1) / 2 - cw / 2) <= 2, 1);
+        check("regular: at the bottom of the screen", a.y1 > ch - ch / 6, 1);
+    }
+    const char *pos[] = { HDR(1920,1080,"yes",0) EV("{\\an5\\pos(960,540)}HHHH"),
+                          HDR(1920,1080,"yes",0) EV("{\\an5\\pos(1000,700)}HHHH") };
+    for (unsigned i = 0; i < sizeof pos / sizeof *pos; i++) {
+        BB a = render(&g, pos[i]), r = render(&boxref, pos[i]);
+        printf("   \\pos #%u      ink %3dx%-3d @(%4d,%4d)   box-ref %3dx%-3d @(%4d,%4d)  (box origin in canvas: %d)\n", i,
+               a.x1 - a.x0 + 1, a.y1 - a.y0 + 1, a.x0, a.y0, r.x1 - r.x0 + 1, r.y1 - r.y0 + 1, r.x0, r.y0, bx);
+        check("pos: ink width  == box ref",  a.x1 - a.x0 + 1, r.x1 - r.x0 + 1);
+        check("pos: ink height == box ref",  a.y1 - a.y0 + 1, r.y1 - r.y0 + 1);
+        check("pos: same spot on the video (x == box ref + box origin)", a.x0, r.x0 + bx);
+        check("pos: y == box ref",           a.y0, r.y0);
+    }
+}
+
 int main(void) {
     // Font sanity: every comparison below is "ink == reference ink", which two EMPTY renders also
     // satisfy. Prove the font works first so a missing font fails loudly instead of passing vacuously.
@@ -174,6 +217,8 @@ int main(void) {
     scenario("tablet portrait, 21:9 video",            1600, 2560, 0, 1015, 1600, 686, 2560, 1080);
     overflow_scenario("Fit width overflow: 16:9 w/ baked bars on 2404x1080", 2404, 1080, 2404, 1352, 3840, 2160);
     overflow_scenario("Fit width overflow, small phone",                      1920, 1080, 1920, 1200, 3840, 2160);
+    overflow_x_scenario("Portrait Fit: 16:9 on 1080x2400",                    1080, 2400, 4267, 2400, 1920, 1080);
+    overflow_x_scenario("Portrait Fit: 21:9 on 1080x2400",                    1080, 2400, 5736, 2400, 2560, 1080);
     printf("\n-- degenerate / transient inputs (must not produce negative margins or crash) --\n");
     scenario("transient: landscape box in old portrait canvas", 1080, 2400, 0, 0, 2400, 1080, 1920, 1080);
     scenario("box not known yet (all zero)",           1080, 2400, 0, 0, 0, 0, 1920, 1080);

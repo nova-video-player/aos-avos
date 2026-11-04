@@ -41,6 +41,10 @@ typedef struct {
     int frame_w, frame_h;                        // ass_set_frame_size
     int margin_t, margin_b, margin_l, margin_r;  // ass_set_margins
     int content_w, content_h;                    // video box size == what PlayRes maps onto
+    int layout_h;                                // height libass scales ORDINARY dialogue against
+                                                 // (its "fit" height). == content_h except when the
+                                                 // box overflows the frame vertically, where it is
+                                                 // the frame height. \pos events still use content_h.
     int storage_w, storage_h;                    // ass_set_storage_size (0 = leave unset)
 } SSA_GEOM;
 
@@ -49,12 +53,36 @@ typedef struct {
  * box_x/y/w/h       : video's on-screen box within the canvas (w or h == 0 = not known yet)
  * real_w/h          : coded video size, used as libass "storage size" (0 = not known)
  *
- * Never returns negative margins. Negative margins mean "crop" to libass, and the canvas and
- * the box arrive through two separate callbacks (resize / set_video_box), so a momentarily
- * inconsistent pair is possible. Anything that doesn't fit falls back to "the video fills
- * the canvas", which is exactly what the backend did before boxes existed -- a safe,
- * bounded, self-correcting state.
+ * Margins are never negative EXCEPT for one deliberate shape: the box overflows the canvas
+ * (see below). Negative margins mean "crop" to libass, and the canvas and the box arrive
+ * through two separate callbacks (resize / set_video_box), so a momentarily inconsistent pair
+ * is possible. Anything else that doesn't fit falls back to "the video fills the canvas",
+ * which is exactly what the backend did before boxes existed -- a safe, bounded,
+ * self-correcting state.
+ *
+ * Overflow: when the video is scaled past the screen and cropped ("Fit width" on a wide phone
+ * overflows vertically; Fit / Auto in portrait overflows horizontally), the player clips the
+ * canvas to the visible screen and reports a box that is larger than it on that axis, centered,
+ * with a negative x or y. Mapping that to negative libass margins makes libass scale PlayRes
+ * and place \pos / \move against the video (the picture keeps its alignment with signs and
+ * typesetting), while ordinary dialogue, which use_margins places against the frame, stays
+ * inside the visible area. Per axis, the box must either lie inside the canvas, or COVER it
+ * (start at or before the edge, end at or after the other), be centered on it, and be at most
+ * SSA_GEOM_MAX_OVERFLOW times its length, so a stale box from a previous layout (for example
+ * one from before a rotation) can't slip through.
  */
+#define SSA_GEOM_MAX_OVERFLOW 8
+
+static inline int ssa_geom_axis_ok(int pos, int size, int frame) {
+    if (pos >= 0 && pos + size <= frame) return 1;                       // inside
+    // Overflow: the box covers the canvas and is CENTERED on it (the player always centres the
+    // video in the subtitle canvas), within a couple of pixels of integer rounding. The
+    // symmetry is what rejects a stale box from before a rotation.
+    int off = 2 * pos + size - frame;
+    return size > frame && size <= frame * SSA_GEOM_MAX_OVERFLOW &&
+           pos <= 0 && pos + size >= frame && off >= -2 && off <= 2;
+}
+
 static inline SSA_GEOM ssa_geom_compute(int canvas_w, int canvas_h,
                                         int box_x, int box_y, int box_w, int box_h,
                                         int real_w, int real_h) {
@@ -62,8 +90,9 @@ static inline SSA_GEOM ssa_geom_compute(int canvas_w, int canvas_h,
     g.frame_w = canvas_w > 0 ? canvas_w : 1920;
     g.frame_h = canvas_h > 0 ? canvas_h : 1080;
 
-    int fits = box_w > 0 && box_h > 0 && box_x >= 0 && box_y >= 0 &&
-               box_x + box_w <= g.frame_w && box_y + box_h <= g.frame_h;
+    int fits = box_w > 0 && box_h > 0 &&
+               ssa_geom_axis_ok(box_x, box_w, g.frame_w) &&
+               ssa_geom_axis_ok(box_y, box_h, g.frame_h);
     if (!fits) { box_x = 0; box_y = 0; box_w = g.frame_w; box_h = g.frame_h; }
 
     g.margin_l = box_x;
@@ -72,6 +101,17 @@ static inline SSA_GEOM ssa_geom_compute(int canvas_w, int canvas_h,
     g.margin_b = g.frame_h - box_y - box_h;
     g.content_w = box_w;
     g.content_h = box_h;
+    // Mirror of ass_reconfigure()'s fit_height: regular (non-\pos) events are scaled to the box
+    // fitted inside the frame, letterboxed or pillarboxed. For the usual letterbox case this is
+    // exactly box_h; box taller than the frame (vertical overflow) -> frame height; box wider
+    // than the frame (horizontal overflow, portrait) -> the box height scaled down to the
+    // frame width.
+    {
+        long long cw = (long long)box_w;
+        g.layout_h = (cw * g.frame_h <= (long long)box_h * g.frame_w)
+                         ? g.frame_h
+                         : (int)((double)box_h * g.frame_w / box_w + 0.5);
+    }
 
     // Storage size only matters to libass for border/shadow/blur scaling of scripts with
     // "ScaledBorderAndShadow: no" (and, unless we pin PAR, for anamorphic text stretch).

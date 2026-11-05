@@ -33,6 +33,7 @@ extern "C" {
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSurfaceChanged(JNIEnv *env, jobject thiz, jlong handle, jint width, jint height);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSurfaceDestroyed(JNIEnv *env, jobject thiz, jlong handle);
     JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetVideoBox(JNIEnv *env, jobject thiz, jlong handle, jint x, jint y, jint w, jint h);
+    JNIEXPORT void    JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBottomInset(JNIEnv *env, jobject thiz, jlong handle, jint px);
 
     /* ── 3D Hybrid Render Bridge ── */
     /* Single pull: returns SUB_FILL_* (UNCHANGED/CLEAR/FRAME/ERROR) and reports, in

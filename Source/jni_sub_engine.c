@@ -188,6 +188,12 @@ JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_n
     sub_engine_set_video_box(get_engine(handle), x, y, w, h);
 }
 
+// Reports the pixels at the bottom of the canvas bitmap subtitles must stay clear of
+// (controls / system bars) -- see sub_engine_set_bottom_inset() in sub_engine.h.
+JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetBottomInset(JNIEnv *env, jobject thiz, jlong handle, jint px) {
+    sub_engine_set_bottom_inset(get_engine(handle), px);
+}
+
 // --- 3D HYBRID RENDER BRIDGE ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetUIMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {

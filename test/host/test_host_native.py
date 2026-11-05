@@ -69,6 +69,13 @@ ssa_geometry     ssa_geom_compute()/ssa_geom_apply() against a real libass: synt
                  SBAS=no/outline). Portrait/landscape/pillarbox/tablet layouts plus degenerate
                  and transient inputs (zero-size canvas or box, orientation-mismatched coded
                  size): margins never go negative, and storage size is dropped, not misapplied.
+gfx_layout       gfx_map_to_canvas(): PGS/VobSub cues are fitted to the subtitle viewport with one
+                 uniform scale and translation, independent of the video's zoom/crop/aspect, and
+                 kept clear of the controls / system bars. Pure arithmetic: viewport x stream
+                 frame x cue x reserved-space matrix, portrait and landscape.
+gfx_inset        The real GFX backend and the reserved bottom space (controls / system bars): stamped on
+                 the cue, re-stamped when it changes (copy on write, pixels shared), no redraw when
+                 unchanged, current value applied to later cues and newly opened tracks.
 ssa_style_cache  Real sub_format_ssa.c through its open()/resize()/set_video_box()/render_at()
                  vtable: forced FontSize must be recomputed when video geometry changes (e.g.
                  black bars removed or content height changed).
@@ -426,6 +433,14 @@ class HostNativeTests(HostTestCase):
     def test_ssa_geometry(self):
         """ssa_geom_compute()/ssa_geom_apply() vs a box-only libass reference render."""
         self.build_and_run('ssa_geometry_test.c', pkgs=['libass'])
+
+    def test_gfx_layout(self):
+        """GFX (PGS/VobSub) cue placement: fitted to the subtitle viewport, independent of the video."""
+        self.build_and_run('gfx_layout_test.c')
+
+    def test_gfx_inset(self):
+        """GFX backend: reserved bottom space is stamped, re-stamped on change, and a no-op when unchanged."""
+        self.build_and_run('gfx_inset_test.c', ('Source/sub_format_gfx.c', HOST + 'stubs.c'))
 
     def test_ssa_style_cache(self):
         """Forced FontSize is recomputed when video geometry changes."""

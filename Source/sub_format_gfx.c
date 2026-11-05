@@ -38,7 +38,12 @@ typedef struct {
     int        video_box_x, video_box_y;     // where the video's own on-screen box sits
     int        video_box_w, video_box_h;     // within the canvas (post letterbox/pillarbox/
                                               // zoom-crop/stretch), as reported by
-                                              // sub_engine_set_video_box().
+                                              // sub_engine_set_video_box(). NOT used to place
+                                              // the cue any more (see gfx_layout.h): kept because
+                                              // the contract still reports it.
+    int        bottom_inset;                 // bottom pixels the cue must stay clear of
+                                              // (controls / system bars), from
+                                              // sub_engine_set_bottom_inset().
 } GFX_BACKEND;
 
 // ---------------------------------------------------------------------------
@@ -87,6 +92,7 @@ static int gfx_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     ctx->video_box_y  = params->video_box_h > 0 ? params->video_box_y : 0;
     ctx->video_box_w  = params->video_box_w > 0 ? params->video_box_w : ctx->canvas_w;
     ctx->video_box_h  = params->video_box_h > 0 ? params->video_box_h : ctx->canvas_h;
+    ctx->bottom_inset = params->bottom_inset > 0 ? params->bottom_inset : 0;
     be->priv = ctx;
     return 0;
 }
@@ -155,6 +161,7 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     frame->video_box_y    = ctx->video_box_y;
     frame->video_box_w    = ctx->video_box_w;
     frame->video_box_h    = ctx->video_box_h;
+    frame->gfx_inset_bottom = ctx->bottom_inset;
 
     SUB_EVENT *ev = calloc(1, sizeof(SUB_EVENT));
     ev->kind             = SUB_EVENT_BITMAP;
@@ -217,7 +224,8 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
 static int gfx_geometry_stale(const GFX_BACKEND *ctx, const SUB_FRAME *f) {
     return f->video_w     != ctx->canvas_w     || f->video_h     != ctx->canvas_h     ||
            f->video_box_x != ctx->video_box_x  || f->video_box_y != ctx->video_box_y  ||
-           f->video_box_w != ctx->video_box_w  || f->video_box_h != ctx->video_box_h;
+           f->video_box_w != ctx->video_box_w  || f->video_box_h != ctx->video_box_h  ||
+           f->gfx_inset_bottom != ctx->bottom_inset;
 }
 
 // Copy-on-write: build a brand-new frame stamped with the CURRENT geometry. The old frame
@@ -245,6 +253,7 @@ static SUB_FRAME *gfx_clone_with_geometry(const GFX_BACKEND *ctx, const SUB_FRAM
     f->gfx_stream_w = ctx->gfx_stream_w;   f->gfx_stream_h = ctx->gfx_stream_h;
     f->video_box_x  = ctx->video_box_x;    f->video_box_y  = ctx->video_box_y;
     f->video_box_w  = ctx->video_box_w;    f->video_box_h  = ctx->video_box_h;
+    f->gfx_inset_bottom = ctx->bottom_inset;
 
     *ev = *sev;                       // kind, x, y, w, h, stride, rgba ptr, pixel_refs
     ev->next = NULL;
@@ -347,6 +356,19 @@ static int gfx_set_video_box(SUB_FORMAT_BACKEND *be, int x, int y, int w, int h)
 }
 
 // ---------------------------------------------------------------------------
+// gfx_set_bottom_inset
+//
+// The playback controls appeared/disappeared, or the system bottom area changed: the cue has
+// to be laid out again against the space that is now free. Cheap, idempotent.
+// ---------------------------------------------------------------------------
+static int gfx_set_bottom_inset(SUB_FORMAT_BACKEND *be, int px) {
+    GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
+    ctx->bottom_inset = px > 0 ? px : 0;
+    ctx->is_dirty = 1;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // gfx_flush
 //
 // Called on seek — clear the stored frame so stale bitmaps don't reappear.
@@ -409,6 +431,7 @@ SUB_FORMAT_BACKEND *sub_format_gfx_create(void) {
     be->free_frame  = gfx_free_frame;
     be->resize      = gfx_resize;
     be->set_video_box = gfx_set_video_box;
+    be->set_bottom_inset = gfx_set_bottom_inset;
     be->flush       = gfx_flush;
     be->close       = gfx_close;
     be->get_schedule = gfx_get_schedule;

@@ -98,6 +98,11 @@ struct SUB_ENGINE {
     int video_box_x, video_box_y;
     int video_box_w, video_box_h;
 
+    // Bottom space a bitmap cue must stay clear of, as last reported by
+    // sub_engine_set_bottom_inset(). Unlike the canvas size and the box it describes the UI,
+    // not a surface, so it is NOT invalidated by attach/detach.
+    int bottom_inset;
+
     // Custom fonts folder (MX Player / mpv-android style third-party fonts
     // dir). Both are simple owned heap strings guarded by eng->lock, snapshot
     // into SUB_FORMAT_OPEN_PARAMS at open_track() time -- the SSA backend
@@ -142,6 +147,7 @@ struct SUB_ENGINE {
 
 #define SUB_GEOM_CANVAS 0x1  // canvas_w/h changed (or a fresh backend needs it)
 #define SUB_GEOM_BOX    0x2  // video_box_* changed (or a fresh backend needs it)
+#define SUB_GEOM_INSET  0x4  // bottom_inset changed (or a fresh backend needs it)
 
 // Internal helper for safe wakeups
 static void broadcast_wake_locked(SUB_ENGINE *eng) {
@@ -359,6 +365,19 @@ void sub_engine_set_video_box(SUB_ENGINE *eng, int x, int y, int w, int h) {
     pthread_mutex_unlock(&eng->lock);
 }
 
+// See sub_engine.h for the full doc comment.
+void sub_engine_set_bottom_inset(SUB_ENGINE *eng, int px) {
+    if (!eng) return;
+    if (px < 0) px = 0;
+    pthread_mutex_lock(&eng->lock);
+    if (eng->bottom_inset != px) {
+        eng->bottom_inset = px;
+        eng->geometry_dirty |= SUB_GEOM_INSET;
+        broadcast_wake_locked(eng); // applies while paused too, like the box
+    }
+    pthread_mutex_unlock(&eng->lock);
+}
+
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,
                            const uint8_t *codec_private, int codec_private_size,
                            const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count,
@@ -396,6 +415,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     target_h = eng->canvas_h > 0 ? eng->canvas_h : video_h;
     box_x = eng->video_box_x; box_y = eng->video_box_y;
     box_w = eng->video_box_w; box_h = eng->video_box_h;
+    int bottom_inset = eng->bottom_inset;
     pthread_mutex_unlock(&eng->lock);
 
     DBG serprintf("SUB_SURFACE: Opening track (format=%d) with canvas dimensions: %d x %d (raw video dim: %d x %d)\n",
@@ -431,6 +451,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
         .real_video_w = video_w, .real_video_h = video_h,
         .video_box_x = box_x, .video_box_y = box_y,
         .video_box_w = box_w, .video_box_h = box_h,
+        .bottom_inset = bottom_inset,
         .codec_private = codec_private, .codec_private_size = codec_private_size,
         .user_style = eng->style,
         .is_plain_text_format = (format_id == SUB_FMT_SRT), // Tell backend to force styles!
@@ -495,7 +516,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     // mechanism as item #3 instead of a second, parallel push. poll_frame() skips the
     // resize() if no real canvas is known yet (canvas_w==0), in which case open() already got
     // the video_w/h fallback via target_w/target_h.
-    eng->geometry_dirty |= (SUB_GEOM_CANVAS | SUB_GEOM_BOX);
+    eng->geometry_dirty |= (SUB_GEOM_CANVAS | SUB_GEOM_BOX | SUB_GEOM_INSET);
 
     // Drop whatever the previous track had published, in THIS lock hold -- not after it.
     // poll_and_publish() renders and publishes under eng->lock, so once the backend is
@@ -744,6 +765,8 @@ int sub_engine_poll_and_publish(SUB_ENGINE *eng, SUB_RENDERER *r) {
             // Still unresolved (no canvas either): leave the backend on its open() fallback.
             if (bw > 0 && bh > 0) be->set_video_box(be, bx, by, bw, bh);
         }
+        if ((eng->geometry_dirty & SUB_GEOM_INSET) && be->set_bottom_inset)
+            be->set_bottom_inset(be, eng->bottom_inset);
         eng->geometry_dirty = 0;
     }
     int64_t pts = eng->clock_fn(eng->clock_ctx);

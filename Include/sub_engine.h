@@ -137,6 +137,15 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height);
 // including before a track is open.
 void sub_engine_set_video_box(SUB_ENGINE *eng, int x, int y, int w, int h);
 
+// Reports how many pixels at the bottom of the subtitle canvas a bitmap cue (PGS/VobSub)
+// must stay clear of: the playback controls while they are shown, or the system bottom area
+// (navigation bar / gesture area / bottom cutout), whichever reaches higher. 0 = nothing
+// reserved (controls hidden). Forwarded to the active backend through
+// SUB_FORMAT_BACKEND::set_bottom_inset (GFX only; text subtitles are lifted through their own
+// MarginV). Cached on the engine like the canvas size and the video box, and applied by
+// sub_engine_poll_frame() together with them. Safe to call at any time.
+void sub_engine_set_bottom_inset(SUB_ENGINE *eng, int px);
+
 SUB_USER_STYLE *sub_engine_get_style(SUB_ENGINE *eng);
 
 // --- CUSTOM FONTS FOLDER (MX Player / mpv-android style third-party fonts dir) ---

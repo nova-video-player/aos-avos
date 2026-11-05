@@ -156,6 +156,10 @@ typedef struct {
     int         video_box_y;
     int         video_box_w;
     int         video_box_h;
+    int         gfx_inset_bottom; /* GFX frames ONLY: pixels at the bottom of the canvas the
+                                 * cue must stay clear of (playback controls, navigation bar,
+                                 * gesture area). Stamped by the GFX backend from
+                                 * sub_engine_set_bottom_inset(); 0 = nothing reserved. */
     SUB_EVENT  *events;        /* linked list, NULL = nothing to show       */
 } SUB_FRAME;
 

@@ -146,6 +146,17 @@ void sub_engine_set_video_box(SUB_ENGINE *eng, int x, int y, int w, int h);
 // sub_engine_poll_frame() together with them. Safe to call at any time.
 void sub_engine_set_bottom_inset(SUB_ENGINE *eng, int px);
 
+// Reports the user's vertical position for bitmap cues (PGS/VobSub): value in [-100, 100]
+// (clamped), 0 = the placement the engine computes on its own, positive moves the cue up and
+// negative moves it down. Always relative to the computed placement: +100 moves the whole cue
+// up to the top margin of the subtitle viewport and -100 down to its bottom margin, in between
+// is that fraction of the distance available (see gfx_layout.h), so no pixel range is needed.
+// The playback controls are cleared afterwards and do not change what a value means. Forwarded
+// to the active backend through SUB_FORMAT_BACKEND::set_gfx_position (GFX only; text subtitles
+// use sub_engine_set_vertical_offset). Cached and applied like the inset. Safe to call at any
+// time.
+void sub_engine_set_gfx_position(SUB_ENGINE *eng, int value);
+
 SUB_USER_STYLE *sub_engine_get_style(SUB_ENGINE *eng);
 
 // --- CUSTOM FONTS FOLDER (MX Player / mpv-android style third-party fonts dir) ---

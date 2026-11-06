@@ -72,10 +72,16 @@ ssa_geometry     ssa_geom_compute()/ssa_geom_apply() against a real libass: synt
 gfx_layout       gfx_map_to_canvas(): PGS/VobSub cues are fitted to the subtitle viewport with one
                  uniform scale and translation, independent of the video's zoom/crop/aspect, and
                  kept clear of the controls / system bars. Pure arithmetic: viewport x stream
-                 frame x cue x reserved-space matrix, portrait and landscape.
-gfx_inset        The real GFX backend and the reserved bottom space (controls / system bars): stamped on
-                 the cue, re-stamped when it changes (copy on write, pixels shared), no redraw when
-                 unchanged, current value applied to later cues and newly opened tracks.
+                 frame x cue x reserved-space matrix, portrait and landscape; plus the user's
+                 vertical position (-100..100): relative to the placement, +100 / -100 take the whole
+                 cue (every bitmap of it, measured on its fitted bounds, also when it was shrunk to the side
+                 margins) to the top / bottom margin, in between a fraction of that
+                 distance; never moves a cue the wrong way; the controls clear it afterwards without
+                 changing what a value means.
+gfx_inset        The real GFX backend and its two layout inputs, the reserved bottom space (controls /
+                 system bars) and the user's vertical position: stamped on the cue, re-stamped when
+                 either changes (copy on write, pixels shared), no redraw when unchanged, current
+                 values applied to later cues and newly opened tracks.
 ssa_style_cache  Real sub_format_ssa.c through its open()/resize()/set_video_box()/render_at()
                  vtable: forced FontSize must be recomputed when video geometry changes (e.g.
                  black bars removed or content height changed).
@@ -439,7 +445,7 @@ class HostNativeTests(HostTestCase):
         self.build_and_run('gfx_layout_test.c')
 
     def test_gfx_inset(self):
-        """GFX backend: reserved bottom space is stamped, re-stamped on change, and a no-op when unchanged."""
+        """GFX backend: reserved bottom space and user offset are stamped, re-stamped on change, and a no-op when unchanged."""
         self.build_and_run('gfx_inset_test.c', ('Source/sub_format_gfx.c', HOST + 'stubs.c'))
 
     def test_ssa_style_cache(self):

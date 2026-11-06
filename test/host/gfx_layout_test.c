@@ -180,6 +180,165 @@ int main(void) {
         }
     }
 
+    // The user's vertical position (gfx_vpos): relative to the nominal place, positive up,
+    // negative down, bounded by the viewport and the reserved bottom space.
+    printf("\n== user vertical position: viewport x stream frame x cue x reserved space x vpos\n");
+    {
+        static const int VPOS[] = { -100, -75, -50, -25, -10, -1, 0, 1, 10, 25, 50, 75, 100 };
+        const int NV = (int)(sizeof VPOS / sizeof *VPOS);
+        for (unsigned v = 0; v < sizeof VP / sizeof *VP; v++) {
+            const VIEWPORT *vp = &VP[v];
+            int failed_before = fails;
+            const int range = vp->h / 3;                          // what the player passes: a third of the screen height
+            for (unsigned p = 0; p < sizeof PL / sizeof *PL; p++) {
+                for (unsigned c = 0; c < sizeof CU / sizeof *CU; c++) {
+                    for (unsigned m = 0; m < 3; m++) {
+                        int inset = m == 0 ? 0 : m == 1 ? (int)(vp->h * 0.17f) : (int)(vp->h * 0.06f);
+                        const PLANE *pl = &PL[p]; const CUE *cu = &CU[c];
+                        char tag[200], msg[300];
+                        snprintf(tag, sizeof tag, "[%s | %s | %s | inset %d]", vp->name, pl->name, cu->name, inset);
+                        SUB_EVENT e = make_event(cu->x, cu->y, cu->w, cu->h, pl->w, pl->h);
+                        SUB_FRAME base = make_frame(vp->w, vp->h, pl->w, pl->h, inset);
+                        base.events = &e;
+                        base.gfx_vpos_range = range;
+                        R r0 = map(&base, &e);                       // vpos 0
+                        const float my = vp->h * GFX_EDGE_MARGIN, mx = vp->w * GFX_EDGE_MARGIN, eps = 0.51f;
+                        float prev_y = 1e9f;
+                        for (int i = 0; i < NV; i++) {
+                            SUB_FRAME f = base; f.gfx_vpos = VPOS[i];
+                            R r = map(&f, &e);
+                            snprintf(msg, sizeof msg, "%s vpos %d inside viewport / clear of controls (x %.1f..%.1f y %.1f..%.1f)",
+                                     tag, VPOS[i], r.x, r.x + r.w, r.y, r.y + r.h);
+                            check(msg, r.x >= mx - eps && r.x + r.w <= vp->w - mx + eps &&
+                                       r.y >= my - eps && r.y + r.h <= vp->h - inset - my + eps);
+                            snprintf(msg, sizeof msg, "%s vpos %d size/scale unchanged by the offset", tag, VPOS[i]);
+                            check(msg, near(r.sx, r0.sx, 1e-6f) && near(r.sy, r0.sy, 1e-6f) && near(r.w, r0.w, 1e-3f) && near(r.h, r0.h, 1e-3f));
+                            snprintf(msg, sizeof msg, "%s vpos %d horizontal position unchanged", tag, VPOS[i]);
+                            check(msg, near(r.x, r0.x, 1e-3f));
+                            snprintf(msg, sizeof msg, "%s vpos %d monotonic (y %.2f after %.2f)", tag, VPOS[i], r.y, prev_y);
+                            check(msg, r.y <= prev_y + 1e-3f);
+                            prev_y = r.y;
+                            if (VPOS[i] > 0) { snprintf(msg, sizeof msg, "%s vpos %d never lower than 0 (%.2f vs %.2f)", tag, VPOS[i], r.y, r0.y); check(msg, r.y <= r0.y + 1e-3f); }
+                            if (VPOS[i] < 0) { snprintf(msg, sizeof msg, "%s vpos %d never higher than 0 (%.2f vs %.2f)", tag, VPOS[i], r.y, r0.y); check(msg, r.y >= r0.y - 1e-3f); }
+                            if (VPOS[i] == 0) { snprintf(msg, sizeof msg, "%s vpos 0 is the plain placement", tag); check(msg, near(r.y, r0.y, 1e-6f)); }
+                            // the controls only ever clear a cue that is in their way: one that is already above
+                            // them stays exactly where the offset put it (the slider's meaning does not depend on them)
+                            if (inset > 0) {
+                                SUB_FRAME hid = f; hid.gfx_inset_bottom = 0;
+                                R rh = map(&hid, &e);
+                                if (rh.y + rh.h <= vp->h - inset - my) {
+                                    snprintf(msg, sizeof msg, "%s vpos %d controls shown, cue already clear: same place as with them hidden (%.2f vs %.2f)", tag, VPOS[i], r.y, rh.y);
+                                    check(msg, near(r.y, rh.y, 0.01f) && near(r.x, rh.x, 0.01f));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            printf("   %-62s %s\n", vp->name, fails == failed_before ? "ok" : "FAILED");
+        }
+
+        // exact reach where no limit gets in the way
+        printf("\n   reach: +100 moves a cue up by the range, -100 puts a typical cue on the bottom limit\n");
+        {
+            // portrait 1080x2400, PGS 1920x1080, controls hidden: lots of room both ways
+            SUB_FRAME f = make_frame(1080, 2400, 1920, 1080, 0);
+            SUB_EVENT typical = make_event(0.25f, 0.88f, 0.50f, 0.06f, 1920, 1080);
+            typical.y = 951; typical.h = 64;                                    // bottom at 1015 of 1080 = 6% up (exact, no int truncation)
+            f.events = &typical; f.gfx_vpos_range = 800;
+            R r0 = map(&f, &typical);
+            f.gfx_vpos = 100;  R up = map(&f, &typical);
+            f.gfx_vpos = -100; R dn = map(&f, &typical);
+            char msg[200];
+            snprintf(msg, sizeof msg, "+100 moves up by the range (%.2f -> %.2f)", r0.y, up.y);
+            check(msg, near(r0.y - up.y, 800.0f, 0.6f));
+            snprintf(msg, sizeof msg, "-100 puts a typical cue on the bottom limit (bottom %.2f, limit %.2f)", dn.y + dn.h, 2400 * (1.0f - GFX_EDGE_MARGIN));
+            check(msg, near(dn.y + dn.h, 2400 * (1.0f - GFX_EDGE_MARGIN), 0.6f));
+            f.gfx_vpos = -50; R half = map(&f, &typical);
+            snprintf(msg, sizeof msg, "-50 is halfway (%.2f between %.2f and %.2f)", half.y, r0.y, dn.y);
+            check(msg, near(half.y, (r0.y + dn.y) * 0.5f, 0.6f));
+            // landscape 2404x1080: little room below, a lot above
+            f = make_frame(2404, 1080, 1920, 1080, 0);
+            f.events = &typical; f.gfx_vpos_range = 360;
+            r0 = map(&f, &typical);
+            f.gfx_vpos = -100; dn = map(&f, &typical);
+            printf("   landscape: -100 moves the cue down by %.1f px (room below a typical cue)\n", dn.y - r0.y);
+            snprintf(msg, sizeof msg, "landscape -100 reaches the bottom limit (bottom %.2f)", dn.y + dn.h);
+            check(msg, near(dn.y + dn.h, 1080 * (1.0f - GFX_EDGE_MARGIN), 0.6f));
+            // a cue already authored lower than the reference is never lifted by a negative value
+            SUB_EVENT low = make_event(0.25f, 0.94f, 0.50f, 0.06f, 1920, 1080);          // on the frame's bottom edge
+            f.events = &low; f.gfx_vpos = 0; r0 = map(&f, &low);
+            f.gfx_vpos = -100; dn = map(&f, &low);
+            check("a cue below the reference is not lifted by -100", dn.y >= r0.y - 1e-3f && dn.y + dn.h <= 1080 * (1.0f - GFX_EDGE_MARGIN) + 0.51f);
+        }
+
+        // cue nominally above a third of the screen (portrait Fit / Auto): +vpos must still move it up
+        printf("   cue above a third of the screen: +vpos moves it up, never down\n");
+        {
+            SUB_FRAME f = make_frame(1080, 2404, 1920, 1080, 0);
+            SUB_EVENT e = make_event(0.20f, 0.88f, 0.60f, 0.06f, 1920, 1080);
+            f.events = &e; f.gfx_vpos_range = 2404 / 3;
+            R r0 = map(&f, &e);
+            const float gap0 = 2404 - (r0.y + r0.h);
+            f.gfx_vpos = 100; R up = map(&f, &e);
+            printf("   gap above the bottom edge: %.0f px (%.0f%% of the height) at 0, %.0f px at +100\n",
+                   gap0, 100.0f * gap0 / 2404, 2404 - (up.y + up.h));
+            check("starts above a third of the screen height", gap0 > 2404 / 3.0f);
+            check("+100 is higher still", up.y < r0.y - 700.0f);
+        }
+
+        // the video's box still has no influence, with an offset applied
+        {
+            SUB_EVENT e = make_event(0.25f, 0.88f, 0.50f, 0.06f, 1920, 1080);
+            static const int BOXES[][4] = { {0,0,1,1}, {-1593,0,4267,2400}, {0,-136,2404,1352}, {-9999,-9999,99999,99999} };
+            for (int v = -100; v <= 100; v += 100) {
+                SUB_FRAME f = make_frame(1080, 2400, 1920, 1080, 300);
+                f.events = &e; f.gfx_vpos = v; f.gfx_vpos_range = 800;
+                R r = map(&f, &e);
+                for (unsigned b = 0; b < sizeof BOXES / sizeof *BOXES; b++) {
+                    SUB_FRAME g = f; g.video_box_x = BOXES[b][0]; g.video_box_y = BOXES[b][1];
+                    g.video_box_w = BOXES[b][2]; g.video_box_h = BOXES[b][3];
+                    R q = map(&g, &e);
+                    check("vpos: independent of the video box", near(q.x, r.x, 1e-4f) && near(q.y, r.y, 1e-4f) && near(q.w, r.w, 1e-4f));
+                }
+            }
+        }
+
+        // several rectangles of one cue: one shift for all of them, relative layout preserved
+        for (unsigned v = 0; v < sizeof VP / sizeof *VP; v++) {
+            for (int vpos = -100; vpos <= 100; vpos += 100) {
+                SUB_FRAME f = make_frame(VP[v].w, VP[v].h, 1920, 1080, 0);
+                SUB_EVENT a = make_event(0.30f, 0.80f, 0.40f, 0.05f, 1920, 1080);
+                SUB_EVENT b = make_event(0.20f, 0.90f, 0.60f, 0.07f, 1920, 1080);
+                a.next = &b; f.events = &a; f.gfx_vpos = vpos; f.gfx_vpos_range = VP[v].h / 3;
+                R ra = map(&f, &a), rb = map(&f, &b);
+                char msg[200]; snprintf(msg, sizeof msg, "[%s vpos %d] multi-rect: same scale, relative layout kept", VP[v].name, vpos);
+                check(msg, near(ra.sx, rb.sx, 1e-6f) && near(rb.x - ra.x, (b.x - a.x) * ra.sx, 0.02f) && near(rb.y - ra.y, (b.y - a.y) * ra.sx, 0.02f));
+                snprintf(msg, sizeof msg, "[%s vpos %d] multi-rect: inside", VP[v].name, vpos);
+                check(msg, ra.y >= 0 && rb.y + rb.h <= VP[v].h + 0.51f);
+            }
+        }
+
+        // degenerate inputs
+        {
+            SUB_EVENT e = make_event(0.25f, 0.88f, 0.50f, 0.06f, 1920, 1080);
+            SUB_FRAME f = make_frame(1080, 2400, 1920, 1080, 0); f.events = &e; f.gfx_vpos_range = 800;
+            f.gfx_vpos = 100;  R a = map(&f, &e);  f.gfx_vpos = 5000;  R b = map(&f, &e);
+            check("vpos above 100 behaves as 100", near(a.y, b.y, 1e-4f));
+            f.gfx_vpos = -100; a = map(&f, &e);  f.gfx_vpos = -5000; b = map(&f, &e);
+            check("vpos below -100 behaves as -100", near(a.y, b.y, 1e-4f));
+            f.gfx_vpos = 100; f.gfx_vpos_range = 0;  a = map(&f, &e);  f.gfx_vpos = 0; b = map(&f, &e);
+            check("zero range: +vpos does nothing", near(a.y, b.y, 1e-4f));
+            f.gfx_vpos = 100; f.gfx_vpos_range = -50; a = map(&f, &e);
+            check("negative range treated as 0", near(a.y, b.y, 1e-4f));
+            f.gfx_vpos = 100; f.gfx_vpos_range = 1000000000; a = map(&f, &e);
+            check("absurd range stays on screen", a.y >= 0 && a.y + a.h <= 2400 && !isnan(a.y));
+            SUB_FRAME u = make_frame(0, 0, 0, 0, 0); u.events = &e; u.gfx_vpos = 100; u.gfx_vpos_range = 800;
+            R id = map(&u, &e);
+            check("unknown canvas/stream: identity even with an offset", near(id.x, e.x, 1e-4f) && near(id.y, e.y, 1e-4f));
+        }
+    }
+
     // the reported case: 3840x2160 file with baked-in bars, Fit width on a 2404x1080 phone
     printf("\n== reported case: PGS 3840x2160, bottom-bar cue, landscape Fit width (viewport 2404x1080)\n");
     {

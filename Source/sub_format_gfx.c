@@ -44,6 +44,9 @@ typedef struct {
     int        bottom_inset;                 // bottom pixels the cue must stay clear of
                                               // (controls / system bars), from
                                               // sub_engine_set_bottom_inset().
+    int        vpos, vpos_range;             // the user's vertical position (-100..100) and the
+                                              // pixel distance +100 stands for, from
+                                              // sub_engine_set_gfx_position().
 } GFX_BACKEND;
 
 // ---------------------------------------------------------------------------
@@ -93,6 +96,8 @@ static int gfx_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     ctx->video_box_w  = params->video_box_w > 0 ? params->video_box_w : ctx->canvas_w;
     ctx->video_box_h  = params->video_box_h > 0 ? params->video_box_h : ctx->canvas_h;
     ctx->bottom_inset = params->bottom_inset > 0 ? params->bottom_inset : 0;
+    ctx->vpos         = params->gfx_vpos < -100 ? -100 : params->gfx_vpos > 100 ? 100 : params->gfx_vpos;
+    ctx->vpos_range   = params->gfx_vpos_range > 0 ? params->gfx_vpos_range : 0;
     be->priv = ctx;
     return 0;
 }
@@ -162,6 +167,8 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     frame->video_box_w    = ctx->video_box_w;
     frame->video_box_h    = ctx->video_box_h;
     frame->gfx_inset_bottom = ctx->bottom_inset;
+    frame->gfx_vpos         = ctx->vpos;
+    frame->gfx_vpos_range   = ctx->vpos_range;
 
     SUB_EVENT *ev = calloc(1, sizeof(SUB_EVENT));
     ev->kind             = SUB_EVENT_BITMAP;
@@ -225,7 +232,8 @@ static int gfx_geometry_stale(const GFX_BACKEND *ctx, const SUB_FRAME *f) {
     return f->video_w     != ctx->canvas_w     || f->video_h     != ctx->canvas_h     ||
            f->video_box_x != ctx->video_box_x  || f->video_box_y != ctx->video_box_y  ||
            f->video_box_w != ctx->video_box_w  || f->video_box_h != ctx->video_box_h  ||
-           f->gfx_inset_bottom != ctx->bottom_inset;
+           f->gfx_inset_bottom != ctx->bottom_inset ||
+           f->gfx_vpos         != ctx->vpos         || f->gfx_vpos_range != ctx->vpos_range;
 }
 
 // Copy-on-write: build a brand-new frame stamped with the CURRENT geometry. The old frame
@@ -254,8 +262,9 @@ static SUB_FRAME *gfx_clone_with_geometry(const GFX_BACKEND *ctx, const SUB_FRAM
     f->video_box_x  = ctx->video_box_x;    f->video_box_y  = ctx->video_box_y;
     f->video_box_w  = ctx->video_box_w;    f->video_box_h  = ctx->video_box_h;
     f->gfx_inset_bottom = ctx->bottom_inset;
+    f->gfx_vpos         = ctx->vpos;       f->gfx_vpos_range = ctx->vpos_range;
 
-    *ev = *sev;                       // kind, x, y, w, h, stride, rgba ptr, pixel_refs
+    *ev = *sev;                      // kind, x, y, w, h, stride, rgba ptr, pixel_refs
     ev->next = NULL;
     atomic_fetch_add(ev->pixel_refs, 1);        // shared, immutable pixels
     f->events = ev;
@@ -369,6 +378,21 @@ static int gfx_set_bottom_inset(SUB_FORMAT_BACKEND *be, int px) {
 }
 
 // ---------------------------------------------------------------------------
+// gfx_set_gfx_position
+//
+// The user moved the bitmap-subtitle position slider (or a different track kind just became
+// active and the stored value is being re-applied): lay the cue out again with the new
+// offset. Cheap, idempotent.
+// ---------------------------------------------------------------------------
+static int gfx_set_gfx_position(SUB_FORMAT_BACKEND *be, int value, int range_px) {
+    GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
+    ctx->vpos       = value < -100 ? -100 : value > 100 ? 100 : value;
+    ctx->vpos_range = range_px > 0 ? range_px : 0;
+    ctx->is_dirty = 1;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // gfx_flush
 //
 // Called on seek — clear the stored frame so stale bitmaps don't reappear.
@@ -432,7 +456,8 @@ SUB_FORMAT_BACKEND *sub_format_gfx_create(void) {
     be->resize      = gfx_resize;
     be->set_video_box = gfx_set_video_box;
     be->set_bottom_inset = gfx_set_bottom_inset;
-    be->flush       = gfx_flush;
+    be->set_gfx_position = gfx_set_gfx_position;
+    be->flush      = gfx_flush;
     be->close       = gfx_close;
     be->get_schedule = gfx_get_schedule;
     return be;

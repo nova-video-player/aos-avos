@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The real GFX backend and the reserved bottom space (controls / system bars): the value is
-// stamped on the frames it hands out, a change re-stamps the cue (so it moves when the controls
-// appear and returns when they hide), an unchanged value does nothing, and a cue that is
-// opened or fed later still gets the current value.
+// The real GFX backend and the two layout inputs it forwards: the reserved bottom space
+// (controls / system bars) and the user's vertical position. The value is stamped on the frames
+// it hands out, a change re-stamps the cue (so it moves when the controls appear and returns
+// when they hide), an unchanged value does nothing, and a cue that is opened or fed later still
+// gets the current value.
 #include "sub_format.h"
 #include <stdio.h>
 #include <string.h>
@@ -95,6 +96,54 @@ int main(void) {
     CHECK(g1 && g1->gfx_inset_bottom == 250, "a track opened with the controls up starts with the reserved space");
     sub_frame_unref(g1);
     be2->close(be2); free(be2);
+
+    // The user's vertical position (set_gfx_position): same contract as the inset.
+    SUB_FORMAT_BACKEND *be3 = open_backend(0);
+    CHECK(be3->set_gfx_position != NULL, "GFX backend implements set_gfx_position");
+    feed(be3);
+    SUB_FRAME *v1 = be3->render_at(be3, 100);
+    CHECK(v1 && v1->gfx_vpos == 0 && v1->gfx_vpos_range == 0, "cue stamped with no user offset by default");
+    const uint8_t *vpix = v1->events->data.bitmap.rgba;
+
+    be3->set_gfx_position(be3, 40, 800);                 // slider moved up
+    SUB_FRAME *v2 = be3->render_at(be3, 100);
+    CHECK(v2 && v2 != v1 && v2->gfx_vpos == 40 && v2->gfx_vpos_range == 800, "slider moved: cue re-stamped with the offset");
+    CHECK(v1->gfx_vpos == 0, "the frame the renderer already holds is untouched (copy on write)");
+    CHECK(v2->events->data.bitmap.rgba == vpix, "pixels are shared, not copied");
+
+    be3->set_gfx_position(be3, 40, 800);                 // same value again (re-applied on a layout pass)
+    CHECK(be3->render_at(be3, 100) == NULL, "unchanged offset: no redraw");
+
+    be3->set_bottom_inset(be3, 300);                     // controls appear: the offset must survive
+    SUB_FRAME *v3 = be3->render_at(be3, 100);
+    CHECK(v3 && v3->gfx_inset_bottom == 300 && v3->gfx_vpos == 40 && v3->gfx_vpos_range == 800,
+          "controls shown: the user's offset is kept next to the reserved space");
+
+    be3->set_gfx_position(be3, 7000, -5);                // bogus values are clamped
+    SUB_FRAME *v4 = be3->render_at(be3, 100);
+    CHECK(v4 && v4->gfx_vpos == 100 && v4->gfx_vpos_range == 0, "out-of-range offset clamped to +100, negative range to 0");
+    be3->set_gfx_position(be3, -7000, 800);
+    SUB_FRAME *v5 = be3->render_at(be3, 100);
+    CHECK(v5 && v5->gfx_vpos == -100, "offset below -100 clamped");
+
+    be3->set_gfx_position(be3, -30, 800);
+    feed(be3);                                           // next cue while the offset is set
+    SUB_FRAME *v6 = be3->render_at(be3, 100);
+    CHECK(v6 && v6->gfx_vpos == -30 && v6->gfx_vpos_range == 800 && v6->gfx_inset_bottom == 300,
+          "a cue fed later gets the current offset");
+    for (SUB_FRAME *f = v1; f; f = (f == v1) ? v2 : (f == v2) ? v3 : (f == v3) ? v4 : (f == v4) ? v5 : (f == v5) ? v6 : NULL) sub_frame_unref(f);
+    be3->close(be3); free(be3);
+
+    SUB_FORMAT_BACKEND *be4 = sub_format_gfx_create();   // track opened with the offset already set
+    SUB_FORMAT_OPEN_PARAMS p4; memset(&p4, 0, sizeof p4);
+    p4.video_w = 1080; p4.video_h = 2400; p4.real_video_w = 1920; p4.real_video_h = 1080;
+    p4.gfx_vpos = -60; p4.gfx_vpos_range = 800;
+    be4->open(be4, &p4);
+    feed(be4);
+    SUB_FRAME *w1 = be4->render_at(be4, 100);
+    CHECK(w1 && w1->gfx_vpos == -60 && w1->gfx_vpos_range == 800, "a track opened with an offset starts with it");
+    sub_frame_unref(w1);
+    be4->close(be4); free(be4);
 
     printf("%s (%d checks, %d failed)\n", fails ? "FAILED" : "ALL PASSED", checks, fails);
     return fails;

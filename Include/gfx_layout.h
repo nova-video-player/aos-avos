@@ -35,6 +35,21 @@
  *      centred in it. The cue keeps its authored place in that frame and its authored size,
  *      scaled by that single factor -- so a cue is never stretched.
  *
+ *   1b. USER POSITION: the user's vertical position (gfx_vpos, -100..100) shifts the whole
+ *      cue vertically from that nominal place; 0 changes nothing. It is always RELATIVE to the
+ *      nominal place, so a positive value only ever moves the cue up and a negative one only
+ *      ever down, whatever the nominal place is:
+ *        +100 = up by gfx_vpos_range pixels (the player passes a third of the screen height),
+ *        -100 = down until a typical bottom-placed cue (one authored GFX_TYPICAL_BOTTOM_MARGIN
+ *               of the frame height above the frame's bottom edge) reaches the bottom limit of
+ *               the viewport -- the room below the cue depends a lot on the orientation (large
+ *               in portrait, small in landscape), so a fixed fraction would leave most of the
+ *               negative range dead on one of them. The reference ignores the reserved bottom
+ *               space on purpose: the controls clear the cue in step 2, they do not rescale
+ *               the slider.
+ *      Every cue of a track is shifted by the same amount, so authored relative positions
+ *      (a top cue and a bottom cue) are preserved; step 2 then keeps each one on screen.
+ *
  *   2. FIT: the cue must lie inside the AVAILABLE area: the viewport minus a small margin, and
  *      minus gfx_inset_bottom at the bottom (playback controls / system bars). A cue that
  *      does not fit is first moved (up above the controls, down from the top edge, in from the
@@ -58,6 +73,11 @@
 // can never leave no room for the cue.
 #define GFX_MAX_INSET 0.5f
 
+// Where a "typical" bottom-placed cue ends, as a fraction of the stream frame height above the
+// frame's bottom edge: the reference a vpos of -100 moves to the bottom limit. A tunable
+// assumption -- authoring tools place dialogue roughly 5-9% up -- not a measured value.
+#define GFX_TYPICAL_BOTTOM_MARGIN 0.06f
+
 static inline void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
                                      float *out_x, float *out_y, float *out_w, float *out_h,
                                      float *out_sx, float *out_sy) {
@@ -76,12 +96,32 @@ static inline void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
     if (ch / fh < s0) s0 = ch / fh;
     const float ox = (cw - fw * s0) * 0.5f, oy = (ch - fh * s0) * 0.5f;
 
-    // Union of the frame's bitmap events (always including ev), nominal placement.
-    float ux0 = ox + ev->x * s0,            uy0 = oy + ev->y * s0;
+    // 1b. the user's vertical position: one vertical shift for the whole cue (see above).
+    float shift = 0.0f;
+    {
+        int v = f->gfx_vpos;
+        if (v > 100) v = 100;
+        if (v < -100) v = -100;
+        if (v > 0) {
+            float range = (float)f->gfx_vpos_range;
+            if (range < 0.0f) range = 0.0f;
+            if (range > ch * 2.0f) range = ch * 2.0f;        // a bogus range can't fling the cue
+            shift = -(float)v * 0.01f * range;
+        } else if (v < 0) {
+            const float ref  = oy + fh * s0 * (1.0f - GFX_TYPICAL_BOTTOM_MARGIN);
+            float room = ch - ch * GFX_EDGE_MARGIN - ref;    // down to the bottom limit, controls hidden
+            if (room < 0.0f) room = 0.0f;
+            shift = (float)(-v) * 0.01f * room;
+        }
+    }
+    const float oy_s = oy + shift;
+
+    // Union of the frame's bitmap events (always including ev), nominal placement + shift.
+    float ux0 = ox + ev->x * s0,            uy0 = oy_s + ev->y * s0;
     float ux1 = ux0 + ev->w * s0,           uy1 = uy0 + ev->h * s0;
     for (const SUB_EVENT *e = f->events; e; e = e->next) {
         if (e->kind != SUB_EVENT_BITMAP) continue;
-        const float x0 = ox + e->x * s0, y0 = oy + e->y * s0;
+        const float x0 = ox + e->x * s0, y0 = oy_s + e->y * s0;
         if (x0 < ux0) ux0 = x0;
         if (y0 < uy0) uy0 = y0;
         if (x0 + e->w * s0 > ux1) ux1 = x0 + e->w * s0;
@@ -108,7 +148,7 @@ static inline void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
     if (nx1 > ax1) dx = ax1 - nx1; else if (nx0 < ax0) dx = ax0 - nx0;
     if (ny1 > ay1) dy = ay1 - ny1; else if (ny0 < ay0) dy = ay0 - ny0;
 
-    const float ex = ox + ev->x * s0, ey = oy + ev->y * s0;
+    const float ex = ox + ev->x * s0, ey = oy_s + ev->y * s0;
     *out_x = anchor_x + (ex - anchor_x) * k + dx;
     *out_y = anchor_y + (ey - anchor_y) * k + dy;
     *out_w = ev->w * s0 * k;

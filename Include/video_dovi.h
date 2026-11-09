@@ -21,7 +21,7 @@
 #include <libavcodec/codec_id.h>
 
 /* A decodable base codec is not necessarily a display-compatible base layer.
- * CCIDs 0/3/15 are proprietary, 5/7..14 reserved. Profile 5 always needs DV.
+ * CCIDs 0/3/15 are proprietary, 5/7..14 reserved. Profile 5 needs DV for correct colors.
  * Keep the original bitstream profile: Android maps both profiles 7 and 8 to
  * DolbyVisionProfileDvheSt for device compatibility (phh/Kodi mapping).
  */
@@ -50,6 +50,28 @@ static inline int video_dovi_base_format(const VIDEO_PROPERTIES *video)
 	return VIDEO_FORMAT_UNKNOWN;
 }
 
+/* The underlying codec can still decode proprietary colors. Prefer a picture
+ * over failure when DV is unavailable; report color compatibility separately.
+ */
+static inline int video_dovi_decode_format(const VIDEO_PROPERTIES *video)
+{
+	if (!video->dv_bitstream_profile || !video->dv_bl_present_flag)
+		return VIDEO_FORMAT_UNKNOWN;
+	switch (video->codec_id) {
+	case AV_CODEC_ID_HEVC: return VIDEO_FORMAT_HEVC;
+	case AV_CODEC_ID_H264: return VIDEO_FORMAT_H264;
+	case AV_CODEC_ID_AV1: return VIDEO_FORMAT_AV1;
+	default: return VIDEO_FORMAT_UNKNOWN;
+	}
+}
+
+static inline int video_dovi_colors_unsupported(const VIDEO_PROPERTIES *video)
+{
+	return video_dovi_decode_format(video) != VIDEO_FORMAT_UNKNOWN &&
+	    video->format == video_dovi_decode_format(video) &&
+	    video_dovi_base_format(video) == VIDEO_FORMAT_UNKNOWN;
+}
+
 /* Change the stream, not just a decoder-private copy, so subsequent hardware
  * and software candidates see the base codec. The one-way change also bounds
  * retries. Keep codec_id, DV metadata and packet framing for seeks/recovery.
@@ -58,7 +80,7 @@ static inline int video_dovi_use_base(VIDEO_PROPERTIES *video)
 {
 	if (video->format != VIDEO_FORMAT_DOLBY_VISION)
 		return 0;
-	int format = video_dovi_base_format(video);
+	int format = video_dovi_decode_format(video);
 	if (format == VIDEO_FORMAT_UNKNOWN)
 		return 0;
 	video->format = format;

@@ -703,8 +703,8 @@ serprintf("FF: parse H264 SPS\n");
                             video->dv_bl_present_flag = record->bl_present_flag;
                             video->dv_bl_signal_compatibility_id = record->dv_bl_signal_compatibility_id;
                         }
-                        // Off remains an explicit user override. Auto/Force must not
-                        // silently decode proprietary DV colors as ordinary HDR/SDR.
+                        // Off bypasses DV. Auto/Force try DV for proprietary colors
+                        // first; decoder recovery can use the base codec with a warning.
                         if(side_data && side_data_size >= dovi_min_size && dovi_mode != 1) {
                             AVDOVIDecoderConfigurationRecord *dovi_record = (AVDOVIDecoderConfigurationRecord*)side_data;
                             int force_dovi = 0;
@@ -781,7 +781,7 @@ serprintf("FF: parse H264 SPS\n");
 #endif
                             if (video_dovi_base_format(video) == VIDEO_FORMAT_UNKNOWN) {
                                 force_dovi = 1;
-                                serprintf("Dolby Vision required: no compatible base layer (profile=%d bl_compat_id=%d bl=%d)\n",
+                                serprintf("Dolby Vision preferred for correct colors: no compatible base layer (profile=%d bl_compat_id=%d bl=%d)\n",
                                           video->dv_bitstream_profile, video->dv_bl_signal_compatibility_id,
                                           video->dv_bl_present_flag);
                             }

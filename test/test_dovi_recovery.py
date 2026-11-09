@@ -161,6 +161,7 @@ int main(void) {
         /* Runtime recovery reuses hardware priority for the base codec. */
         assert(!_handle_video_codec_error(&s));
         assert(attempts == 2 && v.format == format && s.video_dec->cpu == 4);
+        assert(!video_dovi_colors_unsupported(&v));
         /* A later base failure downgrades once, without returning to DV. */
         assert(!_handle_video_codec_error(&s));
         assert(attempts == 3 && attempt_format[2] == format && s.video_dec->cpu == 1);
@@ -200,13 +201,27 @@ int main(void) {
     assert(attempts == 2 && attempt_cpu[0] == 4 && attempt_cpu[1] == 4);
     finish(&s);
     reset(&s, &v, VIDEO_FORMAT_AV1); fail_dv = 1; v.dv_bl_signal_compatibility_id = 0;
-    assert(stream_open_video_dec(&s, NULL));
-    assert(attempts == 1 && v.format == VIDEO_FORMAT_DOLBY_VISION);
+    assert(!stream_open_video_dec(&s, NULL));
+    assert(attempts == 2 && v.format == VIDEO_FORMAT_AV1);
+    assert(video_dovi_colors_unsupported(&v));
     finish(&s);
     reset(&s, &v, VIDEO_FORMAT_HEVC); v.dv_bitstream_profile = 5; v.dv_bl_signal_compatibility_id = 0;
     assert(!stream_open_video_dec(&s, NULL));
-    assert(_handle_video_codec_error(&s));
-    assert(attempts == 1 && v.format == VIDEO_FORMAT_DOLBY_VISION);
+    assert(!_handle_video_codec_error(&s));
+    assert(attempts == 2 && v.format == VIDEO_FORMAT_HEVC);
+    assert(video_dovi_colors_unsupported(&v));
+    finish(&s);
+    /* Pixel case: no DV candidate, restart at hardware HEVC priority. */
+    reset(&s, &v, VIDEO_FORMAT_HEVC); no_dv = 1;
+    v.dv_bitstream_profile = 5; v.dv_bl_signal_compatibility_id = 0;
+    assert(!stream_open_video_dec(&s, NULL));
+    assert(attempts == 1 && v.format == VIDEO_FORMAT_HEVC && s.video_dec->cpu == 4);
+    assert(video_dovi_colors_unsupported(&v));
+    finish(&s);
+    reset(&s, &v, VIDEO_FORMAT_HEVC); no_dv = fail_base_hw = 1;
+    v.dv_bitstream_profile = 5; v.dv_bl_signal_compatibility_id = 0;
+    assert(!stream_open_video_dec(&s, NULL));
+    assert(attempts == 2 && s.video_dec->cpu == 1 && video_dovi_colors_unsupported(&v));
     finish(&s);
     /* Non-DV streams retain the existing hardware-to-software sequence. */
     reset(&s, &v, VIDEO_FORMAT_AV1); v.format = VIDEO_FORMAT_AV1; fail_base_hw = 1;

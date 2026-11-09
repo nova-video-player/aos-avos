@@ -32,6 +32,7 @@
 #include "audio_interface.h"
 #include "stream_config.h"
 #include "device_config.h"
+#include "video_dovi.h"
 
 #define UPNP_FUSE_TO_HTTP
 
@@ -305,6 +306,8 @@ int avos_mp_fillmetadata(avos_mp_t *mp, int type, uint64_t size, ID3_TAG *id3_ta
 		ADD_INT(gap_key + AVOS_MP_METADATA_VIDEO_TRACK_S3DMODE, videop->stereo_mode);
 		ADD_INT(gap_key + AVOS_MP_METADATA_VIDEO_TRACK_DECODER, decoder);
 		ADD_INT(gap_key + AVOS_MP_METADATA_VIDEO_TRACK_COLOR_TRC, videop->color_trc);
+		ADD_BOOL(gap_key + AVOS_MP_METADATA_VIDEO_TRACK_DOVI_COLOR_UNSUPPORTED,
+		    decoder != MP_DECODER_ANY && video_dovi_colors_unsupported(videop));
 	}
 	if (av && type == TYPE_AUD)
 		av->as_max = 1;

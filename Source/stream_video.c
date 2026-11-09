@@ -954,8 +954,9 @@ next:
 			s->vtime_post_sink = 0;
 			pthread_mutex_unlock( &s->video_sink_mutex );
 		}
-		// Retry a compatible base layer at the same priority before downgrading
-		// to software. If no DV candidate exists at all, restart the search with
+		// Retry the underlying codec at the same priority before downgrading
+		// to software; metadata reports any loss of color compatibility to the UI.
+		// If no DV candidate exists at all, restart the search with
 		// the base format, respecting an explicitly selected decoder priority.
 		if ((decoder_attempted || !prio) && video_dovi_use_base(s->video)) {
 			prio = decoder_attempted ? try_prio : first_prio;

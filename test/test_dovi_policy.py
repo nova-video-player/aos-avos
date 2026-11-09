@@ -26,6 +26,8 @@ VIDEO = PREAMBLE.replace('int format, fourcc, codec_id,',
                         'dv_bl_signal_compatibility_id, format, fourcc, codec_id,')
 POLICY = '\n'.join(extract((ROOT / 'Include/video_dovi.h').read_text(), marker)
                    for marker in ('static inline int video_dovi_base_format(',
+                                  'static inline int video_dovi_decode_format(',
+                                  'static inline int video_dovi_colors_unsupported(',
                                   'static inline int video_dovi_use_base('))
 
 
@@ -51,7 +53,7 @@ int main(void) {
 }
 ''')
 
-    def test_only_known_compatible_base_layers_can_be_retried(self):
+    def test_decode_fallback_is_separate_from_color_compatibility(self):
         run_c(VIDEO + POLICY + r'''
 int main(void) {
     VIDEO_PROPERTIES v = { .format = VIDEO_FORMAT_DOLBY_VISION,
@@ -61,7 +63,12 @@ int main(void) {
         v.dv_bl_signal_compatibility_id = ccid;
         int compatible = ccid == 1 || ccid == 2 || ccid == 4 || ccid == 6;
         assert(video_dovi_base_format(&v) == (compatible ? VIDEO_FORMAT_AV1 : 0));
+        v.format = VIDEO_FORMAT_DOLBY_VISION;
+        assert(!video_dovi_colors_unsupported(&v));
+        assert(video_dovi_use_base(&v));
+        assert(video_dovi_colors_unsupported(&v) == !compatible);
     }
+    v.format = VIDEO_FORMAT_DOLBY_VISION;
     v.dv_bl_signal_compatibility_id = 1;
     v.dv_bl_present_flag = 0;
     assert(!video_dovi_use_base(&v));
@@ -84,6 +91,15 @@ int main(void) {
     assert(video_dovi_use_base(&v));
     assert(v.format == VIDEO_FORMAT_HEVC && v.fourcc == VIDEO_FOURCC_HEVC);
     assert(v.hvcc == 1 && v.nal_unit_size == 4);
+    assert(!video_dovi_colors_unsupported(&v));
+    v.dv_bitstream_profile = 5;
+    v.dv_bl_signal_compatibility_id = 0;
+    v.format = VIDEO_FORMAT_DOLBY_VISION;
+    assert(video_dovi_use_base(&v));
+    assert(v.format == VIDEO_FORMAT_HEVC && video_dovi_colors_unsupported(&v));
+    assert(!video_dovi_use_base(&v));
+    v.dv_bitstream_profile = 0;
+    assert(!video_dovi_colors_unsupported(&v));
     return 0;
 }
 ''')
@@ -139,22 +155,23 @@ int main(void) {
     v = select_video(VIDEO_FORMAT_H264, 9, 2, 0, 1, 0, size);
     assert(v.format == VIDEO_FORMAT_H264);
     v = select_video(VIDEO_FORMAT_H264, 9, 0, 0, 1, 1, size);
-    assert(!video_dovi_use_base(&v));
+    assert(video_dovi_use_base(&v) && video_dovi_colors_unsupported(&v));
     /* Profile 7 retains its existing HDR base preference, unless forced. */
     v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 1, size);
     assert(v.format == VIDEO_FORMAT_HEVC && queried_profile == 256);
     v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 2, 1, 1, size);
     assert(v.format == VIDEO_FORMAT_DOLBY_VISION && queried_profile == 256);
-    /* Auto without a matching decoder uses a compatible base only. */
+    /* Proprietary colors still prefer DV, but failed attempts can use the base. */
     v = select_video(VIDEO_FORMAT_AV1, 10, 1, 0, 1, 0, size);
     assert(v.format == VIDEO_FORMAT_AV1);
     v = select_video(VIDEO_FORMAT_AV1, 10, 4, 0, 0, 0, size);
     assert(v.format == VIDEO_FORMAT_AV1 && queries == 0);
     v = select_video(VIDEO_FORMAT_AV1, 10, 0, 0, 1, 0, size);
-    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && !video_dovi_use_base(&v));
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && video_dovi_use_base(&v));
+    assert(video_dovi_colors_unsupported(&v));
     v = select_video(VIDEO_FORMAT_HEVC, 5, 0, 0, 0, 0, size);
     assert(v.format == VIDEO_FORMAT_DOLBY_VISION && queries == 0);
-    assert(!video_dovi_use_base(&v));
+    assert(video_dovi_use_base(&v) && video_dovi_colors_unsupported(&v));
     /* Off is still an explicit override, and Force still requests DV. */
     v = select_video(VIDEO_FORMAT_AV1, 10, 0, 1, 0, 0, size);
     assert(v.format == VIDEO_FORMAT_AV1 && queries == 0);

@@ -96,7 +96,7 @@ sfdec_t*	sfdec_new(sfdec_type_t type,
 		    void *extradata, size_t extradata_size,
 		    int *pts_reorder, const char* codec_name, int video_frame_rate_den, int video_frame_rate_num,
 		    int color_primaries, int color_trc, int color_space, int color_range,
-    const void *hdr_static_info, size_t hdr_static_info_size);
+    const void *hdr_static_info, size_t hdr_static_info_size, int dovi_profile);
 
 void		sfdec_delete(sfdec_t *sfdec);
 int		sfdec_start(sfdec_t *);

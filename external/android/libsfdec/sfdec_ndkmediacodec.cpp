@@ -204,7 +204,7 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
             int *pts_reorder,
             int color_primaries, int color_trc, int color_space, int color_range,
             const void *hdr_static_info, size_t hdr_static_info_size,
-            const char* codec_name, int video_frame_rate_den, int video_frame_rate_num)
+            const char* codec_name, int video_frame_rate_den, int video_frame_rate_num, int dovi_profile)
 {
     media_status_t err;
     const char *mime_type;
@@ -251,6 +251,13 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     CHECK(sfdec->mFormat != NULL);
 
     AMediaFormat_setString(sfdec->mFormat, "mime", mime_type);
+    // Some phone decoders require the Android DV profile at configure time,
+    // not just during codec selection (as in Media3). Never apply it to a
+    // base-codec fallback: its profile values belong to a different namespace.
+    if (codec == SFDEC_VIDEO_DOLBY_VISION && dovi_profile > 0) {
+        AMediaFormat_setInt32(sfdec->mFormat, "profile", dovi_profile);
+        DBG LOG("Dolby Vision configure profile: %d", dovi_profile);
+    }
     if (duration_us > 0)
         AMediaFormat_setInt64(sfdec->mFormat, "durationUs", duration_us);
     AMediaFormat_setInt32(sfdec->mFormat, "width", sfdec->width);

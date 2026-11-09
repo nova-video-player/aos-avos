@@ -2999,6 +2999,7 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
 retry_decoder_candidate:
 	width = video->width;
 	height = video->height;
+	int dovi_profile = effective_format == VIDEO_FORMAT_DOLBY_VISION ? video->dv_profile : 0;
 	p->sfdec = sfdec_new(SFDEC_TYPE_MEDIACODEC,
 			sfdec_codec,
 			flags,
@@ -3008,7 +3009,7 @@ retry_decoder_candidate:
 			extradata, extradata_size,
 			&pts_reorder, decoder_name, video->frame_rate_den, video->frame_rate_num,
 			video->color_primaries, video->color_trc, video->color_space, video->color_range,
-            video->hdr_static_info, video->hdr_static_info_size);
+            video->hdr_static_info, video->hdr_static_info_size, dovi_profile);
 	apply_rotation(p, video->rotation, width, height, &width, &height);
 
 	if (!p->sfdec) {

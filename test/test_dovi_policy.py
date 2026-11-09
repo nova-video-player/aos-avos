@@ -24,7 +24,8 @@ from test_dovi_base_codec import PREAMBLE
 VIDEO = PREAMBLE.replace('int format, fourcc, codec_id,',
                         'int dv_profile, dv_bitstream_profile, dv_bl_present_flag, '
                         'dv_bl_signal_compatibility_id, dv_rpu_probe_count, dv_rpu_profile, '
-                        'dv_rpu_el_type, format, fourcc, codec_id,')
+                        'dv_rpu_el_type, dv_nal_unit_size, dv_rewrite, dv_rewrite_logged, '
+                        'dv_rewrite_errors, format, fourcc, codec_id,')
 POLICY = '\n'.join(extract((ROOT / 'Include/video_dovi.h').read_text(), marker)
                    for marker in ('static inline int video_dovi_base_format(',
                                   'static inline int video_dovi_decode_format(',
@@ -121,6 +122,21 @@ typedef struct {
     uint8_t bl_present_flag, dv_bl_signal_compatibility_id;
 } AVDOVIDecoderConfigurationRecord;
 static int matches, queried_profile, queries, display_caps = -1;
+static int p7_advertised, have_libdovi = 1;
+#define VIDEO_DOVI_REWRITE_P7_TO_P81 1
+#define VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS 2
+static int video_dovi_hevc_nal_unit_size(const unsigned char *extradata, int size) {
+    (void)extradata;
+    return size ? 4 : 0;
+}
+static int video_dovi_rewrite_supported(void) {
+    return VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS | (have_libdovi ? VIDEO_DOVI_REWRITE_P7_TO_P81 : 0);
+}
+static int acodecs_is_profile_advertised(const char *mime, int profile) {
+    assert(!strcmp(mime, "video/dolby-vision") && profile == 128);
+    return p7_advertised;
+}
+static struct { unsigned char *extradata; int extradata_size; } codecpar_hvcc = {0, 23}, *codecpar = &codecpar_hvcc;
 static int acodecs_get_display_hdr_capabilities(void) { return display_caps; }
 static const char *acodecs_get_for_profile(const char *mime, int profile) {
     assert(!strcmp(mime, "video/dolby-vision"));
@@ -157,11 +173,44 @@ int main(void) {
     assert(v.format == VIDEO_FORMAT_H264);
     v = select_video(VIDEO_FORMAT_H264, 9, 0, 0, 1, 1, size);
     assert(video_dovi_use_base(&v) && video_dovi_colors_unsupported(&v));
-    /* Profile 7 retains its existing HDR base preference, unless forced. */
+    const int convert = VIDEO_DOVI_REWRITE_P7_TO_P81 | VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS;
+    /* Profile 7 converts to 8.1 automatically when a DV decoder exists. */
     v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 1, size);
-    assert(v.format == VIDEO_FORMAT_HEVC && queried_profile == 256);
-    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 2, 1, 1, size);
     assert(v.format == VIDEO_FORMAT_DOLBY_VISION && queried_profile == 256);
+    assert(v.dv_rewrite == convert && v.dv_profile == 256 && v.dv_nal_unit_size == 4);
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 2, 1, 0, size); // Force, no profile match
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && v.dv_rewrite == convert);
+    /* No matching DV decoder in Auto, or Off: keep the HDR10 base. */
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 0, size);
+    assert(v.format == VIDEO_FORMAT_HEVC && !v.dv_rewrite);
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 1, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_HEVC && !v.dv_rewrite);
+    /* A decoder advertising DvheDtb gets Profile 7 unchanged (FEL kept). */
+    p7_advertised = 1;
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 0, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && v.dv_profile == 128 && v.dv_rewrite == VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS);
+    p7_advertised = 0;
+    /* Without libdovi Profile 7 keeps the previous behaviour. */
+    have_libdovi = 0;
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_HEVC && !v.dv_rewrite);
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 2, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && v.dv_rewrite == VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS);
+    have_libdovi = 1;
+    /* HDR10-only display in Auto: HDR10 base with its HDR10+, no rewrite. */
+    display_caps = 1;
+    v = select_video(VIDEO_FORMAT_HEVC, 7, 6, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_HEVC && !v.dv_rewrite);
+    v = select_video(VIDEO_FORMAT_HEVC, 8, 1, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_HEVC && !v.dv_rewrite);
+    display_caps = -1;
+    /* HDR10+ is removed whenever the HEVC DV decoder is used, and the base
+     * codec fallback restores the original bitstream. */
+    v = select_video(VIDEO_FORMAT_HEVC, 8, 1, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && v.dv_rewrite == VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS);
+    assert(video_dovi_use_base(&v) && v.format == VIDEO_FORMAT_HEVC && !v.dv_rewrite);
+    v = select_video(VIDEO_FORMAT_AV1, 10, 1, 0, 1, 1, size);
+    assert(v.format == VIDEO_FORMAT_DOLBY_VISION && !v.dv_rewrite);
     /* Proprietary colors still prefer DV, but failed attempts can use the base. */
     v = select_video(VIDEO_FORMAT_AV1, 10, 1, 0, 1, 0, size);
     assert(v.format == VIDEO_FORMAT_AV1);

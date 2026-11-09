@@ -698,6 +698,11 @@ serprintf("FF: parse H264 SPS\n");
                         video->dv_rpu_probe_count = 0;
                         video->dv_rpu_profile = 0;
                         video->dv_rpu_el_type = 0;
+                        video->dv_nal_unit_size = video_dovi_hevc_nal_unit_size(codecpar->extradata,
+                            codecpar->extradata_size);
+                        video->dv_rewrite = 0;
+                        video->dv_rewrite_logged = 0;
+                        video->dv_rewrite_errors = 0;
                         // Read only fields present in all supported FFmpeg DV records.
                         const size_t dovi_min_size = offsetof(AVDOVIDecoderConfigurationRecord,
                             dv_bl_signal_compatibility_id) + sizeof(((AVDOVIDecoderConfigurationRecord*)0)->dv_bl_signal_compatibility_id);
@@ -775,6 +780,26 @@ serprintf("FF: parse H264 SPS\n");
                                 force_dovi = 0;
                             }
 
+                            // Profile 7 (doc/DOVI.md in Video): a decoder advertising
+                            // DvheDtb gets the stream unchanged; otherwise convert it to
+                            // single-layer 8.1, which DV decoders limited to Profile 8 accept.
+                            int p7_native = 0, convert_p7 = 0;
+                            if (video->format == VIDEO_FORMAT_HEVC && dovi_record->dv_profile == 7 &&
+                                dovi_codec_supported && dovi_mode != 1) {
+#ifdef CONFIG_ANDROID
+                                p7_native = acodecs_is_profile_advertised("video/dolby-vision", 128);
+#endif
+                                convert_p7 = !p7_native &&
+                                    (video_dovi_rewrite_supported() & VIDEO_DOVI_REWRITE_P7_TO_P81) &&
+                                    (dovi_decoder || dovi_mode == 2);
+                            }
+                            if (p7_native || convert_p7) {
+                                prefer_hevc_fallback = 0;
+                                force_dovi = 1;
+                                if (p7_native)
+                                    video->dv_profile = 128; // DolbyVisionProfileDvheDtb
+                            }
+
 #ifdef CONFIG_ANDROID
                             int display_hdr = acodecs_get_display_hdr_capabilities();
                             if (dovi_mode == 0 && display_hdr >= 0 && !(display_hdr & 8) &&
@@ -793,6 +818,15 @@ serprintf("FF: parse H264 SPS\n");
                             if (force_dovi) {
                                 video->fourcc = VIDEO_FOURCC_DOLBY_VISION;
                                 video->format = VIDEO_FORMAT_DOLBY_VISION;
+                                // The HEVC NAL rewrites only apply to HEVC; HDR10+ is redundant
+                                // with DV output and stops some displays entering DV.
+                                if (video->codec_id == AV_CODEC_ID_HEVC) {
+                                    if (convert_p7)
+                                        video->dv_rewrite |= VIDEO_DOVI_REWRITE_P7_TO_P81;
+                                    video->dv_rewrite |= VIDEO_DOVI_REWRITE_STRIP_HDR10PLUS;
+                                }
+                                serprintf("Dolby Vision rewrite selection: p7_native=%d rewrite=%d nal_unit_size=%d\r\n",
+                                          p7_native, video->dv_rewrite, video->dv_nal_unit_size);
                             }
 
                             serprintf("Dolby Vision selection: final_format=%d final_dv_profile=%d fourcc=%d decoder_match=%s prefer_hevc_fallback=%d bl_compat_id=%d dovi_mode=%d\r\n",
@@ -1701,6 +1735,30 @@ static int parser_input_error(STREAM *s, int result, int demux_result)
 
 // Reserve bounded headroom for the audio packet that ends starvation. Never
 // retain unlimited keyframes/subtitles while scanning a long audio gap.
+// Probe the original Dolby Vision RPU, then apply the selected bitstream
+// rewrite once per packet, before queueing; failures keep the packet.
+static void _dovi_process_packet(VIDEO_PROPERTIES *video, AVPacket *packet)
+{
+	if (!video->dv_bitstream_profile || !packet->data || packet->size <= 0)
+		return;
+	video_dovi_rpu_probe(video, packet->data, packet->size, video->dv_nal_unit_size);
+	if (!video->dv_rewrite)
+		return;
+	int size = 0;
+	unsigned char *au = video_dovi_rewrite_au(video, packet->data, packet->size,
+		video->dv_nal_unit_size, &size);
+	if (!au)
+		return;
+	AVPacket *rewritten = av_packet_alloc();
+	if (rewritten && !av_new_packet(rewritten, size) && !av_packet_copy_props(rewritten, packet)) {
+		memcpy(rewritten->data, au, size);
+		av_packet_unref(packet);
+		av_packet_move_ref(packet, rewritten);
+	}
+	av_packet_free(&rewritten);
+	free(au);
+}
+
 static int enqueue_media_packet(STREAM *s, AVQueue *q, AVPacket *packet, int audio_starved)
 {
 	int64_t budget = MAX(ff_p->buffer_size, 1024 * 1024);
@@ -1882,6 +1940,7 @@ DBGP2 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", _
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
 DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", _get_video_timestamp(s, &packet, packet.dts), _get_video_timestamp(s, &packet, packet.pts), (packet.flags & AV_PKT_FLAG_KEY) ? "I" : " ",
 										packet.data[0], packet.data[1],packet.data[2],packet.data[3]  );
+		_dovi_process_packet(s->video, &packet);
 		if (enqueue_media_packet(s, &ff_p->vq, &packet, audio_starved)) goto QueueError;
 		if (timestamp) *timestamp = use_pts ? _get_video_timestamp(s, &packet, packet.pts) : _get_video_timestamp(s, &packet, packet.dts);
 
@@ -2293,9 +2352,6 @@ DBGC8  serprintf("V    siz %6d  pos %8lld %d tim %8d  pkt %6d  %8d\r\n", packet-
 			}
 		}
 	}
-
-	video_dovi_rpu_probe(s->video, packet->data, packet->size,
-		s->video->hvcc ? s->video->nal_unit_size : 0);
 
 	if( !s->video->no_extra && s->video->format != VIDEO_FORMAT_WMV3 ) {
 		stream_parser_send_video_extra( s->video, cbe, &cdata->size );

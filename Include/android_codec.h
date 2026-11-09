@@ -23,6 +23,9 @@
 int acodecs_is_type_supported(const char *type, int is_sw_allowed);
 const char* acodecs_get_for_profile(const char *mime_type, int profile);
 int acodecs_get_dovi_mode(void);
+// 1 when a hardware decoder advertises the profile, ignoring Force mode;
+// 0 for older Java clients.
+int acodecs_is_profile_advertised(const char *mime, int profile);
 /* Returned codec names are owned by the caller. Index bounds initialization retries. */
 const char *acodecs_get_video_decoder(const char *mime, int profile,
     int width, int height, double frame_rate, int index);

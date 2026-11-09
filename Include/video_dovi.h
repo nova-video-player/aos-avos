@@ -84,6 +84,7 @@ static inline int video_dovi_use_base(VIDEO_PROPERTIES *video)
 	if (format == VIDEO_FORMAT_UNKNOWN)
 		return 0;
 	video->format = format;
+	video->dv_rewrite = 0; // base decoding keeps the original bitstream
 	video->fourcc = format == VIDEO_FORMAT_AV1 ? VIDEO_FOURCC_AV01 :
 	    format == VIDEO_FORMAT_H264 ? VIDEO_FOURCC_H264 : VIDEO_FOURCC_HEVC;
 	return 1;

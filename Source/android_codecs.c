@@ -48,6 +48,7 @@ static jmethodID jGetCodecForProfileMethod;
 static jmethodID jGetDoViModeMethod;
 static jmethodID jGetVideoCodecMethod;
 static jmethodID jGetDisplayHdrMethod;
+static jmethodID jIsProfileAdvertisedMethod;
 
 void acodecs_init(void) {
     int willDetach = 0;
@@ -107,6 +108,9 @@ void acodecs_init(void) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     jGetDisplayHdrMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass,
         "getPlaybackHdrCapabilities", "()I");
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    jIsProfileAdvertisedMethod = (*env)->GetStaticMethodID(env, jCodecDiscoveryClass,
+        "isProfileAdvertised", "(Ljava/lang/String;I)Z");
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 	if (willDetach)
 		(*myVm)->DetachCurrentThread(myVm);
@@ -224,6 +228,30 @@ const char *acodecs_get_video_decoder(const char *mime, int profile,
     if (type) (*env)->DeleteLocalRef(env, type);
     if (detach) (*myVm)->DetachCurrentThread(myVm);
     return name;
+}
+
+int acodecs_is_profile_advertised(const char *mime, int profile)
+{
+    if (!jIsProfileAdvertisedMethod) return 0;
+    JNIEnv *env = NULL;
+    int detach = 0;
+    if ((*myVm)->GetEnv(myVm, (void **)&env, JNI_VERSION_1_4) != JNI_OK) {
+        if ((*myVm)->AttachCurrentThread(myVm, &env, NULL) != JNI_OK) return 0;
+        detach = 1;
+    }
+    int advertised = 0;
+    jstring type = (*env)->NewStringUTF(env, mime);
+    if (type) {
+        advertised = (*env)->CallStaticBooleanMethod(env, jCodecDiscoveryClass,
+            jIsProfileAdvertisedMethod, type, profile) ? 1 : 0;
+        (*env)->DeleteLocalRef(env, type);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        advertised = 0;
+    }
+    if (detach) (*myVm)->DetachCurrentThread(myVm);
+    return advertised;
 }
 
 int acodecs_get_display_hdr_capabilities(void)

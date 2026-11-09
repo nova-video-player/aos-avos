@@ -668,6 +668,10 @@ typedef struct _video_props {
     int dv_rpu_probe_count; // packets inspected by the read-only RPU probe
     int dv_rpu_profile;     // profile guessed from the first parsed RPU, 0 if unknown
     int dv_rpu_el_type;     // VIDEO_DOVI_EL_* from video_dovi_rpu.h
+    int dv_nal_unit_size;   // hvcC length-prefix size of demuxed packets, 0 for Annex B
+    int dv_rewrite;         // VIDEO_DOVI_REWRITE_* applied to demuxed packets
+    int dv_rewrite_logged;
+    int dv_rewrite_errors;
 
     // for color metadata (values from FFmpeg AVCOL_* enums)
     int color_primaries;    // AVCOL_PRI_* (e.g. BT709=1, BT2020=9)

@@ -23,7 +23,8 @@ from test_dovi_base_codec import PREAMBLE
 
 VIDEO = PREAMBLE.replace('int format, fourcc, codec_id,',
                         'int dv_profile, dv_bitstream_profile, dv_bl_present_flag, '
-                        'dv_bl_signal_compatibility_id, format, fourcc, codec_id,')
+                        'dv_bl_signal_compatibility_id, dv_rpu_probe_count, dv_rpu_profile, '
+                        'dv_rpu_el_type, format, fourcc, codec_id,')
 POLICY = '\n'.join(extract((ROOT / 'Include/video_dovi.h').read_text(), marker)
                    for marker in ('static inline int video_dovi_base_format(',
                                   'static inline int video_dovi_decode_format(',

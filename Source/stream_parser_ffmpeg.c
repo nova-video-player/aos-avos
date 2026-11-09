@@ -48,6 +48,7 @@
 #include <libavutil/dict.h>
 #include <libavutil/dovi_meta.h>
 #include "video_dovi.h"
+#include "video_dovi_rpu.h"
 #include "video_hdr.h"
 #include <libavutil/time.h>
 
@@ -694,6 +695,9 @@ serprintf("FF: parse H264 SPS\n");
                         video->dv_bitstream_profile = 0;
                         video->dv_bl_present_flag = 0;
                         video->dv_bl_signal_compatibility_id = 0;
+                        video->dv_rpu_probe_count = 0;
+                        video->dv_rpu_profile = 0;
+                        video->dv_rpu_el_type = 0;
                         // Read only fields present in all supported FFmpeg DV records.
                         const size_t dovi_min_size = offsetof(AVDOVIDecoderConfigurationRecord,
                             dv_bl_signal_compatibility_id) + sizeof(((AVDOVIDecoderConfigurationRecord*)0)->dv_bl_signal_compatibility_id);
@@ -2289,6 +2293,9 @@ DBGC8  serprintf("V    siz %6d  pos %8lld %d tim %8d  pkt %6d  %8d\r\n", packet-
 			}
 		}
 	}
+
+	video_dovi_rpu_probe(s->video, packet->data, packet->size,
+		s->video->hvcc ? s->video->nal_unit_size : 0);
 
 	if( !s->video->no_extra && s->video->format != VIDEO_FORMAT_WMV3 ) {
 		stream_parser_send_video_extra( s->video, cbe, &cdata->size );

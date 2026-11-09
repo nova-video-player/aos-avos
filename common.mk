@@ -138,7 +138,7 @@ CSRC_STREAM_CORE = \
 	stream_global.c stream_sync.c  
 
 CSRC_STREAM_MISC = \
-	mpeg2.c h264.c mpg4.c realvideo.c wmv.c downmix.c pts_reorder.c hevc.c
+	mpeg2.c h264.c mpg4.c realvideo.c wmv.c downmix.c pts_reorder.c hevc.c video_dovi_rpu.c
 
 CSRC_STREAM_IO = \
 	stream_io_file.c \

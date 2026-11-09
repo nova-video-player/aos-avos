@@ -125,6 +125,10 @@ ifeq ($(VIDEO),ON)
 	
 	DEFINES += -DCONFIG_SUBTITLES
 
+    ifeq ($(LIBDOVI),ON)
+		DEFINES += -DCONFIG_LIBDOVI     # read-only Dolby Vision RPU probe
+	endif
+
     ifeq ($(LIBASS),ON)
 		DEFINES += -DCONFIG_LIBASS      # for rendering subtitles
 		INCLUDES += -I$(LOCAL_PATH)/../../native/prebuilt/libass/include

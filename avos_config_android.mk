@@ -14,6 +14,13 @@
 
 GUI			= OFF
 LIBASS			= ON
+# Optional until the libdovi prebuilt is distributed with the manifest.
+ifneq ($(wildcard $(AVOS_DIR)/../prebuilt/libdovi/include/libdovi/rpu_parser.h),)
+LIBDOVI			= ON
+else
+$(warning libdovi prebuilt not found: run make native_build_native/libdovi-android-builder)
+LIBDOVI			= OFF
+endif
 AUDIO			= ON
 AUDIO_FF_AMR		= ON
 AUDIO_FF_AMR_WB		= ON

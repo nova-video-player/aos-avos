@@ -665,6 +665,9 @@ typedef struct _video_props {
     int dv_bl_signal_compatibility_id;
     int dv_bitstream_profile; // original profile, before the Android profile mapping
     int dv_bl_present_flag;
+    int dv_rpu_probe_count; // packets inspected by the read-only RPU probe
+    int dv_rpu_profile;     // profile guessed from the first parsed RPU, 0 if unknown
+    int dv_rpu_el_type;     // VIDEO_DOVI_EL_* from video_dovi_rpu.h
 
     // for color metadata (values from FFmpeg AVCOL_* enums)
     int color_primaries;    // AVCOL_PRI_* (e.g. BT709=1, BT2020=9)

@@ -194,6 +194,12 @@ JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_n
     sub_engine_set_bottom_inset(get_engine(handle), px);
 }
 
+// Reports the user's vertical position for bitmap subtitles (-100..100) -- see
+// sub_engine_set_gfx_position() in sub_engine.h.
+JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetGfxPosition(JNIEnv *env, jobject thiz, jlong handle, jint value) {
+    sub_engine_set_gfx_position(get_engine(handle), value);
+}
+
 // --- 3D HYBRID RENDER BRIDGE ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetUIMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {

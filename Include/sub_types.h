@@ -160,6 +160,9 @@ typedef struct {
                                  * cue must stay clear of (playback controls, navigation bar,
                                  * gesture area). Stamped by the GFX backend from
                                  * sub_engine_set_bottom_inset(); 0 = nothing reserved. */
+    int         gfx_vpos;      /* GFX frames ONLY: the user's vertical position, -100..100
+                                 * (0 = computed placement, positive = up). Stamped by the GFX
+                                 * backend from sub_engine_set_gfx_position(). */
     SUB_EVENT  *events;        /* linked list, NULL = nothing to show       */
 } SUB_FRAME;
 

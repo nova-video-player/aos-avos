@@ -137,6 +137,9 @@ struct sfdec_dovi_gl {
     GLint u_code_scale, u_sample_bias, u_pivot_lo, u_pivot_hi, u_pivots, u_coeffs, u_mmr;
     GLint u_ycc_to_rgb, u_ycc_offset, u_lms_to_rgb, u_tex, u_crop, u_rgb_to_ycc, u_sdr_scale, u_sdr_peak;
     bool rgb_sampling; // no GL_EXT_YUV_target: undo the driver's YUV to RGB
+    bool smpte2086, cta861_3; // surface HDR metadata extensions (PQ output)
+    float meta_max_nits, meta_min_nits; // last metadata set on the surface
+    int meta_cll, meta_fall;
     image_entry shown_import; // EGLImage of the shown frame, released with it
     AImage *shown;    // kept until the next frame is presented
     held_frame held[HELD_FRAMES_MAX]; // acquired frames waiting for their time, FIFO
@@ -314,6 +317,8 @@ static bool egl_init(sfdec_dovi_gl *gl)
         return false;
     }
     gl->rgb_sampling = !has_ext((const char *)glGetString(GL_EXTENSIONS), "GL_EXT_YUV_target");
+    gl->smpte2086 = !gl->sdr && has_ext(egl_ext, "EGL_EXT_surface_SMPTE2086_metadata");
+    gl->cta861_3 = !gl->sdr && has_ext(egl_ext, "EGL_EXT_surface_CTA861_3_metadata");
 
     GLuint vs = compile(GL_VERTEX_SHADER, vertex_shader);
     GLuint fs = compile(GL_FRAGMENT_SHADER, gl->rgb_sampling ? video_dovi_reshape_rgb_fs : video_dovi_reshape_fs);
@@ -468,6 +473,44 @@ static void acquire_one(sfdec_dovi_gl *gl)
 // Draw the oldest held frame and queue it to the window with its
 // presentation time. Called shortly before that time: queueing ~200 ms early
 // fills the window's few buffers and blocks eglSwapBuffers.
+// Static HDR metadata for the display's own tone mapping of the PQ output,
+// set before the swap of the first frame carrying new values.
+static void set_hdr_metadata(sfdec_dovi_gl *gl, const VIDEO_DOVI_RESHAPE *p)
+{
+    if (p->mastering_max_nits == gl->meta_max_nits && p->mastering_min_nits == gl->meta_min_nits &&
+        p->max_cll == gl->meta_cll && p->max_fall == gl->meta_fall)
+        return;
+    gl->meta_max_nits = p->mastering_max_nits;
+    gl->meta_min_nits = p->mastering_min_nits;
+    gl->meta_cll = p->max_cll;
+    gl->meta_fall = p->max_fall;
+    bool ok = true;
+    if (gl->smpte2086) {
+        // Dolby's default mastering primaries without an L9 block: P3-D65.
+        static const struct { EGLint attr; float value; } prim[] = {
+            { EGL_SMPTE2086_DISPLAY_PRIMARY_RX_EXT, 0.680f }, { EGL_SMPTE2086_DISPLAY_PRIMARY_RY_EXT, 0.320f },
+            { EGL_SMPTE2086_DISPLAY_PRIMARY_GX_EXT, 0.265f }, { EGL_SMPTE2086_DISPLAY_PRIMARY_GY_EXT, 0.690f },
+            { EGL_SMPTE2086_DISPLAY_PRIMARY_BX_EXT, 0.150f }, { EGL_SMPTE2086_DISPLAY_PRIMARY_BY_EXT, 0.060f },
+            { EGL_SMPTE2086_WHITE_POINT_X_EXT, 0.3127f }, { EGL_SMPTE2086_WHITE_POINT_Y_EXT, 0.3290f },
+        };
+        for (size_t i = 0; i < sizeof(prim) / sizeof(prim[0]); i++)
+            ok &= eglSurfaceAttrib(gl->dpy, gl->surf, prim[i].attr,
+                                   (EGLint)lroundf(prim[i].value * EGL_METADATA_SCALING_EXT)) == EGL_TRUE;
+        ok &= eglSurfaceAttrib(gl->dpy, gl->surf, EGL_SMPTE2086_MAX_LUMINANCE_EXT,
+                               (EGLint)lroundf(p->mastering_max_nits * EGL_METADATA_SCALING_EXT)) == EGL_TRUE;
+        ok &= eglSurfaceAttrib(gl->dpy, gl->surf, EGL_SMPTE2086_MIN_LUMINANCE_EXT,
+                               (EGLint)lroundf(p->mastering_min_nits * EGL_METADATA_SCALING_EXT)) == EGL_TRUE;
+    }
+    if (gl->cta861_3 && p->max_cll > 0) {
+        ok &= eglSurfaceAttrib(gl->dpy, gl->surf, EGL_CTA861_3_MAX_CONTENT_LIGHT_LEVEL_EXT,
+                               p->max_cll * EGL_METADATA_SCALING_EXT) == EGL_TRUE;
+        ok &= eglSurfaceAttrib(gl->dpy, gl->surf, EGL_CTA861_3_MAX_FRAME_AVERAGE_LEVEL_EXT,
+                               p->max_fall * EGL_METADATA_SCALING_EXT) == EGL_TRUE;
+    }
+    LOG("HDR metadata: mastering %.4f..%.0f nits, MaxCLL %d, MaxFALL %d%s", p->mastering_min_nits,
+        p->mastering_max_nits, p->max_cll, p->max_fall, ok ? "" : " (rejected)");
+}
+
 static void draw_held(sfdec_dovi_gl *gl)
 {
     dovi_syms *s = &gl->s;
@@ -508,6 +551,8 @@ static void draw_held(sfdec_dovi_gl *gl)
     glViewport(0, 0, sw, sh);
     glUseProgram(gl->prog);
     upload(gl, &f->params);
+    if (gl->smpte2086 || gl->cta861_3)
+        set_hdr_metadata(gl, &f->params);
     glUniform4f(gl->u_crop, (float)crop.left / desc.width, (float)crop.top / desc.height,
         (float)(crop.right - crop.left) / desc.width, (float)(crop.bottom - crop.top) / desc.height);
     glActiveTexture(GL_TEXTURE0);

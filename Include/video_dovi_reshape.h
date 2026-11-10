@@ -41,6 +41,11 @@ typedef struct {
 	float ycc_offset[3];
 	float lms_to_rgb[9];  /* row-major, linear LMS to linear BT.2020 RGB */
 	float source_min_pq, source_max_pq; /* 0..1 */
+	/* Static HDR metadata for the display: mastering luminance (nits) from
+	 * the L6 block, else the source range; MaxCLL / MaxFALL (nits) from L6,
+	 * 0 when unknown. */
+	float mastering_min_nits, mastering_max_nits;
+	int max_cll, max_fall;
 	int bl_bit_depth;
 } VIDEO_DOVI_RESHAPE;
 

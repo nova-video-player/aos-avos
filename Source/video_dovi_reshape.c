@@ -112,6 +112,12 @@ static int map_component(VIDEO_DOVI_RESHAPE *out, int c, const DoviReshapingCurv
 	return 0;
 }
 
+static float pq_nits(double e)
+{
+	const double p = pow(e, 1.0 / 78.84375);
+	return (float)(10000.0 * pow(fmax(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125));
+}
+
 static void fill_dm(VIDEO_DOVI_RESHAPE *out, const DoviVdrDmData *dm)
 {
 	const int16_t ycc[9] = { dm->ycc_to_rgb_coef0, dm->ycc_to_rgb_coef1, dm->ycc_to_rgb_coef2,
@@ -136,6 +142,13 @@ static void fill_dm(VIDEO_DOVI_RESHAPE *out, const DoviVdrDmData *dm)
 		}
 	out->source_min_pq = dm->source_min_pq / 4095.0f;
 	out->source_max_pq = dm->source_max_pq / 4095.0f;
+	const DoviExtMetadataBlockLevel6 *l6 = dm->dm_data.level6;
+	out->mastering_max_nits = l6 && l6->max_display_mastering_luminance ?
+		(float)l6->max_display_mastering_luminance : pq_nits(out->source_max_pq);
+	out->mastering_min_nits = l6 && l6->max_display_mastering_luminance ?
+		l6->min_display_mastering_luminance / 10000.0f : pq_nits(out->source_min_pq);
+	out->max_cll = l6 ? l6->max_content_light_level : 0;
+	out->max_fall = l6 ? l6->max_frame_average_light_level : 0;
 }
 
 static void copy_mapping(VIDEO_DOVI_RESHAPE *dst, const VIDEO_DOVI_RESHAPE *src)

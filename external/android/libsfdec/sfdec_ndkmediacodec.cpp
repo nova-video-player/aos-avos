@@ -318,9 +318,24 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
         LOG("Dolby Vision GPU reshaping: %s", sfdec->dovi ? "enabled" : "unavailable, direct rendering");
     }
     err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, output_window, NULL, 0);
-    CHECK_STATUS(err);
-
-    err = AMediaCodec_start(sfdec->mCodec);
+    if (err == AMEDIA_OK)
+        err = AMediaCodec_start(sfdec->mCodec);
+    if (err != AMEDIA_OK && sfdec->dovi) {
+        // Some decoders reject the image reader: MediaTek OMX on Fire OS
+        // refuses the output buffers its consumer needs, so start fails.
+        // Keep the hardware decoder and render directly. The failed codec may
+        // not be reusable, and the GL path holds the app window.
+        LOG("Dolby Vision GPU reshaping: decoder rejected the image reader (%d), direct rendering", err);
+        AMediaCodec_delete(sfdec->mCodec);
+        sfdec_dovi_gl_destroy(sfdec->dovi);
+        sfdec->dovi = NULL;
+        sfdec->mCodec = codec_name ? AMediaCodec_createCodecByName(codec_name) :
+            AMediaCodec_createDecoderByType(mime_type);
+        CHECK(sfdec->mCodec != NULL);
+        err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, sfdec->mNativeWindow, NULL, 0);
+        if (err == AMEDIA_OK)
+            err = AMediaCodec_start(sfdec->mCodec);
+    }
     CHECK_STATUS(err);
     sfdec->started = true;
     sfdec->flush = 1;

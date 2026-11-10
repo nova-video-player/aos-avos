@@ -258,7 +258,10 @@ typedef struct priv {
 	int dovi_reshape;
 	int dovi_nal_unit_size;
 	int dovi_rpu_errors;
-	VIDEO_DOVI_RESHAPE *dovi_params;
+	// RPU history in decode order (RPUs may reuse earlier mappings). A flush
+	// bumps dovi_flush_gen; the input path resets the state when it changed.
+	VIDEO_DOVI_RESHAPE_STATE *dovi_state;
+	int dovi_flush_gen, dovi_state_gen;
 
 	pthread_t dec_thread;
 	int dec_thread_started;
@@ -3075,9 +3078,11 @@ retry_decoder_candidate:
 	p->dovi_reshape = sfdec_dovi_active(p->sfdec);
 	p->dovi_nal_unit_size = video->dv_nal_unit_size;
 	p->dovi_rpu_errors = 0;
-	if (p->dovi_reshape && !p->dovi_params &&
-	    !(p->dovi_params = amalloc(sizeof(*p->dovi_params))))
+	if (p->dovi_reshape && !p->dovi_state &&
+	    !(p->dovi_state = amalloc(sizeof(*p->dovi_state))))
 		p->dovi_reshape = 0;
+	if (p->dovi_state)
+		video_dovi_reshape_reset(p->dovi_state);
 	video->dv_reshape_active = p->dovi_reshape;
 	if (flags & SFDEC_FLAG_DOVI_RESHAPE)
 		serprintf("Dolby Vision GPU reshaping: %s nal_unit_size=%d output=%s\n",
@@ -3257,8 +3262,8 @@ DBGCV CLOG("stop thread done");
 
 		sfdec_delete(p->sfdec);
 		p->sfdec = NULL;
-		afree(p->dovi_params);
-		p->dovi_params = NULL;
+		afree(p->dovi_state);
+		p->dovi_state = NULL;
 		p->dovi_reshape = 0;
 
 		pthread_mutex_destroy(&p->locked.mtx);
@@ -3317,10 +3322,16 @@ CLOG("error!");
 		// (and dv_nal_unit_size) uses hvcC length prefixes.
 		int annexb = d->size > 4 && au[0] == 0 && au[1] == 0 &&
 		    (au[2] == 1 || (au[2] == 0 && au[3] == 1));
+		int flush_gen = __atomic_load_n(&p->dovi_flush_gen, __ATOMIC_ACQUIRE);
+		if (p->dovi_state_gen != flush_gen) {
+			video_dovi_reshape_reset(p->dovi_state);
+			p->dovi_state_gen = flush_gen;
+		}
 		if (video_dovi_find_hevc_nal(au, d->size, annexb ? 0 : p->dovi_nal_unit_size, VIDEO_DOVI_NAL_RPU,
 		                             &rpu, &rpu_size) &&
-		    video_dovi_reshape_params(rpu, rpu_size, p->dovi_params) == 0)
-			sfdec_dovi_frame(p->sfdec, (int64_t)media_time * 1000, p->dovi_params, sizeof(*p->dovi_params));
+		    video_dovi_reshape_update(p->dovi_state, rpu, rpu_size) == 0)
+			sfdec_dovi_frame(p->sfdec, (int64_t)media_time * 1000, &p->dovi_state->params,
+			                 sizeof(p->dovi_state->params));
 		else if (p->dovi_rpu_errors++ == 0)
 			serprintf("Dolby Vision GPU reshaping: no usable RPU at %d ms\n", media_time);
 	}
@@ -3474,6 +3485,7 @@ DBGCV	CLOG();
 	p->pts_input_seen = 0;
 	p->pts_input_last = INT_MIN;
 	p->pts_repair_logged = 0;
+	__atomic_add_fetch(&p->dovi_flush_gen, 1, __ATOMIC_RELEASE);
 	int codec_flushed = sfdec_flush(p->sfdec) == 0;
 	if (!codec_flushed) p->locked.error = 1;
 	p->input_eos = p->output_eos = 0;

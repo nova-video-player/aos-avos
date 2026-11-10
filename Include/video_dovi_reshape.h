@@ -50,6 +50,24 @@ typedef struct {
  * CONFIG_LIBDOVI. */
 int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RESHAPE *out);
 
+/* RPUs may reuse an earlier mapping (use_prev_vdr_rpu_flag, by vdr_rpu_id) and
+ * omit display management data, which then stays as last sent. Feed every RPU
+ * of a stream in decode order; reset on flush/seek. */
+#define VIDEO_DOVI_RESHAPE_IDS 16
+typedef struct {
+	VIDEO_DOVI_RESHAPE params; /* complete parameters of the last RPU */
+	VIDEO_DOVI_RESHAPE mappings[VIDEO_DOVI_RESHAPE_IDS]; /* curves by vdr_rpu_id */
+	unsigned mapping_valid;    /* bit per vdr_rpu_id */
+	int dm_valid;
+} VIDEO_DOVI_RESHAPE_STATE;
+
+void video_dovi_reshape_reset(VIDEO_DOVI_RESHAPE_STATE *state);
+/* Update `state` from the next RPU NAL unit (as video_dovi_reshape_params) and
+ * resolve state->params. Returns 0 when they are complete for this RPU, -1
+ * otherwise (unparsable, or referencing a mapping or DM data not received
+ * since the last reset). */
+int video_dovi_reshape_update(VIDEO_DOVI_RESHAPE_STATE *state, const unsigned char *nal, int size);
+
 /* CPU version of the shader's SDR output (thumbnails): reshape one 4:2:0 frame
  * of 16-bit samples holding bl_bit_depth-bit codes into BGRA, alpha 255.
  * Strides are in samples for the planes, in bytes for dst. */

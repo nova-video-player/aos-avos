@@ -177,6 +177,7 @@ typedef struct PRIV {
 	int eos_sent;
 	int drained;
 	pthread_mutex_t mutex;
+	VIDEO_DOVI_RESHAPE_STATE *dovi_state; // Profile 5 RPU history, see dovi_convert()
 } PRIV;
 
 //
@@ -185,7 +186,7 @@ typedef struct PRIV {
 /* Dolby Vision without a compatible base layer (Profile 5) converted to RGB,
  * i.e. thumbnails: apply the frame's RPU reshaping instead of reading its
  * IPTPQc2 samples as YUV. Returns 0 when done, -1 to convert normally. */
-static int dovi_convert(const VIDEO_PROPERTIES *video, const AVFrame *f, VIDEO_FRAME *dst)
+static int dovi_convert(PRIV *p, const VIDEO_PROPERTIES *video, const AVFrame *f, VIDEO_FRAME *dst)
 {
 	if (!video_dovi_colors_unsupported(video) || dst->colorspace != AV_IMAGE_BGRA_32 ||
 	    f->format != AV_PIX_FMT_YUV420P10 || dst->linestep[0] <= 0 || dst->linestep[0] > INT_MAX / 4)
@@ -194,14 +195,18 @@ static int dovi_convert(const VIDEO_PROPERTIES *video, const AVFrame *f, VIDEO_F
 	if (!sd || !sd->size || sd->size > (1 << 20))
 		return -1;
 	int ret = -1;
+	/* Frames come in output order: references to earlier RPUs resolve within
+	 * the frames converted since the last flush. */
+	if (!p->dovi_state && !(p->dovi_state = calloc(1, sizeof(*p->dovi_state))))
+		return -1;
 	unsigned char *nal = malloc(sd->size + 2);
-	VIDEO_DOVI_RESHAPE *params = malloc(sizeof(*params));
-	if (nal && params) {
+	if (nal) {
 		/* FFmpeg strips the two-byte NAL header (type 62). */
 		nal[0] = 0x7C;
 		nal[1] = 0x01;
 		memcpy(nal + 2, sd->data, sd->size);
-		if (video_dovi_reshape_params(nal, (int)sd->size + 2, params) == 0) {
+		if (video_dovi_reshape_update(p->dovi_state, nal, (int)sd->size + 2) == 0) {
+			const VIDEO_DOVI_RESHAPE *params = &p->dovi_state->params;
 			const uint16_t *const planes[3] = { (const uint16_t *)f->data[0],
 				(const uint16_t *)f->data[1], (const uint16_t *)f->data[2] };
 			const int strides[3] = { f->linesize[0] / 2, f->linesize[1] / 2, f->linesize[2] / 2 };
@@ -212,7 +217,6 @@ static int dovi_convert(const VIDEO_PROPERTIES *video, const AVFrame *f, VIDEO_F
 		}
 	}
 	free(nal);
-	free(params);
 	return ret;
 }
 
@@ -468,6 +472,8 @@ serprintf("ffvd not open!\r\n");
 		codec_convert_mt_exit( p->mt_ctx );
 		p->mt_ctx = NULL;
 	}
+	free( p->dovi_state );
+	p->dovi_state = NULL;
 
 	STREAM *s = dec->ctx;
 	if( s && s->ro_ctx) {
@@ -712,7 +718,7 @@ DBGCV2 serprintf("[");
 					stream_set_error(dec->ctx, VE_VIDEO_CODEC_ERROR);
 					return -1;
 				}
-				if (dovi_convert(dec->video, vframe, avos_frame) < 0 &&
+				if (dovi_convert(p, dec->video, vframe, avos_frame) < 0 &&
 				    codec_convert_mt(p->mt_ctx, vframe->format, vframe->data, vframe->linesize,
 				                     vframe->width, vframe->height, avos_frame) < 0) {
 					avos_frame->error = 1;
@@ -787,7 +793,7 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	if( dst && !failed ) {
 		dst->color_space = avframe->colorspace;
 		dst->color_range = avframe->color_range;
-		failed = dovi_convert(dec->video, avframe, dst) < 0 &&
+		failed = dovi_convert(p, dec->video, avframe, dst) < 0 &&
 			codec_convert_mt(p->mt_ctx, avframe->format, avframe->data, avframe->linesize,
 			                 avframe->width, avframe->height, dst) < 0;
 	}
@@ -816,6 +822,7 @@ static int ffmpeg_video_codec_flush( STREAM_DEC_VIDEO *dec  )
 	if( p->vctx )
 		avcodec_flush_buffers( p->vctx );
 	p->eos_sent = p->drained = 0;
+	video_dovi_reshape_reset( p->dovi_state );
 	return 0;
 }
 

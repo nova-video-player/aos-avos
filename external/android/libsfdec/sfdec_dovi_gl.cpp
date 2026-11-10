@@ -745,6 +745,8 @@ void sfdec_dovi_gl_flush(sfdec_dovi_gl_t *gl)
     for (int i = 0; i < PARAM_SLOTS; i++)
         gl->params[i].valid = false;
     gl->queue_len = 0;
+    // Never show frames of the new position with the old position's colors.
+    gl->have_last = false;
     __atomic_add_fetch(&gl->flush_gen, 1, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&gl->mtx);
 }

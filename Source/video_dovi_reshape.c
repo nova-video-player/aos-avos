@@ -17,6 +17,7 @@
 #include "video_dovi_reshape.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef CONFIG_LIBDOVI
@@ -111,29 +112,8 @@ static int map_component(VIDEO_DOVI_RESHAPE *out, int c, const DoviReshapingCurv
 	return 0;
 }
 
-int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RESHAPE *out)
+static void fill_dm(VIDEO_DOVI_RESHAPE *out, const DoviVdrDmData *dm)
 {
-	if (!nal || size <= 2 || !out)
-		return -1;
-	memset(out, 0, sizeof(*out));
-	DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(nal, (size_t)size);
-	if (!rpu)
-		return -1;
-	const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
-	const DoviRpuDataMapping *mapping = header ? dovi_rpu_get_data_mapping(rpu) : NULL;
-	const DoviVdrDmData *dm = mapping ? dovi_rpu_get_vdr_dm_data(rpu) : NULL;
-	int ret = -1;
-	/* Float coefficients and the 64-bit shift guard are not supported. */
-	if (!dm || dovi_rpu_get_error(rpu) || header->coefficient_data_type != 0 ||
-	    header->coefficient_log2_denom > 32 || header->bl_bit_depth_minus8 > 8)
-		goto done;
-	out->bl_bit_depth = (int)header->bl_bit_depth_minus8 + 8;
-	ret = 0;
-	for (int c = 0; c < 3 && !ret; c++)
-		ret = map_component(out, c, &mapping->curves[c], header);
-	if (ret)
-		goto done;
-
 	const int16_t ycc[9] = { dm->ycc_to_rgb_coef0, dm->ycc_to_rgb_coef1, dm->ycc_to_rgb_coef2,
 		dm->ycc_to_rgb_coef3, dm->ycc_to_rgb_coef4, dm->ycc_to_rgb_coef5,
 		dm->ycc_to_rgb_coef6, dm->ycc_to_rgb_coef7, dm->ycc_to_rgb_coef8 };
@@ -156,6 +136,77 @@ int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RES
 		}
 	out->source_min_pq = dm->source_min_pq / 4095.0f;
 	out->source_max_pq = dm->source_max_pq / 4095.0f;
+}
+
+static void copy_mapping(VIDEO_DOVI_RESHAPE *dst, const VIDEO_DOVI_RESHAPE *src)
+{
+	memcpy(dst->pivots, src->pivots, sizeof(dst->pivots));
+	memcpy(dst->coeffs, src->coeffs, sizeof(dst->coeffs));
+	memcpy(dst->mmr, src->mmr, sizeof(dst->mmr));
+	memcpy(dst->pivot_lo, src->pivot_lo, sizeof(dst->pivot_lo));
+	memcpy(dst->pivot_hi, src->pivot_hi, sizeof(dst->pivot_hi));
+}
+
+void video_dovi_reshape_reset(VIDEO_DOVI_RESHAPE_STATE *state)
+{
+	if (state) {
+		state->mapping_valid = 0;
+		state->dm_valid = 0;
+	}
+}
+
+int video_dovi_reshape_update(VIDEO_DOVI_RESHAPE_STATE *state, const unsigned char *nal, int size)
+{
+	if (!state || !nal || size <= 2)
+		return -1;
+	DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(nal, (size_t)size);
+	if (!rpu)
+		return -1;
+	const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
+	const DoviRpuDataMapping *mapping = NULL;
+	const DoviVdrDmData *dm = NULL;
+	int ret = -1;
+	/* Float coefficients and the 64-bit shift guard are not supported. */
+	if (!header || dovi_rpu_get_error(rpu) || header->coefficient_data_type != 0 ||
+	    header->coefficient_log2_denom > 32 || header->bl_bit_depth_minus8 > 8)
+		goto done;
+
+	/* Curves: new ones are stored under their id; a reused id that was never
+	 * received falls back to id 0, as FFmpeg does. */
+	int id;
+	if (header->use_prev_vdr_rpu_flag) {
+		id = header->prev_vdr_rpu_id < VIDEO_DOVI_RESHAPE_IDS ? (int)header->prev_vdr_rpu_id : 0;
+		if (!(state->mapping_valid & (1u << id)))
+			id = 0;
+		if (!(state->mapping_valid & 1u))
+			goto done;
+	} else {
+		mapping = dovi_rpu_get_data_mapping(rpu);
+		if (!mapping || mapping->vdr_rpu_id >= VIDEO_DOVI_RESHAPE_IDS)
+			goto done;
+		id = (int)mapping->vdr_rpu_id;
+		VIDEO_DOVI_RESHAPE *m = &state->mappings[id];
+		memset(m, 0, sizeof(*m)); /* unused pieces as in a one-shot parse */
+		state->mapping_valid &= ~(1u << id);
+		for (int c = 0; c < 3; c++)
+			if (map_component(m, c, &mapping->curves[c], header))
+				goto done;
+		state->mapping_valid |= 1u << id;
+	}
+
+	/* Display management data: kept until the next RPU carrying it. */
+	if (header->vdr_dm_metadata_present_flag) {
+		dm = dovi_rpu_get_vdr_dm_data(rpu);
+		if (!dm)
+			goto done;
+		fill_dm(&state->params, dm);
+		state->dm_valid = 1;
+	}
+	if (!state->dm_valid)
+		goto done;
+	copy_mapping(&state->params, &state->mappings[id]);
+	state->params.bl_bit_depth = (int)header->bl_bit_depth_minus8 + 8;
+	ret = 0;
 done:
 	if (dm)
 		dovi_rpu_free_vdr_dm_data(dm);
@@ -169,15 +220,35 @@ done:
 
 #else
 
-int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RESHAPE *out)
+void video_dovi_reshape_reset(VIDEO_DOVI_RESHAPE_STATE *state)
 {
+	(void)state;
+}
+
+int video_dovi_reshape_update(VIDEO_DOVI_RESHAPE_STATE *state, const unsigned char *nal, int size)
+{
+	(void)state;
 	(void)nal;
 	(void)size;
-	(void)out;
 	return -1;
 }
 
 #endif
+
+int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RESHAPE *out)
+{
+	if (!out)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	VIDEO_DOVI_RESHAPE_STATE *state = calloc(1, sizeof(*state));
+	if (!state)
+		return -1;
+	int ret = video_dovi_reshape_update(state, nal, size);
+	if (ret == 0)
+		*out = state->params;
+	free(state);
+	return ret;
+}
 
 /* Same math as VIDEO_DOVI_RESHAPE_FS_BODY with SDR output. */
 static float reshape_component(const VIDEO_DOVI_RESHAPE *p, int c, const float sig[3])

@@ -120,7 +120,9 @@ int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num);
 int sfdec_pause(sfdec_t *sfdec);
 int sfdec_resume(sfdec_t *sfdec);
 int sfdec_seek_reset(sfdec_t *sfdec);
-/* 1 when SFDEC_FLAG_DOVI_RESHAPE was granted. */
+/* 0 without GPU reshaping, else its output: SFDEC_DOVI_PQ or SFDEC_DOVI_SDR
+ * (requested, or the fallback of a display path without BT.2020 PQ). */
+enum { SFDEC_DOVI_PQ = 1, SFDEC_DOVI_SDR = 2 };
 int sfdec_dovi_active(sfdec_t *sfdec);
 /* Reshaping parameters (VIDEO_DOVI_RESHAPE) of the access unit sent with this
  * timestamp; -1 when GPU reshaping is not active. */

@@ -3075,7 +3075,8 @@ retry_decoder_candidate:
 	if( p->repair_decode_order_pts ) {
 		CLOG("decode-order PTS repair armed: depth=%d", p->pts_reorder_depth);
 	}
-	p->dovi_reshape = sfdec_dovi_active(p->sfdec);
+	int dovi_output = sfdec_dovi_active(p->sfdec);
+	p->dovi_reshape = dovi_output != 0;
 	p->dovi_nal_unit_size = video->dv_nal_unit_size;
 	p->dovi_rpu_errors = 0;
 	if (p->dovi_reshape && !p->dovi_state &&
@@ -3087,7 +3088,7 @@ retry_decoder_candidate:
 	if (flags & SFDEC_FLAG_DOVI_RESHAPE)
 		serprintf("Dolby Vision GPU reshaping: %s nal_unit_size=%d output=%s\n",
 		          p->dovi_reshape ? "active" : "unavailable", p->dovi_nal_unit_size,
-		          (flags & SFDEC_FLAG_DOVI_SDR) ? "SDR" : "PQ");
+		          dovi_output == SFDEC_DOVI_SDR ? "SDR" : dovi_output ? "PQ" : "none");
 
 	if (sfdec_start(p->sfdec) != 0) {
 		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",

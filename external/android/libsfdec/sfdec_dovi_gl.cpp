@@ -710,6 +710,11 @@ sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int heig
     return gl;
 }
 
+bool sfdec_dovi_gl_sdr(const sfdec_dovi_gl_t *gl)
+{
+    return gl->sdr;
+}
+
 void sfdec_dovi_gl_destroy(sfdec_dovi_gl_t *gl)
 {
     if (!gl)

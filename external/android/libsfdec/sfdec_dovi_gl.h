@@ -35,6 +35,8 @@ typedef struct sfdec_dovi_gl sfdec_dovi_gl_t;
 sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int height, bool sdr,
                                       int64_t frame_ns);
 void sfdec_dovi_gl_destroy(sfdec_dovi_gl_t *gl);
+// True when tone mapping to SDR, requested or for lack of a PQ surface.
+bool sfdec_dovi_gl_sdr(const sfdec_dovi_gl_t *gl);
 // Surface to configure the codec with.
 ANativeWindow *sfdec_dovi_gl_codec_window(sfdec_dovi_gl_t *gl);
 // Reshaping parameters of the access unit with this input timestamp.

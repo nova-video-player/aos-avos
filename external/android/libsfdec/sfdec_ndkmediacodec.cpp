@@ -774,7 +774,7 @@ static int sfdec_seek_reset(sfdec_priv_t *sfdec)
 
 static int sfdec_dovi_active(sfdec_priv_t *sfdec)
 {
-    return sfdec->dovi != NULL;
+    return !sfdec->dovi ? 0 : sfdec_dovi_gl_sdr(sfdec->dovi) ? SFDEC_DOVI_SDR : SFDEC_DOVI_PQ;
 }
 
 static int sfdec_dovi_frame(sfdec_priv_t *sfdec, int64_t time_us, const void *params, size_t size)

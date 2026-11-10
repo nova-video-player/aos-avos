@@ -44,10 +44,13 @@
 #define SDR_WHITE_NITS 203.0f
 // Frames are queued to the window this long before their presentation time.
 #define PRESENT_LEAD_NS 30000000LL
-// Frames released ahead of time (~200 ms, 12 at 60 fps) are held acquired
-// until due; the reader also counts the frame on screen and one being drawn.
-#define HELD_FRAMES 14
-#define READER_IMAGES (HELD_FRAMES + 2)
+// Frames are released up to this long before their presentation time and held
+// acquired until due: about 6 frames at 24 fps, 13 at 60 fps. The reader also
+// counts the frame on screen and the one being drawn. 10-bit 4K frames take
+// about 25 MB each, so the count follows the frame rate.
+#define RELEASE_LEAD_NS 200000000LL
+#define HELD_FRAMES_MIN 4
+#define HELD_FRAMES_MAX 14
 
 #ifndef EGL_COLOR_COMPONENT_TYPE_EXT
 #define EGL_COLOR_COMPONENT_TYPE_EXT 0x3339
@@ -136,7 +139,9 @@ struct sfdec_dovi_gl {
     bool rgb_sampling; // no GL_EXT_YUV_target: undo the driver's YUV to RGB
     image_entry shown_import; // EGLImage of the shown frame, released with it
     AImage *shown;    // kept until the next frame is presented
-    held_frame held[HELD_FRAMES]; // acquired frames waiting for their time, FIFO
+    held_frame held[HELD_FRAMES_MAX]; // acquired frames waiting for their time, FIFO
+    int held_max; // frames held at most, from the frame rate
+    int overflowed; // frames presented early because all were held
     int held_head, held_len;
     int frames, misses, dropped;
     int stale; // output frames without parameters for their pts (previous reused)
@@ -344,9 +349,9 @@ static bool egl_init(sfdec_dovi_gl *gl)
         glUniformMatrix3fv(gl->u_rgb_to_ycc, 1, GL_TRUE, bt601_full_rgb_to_ycc);
     // SDR: 203 nits reference white (ITU-R BT.2408) maps to 1.0.
     glUniform1f(gl->u_sdr_scale, gl->sdr ? 10000.0f / SDR_WHITE_NITS : 0.0f);
-    LOG("ready on %s: %s %s output, %s sampling", (const char *)glGetString(GL_RENDERER), format,
-        gl->sdr ? "SDR" : "PQ",
-        gl->rgb_sampling ? "RGB (BT.601 full range inverted)" : "raw YUV");
+    LOG("ready on %s: %s %s output, %s sampling, %d held frames", (const char *)glGetString(GL_RENDERER),
+        format, gl->sdr ? "SDR" : "PQ", gl->rgb_sampling ? "RGB (BT.601 full range inverted)" : "raw YUV",
+        gl->held_max);
     return true;
 }
 
@@ -431,7 +436,7 @@ static void acquire_one(sfdec_dovi_gl *gl)
     AImage *image = NULL;
     if (s->reader_acquire(gl->reader, &image) != AMEDIA_OK || !image)
         return;
-    held_frame *f = &gl->held[(gl->held_head + gl->held_len) % HELD_FRAMES];
+    held_frame *f = &gl->held[(gl->held_head + gl->held_len) % gl->held_max];
     f->image = image;
     f->ts = 0;
     f->present_ns = 0;
@@ -467,7 +472,7 @@ static void draw_held(sfdec_dovi_gl *gl)
 {
     dovi_syms *s = &gl->s;
     held_frame *f = &gl->held[gl->held_head];
-    gl->held_head = (gl->held_head + 1) % HELD_FRAMES;
+    gl->held_head = (gl->held_head + 1) % gl->held_max;
     gl->held_len--;
     AImage *image = f->image;
     int64_t present_ns = f->present_ns;
@@ -568,8 +573,13 @@ static void *gl_thread(void *arg)
         if (stop)
             break;
         for (int i = 0; i < pending; i++) {
-            if (gl->held_len == HELD_FRAMES)
-                draw_held(gl); // full: present the oldest now
+            if (gl->held_len == gl->held_max) {
+                // Full: present the oldest now. Frames arrive more often than
+                // the declared frame rate, or earlier than expected.
+                if (!gl->overflowed++)
+                    LOG("%d held frames are not enough, presenting early", gl->held_max);
+                draw_held(gl);
+            }
             acquire_one(gl);
         }
         int64_t wait_ns = 0;
@@ -587,7 +597,7 @@ static void *gl_thread(void *arg)
     }
     while (gl->held_len) {
         gl->s.image_delete(gl->held[gl->held_head].image);
-        gl->held_head = (gl->held_head + 1) % HELD_FRAMES;
+        gl->held_head = (gl->held_head + 1) % gl->held_max;
         gl->held_len--;
     }
     release_import(gl, &gl->shown_import);
@@ -598,7 +608,8 @@ static void *gl_thread(void *arg)
     return NULL;
 }
 
-sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int height, bool sdr)
+sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int height, bool sdr,
+                                      int64_t frame_ns)
 {
     if (!window || width <= 0 || height <= 0 || api_level() < 26)
         return NULL;
@@ -609,6 +620,12 @@ sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int heig
     gl->width = width;
     gl->height = height;
     gl->sdr = sdr;
+    // One more than the frames within the release lead, unknown rate: maximum.
+    gl->held_max = frame_ns > 0 ? (int)((RELEASE_LEAD_NS + frame_ns - 1) / frame_ns) + 1 : HELD_FRAMES_MAX;
+    if (gl->held_max < HELD_FRAMES_MIN)
+        gl->held_max = HELD_FRAMES_MIN;
+    if (gl->held_max > HELD_FRAMES_MAX)
+        gl->held_max = HELD_FRAMES_MAX;
     gl->dpy = EGL_NO_DISPLAY;
     gl->ctx = EGL_NO_CONTEXT;
     gl->surf = EGL_NO_SURFACE;
@@ -619,7 +636,7 @@ sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int heig
     }
     // GPU-sampled private buffers: the decoder picks its native 10-bit layout.
     if (gl->s.reader_new(width, height, AIMAGE_FORMAT_PRIVATE, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
-                         READER_IMAGES, &gl->reader) != AMEDIA_OK ||
+                         gl->held_max + 2, &gl->reader) != AMEDIA_OK ||
         gl->s.reader_window(gl->reader, &gl->reader_window) != AMEDIA_OK) {
         LOG("AImageReader creation failed");
         if (gl->reader)
@@ -662,7 +679,8 @@ void sfdec_dovi_gl_destroy(sfdec_dovi_gl_t *gl)
     gl->s.reader_delete(gl->reader);
     pthread_cond_destroy(&gl->cond);
     pthread_mutex_destroy(&gl->mtx);
-    LOG("closed after %d frames (%d without matching RPU, %d dropped)", gl->frames, gl->misses, gl->dropped);
+    LOG("closed after %d frames (%d without matching RPU, %d dropped, %d presented early)", gl->frames,
+        gl->misses, gl->dropped, gl->overflowed);
     free(gl);
 }
 

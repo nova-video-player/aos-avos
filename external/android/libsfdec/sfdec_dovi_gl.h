@@ -31,7 +31,9 @@ typedef struct sfdec_dovi_gl sfdec_dovi_gl_t;
 // NULL when the device cannot do it (API < 26, no usable window surface); the
 // caller then renders directly. sdr: the display has no HDR, tone map to SDR
 // BT.709 instead of presenting PQ, as is also done without a BT.2020 PQ surface.
-sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int height, bool sdr);
+// frame_ns: frame duration, sizes the frames held until due (0: unknown).
+sfdec_dovi_gl_t *sfdec_dovi_gl_create(ANativeWindow *window, int width, int height, bool sdr,
+                                      int64_t frame_ns);
 void sfdec_dovi_gl_destroy(sfdec_dovi_gl_t *gl);
 // Surface to configure the codec with.
 ANativeWindow *sfdec_dovi_gl_codec_window(sfdec_dovi_gl_t *gl);

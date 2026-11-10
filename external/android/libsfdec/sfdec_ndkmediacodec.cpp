@@ -311,8 +311,10 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     }
     ANativeWindow *output_window = sfdec->mNativeWindow;
     if ((flags & SFDEC_FLAG_DOVI_RESHAPE) && sfdec->mNativeWindow) {
+        int64_t frame_ns = sfdec->video_frame_rate_num > 0 && sfdec->video_frame_rate_den > 0 ?
+            1000000000LL * sfdec->video_frame_rate_den / sfdec->video_frame_rate_num : 0;
         sfdec->dovi = sfdec_dovi_gl_create(sfdec->mNativeWindow, sfdec->width, sfdec->height,
-                                           (flags & SFDEC_FLAG_DOVI_SDR) != 0);
+                                           (flags & SFDEC_FLAG_DOVI_SDR) != 0, frame_ns);
         if (sfdec->dovi)
             output_window = sfdec_dovi_gl_codec_window(sfdec->dovi);
         LOG("Dolby Vision GPU reshaping: %s", sfdec->dovi ? "enabled" : "unavailable, direct rendering");

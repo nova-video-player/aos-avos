@@ -806,8 +806,10 @@ DBGS serprintf("stream_open_video_dec\r\n");
 			serprintf("stream_open_video_dec: no decoder candidate at prio=%d, fallback to next\n", try_prio);
 			goto next;
 		}
-		// try to open the decoder
+		// try to open the decoder; only a decoder that reshapes Dolby Vision
+		// sets this, so the color warning reflects the decoder in use.
 		decoder_attempted = 1;
+		s->video->dv_reshape_active = 0;
 		if( s->video_dec->open( s->video_dec, s->video, s, &s->video->flush_frames, &s->video->delay_frames ) ) {
 			// no dec
 serprintf("error opening video_dec[%s] cpu=%d at prio=%d (video_error=%d qual=%d desc=%s), fallback\n",

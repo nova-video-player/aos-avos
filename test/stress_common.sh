@@ -45,6 +45,7 @@ PY
 	LOGCAT_KEEP="$LOGCAT_KEEP|pcm_present_observer:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|compressed_write_wait:|mode2_seek_calibration:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|android_sync anchor_diag|android_sync: (init render_offset|PCM startup correction)|pcm_startup_correction:|at_ledger:|startup_anchor_commit|audio_start_commit|heard_ts_diag:"
+	LOGCAT_KEEP="$LOGCAT_KEEP|sfdec_dovi_gl:|Dolby Vision GPU reshaping"
 	LOGCAT_ADB_PID=''
 	LOGCAT_PIPE=''
 	STRESS_POLL_SEQUENCE=0

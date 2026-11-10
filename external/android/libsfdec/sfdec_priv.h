@@ -65,6 +65,8 @@ typedef struct sfdec_itf {
 	sfdec_seek_reset_t seek_reset;
 	sfdec_buf_discard_t buf_discard;
 	int (*send_eos)(sfdec_priv_t *sfdec);
+	int (*dovi_active)(sfdec_priv_t *sfdec);
+	int (*dovi_frame)(sfdec_priv_t *sfdec, int64_t time_us, const void *params, size_t size);
 } sfdec_itf_t;
 
 struct sfdec {

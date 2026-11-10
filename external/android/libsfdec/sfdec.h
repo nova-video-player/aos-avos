@@ -58,6 +58,11 @@ typedef enum sfdec_codec_type {
 
 typedef enum sfdec_flags {
 	SFDEC_FLAG_SWDEC = 0x01,
+	/* Dolby Vision single-layer stream on its base codec: reshape on the GPU
+	 * (sfdec_dovi_frame) when the device supports it. */
+	SFDEC_FLAG_DOVI_RESHAPE = 0x02,
+	/* With SFDEC_FLAG_DOVI_RESHAPE: the display has no HDR, tone map to SDR. */
+	SFDEC_FLAG_DOVI_SDR = 0x04,
 } sfdec_flags_t;
 
 enum {
@@ -115,6 +120,11 @@ int sfdec_set_playback_speed(sfdec_t *sfdec, int den, int num);
 int sfdec_pause(sfdec_t *sfdec);
 int sfdec_resume(sfdec_t *sfdec);
 int sfdec_seek_reset(sfdec_t *sfdec);
+/* 1 when SFDEC_FLAG_DOVI_RESHAPE was granted. */
+int sfdec_dovi_active(sfdec_t *sfdec);
+/* Reshaping parameters (VIDEO_DOVI_RESHAPE) of the access unit sent with this
+ * timestamp; -1 when GPU reshaping is not active. */
+int sfdec_dovi_frame(sfdec_t *sfdec, int64_t time_us, const void *params, size_t size);
 
 #if __cplusplus
 }

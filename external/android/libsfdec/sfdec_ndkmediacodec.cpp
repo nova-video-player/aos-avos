@@ -22,6 +22,7 @@
 #include <media/NdkMediaCodec.h>
 
 #include "sfdec_common.h"
+#include "sfdec_dovi_gl.h"
 
 typedef struct sfdec_mediacodec sfdec_priv_t;
 #include "sfdec_priv.h"
@@ -83,6 +84,8 @@ struct sfdec_mediacodec
     bool is_paused;
     int64_t pause_start_monotonic;
     int64_t last_reset_monotonic;
+    // GPU Dolby Vision reshaping (SFDEC_FLAG_DOVI_RESHAPE), NULL otherwise.
+    sfdec_dovi_gl_t *dovi;
 };
 
 struct sfbuf
@@ -306,7 +309,15 @@ static sfdec_priv_t *sfdec_init(sfdec_codec_t codec,
     if (api_level >= 24 && hdr_static_info && hdr_static_info_size == 25) {
         AMediaFormat_setBuffer(sfdec->mFormat, "hdr-static-info", hdr_static_info, hdr_static_info_size);
     }
-    err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, sfdec->mNativeWindow, NULL, 0);
+    ANativeWindow *output_window = sfdec->mNativeWindow;
+    if ((flags & SFDEC_FLAG_DOVI_RESHAPE) && sfdec->mNativeWindow) {
+        sfdec->dovi = sfdec_dovi_gl_create(sfdec->mNativeWindow, sfdec->width, sfdec->height,
+                                           (flags & SFDEC_FLAG_DOVI_SDR) != 0);
+        if (sfdec->dovi)
+            output_window = sfdec_dovi_gl_codec_window(sfdec->dovi);
+        LOG("Dolby Vision GPU reshaping: %s", sfdec->dovi ? "enabled" : "unavailable, direct rendering");
+    }
+    err = AMediaCodec_configure(sfdec->mCodec, sfdec->mFormat, output_window, NULL, 0);
     CHECK_STATUS(err);
 
     err = AMediaCodec_start(sfdec->mCodec);
@@ -337,6 +348,8 @@ static void sfdec_destroy(sfdec_priv_t *sfdec)
         AMediaCodec_delete(sfdec->mCodec);
     if (sfdec->mFormat != NULL)
         AMediaFormat_delete(sfdec->mFormat);
+    // After the codec: it renders into the reader owned by the GL path.
+    sfdec_dovi_gl_destroy(sfdec->dovi);
     delete sfdec;
 }
 
@@ -430,6 +443,8 @@ static int sfdec_send_eos(sfdec_priv_t *sfdec)
 static int sfdec_flush(sfdec_priv_t *sfdec)
 {
     sfdec->flush = 1;
+    if (sfdec->dovi)
+        sfdec_dovi_gl_flush(sfdec->dovi);
     media_status_t err = AMediaCodec_flush(sfdec->mCodec);
     CHECK_STATUS(err);
     err_count = 0;
@@ -549,9 +564,14 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
         // internal timed-release scheduling. Keep the render_ts_ns / cadence-aware
         // scheduling logic below intact for safekeeping and possible future reuse.
         if (render_ts_ns > 0) {
+            if (sfdec->dovi)
+                sfdec_dovi_gl_queue(sfdec->dovi, sfbuf->timestamp_us, render_ts_ns, render_ts_ns);
             err = AMediaCodec_releaseOutputBufferAtTime(sfdec->mCodec, sfbuf->index, render_ts_ns);
             DBG LOG("sfdec_render_release: mode=at_time index=%zu when_ns=%lld", sfbuf->index, (long long)render_ts_ns);
         } else if (asap) {
+            // Rendered without a time, the frame carries its presentation time.
+            if (sfdec->dovi)
+                sfdec_dovi_gl_queue(sfdec->dovi, sfbuf->timestamp_us, sfbuf->timestamp_us * 1000LL, 0);
             err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
             DBG LOG("sfdec_render_release: mode=asap index=%zu", sfbuf->index);
         } else {
@@ -634,6 +654,8 @@ static int sfdec_buf_render(sfdec_priv_t *sfdec, sfbuf_t *sfbuf, int render, int
             sfdec->last_monotonic = now_ts;
             sfdec->last_off = timestamp_ns;
 
+            if (sfdec->dovi)
+                sfdec_dovi_gl_queue(sfdec->dovi, sfbuf->timestamp_us, asap ? timestamp_ns : ts, asap ? 0 : ts);
             if (asap)
                 err = AMediaCodec_releaseOutputBuffer(sfdec->mCodec, sfbuf->index, true);
             else
@@ -733,6 +755,18 @@ static int sfdec_seek_reset(sfdec_priv_t *sfdec)
     return 0;
 }
 
+static int sfdec_dovi_active(sfdec_priv_t *sfdec)
+{
+    return sfdec->dovi != NULL;
+}
+
+static int sfdec_dovi_frame(sfdec_priv_t *sfdec, int64_t time_us, const void *params, size_t size)
+{
+    if (!sfdec->dovi || !params || size != sizeof(VIDEO_DOVI_RESHAPE))
+        return -1;
+    sfdec_dovi_gl_set_params(sfdec->dovi, time_us, (const VIDEO_DOVI_RESHAPE *)params);
+    return 0;
+}
 
 sfdec_itf_t sfdec_itf_mediacodec = {
     "MediaCodec",
@@ -753,4 +787,6 @@ sfdec_itf_t sfdec_itf_mediacodec = {
     sfdec_seek_reset,
     sfdec_buf_discard,
     sfdec_send_eos,
+    sfdec_dovi_active,
+    sfdec_dovi_frame,
 };

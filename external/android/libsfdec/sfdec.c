@@ -170,3 +170,17 @@ int sfdec_seek_reset(sfdec_t *sfdec)
 		return sfdec->itf->seek_reset(sfdec->priv);
 	return 0;
 }
+
+int sfdec_dovi_active(sfdec_t *sfdec)
+{
+	if (sfdec && sfdec->itf->dovi_active)
+		return sfdec->itf->dovi_active(sfdec->priv);
+	return 0;
+}
+
+int sfdec_dovi_frame(sfdec_t *sfdec, int64_t time_us, const void *params, size_t size)
+{
+	if (sfdec && sfdec->itf->dovi_frame)
+		return sfdec->itf->dovi_frame(sfdec->priv, time_us, params, size);
+	return -1;
+}

@@ -19,11 +19,11 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := libsfdec.core.21$(AVOS_LIBS_SUFFIX)
-LOCAL_SRC_FILES := sfdec_ndkmediacodec.cpp codec_audio_mediacodec.cpp sfdec_common.cpp
-LOCAL_C_INCLUDES := $(AVOS_DIR)/common/Include
+LOCAL_SRC_FILES := sfdec_ndkmediacodec.cpp sfdec_dovi_gl.cpp codec_audio_mediacodec.cpp sfdec_common.cpp
+LOCAL_C_INCLUDES := $(AVOS_DIR)/common/Include $(AVOS_DIR)/Include
 LOCAL_LDFLAGS = -Wl,-z,max-page-size=16384
 LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
-LOCAL_LDLIBS := -lmediandk -landroid
+LOCAL_LDLIBS := -lmediandk -landroid -lEGL -lGLESv3
 include $(BUILD_SHARED_LIBRARY)
 
 # libsfdec

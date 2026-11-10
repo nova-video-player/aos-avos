@@ -16,6 +16,7 @@
 
 #include "video_dovi_reshape.h"
 
+#include <math.h>
 #include <string.h>
 
 #ifdef CONFIG_LIBDOVI
@@ -177,3 +178,105 @@ int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RES
 }
 
 #endif
+
+/* Same math as VIDEO_DOVI_RESHAPE_FS_BODY with SDR output. */
+static float reshape_component(const VIDEO_DOVI_RESHAPE *p, int c, const float sig[3])
+{
+	const float s = sig[c];
+	int piece = 0;
+	for (int i = 0; i < VIDEO_DOVI_RESHAPE_PIECES - 1; i++)
+		if (s >= p->pivots[c][i])
+			piece = i + 1;
+	const float *k = p->coeffs[c][piece];
+	if (k[3] == 0.0f)
+		return (k[2] * s + k[1]) * s + k[0];
+	const float (*w)[4] = &p->mmr[c][(int)k[1]];
+	float x[4] = { sig[0] * sig[1], sig[0] * sig[2], sig[1] * sig[2], 0.0f };
+	x[3] = x[0] * sig[2];
+	float r = k[0] + w[0][0] * sig[0] + w[0][1] * sig[1] + w[0][2] * sig[2] +
+		w[1][0] * x[0] + w[1][1] * x[1] + w[1][2] * x[2] + w[1][3] * x[3];
+	float s1[3] = { sig[0], sig[1], sig[2] }, x1[4] = { x[0], x[1], x[2], x[3] };
+	for (int order = 2; order <= (int)k[3] && order <= 3; order++) {
+		for (int i = 0; i < 3; i++)
+			s1[i] *= sig[i];
+		for (int i = 0; i < 4; i++)
+			x1[i] *= x[i];
+		const float *a = w[(order - 1) * 2], *b = w[(order - 1) * 2 + 1];
+		r += a[0] * s1[0] + a[1] * s1[1] + a[2] * s1[2] +
+			b[0] * x1[0] + b[1] * x1[1] + b[2] * x1[2] + b[3] * x1[3];
+	}
+	return r;
+}
+
+#define DOVI_LUT_SIZE 4096
+
+static float pq_eotf(float e)
+{
+	e = powf(e, 1.0f / 78.84375f);
+	return powf(fmaxf(e - 0.8359375f, 0.0f) / (18.8515625f - 18.6875f * e), 1.0f / 0.1593017578125f);
+}
+
+static float lut_lookup(const float *lut, float v)
+{
+	v = v <= 0.0f ? 0.0f : v >= 1.0f ? 1.0f : v;
+	float f = v * (DOVI_LUT_SIZE - 1);
+	int i = (int)f;
+	if (i >= DOVI_LUT_SIZE - 1)
+		return lut[DOVI_LUT_SIZE - 1];
+	return lut[i] + (lut[i + 1] - lut[i]) * (f - (float)i);
+}
+
+void video_dovi_reshape_bgra(const VIDEO_DOVI_RESHAPE *p, const uint16_t *const planes[3],
+	const int strides[3], int width, int height, uint8_t *dst, int dst_stride)
+{
+	/* 203-nit reference white, tone mapped up to the source peak, BT.709,
+	 * gamma 2.2; both power curves go through tables. */
+	static const float BT2020_TO_BT709[9] = {
+		1.6605f, -0.5876f, -0.0728f,
+		-0.1246f, 1.1329f, -0.0083f,
+		-0.0182f, -0.1006f, 1.1187f,
+	};
+	float eotf[DOVI_LUT_SIZE], gamma[DOVI_LUT_SIZE];
+	for (int i = 0; i < DOVI_LUT_SIZE; i++) {
+		float v = (float)i / (DOVI_LUT_SIZE - 1);
+		eotf[i] = pq_eotf(v);
+		gamma[i] = powf(v, 1.0f / 2.2f);
+	}
+	const float scale = 10000.0f / 203.0f;
+	const float peak_nits = 10000.0f * pq_eotf(p->source_max_pq > 0.0f ? p->source_max_pq : 0.7518f);
+	const float peak = fmaxf(peak_nits / 203.0f, 1.0f);
+	const float code_scale = 1.0f / (float)(1 << p->bl_bit_depth);
+	for (int y = 0; y < height; y++) {
+		const uint16_t *py = planes[0] + (size_t)y * strides[0];
+		const uint16_t *pu = planes[1] + (size_t)(y / 2) * strides[1];
+		const uint16_t *pv = planes[2] + (size_t)(y / 2) * strides[2];
+		uint8_t *out = dst + (size_t)y * dst_stride;
+		for (int x = 0; x < width; x++) {
+			float sig[3] = { py[x] * code_scale, pu[x / 2] * code_scale, pv[x / 2] * code_scale };
+			for (int c = 0; c < 3; c++)
+				sig[c] = fminf(fmaxf(sig[c], p->pivot_lo[c]), p->pivot_hi[c]);
+			float r[3];
+			for (int c = 0; c < 3; c++)
+				r[c] = fminf(fmaxf(reshape_component(p, c, sig), 0.0f), 1.0f) - p->ycc_offset[c];
+			float lms[3], rgb[3];
+			for (int i = 0; i < 3; i++)
+				lms[i] = lut_lookup(eotf, p->ycc_to_rgb[i * 3] * r[0] + p->ycc_to_rgb[i * 3 + 1] * r[1] +
+					p->ycc_to_rgb[i * 3 + 2] * r[2]);
+			for (int i = 0; i < 3; i++)
+				rgb[i] = fmaxf(p->lms_to_rgb[i * 3] * lms[0] + p->lms_to_rgb[i * 3 + 1] * lms[1] +
+					p->lms_to_rgb[i * 3 + 2] * lms[2], 0.0f) * scale;
+			float l = 0.2627f * rgb[0] + 0.6780f * rgb[1] + 0.0593f * rgb[2];
+			float m = l > 0.0f ? (1.0f + l / (peak * peak)) / (1.0f + l) : 0.0f;
+			uint8_t bgr[3];
+			for (int i = 0; i < 3; i++) {
+				float v = (BT2020_TO_BT709[i * 3] * rgb[0] + BT2020_TO_BT709[i * 3 + 1] * rgb[1] +
+					BT2020_TO_BT709[i * 3 + 2] * rgb[2]) * m;
+				bgr[2 - i] = (uint8_t)(lut_lookup(gamma, v) * 255.0f + 0.5f);
+			}
+			out[x * 4] = bgr[0];
+			out[x * 4 + 1] = bgr[1];
+			out[x * 4 + 2] = bgr[2];
+			out[x * 4 + 3] = 255;
+		}
+	}
+}

@@ -17,6 +17,8 @@
 #ifndef VIDEO_DOVI_RESHAPE_H
 #define VIDEO_DOVI_RESHAPE_H
 
+#include <stdint.h>
+
 /* Dolby Vision single-layer reshaping (Profile 5 without a DV decoder):
  * per-frame RPU parameters in the layout of the shader in
  * video_dovi_reshape_glsl.h. The math follows libplacebo's
@@ -47,5 +49,11 @@ typedef struct {
  * parsed or uses an unsupported coding (float coefficients); always -1 without
  * CONFIG_LIBDOVI. */
 int video_dovi_reshape_params(const unsigned char *nal, int size, VIDEO_DOVI_RESHAPE *out);
+
+/* CPU version of the shader's SDR output (thumbnails): reshape one 4:2:0 frame
+ * of 16-bit samples holding bl_bit_depth-bit codes into BGRA, alpha 255.
+ * Strides are in samples for the planes, in bytes for dst. */
+void video_dovi_reshape_bgra(const VIDEO_DOVI_RESHAPE *p, const uint16_t *const planes[3],
+	const int strides[3], int width, int height, uint8_t *dst, int dst_stride);
 
 #endif

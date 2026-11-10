@@ -29,6 +29,8 @@
 #include "codec_utils.h"
 #include "device_config.h"
 #include "pts_reorder.h"
+#include "video_dovi.h"
+#include "video_dovi_reshape.h"
 #include <pthread.h>
 
 #ifdef CONFIG_SINK_VIDEO_ANDROID
@@ -180,6 +182,40 @@ typedef struct PRIV {
 //
 // VIDEO
 //
+/* Dolby Vision without a compatible base layer (Profile 5) converted to RGB,
+ * i.e. thumbnails: apply the frame's RPU reshaping instead of reading its
+ * IPTPQc2 samples as YUV. Returns 0 when done, -1 to convert normally. */
+static int dovi_convert(const VIDEO_PROPERTIES *video, const AVFrame *f, VIDEO_FRAME *dst)
+{
+	if (!video_dovi_colors_unsupported(video) || dst->colorspace != AV_IMAGE_BGRA_32 ||
+	    f->format != AV_PIX_FMT_YUV420P10 || dst->linestep[0] <= 0 || dst->linestep[0] > INT_MAX / 4)
+		return -1;
+	const AVFrameSideData *sd = av_frame_get_side_data(f, AV_FRAME_DATA_DOVI_RPU_BUFFER);
+	if (!sd || !sd->size || sd->size > (1 << 20))
+		return -1;
+	int ret = -1;
+	unsigned char *nal = malloc(sd->size + 2);
+	VIDEO_DOVI_RESHAPE *params = malloc(sizeof(*params));
+	if (nal && params) {
+		/* FFmpeg strips the two-byte NAL header (type 62). */
+		nal[0] = 0x7C;
+		nal[1] = 0x01;
+		memcpy(nal + 2, sd->data, sd->size);
+		if (video_dovi_reshape_params(nal, (int)sd->size + 2, params) == 0) {
+			const uint16_t *const planes[3] = { (const uint16_t *)f->data[0],
+				(const uint16_t *)f->data[1], (const uint16_t *)f->data[2] };
+			const int strides[3] = { f->linesize[0] / 2, f->linesize[1] / 2, f->linesize[2] / 2 };
+			video_dovi_reshape_bgra(params, planes, strides, f->width, f->height,
+			                        dst->data[0], dst->linestep[0] * 4);
+			dst->color_range = AVCOL_RANGE_JPEG;
+			ret = 0;
+		}
+	}
+	free(nal);
+	free(params);
+	return ret;
+}
+
 static int ffmpeg_video_codec_open( STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *ctx, int *_need_flush, int *_need_reorder )
 {
 DBGS serprintf( "stream_dec_video_open_FFMPEG:\n");
@@ -676,7 +712,8 @@ DBGCV2 serprintf("[");
 					stream_set_error(dec->ctx, VE_VIDEO_CODEC_ERROR);
 					return -1;
 				}
-				if (codec_convert_mt(p->mt_ctx, vframe->format, vframe->data, vframe->linesize,
+				if (dovi_convert(dec->video, vframe, avos_frame) < 0 &&
+				    codec_convert_mt(p->mt_ctx, vframe->format, vframe->data, vframe->linesize,
 				                     vframe->width, vframe->height, avos_frame) < 0) {
 					avos_frame->error = 1;
 					stream_set_error(dec->ctx, VE_VIDEO_CODEC_ERROR);
@@ -750,8 +787,9 @@ static int ffmpeg_video_codec_render( STREAM_DEC_VIDEO *dec, VIDEO_FRAME *dst, V
 	if( dst && !failed ) {
 		dst->color_space = avframe->colorspace;
 		dst->color_range = avframe->color_range;
-		failed = codec_convert_mt(p->mt_ctx, avframe->format, avframe->data, avframe->linesize,
-		                          avframe->width, avframe->height, dst) < 0;
+		failed = dovi_convert(dec->video, avframe, dst) < 0 &&
+			codec_convert_mt(p->mt_ctx, avframe->format, avframe->data, avframe->linesize,
+			                 avframe->width, avframe->height, dst) < 0;
 	}
 	
 	av_frame_free((AVFrame**)&src->priv);

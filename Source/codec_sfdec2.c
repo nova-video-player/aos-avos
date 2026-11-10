@@ -36,6 +36,9 @@
 #include "android_window.h"
 #include "android_codec.h"
 #include "video_startup_watchdog.h"
+#include "video_dovi.h"
+#include "video_dovi_rpu.h"
+#include "video_dovi_reshape.h"
 
 #include <time.h>
 #include <limits.h>
@@ -250,6 +253,12 @@ typedef struct {
 typedef struct priv {
 	sfdec_t *sfdec;
 	void *surface_handle;
+	// GPU Dolby Vision reshaping granted by sfdec: RPU of each access unit is
+	// parsed here (libdovi lives in libavos) and passed with its timestamp.
+	int dovi_reshape;
+	int dovi_nal_unit_size;
+	int dovi_rpu_errors;
+	VIDEO_DOVI_RESHAPE *dovi_params;
 
 	pthread_t dec_thread;
 	int dec_thread_started;
@@ -2996,6 +3005,19 @@ static int videodec_open(STREAM_DEC_VIDEO *dec, VIDEO_PROPERTIES *video, void *c
         }
     }
 
+#ifdef CONFIG_LIBDOVI
+	// Profile 5 (no usable base layer) on its HEVC base codec: without GPU
+	// reshaping the colors are wrong, see Video/doc/DOVI.md.
+	if (sfdec_codec == SFDEC_VIDEO_HEVC && !(flags & SFDEC_FLAG_SWDEC) &&
+	    video_dovi_colors_unsupported(video)) {
+		int display_hdr = acodecs_get_display_hdr_capabilities();
+		flags |= SFDEC_FLAG_DOVI_RESHAPE;
+		// Displays without HDR10 get tone mapped SDR (unknown: keep PQ).
+		if (display_hdr >= 0 && !(display_hdr & 1))
+			flags |= SFDEC_FLAG_DOVI_SDR;
+	}
+#endif
+
 retry_decoder_candidate:
 	width = video->width;
 	height = video->height;
@@ -3050,6 +3072,17 @@ retry_decoder_candidate:
 	if( p->repair_decode_order_pts ) {
 		CLOG("decode-order PTS repair armed: depth=%d", p->pts_reorder_depth);
 	}
+	p->dovi_reshape = sfdec_dovi_active(p->sfdec);
+	p->dovi_nal_unit_size = video->dv_nal_unit_size;
+	p->dovi_rpu_errors = 0;
+	if (p->dovi_reshape && !p->dovi_params &&
+	    !(p->dovi_params = amalloc(sizeof(*p->dovi_params))))
+		p->dovi_reshape = 0;
+	video->dv_reshape_active = p->dovi_reshape;
+	if (flags & SFDEC_FLAG_DOVI_RESHAPE)
+		serprintf("Dolby Vision GPU reshaping: %s nal_unit_size=%d output=%s\n",
+		          p->dovi_reshape ? "active" : "unavailable", p->dovi_nal_unit_size,
+		          (flags & SFDEC_FLAG_DOVI_SDR) ? "SDR" : "PQ");
 
 	if (sfdec_start(p->sfdec) != 0) {
 		CLOG("sfdec_start failed codec=%d flags=0x%x decoder_name=%s",
@@ -3224,6 +3257,9 @@ DBGCV CLOG("stop thread done");
 
 		sfdec_delete(p->sfdec);
 		p->sfdec = NULL;
+		afree(p->dovi_params);
+		p->dovi_params = NULL;
+		p->dovi_reshape = 0;
 
 		pthread_mutex_destroy(&p->locked.mtx);
 		pthread_cond_destroy(&p->locked.cond);
@@ -3273,6 +3309,21 @@ CLOG("error!");
 	// speeds while older access units were still buffered in the decoder.
 	int media_time = d->media_time_valid ? d->media_time :
 		(d->time == -1 ? -1 : TS_TO_RST_TIME(d->time, int));
+	if (p->dovi_reshape && media_time != -1) {
+		// The frame keeps the previous parameters when its RPU is missing.
+		const unsigned char *rpu = NULL, *au = d->data[0];
+		int rpu_size = 0;
+		// MediaCodec input may already be Annex B although the container
+		// (and dv_nal_unit_size) uses hvcC length prefixes.
+		int annexb = d->size > 4 && au[0] == 0 && au[1] == 0 &&
+		    (au[2] == 1 || (au[2] == 0 && au[3] == 1));
+		if (video_dovi_find_hevc_nal(au, d->size, annexb ? 0 : p->dovi_nal_unit_size, VIDEO_DOVI_NAL_RPU,
+		                             &rpu, &rpu_size) &&
+		    video_dovi_reshape_params(rpu, rpu_size, p->dovi_params) == 0)
+			sfdec_dovi_frame(p->sfdec, (int64_t)media_time * 1000, p->dovi_params, sizeof(*p->dovi_params));
+		else if (p->dovi_rpu_errors++ == 0)
+			serprintf("Dolby Vision GPU reshaping: no usable RPU at %d ms\n", media_time);
+	}
 	ret = sfdec_send_input(p->sfdec, d->data[0], d->size, (int64_t)media_time * 1000, d->type == I_VOP ? 1 : 0, 0);
 	pthread_mutex_lock(&p->locked.mtx);
 	if (ret < 0 || (ret > 0 && ret != d->size)) {

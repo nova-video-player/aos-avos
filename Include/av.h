@@ -672,6 +672,7 @@ typedef struct _video_props {
     int dv_rewrite;         // VIDEO_DOVI_REWRITE_* applied to demuxed packets
     int dv_rewrite_logged;
     int dv_rewrite_errors;
+    int dv_reshape_active;  // Profile 5 colors corrected on the GPU (libsfdec)
 
     // for color metadata (values from FFmpeg AVCOL_* enums)
     int color_primaries;    // AVCOL_PRI_* (e.g. BT709=1, BT2020=9)

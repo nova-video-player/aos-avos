@@ -29,6 +29,7 @@
 // hidden / shown / system bar only).
 #include "gfx_layout.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -450,6 +451,194 @@ int main(void) {
             SUB_FRAME u = make_frame(0, 0, 0, 0, 0); u.events = &e; u.gfx_vpos = 100;
             R id = map(&u, &e);
             check("unknown canvas/stream: identity even with an offset", near(id.x, e.x, 1e-4f) && near(id.y, e.y, 1e-4f));
+        }
+    }
+
+    // The user's scale (gfx_scale): percent of the FITTED size (what the cue measures after it has
+    // been fitted into the viewport minus the margins), about its bottom centre, kept inside the
+    // margins. 100 (or an unstamped 0) is no scale at all. The vertical position is then measured
+    // on the scaled cue, and the controls clear it last.
+    printf("\n== user scale: viewport x stream frame x cue x reserved space x scale\n");
+    {
+        static const int SCALES[] = { 50, 75, 99, 100, 101, 125, 150, 200, 300 };
+        const int NS = (int)(sizeof SCALES / sizeof *SCALES);
+        for (unsigned v = 0; v < sizeof VP / sizeof *VP; v++) {
+            const VIEWPORT *vp = &VP[v];
+            int failed_before = fails;
+            const float mx = vp->w * GFX_EDGE_MARGIN, my = vp->h * GFX_EDGE_MARGIN, eps = 0.51f;
+            const float aw = vp->w - 2 * mx, ah = vp->h - 2 * my;                 // the area a cue must lie in, controls hidden
+            for (unsigned p = 0; p < sizeof PL / sizeof *PL; p++) {
+                for (unsigned c = 0; c < sizeof CU / sizeof *CU; c++) {
+                    for (unsigned m = 0; m < 3; m++) {
+                        int inset = m == 0 ? 0 : m == 1 ? (int)(vp->h * 0.17f) : (int)(vp->h * 0.06f);
+                        const PLANE *pl = &PL[p]; const CUE *cu = &CU[c];
+                        char tag[160], msg[260];
+                        snprintf(tag, sizeof tag, "[%s | %s | %s | inset %d]", vp->name, pl->name, cu->name, inset);
+
+                        SUB_FRAME base = make_frame(vp->w, vp->h, pl->w, pl->h, inset);
+                        SUB_EVENT e = make_event(cu->x, cu->y, cu->w, cu->h, pl->w, pl->h);
+                        base.events = &e;
+                        SUB_FRAME hb = base; hb.gfx_inset_bottom = 0;            // controls hidden
+                        hb.gfx_scale = 100;   R h100 = map(&hb, &e);             // the fitted cue: the 100% reference
+                        R plain = map(&base, &e);                                // nothing stamped (scale 0)
+                        const float bottom100 = h100.y + h100.h;
+                        float prev_w = 0.0f;
+
+                        for (int i = 0; i < NS; i++) {
+                            const int s = SCALES[i];
+                            SUB_FRAME f = base; f.gfx_scale = s;
+                            R r = map(&f, &e);
+
+                            snprintf(msg, sizeof msg, "%s scale %d inside viewport / clear of controls (x %.1f..%.1f y %.1f..%.1f)", tag, s, r.x, r.x + r.w, r.y, r.y + r.h);
+                            check(msg, r.x >= mx - eps && r.x + r.w <= vp->w - mx + eps &&
+                                       r.y >= my - eps && r.y + r.h <= vp->h - inset - my + eps);
+                            snprintf(msg, sizeof msg, "%s scale %d proportions kept (%.2fx%.2f from %dx%d)", tag, s, r.w, r.h, e.w, e.h);
+                            check(msg, near(r.sx, r.sy, 1e-6f) && near(r.w, e.w * r.sx, 0.02f) && near(r.h, e.h * r.sy, 0.02f));
+
+                            if (s == 100) {
+                                snprintf(msg, sizeof msg, "%s a stamped 100 is exactly the unstamped placement", tag);
+                                check(msg, memcmp(&r, &plain, sizeof r) == 0);
+                            }
+
+                            // controls hidden, no position: the size is the fitted size times the scale
+                            SUB_FRAME hf = hb; hf.gfx_scale = s;
+                            R rh = map(&hf, &e);
+                            const float tw = h100.w * s / 100.0f, th = h100.h * s / 100.0f;      // what was asked for
+                            if (tw <= aw - 0.02f && th <= ah - 0.02f) {
+                                snprintf(msg, sizeof msg, "%s scale %d: exactly %d%% of the FITTED size (%.2fx%.2f, want %.2fx%.2f)", tag, s, s, rh.w, rh.h, tw, th);
+                                check(msg, near(rh.w, tw, 0.06f) && near(rh.h, th, 0.06f));
+                            } else {
+                                snprintf(msg, sizeof msg, "%s scale %d: too big for the screen, stops at an edge (%.2fx%.2f in %.1fx%.1f)", tag, s, rh.w, rh.h, aw, ah);
+                                check(msg, (near(rh.w, aw, 0.06f) || near(rh.h, ah, 0.06f)) && rh.w <= aw + 0.06f && rh.h <= ah + 0.06f);
+                            }
+                            snprintf(msg, sizeof msg, "%s scale %d: never larger than asked for (%.2f > %.2f)", tag, s, rh.w, tw);
+                            check(msg, rh.w <= tw + 0.06f && rh.h <= th + 0.06f);
+                            snprintf(msg, sizeof msg, "%s scale %d: growing the scale never shrinks the cue (%.2f after %.2f)", tag, s, rh.w, prev_w);
+                            check(msg, rh.w >= prev_w - 1e-3f);
+                            prev_w = rh.w;
+
+                            // anchored on the bottom: it stays where it was, or only moves down when the top ran into the margin
+                            snprintf(msg, sizeof msg, "%s scale %d: bottom kept, or pushed down by the top margin (%.2f vs %.2f, top %.2f)", tag, s, rh.y + rh.h, bottom100, rh.y);
+                            check(msg, rh.y + rh.h >= bottom100 - 0.06f &&
+                                       (near(rh.y + rh.h, bottom100, 0.06f) || near(rh.y, my, 0.06f)));
+                            snprintf(msg, sizeof msg, "%s scale %d: stays on its centre line unless a side margin held it", tag, s);
+                            check(msg, near(rh.x + rh.w * 0.5f, h100.x + h100.w * 0.5f, 0.06f) ||
+                                       near(rh.x, mx, 0.06f) || near(rh.x + rh.w, vp->w - mx, 0.06f));
+
+                            // the video's own box still has no influence
+                            SUB_FRAME g = f; g.video_box_x = -1593; g.video_box_y = 0; g.video_box_w = 4267; g.video_box_h = 2400;
+                            R q = map(&g, &e);
+                            snprintf(msg, sizeof msg, "%s scale %d: independent of the video box", tag, s);
+                            check(msg, near(q.x, r.x, 1e-4f) && near(q.y, r.y, 1e-4f) && near(q.w, r.w, 1e-4f) && near(q.h, r.h, 1e-4f));
+
+                            // together with the vertical position: measured on the scaled cue
+                            static const int VP2[] = { -100, -50, 50, 100 };
+                            for (unsigned k = 0; k < sizeof VP2 / sizeof *VP2; k++) {
+                                const int pos = VP2[k];
+                                SUB_FRAME pf = hf; pf.gfx_vpos = pos;                           // controls hidden
+                                R rp = map(&pf, &e);
+                                snprintf(msg, sizeof msg, "%s scale %d vpos %d: size unchanged by the position", tag, s, pos);
+                                check(msg, near(rp.w, rh.w, 0.02f) && near(rp.h, rh.h, 0.02f) && near(rp.x, rh.x, 0.02f));
+                                const float room_up = rh.y - my, room_dn = (vp->h - my) - (rh.y + rh.h);
+                                const float want = pos > 0 ? rh.y - pos * 0.01f * (room_up > 0 ? room_up : 0)
+                                                           : rh.y + (-pos) * 0.01f * (room_dn > 0 ? room_dn : 0);
+                                snprintf(msg, sizeof msg, "%s scale %d vpos %d: %d%% of the room around the SCALED cue (y %.2f, want %.2f)", tag, s, pos, abs(pos), rp.y, want);
+                                check(msg, near(rp.y, want, 0.03f));
+                                if (pos == 100 && room_up > 0.05f) { snprintf(msg, sizeof msg, "%s scale %d +100: the scaled cue's top sits on the top margin (%.2f)", tag, s, rp.y); check(msg, near(rp.y, my, 0.03f)); }
+                                if (pos == -100 && room_dn > 0.05f) { snprintf(msg, sizeof msg, "%s scale %d -100: the scaled cue's bottom sits on the bottom margin (%.2f)", tag, s, rp.y + rp.h); check(msg, near(rp.y + rp.h, vp->h - my, 0.03f)); }
+                                // controls shown: still inside, and clear of them
+                                SUB_FRAME cf = f; cf.gfx_vpos = pos;
+                                R rc = map(&cf, &e);
+                                snprintf(msg, sizeof msg, "%s scale %d vpos %d controls shown: inside, clear of the controls (y %.1f..%.1f)", tag, s, pos, rc.y, rc.y + rc.h);
+                                check(msg, rc.x >= mx - eps && rc.x + rc.w <= vp->w - mx + eps &&
+                                           rc.y >= my - eps && rc.y + rc.h <= vp->h - inset - my + eps);
+                            }
+                        }
+                    }
+                }
+            }
+            printf("   %-62s %s\n", vp->name, fails == failed_before ? "ok" : "FAILED");
+        }
+
+        // 100% is the FITTED size, not the authored one: a cue shrunk to fit the side margins
+        printf("\n   fitted reference: a cue that had to be shrunk to the margins\n");
+        {
+            char msg[220];
+            SUB_FRAME f = make_frame(1920, 1080, 1920, 1080, 0);
+            SUB_EVENT e = make_event(0.00f, 0.84f, 1.00f, 0.10f, 1920, 1080);        // 1920 px wide, the area is 1881.6
+            f.events = &e;
+            f.gfx_scale = 100; R r100 = map(&f, &e);
+            f.gfx_scale = 50;  R r50  = map(&f, &e);
+            f.gfx_scale = 150; R r150 = map(&f, &e);
+            printf("   authored width %d, fitted (100%%) %.1f, 50%% -> %.1f, 150%% -> %.1f\n", e.w, r100.w, r50.w, r150.w);
+            check("100% of a full-width cue is the shrunk, fitted width", near(r100.w, 1920 * (1.0f - 2 * GFX_EDGE_MARGIN), 0.05f));
+            snprintf(msg, sizeof msg, "50%% is half the FITTED width (%.2f), not half the authored one (%.2f)", r50.w, e.w * 0.5f);
+            check(msg, near(r50.w, r100.w * 0.5f, 0.05f) && !near(r50.w, e.w * 0.5f, 5.0f));
+            check("it cannot grow past the screen: 150% of a full-width cue is the fitted width", near(r150.w, r100.w, 0.05f) && near(r150.x, r100.x, 0.05f));
+
+            // a cue that fits: 100% is its authored size at the contain scale, and 150% is 1.5x of it
+            SUB_EVENT n = make_event(0.30f, 0.84f, 0.40f, 0.08f, 1920, 1080);        // 768 px wide
+            f.events = &n;
+            f.gfx_scale = 100; R n100 = map(&f, &n);
+            f.gfx_scale = 150; R n150 = map(&f, &n);
+            f.gfx_scale = 50;  R n50  = map(&f, &n);
+            check("a cue that fits is 100% at its authored size", near(n100.w, n.w, 0.05f));
+            check("150% is one and a half times that, about the bottom centre",
+                  near(n150.w, n.w * 1.5f, 0.1f) && near(n150.h, n.h * 1.5f, 0.1f) &&
+                  near(n150.y + n150.h, n100.y + n100.h, 0.05f) && near(n150.x + n150.w * 0.5f, n100.x + n100.w * 0.5f, 0.05f));
+            check("50% is half of it, about the bottom centre",
+                  near(n50.w, n.w * 0.5f, 0.1f) && near(n50.y + n50.h, n100.y + n100.h, 0.05f));
+        }
+
+        // a cue with several bitmaps scales as one unit: every rectangle by the same factor, layout kept
+        printf("\n   one cue, two bitmaps (upper and lower): scaled together\n");
+        {
+            SUB_FRAME f = make_frame(1920, 1080, 1920, 1080, 0);
+            SUB_EVENT a = make_event(0.30f, 0.55f, 0.40f, 0.06f, 1920, 1080), b = make_event(0.20f, 0.85f, 0.60f, 0.08f, 1920, 1080);
+            a.next = &b; f.events = &a;
+            f.gfx_scale = 100; R a1 = map(&f, &a), b1 = map(&f, &b);
+            for (int s = 50; s <= 150; s += 50) {
+                f.gfx_scale = s; R a2 = map(&f, &a), b2 = map(&f, &b);
+                const float k = s / 100.0f;
+                char msg[200];
+                snprintf(msg, sizeof msg, "two bitmaps at %d%%: each is %d%% of its fitted size", s, s);
+                check(msg, near(a2.w, a1.w * k, 0.1f) && near(b2.w, b1.w * k, 0.1f) && near(a2.sx, a1.sx * k, 1e-4f) && near(b2.sx, b1.sx * k, 1e-4f));
+                snprintf(msg, sizeof msg, "two bitmaps at %d%%: the group is anchored on the bottom centre of the union", s);
+                check(msg, near(b2.y + b2.h, b1.y + b1.h, 0.1f));
+                snprintf(msg, sizeof msg, "two bitmaps at %d%%: the layout between them is scaled with them", s);
+                check(msg, near(b2.y - a2.y, (b1.y - a1.y) * k, 0.2f) && near(b2.x - a2.x, (b1.x - a1.x) * k, 0.2f));
+            }
+            // the group is bounded as a whole: two bitmaps that together would leave the screen stop together
+            f.gfx_scale = 300; R a3 = map(&f, &a), b3 = map(&f, &b);
+            check("two bitmaps at 300%: both inside the viewport", a3.y >= 10.8f - 0.51f && b3.y + b3.h <= 1080 - 10.8f + 0.51f && a3.x >= 19.2f - 0.51f && b3.x + b3.w <= 1920 - 19.2f + 0.51f);
+            check("two bitmaps at 300%: one scale for both", near(a3.sx, b3.sx, 1e-6f));
+        }
+
+        // degenerate values
+        printf("\n   degenerate values\n");
+        {
+            SUB_EVENT e = make_event(0.30f, 0.84f, 0.40f, 0.08f, 1920, 1080);
+            SUB_FRAME f = make_frame(1920, 1080, 1920, 1080, 0); f.events = &e;
+            f.gfx_scale = 0;    R z = map(&f, &e);
+            f.gfx_scale = 100;  R h = map(&f, &e);
+            check("0 (unstamped) is 100", memcmp(&z, &h, sizeof z) == 0);
+            f.gfx_scale = -40;  R n = map(&f, &e);
+            check("a negative scale is read as unstamped, 100", memcmp(&n, &h, sizeof n) == 0);
+            f.gfx_scale = 50;   R lo = map(&f, &e);
+            f.gfx_scale = 10;   R lo2 = map(&f, &e);
+            check("below 50 behaves as 50", memcmp(&lo, &lo2, sizeof lo) == 0);
+            f.gfx_scale = 300;  R hi = map(&f, &e);
+            f.gfx_scale = 5000; R hi2 = map(&f, &e);
+            check("above 300 behaves as 300", memcmp(&hi, &hi2, sizeof hi) == 0);
+            SUB_EVENT huge = make_event(0.0f, 0.0f, 1.0f, 1.0f, 1920, 1080);
+            f.events = &huge; f.gfx_scale = 300; R big = map(&f, &huge);
+            f.gfx_scale = 100; R big100 = map(&f, &huge);
+            check("a cue that already fills the viewport cannot grow", near(big.w, big100.w, 0.05f) && near(big.h, big100.h, 0.05f) && !isnan(big.y));
+            f.gfx_scale = 50; R half = map(&f, &huge);
+            check("... but it can shrink, about its bottom centre", near(half.w, big100.w * 0.5f, 0.05f) && near(half.y + half.h, big100.y + big100.h, 0.05f));
+            SUB_FRAME u = make_frame(0, 0, 0, 0, 0); u.events = &e; u.gfx_scale = 300;
+            R id = map(&u, &e);
+            check("unknown canvas/stream: identity even with a scale", near(id.x, e.x, 1e-4f) && near(id.y, e.y, 1e-4f) && near(id.w, e.w, 1e-4f) && near(id.sx, 1.0f, 1e-6f));
         }
     }
 

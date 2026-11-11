@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The real GFX backend and the two layout inputs it forwards: the reserved bottom space
-// (controls / system bars) and the user's vertical position. The value is stamped on the frames
+// The real GFX backend and the three layout inputs it forwards: the reserved bottom space
+// (controls / system bars), the user's vertical position and the user's scale. The value is stamped on the frames
 // it hands out, a change re-stamps the cue (so it moves when the controls appear and returns
 // when they hide), an unchanged value does nothing, and a cue that is opened or fed later still
 // gets the current value.
@@ -144,6 +144,82 @@ int main(void) {
     CHECK(w1 && w1->gfx_vpos == -60, "a track opened with an offset starts with it");
     sub_frame_unref(w1);
     be4->close(be4); free(be4);
+
+    // The user's scale (set_gfx_scale): same contract again, a third independent input.
+    SUB_FORMAT_BACKEND *be5 = open_backend(0);
+    CHECK(be5->set_gfx_scale != NULL, "GFX backend implements set_gfx_scale");
+    feed(be5);
+    SUB_FRAME *s1 = be5->render_at(be5, 100);
+    CHECK(s1 && s1->gfx_scale == 100, "cue stamped with 100% by default (params left unset)");
+    const uint8_t *spix = s1->events->data.bitmap.rgba;
+
+    be5->set_gfx_scale(be5, 150);                        // slider moved
+    SUB_FRAME *s2 = be5->render_at(be5, 100);
+    CHECK(s2 && s2 != s1 && s2->gfx_scale == 150, "slider moved: cue re-stamped with the scale");
+    CHECK(s1->gfx_scale == 100, "the frame the renderer already holds is untouched (copy on write)");
+    CHECK(s2->events->data.bitmap.rgba == spix, "pixels are shared, not copied");
+    CHECK(s2->gfx_vpos == 0 && s2->gfx_inset_bottom == 0, "scale does not touch the position or the reserved space");
+
+    be5->set_gfx_scale(be5, 150);                        // same value again (re-applied on a layout pass)
+    CHECK(be5->render_at(be5, 100) == NULL, "unchanged scale: no redraw");
+
+    be5->set_gfx_position(be5, -40);                     // the other two inputs must survive each other
+    SUB_FRAME *s3 = be5->render_at(be5, 100);
+    CHECK(s3 && s3->gfx_vpos == -40 && s3->gfx_scale == 150, "position changed: scale kept");
+    be5->set_bottom_inset(be5, 300);
+    SUB_FRAME *s4 = be5->render_at(be5, 100);
+    CHECK(s4 && s4->gfx_inset_bottom == 300 && s4->gfx_vpos == -40 && s4->gfx_scale == 150,
+          "controls shown: scale kept next to the position and the reserved space");
+    be5->set_gfx_scale(be5, 60);
+    SUB_FRAME *s5 = be5->render_at(be5, 100);
+    CHECK(s5 && s5->gfx_scale == 60 && s5->gfx_vpos == -40 && s5->gfx_inset_bottom == 300,
+          "scale changed: position and reserved space kept");
+
+    be5->set_gfx_scale(be5, 7000);                       // bogus values are clamped
+    SUB_FRAME *s6 = be5->render_at(be5, 100);
+    CHECK(s6 && s6->gfx_scale == SUB_GFX_SCALE_MAX, "out-of-range scale clamped to 300");
+    be5->set_gfx_scale(be5, 10);
+    SUB_FRAME *s7 = be5->render_at(be5, 100);
+    CHECK(s7 && s7->gfx_scale == SUB_GFX_SCALE_MIN, "scale below 50 clamped to 50");
+    be5->set_gfx_scale(be5, 120);                        // away from the minimum, so the next clamp is a real change
+    SUB_FRAME *s8a = be5->render_at(be5, 100);
+    CHECK(s8a && s8a->gfx_scale == 120, "scale moved off the minimum");
+    be5->set_gfx_scale(be5, -7000);
+    SUB_FRAME *s8 = be5->render_at(be5, 100);
+    CHECK(s8 && s8->gfx_scale == SUB_GFX_SCALE_MIN, "a negative scale set on the live backend clamps to 50 as well");
+    be5->set_gfx_scale(be5, 0);
+    CHECK(be5->render_at(be5, 100) == NULL, "0 set on the live backend is out of range, not 'unset': it clamps to 50 (unchanged, no redraw)");
+
+    be5->set_gfx_scale(be5, 200);
+    feed(be5);                                           // next cue while the scale is set
+    SUB_FRAME *s9 = be5->render_at(be5, 100);
+    CHECK(s9 && s9->gfx_scale == 200 && s9->gfx_vpos == -40 && s9->gfx_inset_bottom == 300,
+          "a cue fed later gets the current scale");
+    {
+        SUB_FRAME *all[] = { s1, s2, s3, s4, s5, s6, s7, s8a, s8, s9 };
+        for (unsigned i = 0; i < sizeof all / sizeof *all; i++) sub_frame_unref(all[i]);
+    }
+    be5->close(be5); free(be5);
+
+    // a track opened with the scale already set starts with it; unset opens at 100, out of range is clamped
+    static const struct { int given, want; const char *what; } OPEN[] = {
+        { 75,   75,  "a track opened with a scale starts with it" },
+        { 0,    100, "a track opened with no scale (unset) starts at 100" },
+        { 9999, SUB_GFX_SCALE_MAX, "a track opened above the range is clamped to 300" },
+        { 10,   SUB_GFX_SCALE_MIN, "a track opened below the range is clamped to 50" },
+    };
+    for (unsigned i = 0; i < sizeof OPEN / sizeof *OPEN; i++) {
+        SUB_FORMAT_BACKEND *bo = sub_format_gfx_create();
+        SUB_FORMAT_OPEN_PARAMS po; memset(&po, 0, sizeof po);
+        po.video_w = 1080; po.video_h = 2400; po.real_video_w = 1920; po.real_video_h = 1080;
+        po.gfx_scale = OPEN[i].given;
+        bo->open(bo, &po);
+        feed(bo);
+        SUB_FRAME *fo = bo->render_at(bo, 100);
+        CHECK(fo && fo->gfx_scale == OPEN[i].want, OPEN[i].what);
+        sub_frame_unref(fo);
+        bo->close(bo); free(bo);
+    }
 
     printf("%s (%d checks, %d failed)\n", fails ? "FAILED" : "ALL PASSED", checks, fails);
     return fails;

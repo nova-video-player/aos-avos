@@ -130,6 +130,10 @@ ext_finish_race  (SRT and VTT) A reopen landing exactly as a feed job finishes. 
 style_resize_paused  Style changes and surface resizes while paused: each renders once at the frozen
                  clock, geometry reaches the backend as a coalesced pair ending on the last
                  request, style + resize storms on two threads, pause state untouched.
+gfx_scale_engine The user's bitmap scale through the real engine: a track opened before any setter call
+                 gets 100 (not the calloc'd 0), a value reaches the backend once per change, is clamped
+                 to 50..300, is applied while paused, is given to tracks opened later, and survives
+                 setter storms on two threads (watchdog / TSan).
 
 Scope: the ext_* tests run the REAL external-subtitle stack -- stream_sub_ext.c (parse-worker pool, cue
 cache, SUBT_PARSE_* state machine, generation stamping), stream_subtitle.c (the subtitle decode thread,
@@ -520,6 +524,10 @@ class HostNativeTests(HostTestCase):
     def test_style_resize_paused(self):
         """Style change and surface resize while paused."""
         self.build_and_run('style_resize_paused_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
+
+    def test_gfx_scale_engine(self):
+        """User bitmap-subtitle scale through the engine: default 100, forwarded once, clamped, applied while paused."""
+        self.build_and_run('gfx_scale_engine_test.c', LIFECYCLE, flags=ENGINE_FLAGS)
 
     def test_smi_parse_error(self):
         """Empty SMI bodies close the file and free the record without touching it after free."""

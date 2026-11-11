@@ -47,6 +47,12 @@ int     fake_backend_resizes(void);              /* backend->resize() calls */
 int     fake_backend_box_sets(void);             /* backend->set_video_box() calls */
 void    fake_backend_last_canvas(int *w, int *h);
 void    fake_backend_last_box(int *x, int *y, int *w, int *h);
+/* The user's bitmap scale as the engine hands it over: what the latest open() was given
+ * (SUB_FORMAT_OPEN_PARAMS.gfx_scale; -1 before any open), how many times set_gfx_scale() was called
+ * on a backend since the counters were reset, and the value of the last call (-1 if none). */
+int     fake_backend_open_gfx_scale(void);
+int     fake_backend_gfx_scale_sets(void);
+int     fake_backend_last_gfx_scale(void);
 int64_t fake_backend_last_pts(void);             /* pts of the last render_at(); -1 if none */
 /* A backend remembers the first byte of the first cue it was fed as its "label". A later cue with
  * a different first byte means a cue from another track reached it: counted here. */

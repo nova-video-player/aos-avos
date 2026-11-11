@@ -89,6 +89,7 @@ typedef struct {
     int video_box_w, video_box_h;
     int bottom_inset;              /* GFX only: see set_bottom_inset() below. 0 = none. */
     int gfx_vpos;                  /* GFX only: see set_gfx_position() below. 0 = none. */
+    int gfx_scale;                 /* GFX only: see set_gfx_scale() below. 0 (unset) = 100. */
     const uint8_t *codec_private;  /* e.g. ASS [Script Info]+[Styles] header,
                                      * or VOBSUB palette block               */
     int             codec_private_size;
@@ -158,6 +159,11 @@ typedef struct {
  * set_gfx_position() — OPTIONAL (NULL for SSA/SRT). The user's vertical position for bitmap
  *                cues: value in [-100, 100] (0 = computed placement, positive up). Only the
  *                GFX backend implements it -- see sub_engine_set_gfx_position().
+ *
+ * set_gfx_scale() — OPTIONAL (NULL for SSA/SRT). The user's size for bitmap cues, in percent
+ *                of the cue's fitted size: value in [SUB_GFX_SCALE_MIN, SUB_GFX_SCALE_MAX]
+ *                (50..300, 100 = as fitted). Only the GFX backend implements it -- see
+ *                sub_engine_set_gfx_scale().
  *
  * free_frame() — release a SUB_FRAME previously returned by render_at().
  *                Lets bitmap-backed backends (libass, VOBSUB, PGS) reuse
@@ -230,6 +236,7 @@ struct SUB_FORMAT_BACKEND {
     int  (*set_video_box)(struct SUB_FORMAT_BACKEND *be, int x, int y, int w, int h); /* NEW, optional */
     int  (*set_bottom_inset)(struct SUB_FORMAT_BACKEND *be, int px);                    /* optional */
     int  (*set_gfx_position)(struct SUB_FORMAT_BACKEND *be, int value);                   /* optional */
+    int  (*set_gfx_scale)(struct SUB_FORMAT_BACKEND *be, int percent);                    /* optional */
     int  (*flush)     (SUB_FORMAT_BACKEND *be);
     int  (*close)     (SUB_FORMAT_BACKEND *be);
     /* Reports what should wake the render thread next (see SUB_SCHEDULE). Called

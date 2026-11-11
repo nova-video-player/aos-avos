@@ -200,6 +200,12 @@ JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_n
     sub_engine_set_gfx_position(get_engine(handle), value);
 }
 
+// Reports the user's scale for bitmap subtitles (50..300 percent of the fitted size) -- see
+// sub_engine_set_gfx_scale() in sub_engine.h.
+JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetGfxScale(JNIEnv *env, jobject thiz, jlong handle, jint percent) {
+    sub_engine_set_gfx_scale(get_engine(handle), percent);
+}
+
 // --- 3D HYBRID RENDER BRIDGE ---
 
 JNIEXPORT void JNICALL Java_com_archos_mediacenter_video_player_SubtitleEngine_nativeSetUIMode(JNIEnv *env, jobject thiz, jlong handle, jint mode) {

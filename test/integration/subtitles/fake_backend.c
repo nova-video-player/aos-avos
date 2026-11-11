@@ -31,6 +31,7 @@ typedef struct { int label; int feeds; int since_flush; } FAKE_CTX;
 static int g_live, g_feeds, g_flushes, g_renders, g_resizes, g_boxes, g_foreign;
 static int64_t g_last_pts = -1;
 static int g_cw, g_ch, g_bx, g_by, g_bw, g_bh;
+static int g_open_scale = -1, g_scale_sets, g_last_scale = -1;      /* see fake_backend_*_gfx_scale() */
 static FAKE_CTX *g_latest;
 static pthread_mutex_t g_m = PTHREAD_MUTEX_INITIALIZER;
 #define INC(v) __atomic_fetch_add(&(v), 1, __ATOMIC_RELAXED)
@@ -40,8 +41,12 @@ void fake_backend_reset_counters(void) {
     __atomic_store_n(&g_feeds, 0, __ATOMIC_RELAXED);  __atomic_store_n(&g_flushes, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_renders, 0, __ATOMIC_RELAXED); __atomic_store_n(&g_resizes, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_boxes, 0, __ATOMIC_RELAXED);  __atomic_store_n(&g_foreign, 0, __ATOMIC_RELAXED);
-    pthread_mutex_lock(&g_m); g_last_pts = -1; g_cw = g_ch = g_bx = g_by = g_bw = g_bh = 0; pthread_mutex_unlock(&g_m);
+    pthread_mutex_lock(&g_m); g_last_pts = -1; g_cw = g_ch = g_bx = g_by = g_bw = g_bh = 0;
+    g_open_scale = -1; g_scale_sets = 0; g_last_scale = -1; pthread_mutex_unlock(&g_m);
 }
+int fake_backend_open_gfx_scale(void) { pthread_mutex_lock(&g_m); int v = g_open_scale; pthread_mutex_unlock(&g_m); return v; }
+int fake_backend_gfx_scale_sets(void) { pthread_mutex_lock(&g_m); int v = g_scale_sets; pthread_mutex_unlock(&g_m); return v; }
+int fake_backend_last_gfx_scale(void) { pthread_mutex_lock(&g_m); int v = g_last_scale; pthread_mutex_unlock(&g_m); return v; }
 int fake_backend_live(void)     { return GET(g_live); }
 int fake_backend_feeds(void)    { return GET(g_feeds); }
 int fake_backend_flushes(void)  { return GET(g_flushes); }
@@ -93,10 +98,9 @@ static SUB_FRAME *fake_render_at(SUB_FORMAT_BACKEND *be, int64_t pts) {
     return fake_frame_new(1);
 }
 static int fake_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *p) {
-    (void)p;
     FAKE_CTX *ctx = calloc(1, sizeof(*ctx));
     be->priv = ctx;
-    pthread_mutex_lock(&g_m); g_latest = ctx; pthread_mutex_unlock(&g_m);
+    pthread_mutex_lock(&g_m); g_latest = ctx; g_open_scale = p ? p->gfx_scale : -1; pthread_mutex_unlock(&g_m);
     INC(g_live);
     return 0;
 }
@@ -147,6 +151,11 @@ static int fake_set_box(SUB_FORMAT_BACKEND *be, int x, int y, int w, int h) {
     pthread_mutex_lock(&g_m); g_bx = x; g_by = y; g_bw = w; g_bh = h; pthread_mutex_unlock(&g_m);
     return 0;
 }
+static int fake_set_gfx_scale(SUB_FORMAT_BACKEND *be, int percent) {
+    (void)be;
+    pthread_mutex_lock(&g_m); g_scale_sets++; g_last_scale = percent; pthread_mutex_unlock(&g_m);
+    return 0;
+}
 /* RST timing contract (get_schedule replaced the old get_timeout_ms, which this returned 1 from).
  * A deadline that is already due (next_rst_ms <= now) makes the engine's schedule_to_wall_ms()
  * wait the minimum, 1 ms, then re-poll -- the same cadence as the old 1 ms timeout, which is
@@ -163,6 +172,7 @@ SUB_FORMAT_BACKEND *sub_format_ssa_create(void) {
     b->open = fake_open; b->close = fake_close;
     b->render_at = fake_render_at; b->get_schedule = fake_schedule;
     b->feed = fake_feed; b->flush = fake_flush; b->resize = fake_resize; b->set_video_box = fake_set_box;
+    b->set_gfx_scale = fake_set_gfx_scale;
     return b;
 }
 SUB_FORMAT_BACKEND *sub_format_srt_create(void) { return sub_format_ssa_create(); }

@@ -160,6 +160,12 @@ static int api_level(void)
     return __system_property_get("ro.build.version.sdk", value) > 0 ? atoi(value) : 0;
 }
 
+static bool prop_has(const char *name, const char *needle)
+{
+    char value[PROP_VALUE_MAX] = {0};
+    return __system_property_get(name, value) > 0 && strstr(value, needle);
+}
+
 static int64_t mono_ns(void)
 {
     struct timespec ts;
@@ -258,15 +264,19 @@ static bool egl_init(sfdec_dovi_gl *gl)
 
     // BT.2020 PQ window surface: RGBA 10:10:10:2, else FP16 (NVIDIA Tegra has
     // no 10-bit config), else 8-bit (visible banding, still correct colors).
-    // SDR output: default (sRGB) color space, FP16 first. On NVIDIA Tegra
+    // SDR output: default (sRGB) color space, RGBA8888 first: hardware
+    // composers scan it out, while an FP16 layer can force GPU composition
+    // (Amlogic Mali-G310: half the frames late at 1080p60). On NVIDIA Tegra
     // with an SDR display an FP16 layer tagged BT.2020 PQ or scRGB linear
-    // shows black, and the RGBA8888 surface showed nothing either.
+    // shows black and the RGBA8888 surface showed nothing, so FP16 first.
     // eglChooseConfig sizes are minimums, so check the exact red/alpha sizes.
     struct { EGLint red, alpha; bool fp; const char *name; } formats[] = {
         { 10, 2, false, "RGBA1010102" }, { 16, 16, true, "RGBA16F" }, { 8, 8, false, "RGBA8888" } };
     const bool float_ext = has_ext(egl_ext, "EGL_EXT_pixel_format_float");
+    // EGL_VENDOR is "Android" behind the platform loader, so ask the build.
+    const bool tegra = prop_has("ro.board.platform", "tegra") || prop_has("ro.hardware.egl", "tegra");
     const char *format = NULL;
-    static const int pq_order[] = { 0, 1, 2 }, sdr_order[] = { 1, 0, 2 };
+    static const int pq_order[] = { 0, 1, 2 }, tegra_sdr_order[] = { 1, 0, 2 }, sdr_order[] = { 2, 1, 0 };
     // PQ formats first, then the SDR ones when no PQ surface could be created.
     for (size_t i = 0; i < 6 && !format; i++) {
         if (i == 3) {
@@ -275,7 +285,7 @@ static bool egl_init(sfdec_dovi_gl *gl)
             LOG("no BT.2020 PQ window surface, tone mapping to SDR");
             gl->sdr = true;
         }
-        size_t f = gl->sdr ? sdr_order[i % 3] : pq_order[i % 3];
+        size_t f = !gl->sdr ? pq_order[i % 3] : tegra ? tegra_sdr_order[i % 3] : sdr_order[i % 3];
         if (formats[f].fp && !float_ext)
             continue;
         EGLint attribs[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT,

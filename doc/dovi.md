@@ -62,6 +62,24 @@ specification. Each one logs its outcome, so a capture shows which applied.
   driver's conversion is inverted assuming BT.601 full range, the conversion
   drivers apply to Profile 5 (full range, no matrix coefficients), measured
   exact on Tegra X1. Log: `raw YUV` or `RGB (BT.601 full range inverted)`.
+- **Output size.** Video size, unless `ro.surface_flinger.max_graphics_width`
+  and `_height` declare a smaller maximum graphics buffer (TV boxes with 1080p
+  graphics planes, also on 4K TVs): the output then fits inside it, aspect
+  kept. A larger RGBA layer was composited on the GPU there, and its extra
+  pixels were never shown (Amlogic Mali-G310, 4K60: about 13 fps drawn; at
+  1920x1080, 60 fps once settled). Log: `output <width>x<height>`.
+- **Shader specialization**, as libplacebo does. The generic shader chooses
+  the piece, the method and the MMR order per pixel with dynamic uniform
+  indexing and branches. Each RPU structure gets generated code instead:
+  unrolled piece selection with constant indices, only the method present,
+  MMR order branches only for mixed orders. Key per component: pieces, MMR
+  or polynomial, minimum and maximum MMR order. Up to three specialized
+  programs are cached next to the generic one, which remains the fallback
+  when the structure is unexpected or the build fails. Output is identical to
+  the generic shader (checked on the Mali-G310 and Tegra X1). Mali-G310 at
+  1080p60: 60 fps, draw and swap at most about 12 ms, instead of 34-52 ms. A
+  first build takes about 125 ms (cold compiler), later ones 1-2 ms. Log:
+  `shader for structure 0x<key> built in <ms> ms`.
 - **Frames held.** Frames are released up to 200 ms ahead and held until 30 ms
   before their presentation time. Held count is `ceil(200 ms / frame
   duration) + 1`, clamped to 4..14 (6 at 25 fps, 13 at 60 fps; 14 when the rate

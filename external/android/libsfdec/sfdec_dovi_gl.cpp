@@ -15,6 +15,8 @@
 #include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +108,17 @@ struct image_entry {
     GLuint tex;
 };
 
+// Programs kept per renderer: the generic one and up to three specialized to
+// an RPU structure (a title keeps one structure; trailers may switch).
+#define PROGRAMS_MAX 4
+
+struct dovi_program {
+    uint32_t key; // 0: generic shader; else program_key()
+    GLuint prog;  // 0: building the specialized shader failed, use the generic one
+    GLint u_code_scale, u_sample_bias, u_pivot_lo, u_pivot_hi, u_pivots, u_coeffs, u_mmr;
+    GLint u_ycc_to_rgb, u_ycc_offset, u_lms_to_rgb, u_tex, u_crop, u_rgb_to_ycc, u_sdr_scale, u_sdr_peak;
+};
+
 struct sfdec_dovi_gl {
     dovi_syms s;
     ANativeWindow *window;
@@ -133,9 +146,10 @@ struct sfdec_dovi_gl {
     EGLDisplay dpy;
     EGLContext ctx;
     EGLSurface surf;
-    GLuint prog;
-    GLint u_code_scale, u_sample_bias, u_pivot_lo, u_pivot_hi, u_pivots, u_coeffs, u_mmr;
-    GLint u_ycc_to_rgb, u_ycc_offset, u_lms_to_rgb, u_tex, u_crop, u_rgb_to_ycc, u_sdr_scale, u_sdr_peak;
+    GLuint vs;
+    dovi_program progs[PROGRAMS_MAX]; // [0] generic, then specialized by key
+    int prog_count, prog_evict;
+    dovi_program *cur;
     bool rgb_sampling; // no GL_EXT_YUV_target: undo the driver's YUV to RGB
     bool smpte2086, cta861_3; // surface HDR metadata extensions (PQ output)
     float meta_max_nits, meta_min_nits; // last metadata set on the surface
@@ -158,6 +172,12 @@ static int api_level(void)
 {
     char value[PROP_VALUE_MAX] = {0};
     return __system_property_get("ro.build.version.sdk", value) > 0 ? atoi(value) : 0;
+}
+
+static int prop_int(const char *name)
+{
+    char value[PROP_VALUE_MAX] = {0};
+    return __system_property_get(name, value) > 0 ? atoi(value) : 0;
 }
 
 static bool prop_has(const char *name, const char *needle)
@@ -233,6 +253,163 @@ static const char vertex_shader[] =
     "    gl_Position = vec4(pos, 0.0, 1.0);\n"
     "}\n";
 
+// Shader specialization, as libplacebo does: the generic shader picks the
+// piece, the method and the MMR order per pixel through dynamic uniform
+// indexing and branches, which small GPUs pay for (Mali-G310: 34-52 ms per
+// 1080p frame). The RPU's structure changes rarely, so code is generated for
+// it: unrolled branchless piece selection with constant indices, only the
+// method present, and MMR order branches only for mixed orders.
+// Key per component, one byte: pieces - 1 (bits 0-2), MMR (bit 3), minimum
+// and maximum MMR order (bits 4-5, 6-7). 0 when the structure is unexpected.
+static uint32_t program_key(const VIDEO_DOVI_RESHAPE *p)
+{
+    uint32_t key = 0;
+    for (int c = 0; c < 3; c++) {
+        int pieces = 1;
+        while (pieces < VIDEO_DOVI_RESHAPE_PIECES && p->pivots[c][pieces - 1] < 1e8f)
+            pieces++;
+        const bool mmr = p->coeffs[c][0][3] != 0.0f;
+        int lo = mmr ? 3 : 0, hi = mmr ? 1 : 0;
+        for (int i = 0; i < pieces; i++) {
+            const int order = (int)p->coeffs[c][i][3];
+            if (mmr != (order != 0) || order < 0 || order > 3)
+                return 0;
+            if (mmr) {
+                lo = order < lo ? order : lo;
+                hi = order > hi ? order : hi;
+            }
+        }
+        key |= (uint32_t)((pieces - 1) | (mmr ? 8 : 0) | lo << 4 | hi << 6) << (8 * c);
+    }
+    return key | 1u << 24;
+}
+
+static void append(char *buf, size_t size, size_t *len, const char *fmt, ...)
+{
+    if (*len >= size)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *len, size - *len, fmt, ap);
+    va_end(ap);
+    *len = n < 0 ? size : *len + (size_t)n;
+}
+
+// reshape0..2 for `key`; same arithmetic as VIDEO_DOVI_RESHAPE_FS_GENERIC.
+static bool generate_reshape(uint32_t key, char *buf, size_t size)
+{
+    size_t len = 0;
+    for (int c = 0; c < 3; c++) {
+        const unsigned b = (key >> (8 * c)) & 0xff;
+        const int pieces = (int)(b & 7) + 1, lo = (int)(b >> 4) & 3, hi = (int)(b >> 6) & 3;
+        const bool mmr = (b & 8) != 0;
+        append(buf, size, &len, "float reshape%d(vec3 sig) {\n\tfloat s = sig[%d];\n\tvec4 k = u_coeffs[%d];\n",
+               c, c, c * VIDEO_DOVI_RESHAPE_PIECES);
+        // Pivots ascend: the last one at or below s selects the piece.
+        for (int i = 1; i < pieces; i++)
+            append(buf, size, &len, "\tk = s >= u_pivots[%d] ? u_coeffs[%d] : k;\n",
+                   c * (VIDEO_DOVI_RESHAPE_PIECES - 1) + i - 1, c * VIDEO_DOVI_RESHAPE_PIECES + i);
+        if (!mmr) {
+            append(buf, size, &len, "\treturn (k.z * s + k.y) * s + k.x;\n}\n");
+            continue;
+        }
+        if (pieces == 1) // a single MMR piece starts at the component's first row
+            append(buf, size, &len, "\tconst int row = %d;\n", c * VIDEO_DOVI_RESHAPE_MMR_ROWS);
+        else
+            append(buf, size, &len, "\tint row = %d + int(k.y);\n", c * VIDEO_DOVI_RESHAPE_MMR_ROWS);
+        append(buf, size, &len,
+               "\tvec4 x;\n\tx.xyz = sig.xxy * sig.yzz;\n\tx.w = x.x * sig.z;\n"
+               "\tfloat r = k.x + dot(u_mmr[row].xyz, sig) + dot(u_mmr[row + 1], x);\n");
+        if (hi >= 2) {
+            append(buf, size, &len, "%s\tvec3 s2 = sig * sig;\n\tvec4 x2 = x * x;\n"
+                   "\tr += dot(u_mmr[row + 2].xyz, s2) + dot(u_mmr[row + 3], x2);\n",
+                   lo < 2 ? "\tif (k.w >= 2.0) {\n" : "\t{\n");
+            if (hi == 3)
+                append(buf, size, &len, "%s\tr += dot(u_mmr[row + 4].xyz, s2 * sig) + dot(u_mmr[row + 5], x2 * x);\n",
+                       lo < 3 ? "\tif (k.w >= 3.0)\n" : "");
+            append(buf, size, &len, "\t}\n");
+        }
+        append(buf, size, &len, "\treturn r;\n}\n");
+    }
+    return len < size;
+}
+
+// Compile and link the program for `key` (0: generic) into `pr`.
+static bool build_program(sfdec_dovi_gl *gl, dovi_program *pr, uint32_t key)
+{
+    pr->key = key;
+    pr->prog = 0;
+    char src[16384];
+    const char *fs_src = gl->rgb_sampling ? video_dovi_reshape_rgb_fs : video_dovi_reshape_fs;
+    if (key) {
+        char reshape[6144];
+        if (!generate_reshape(key, reshape, sizeof(reshape)))
+            return false;
+        int n = snprintf(src, sizeof(src), "%s%s%s%s",
+                         VIDEO_DOVI_RESHAPE_FS_HEAD,
+                         gl->rgb_sampling ? VIDEO_DOVI_RESHAPE_FS_RGB : VIDEO_DOVI_RESHAPE_FS_YUV,
+                         VIDEO_DOVI_RESHAPE_FS_BODY, reshape);
+        if (n < 0 || (size_t)n >= sizeof(src) ||
+            snprintf(src + n, sizeof(src) - n, "%s", VIDEO_DOVI_RESHAPE_FS_MAIN) >= (int)(sizeof(src) - n))
+            return false;
+        fs_src = src;
+    }
+    GLuint fs = compile(GL_FRAGMENT_SHADER, fs_src);
+    if (!fs)
+        return false;
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, gl->vs);
+    glAttachShader(prog, fs);
+    glBindAttribLocation(prog, 0, "pos");
+    glLinkProgram(prog);
+    glDeleteShader(fs);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        glDeleteProgram(prog);
+        return false;
+    }
+    pr->prog = prog;
+    glUseProgram(prog);
+#define LOC(name) pr->name = glGetUniformLocation(prog, #name)
+    LOC(u_code_scale); LOC(u_sample_bias); LOC(u_pivot_lo); LOC(u_pivot_hi); LOC(u_pivots);
+    LOC(u_coeffs); LOC(u_mmr); LOC(u_ycc_to_rgb); LOC(u_ycc_offset); LOC(u_lms_to_rgb);
+    LOC(u_tex); LOC(u_crop); LOC(u_rgb_to_ycc); LOC(u_sdr_scale); LOC(u_sdr_peak);
+#undef LOC
+    glUniform1i(pr->u_tex, 0);
+    static const GLfloat bias[3] = { 0, 0, 0 };
+    glUniform3fv(pr->u_sample_bias, 1, bias);
+    // Profile 5 is full range without matrix coefficients; drivers then
+    // convert with BT.601 full range (measured exact on NVIDIA Tegra X1).
+    static const GLfloat bt601_full_rgb_to_ycc[9] = {
+        0.299f, 0.587f, 0.114f,
+        -0.168736f, -0.331264f, 0.5f,
+        0.5f, -0.418688f, -0.081312f };
+    if (gl->rgb_sampling)
+        glUniformMatrix3fv(pr->u_rgb_to_ycc, 1, GL_TRUE, bt601_full_rgb_to_ycc);
+    // SDR: 203 nits reference white (ITU-R BT.2408) maps to 1.0.
+    glUniform1f(pr->u_sdr_scale, gl->sdr ? 10000.0f / SDR_WHITE_NITS : 0.0f);
+    return true;
+}
+
+// The program for this RPU structure: cached, else built now (once per
+// structure; a failure is remembered and falls back to the generic program).
+static dovi_program *get_program(sfdec_dovi_gl *gl, uint32_t key)
+{
+    for (int i = 0; i < gl->prog_count; i++)
+        if (gl->progs[i].key == key)
+            return gl->progs[i].prog ? &gl->progs[i] : &gl->progs[0];
+    dovi_program *pr = gl->prog_count < PROGRAMS_MAX ? &gl->progs[gl->prog_count++]
+                                                     : &gl->progs[1 + gl->prog_evict++ % (PROGRAMS_MAX - 1)];
+    if (pr->prog)
+        glDeleteProgram(pr->prog);
+    const int64_t start_ns = mono_ns();
+    const bool ok = build_program(gl, pr, key);
+    LOG("shader for structure 0x%06x %s in %.1f ms", key & 0xffffff, ok ? "built" : "failed, generic shader",
+        (mono_ns() - start_ns) / 1e6);
+    return ok ? pr : &gl->progs[0];
+}
+
 static bool egl_init(sfdec_dovi_gl *gl)
 {
     dovi_syms *s = &gl->s;
@@ -275,6 +452,18 @@ static bool egl_init(sfdec_dovi_gl *gl)
     const bool float_ext = has_ext(egl_ext, "EGL_EXT_pixel_format_float");
     // EGL_VENDOR is "Android" behind the platform loader, so ask the build.
     const bool tegra = prop_has("ro.board.platform", "tegra") || prop_has("ro.hardware.egl", "tegra");
+    // Video-sized buffers, unless the display path declares a smaller
+    // maximum graphics buffer (TV boxes with 1080p graphics planes, also on
+    // 4K TVs): a larger RGBA layer is then composited on the GPU, and the
+    // pixels reshaped beyond that size are never shown.
+    int out_w = gl->width, out_h = gl->height;
+    const int max_w = prop_int("ro.surface_flinger.max_graphics_width");
+    const int max_h = prop_int("ro.surface_flinger.max_graphics_height");
+    if (max_w > 0 && max_h > 0 && (out_w > max_w || out_h > max_h)) {
+        const double scale = fmin((double)max_w / out_w, (double)max_h / out_h);
+        out_w = (int)(out_w * scale) & ~1;
+        out_h = (int)(out_h * scale) & ~1;
+    }
     const char *format = NULL;
     static const int pq_order[] = { 0, 1, 2 }, tegra_sdr_order[] = { 1, 0, 2 }, sdr_order[] = { 2, 1, 0 };
     // PQ formats first, then the SDR ones when no PQ surface could be created.
@@ -308,8 +497,8 @@ static bool egl_init(sfdec_dovi_gl *gl)
         }
         if (!config)
             continue;
-        // Scale the video-sized buffers to the view like MediaCodec output.
-        ANativeWindow_setBuffersGeometry(gl->window, gl->width, gl->height, 0);
+        // Scale the buffers to the view like MediaCodec output.
+        ANativeWindow_setBuffersGeometry(gl->window, out_w, out_h, 0);
         const EGLint surf_attribs[] = { EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_BT2020_PQ_EXT, EGL_NONE };
         gl->surf = eglCreateWindowSurface(gl->dpy, config, gl->window, gl->sdr ? NULL : surf_attribs);
         if (gl->surf == EGL_NO_SURFACE) {
@@ -330,43 +519,14 @@ static bool egl_init(sfdec_dovi_gl *gl)
     gl->smpte2086 = !gl->sdr && has_ext(egl_ext, "EGL_EXT_surface_SMPTE2086_metadata");
     gl->cta861_3 = !gl->sdr && has_ext(egl_ext, "EGL_EXT_surface_CTA861_3_metadata");
 
-    GLuint vs = compile(GL_VERTEX_SHADER, vertex_shader);
-    GLuint fs = compile(GL_FRAGMENT_SHADER, gl->rgb_sampling ? video_dovi_reshape_rgb_fs : video_dovi_reshape_fs);
-    if (!vs || !fs)
+    gl->vs = compile(GL_VERTEX_SHADER, vertex_shader);
+    if (!gl->vs || !build_program(gl, &gl->progs[0], 0))
         return false;
-    gl->prog = glCreateProgram();
-    glAttachShader(gl->prog, vs);
-    glAttachShader(gl->prog, fs);
-    glBindAttribLocation(gl->prog, 0, "pos");
-    glLinkProgram(gl->prog);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    GLint ok = 0;
-    glGetProgramiv(gl->prog, GL_LINK_STATUS, &ok);
-    if (!ok)
-        return false;
-    glUseProgram(gl->prog);
-#define LOC(name) gl->name = glGetUniformLocation(gl->prog, #name)
-    LOC(u_code_scale); LOC(u_sample_bias); LOC(u_pivot_lo); LOC(u_pivot_hi); LOC(u_pivots);
-    LOC(u_coeffs); LOC(u_mmr); LOC(u_ycc_to_rgb); LOC(u_ycc_offset); LOC(u_lms_to_rgb);
-    LOC(u_tex); LOC(u_crop); LOC(u_rgb_to_ycc); LOC(u_sdr_scale); LOC(u_sdr_peak);
-#undef LOC
-    glUniform1i(gl->u_tex, 0);
-    static const GLfloat bias[3] = { 0, 0, 0 };
-    glUniform3fv(gl->u_sample_bias, 1, bias);
-    // Profile 5 is full range without matrix coefficients; drivers then
-    // convert with BT.601 full range (measured exact on NVIDIA Tegra X1).
-    static const GLfloat bt601_full_rgb_to_ycc[9] = {
-        0.299f, 0.587f, 0.114f,
-        -0.168736f, -0.331264f, 0.5f,
-        0.5f, -0.418688f, -0.081312f };
-    if (gl->rgb_sampling)
-        glUniformMatrix3fv(gl->u_rgb_to_ycc, 1, GL_TRUE, bt601_full_rgb_to_ycc);
-    // SDR: 203 nits reference white (ITU-R BT.2408) maps to 1.0.
-    glUniform1f(gl->u_sdr_scale, gl->sdr ? 10000.0f / SDR_WHITE_NITS : 0.0f);
-    LOG("ready on %s: %s %s output, %s sampling, %d held frames", (const char *)glGetString(GL_RENDERER),
-        format, gl->sdr ? "SDR" : "PQ", gl->rgb_sampling ? "RGB (BT.601 full range inverted)" : "raw YUV",
-        gl->held_max);
+    gl->prog_count = 1;
+    gl->cur = &gl->progs[0];
+    LOG("ready on %s: %s %s output %dx%d, %s sampling, %d held frames", (const char *)glGetString(GL_RENDERER),
+        format, gl->sdr ? "SDR" : "PQ", out_w, out_h,
+        gl->rgb_sampling ? "RGB (BT.601 full range inverted)" : "raw YUV", gl->held_max);
     return true;
 }
 
@@ -377,8 +537,11 @@ static void egl_release(sfdec_dovi_gl *gl)
     if (gl->dpy == EGL_NO_DISPLAY)
         return;
     release_import(gl, &gl->shown_import);
-    if (gl->prog)
-        glDeleteProgram(gl->prog);
+    for (int i = 0; i < gl->prog_count; i++)
+        if (gl->progs[i].prog)
+            glDeleteProgram(gl->progs[i].prog);
+    if (gl->vs)
+        glDeleteShader(gl->vs);
     eglMakeCurrent(gl->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     // Destroying the surface disconnects the window for the next producer.
     if (gl->surf != EGL_NO_SURFACE)
@@ -423,22 +586,23 @@ static void release_import(sfdec_dovi_gl *gl, image_entry *e)
 
 static void upload(sfdec_dovi_gl *gl, const VIDEO_DOVI_RESHAPE *p)
 {
+    const dovi_program *pr = gl->cur;
     // P010 through GL_EXT_YUV_target: 16-bit container normalized to 1.0.
     // Driver RGB conversion normalizes 10-bit codes by 1024.
-    glUniform1f(gl->u_code_scale, (gl->rgb_sampling ? 1024.0f : 65535.0f / 64.0f) / (float)(1 << p->bl_bit_depth));
-    glUniform3fv(gl->u_pivot_lo, 1, p->pivot_lo);
-    glUniform3fv(gl->u_pivot_hi, 1, p->pivot_hi);
-    glUniform1fv(gl->u_pivots, 3 * (VIDEO_DOVI_RESHAPE_PIECES - 1), &p->pivots[0][0]);
-    glUniform4fv(gl->u_coeffs, 3 * VIDEO_DOVI_RESHAPE_PIECES, &p->coeffs[0][0][0]);
-    glUniform4fv(gl->u_mmr, 3 * VIDEO_DOVI_RESHAPE_MMR_ROWS, &p->mmr[0][0][0]);
-    glUniformMatrix3fv(gl->u_ycc_to_rgb, 1, GL_TRUE, p->ycc_to_rgb);
-    glUniform3fv(gl->u_ycc_offset, 1, p->ycc_offset);
-    glUniformMatrix3fv(gl->u_lms_to_rgb, 1, GL_TRUE, p->lms_to_rgb);
+    glUniform1f(pr->u_code_scale, (gl->rgb_sampling ? 1024.0f : 65535.0f / 64.0f) / (float)(1 << p->bl_bit_depth));
+    glUniform3fv(pr->u_pivot_lo, 1, p->pivot_lo);
+    glUniform3fv(pr->u_pivot_hi, 1, p->pivot_hi);
+    glUniform1fv(pr->u_pivots, 3 * (VIDEO_DOVI_RESHAPE_PIECES - 1), &p->pivots[0][0]);
+    glUniform4fv(pr->u_coeffs, 3 * VIDEO_DOVI_RESHAPE_PIECES, &p->coeffs[0][0][0]);
+    glUniform4fv(pr->u_mmr, 3 * VIDEO_DOVI_RESHAPE_MMR_ROWS, &p->mmr[0][0][0]);
+    glUniformMatrix3fv(pr->u_ycc_to_rgb, 1, GL_TRUE, p->ycc_to_rgb);
+    glUniform3fv(pr->u_ycc_offset, 1, p->ycc_offset);
+    glUniformMatrix3fv(pr->u_lms_to_rgb, 1, GL_TRUE, p->lms_to_rgb);
     if (gl->sdr) {
         // Tone map up to the source peak from the RPU (1000 nits if absent).
         float e = powf(p->source_max_pq > 0.0f ? p->source_max_pq : 0.7518f, 1.0f / 78.84375f);
         float nits = 10000.0f * powf(fmaxf(e - 0.8359375f, 0.0f) / (18.8515625f - 18.6875f * e), 1.0f / 0.1593017578125f);
-        glUniform1f(gl->u_sdr_peak, fmaxf(nits / SDR_WHITE_NITS, 1.0f));
+        glUniform1f(pr->u_sdr_peak, fmaxf(nits / SDR_WHITE_NITS, 1.0f));
     }
 }
 
@@ -559,11 +723,12 @@ static void draw_held(sfdec_dovi_gl *gl)
     eglQuerySurface(gl->dpy, gl->surf, EGL_WIDTH, &sw);
     eglQuerySurface(gl->dpy, gl->surf, EGL_HEIGHT, &sh);
     glViewport(0, 0, sw, sh);
-    glUseProgram(gl->prog);
+    gl->cur = get_program(gl, program_key(&f->params));
+    glUseProgram(gl->cur->prog);
     upload(gl, &f->params);
     if (gl->smpte2086 || gl->cta861_3)
         set_hdr_metadata(gl, &f->params);
-    glUniform4f(gl->u_crop, (float)crop.left / desc.width, (float)crop.top / desc.height,
+    glUniform4f(gl->cur->u_crop, (float)crop.left / desc.width, (float)crop.top / desc.height,
         (float)(crop.right - crop.left) / desc.width, (float)(crop.bottom - crop.top) / desc.height);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);

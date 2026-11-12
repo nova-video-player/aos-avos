@@ -73,7 +73,11 @@
 	"vec3 pq_oetf(vec3 l) {\n" \
 	"	l = pow(max(l, 0.0), vec3(PQ_M1));\n" \
 	"	return pow((PQ_C1 + PQ_C2 * l) / (1.0 + PQ_C3 * l), vec3(PQ_M2));\n" \
-	"}\n" \
+	"}\n"
+/* Generic reshaping: any piece count, polynomial or MMR of any order, chosen
+ * per pixel. sfdec_dovi_gl generates reshape0..2 specialized to the RPU's
+ * structure instead, and keeps this version as its fallback. */
+#define VIDEO_DOVI_RESHAPE_FS_GENERIC \
 	"float reshape(int c, vec3 sig) {\n" \
 	"	float s = sig[c];\n" \
 	"	int piece = 0;\n" \
@@ -96,10 +100,14 @@
 	"	}\n" \
 	"	return r;\n" \
 	"}\n" \
+	"float reshape0(vec3 sig) { return reshape(0, sig); }\n" \
+	"float reshape1(vec3 sig) { return reshape(1, sig); }\n" \
+	"float reshape2(vec3 sig) { return reshape(2, sig); }\n"
+#define VIDEO_DOVI_RESHAPE_FS_MAIN \
 	"void main() {\n" \
 	"	vec3 sig = dovi_sample(v_uv) * u_code_scale - u_sample_bias;\n" \
 	"	sig = clamp(sig, u_pivot_lo, u_pivot_hi);\n" \
-	"	vec3 c = clamp(vec3(reshape(0, sig), reshape(1, sig), reshape(2, sig)), 0.0, 1.0);\n" \
+	"	vec3 c = clamp(vec3(reshape0(sig), reshape1(sig), reshape2(sig)), 0.0, 1.0);\n" \
 	"	vec3 lms = pq_eotf(u_ycc_to_rgb * (c - u_ycc_offset));\n" \
 	"	vec3 rgb = u_lms_to_rgb * lms;\n" \
 	"	if (u_sdr_scale == 0.0) {\n" \
@@ -116,8 +124,10 @@
 	"}\n"
 
 static const char video_dovi_reshape_fs[] =
-	VIDEO_DOVI_RESHAPE_FS_HEAD VIDEO_DOVI_RESHAPE_FS_YUV VIDEO_DOVI_RESHAPE_FS_BODY;
+	VIDEO_DOVI_RESHAPE_FS_HEAD VIDEO_DOVI_RESHAPE_FS_YUV VIDEO_DOVI_RESHAPE_FS_BODY
+	VIDEO_DOVI_RESHAPE_FS_GENERIC VIDEO_DOVI_RESHAPE_FS_MAIN;
 static const char video_dovi_reshape_rgb_fs[] =
-	VIDEO_DOVI_RESHAPE_FS_HEAD VIDEO_DOVI_RESHAPE_FS_RGB VIDEO_DOVI_RESHAPE_FS_BODY;
+	VIDEO_DOVI_RESHAPE_FS_HEAD VIDEO_DOVI_RESHAPE_FS_RGB VIDEO_DOVI_RESHAPE_FS_BODY
+	VIDEO_DOVI_RESHAPE_FS_GENERIC VIDEO_DOVI_RESHAPE_FS_MAIN;
 
 #endif

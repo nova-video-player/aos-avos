@@ -40,9 +40,22 @@
  *      only if it is larger than that area is it shrunk, uniformly, about its bottom centre
  *      (so it stays low, where subtitles are expected). A cue that already fits is left
  *      exactly where the authored position puts it. These are the cue's FITTED bounds with
- *      the controls hidden: what the user position is measured on.
+ *      the controls hidden: the reference for the user scale (100%) and what the user position
+ *      is measured on.
  *
- *   3. USER POSITION: the user's vertical position (gfx_vpos, -100..100) shifts the whole
+ *   3. USER SCALE: the user's size (gfx_scale, percent, SUB_GFX_SCALE_MIN..MAX = 50..300, 100 =
+ *      no change) resizes the FITTED cue from step 2, uniformly, about ITS bottom centre (so it
+ *      stays low, like the shrink in step 2, and does not slide sideways when the value leaves
+ *      100). 100% is the fitted size, not the authored one: a cue that had to be shrunk to fit
+ *      the side margins is 100% at that shrunk size, so 150% really is one and a half times
+ *      what the user sees at 100%, whether or not step 2 had to shrink it. The scaled cue is
+ *      fitted into the margins again (moved in, and shrunk only if it is larger than the area),
+ *      so a size that does not fit stops growing at the screen edge instead of leaving the
+ *      screen; those scaled, fitted bounds, with the controls hidden, are what the user
+ *      position is measured on and what the controls clear in step 5. Exactly 100 (or an
+ *      unstamped 0) changes nothing at all: the placement is the one steps 2, 4 and 5 give.
+ *
+ *   4. USER POSITION: the user's vertical position (gfx_vpos, -100..100) shifts the whole
  *      fitted cue vertically; 0 changes nothing. It is always RELATIVE to the fitted place, so
  *      a positive value only ever moves the cue up and a negative one only ever down:
  *        +100 = up until the TOP of the cue reaches the top margin of the viewport,
@@ -59,12 +72,13 @@
  *      in viewport fractions: no pixel range comes from the player, so a resize cannot leave
  *      the two out of step.
  *
- *   4. CONTROL CLEARANCE: the cue, moved vertically by what steps 2 and 3 moved it, is fitted
+ *   5. CONTROL CLEARANCE: the cue, moved vertically by what steps 2 to 4 moved it, is fitted
  *      again, now also keeping gfx_inset_bottom (playback controls / system bars) clear at the
  *      bottom: it is moved up above the controls, and only if it is larger than the area left
  *      is it shrunk, again about its bottom centre. A cue that fits keeps exactly the place
- *      steps 2 and 3 gave it, and returns there when the controls hide. Near the bottom
- *      several user positions can therefore land on the same place while the controls are up.
+ *      steps 2 to 4 gave it, and returns there when the controls hide. Near the bottom
+ *      several user positions can therefore land on the same place while the controls are up
+ *      (and a scale that fits with the controls hidden can be shrunk a little while they show).
  *      With the controls hidden the inset is 0 and this step changes nothing.
  *
  * codec_ffsub blends every rectangle of a cue into ONE bounding-box bitmap, so a cue is a
@@ -109,6 +123,17 @@ static inline void gfx_fit_box(GFX_BOX *b, float ax0, float ay0, float ax1, floa
     b->k *= k;
 }
 
+// Resize the union (and the carried event) uniformly by k about the union's bottom centre,
+// without moving it otherwise. The same anchor gfx_fit_box() shrinks about.
+static inline void gfx_scale_box(GFX_BOX *b, float k) {
+    const float anchor_x = (b->ux0 + b->ux1) * 0.5f, anchor_y = b->uy1;   // bottom centre of the union
+    b->ux0 = anchor_x + (b->ux0 - anchor_x) * k;  b->ux1 = anchor_x + (b->ux1 - anchor_x) * k;
+    b->uy0 = anchor_y + (b->uy0 - anchor_y) * k;  /* uy1 is the anchor */
+    b->ex  = anchor_x + (b->ex  - anchor_x) * k;  b->ey  = anchor_y + (b->ey  - anchor_y) * k;
+    b->ew *= k; b->eh *= k;
+    b->k  *= k;
+}
+
 static inline void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
                                      float *out_x, float *out_y, float *out_w, float *out_h,
                                      float *out_sx, float *out_sy) {
@@ -141,13 +166,30 @@ static inline void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
     }
 
     // 2. the cue's fitted bounds with the controls hidden: the nominal cue fitted into the
-    // viewport minus the margins. Measured on a copy; it only decides how far the cue may move.
+    // viewport minus the margins. Measured on a copy; it is the 100% of the user's scale and
+    // decides how far the cue may move.
     const float ax0 = cw * GFX_EDGE_MARGIN, ax1 = cw - cw * GFX_EDGE_MARGIN;
     const float my  = ch * GFX_EDGE_MARGIN;
     GFX_BOX hid = b;
     gfx_fit_box(&hid, ax0, my, ax1, ch - my);
 
-    // 3. the user's vertical position: one vertical shift for the whole union, a fraction of the
+    // 3. the user's scale, relative to the FITTED size: the fitted cue from step 2 (not the
+    // authored one) is resized about its own bottom centre, so 100% is what step 2 produced and
+    // the cue does not slide when the value leaves 100. The resized cue is fitted into the
+    // margins once more (it may not fit any more) and from here on IS the cue the user sees with
+    // the controls hidden: the position is measured on it and the controls clear it. Exactly 100
+    // skips all of this, so the placement is bit for bit the one without a scale.
+    int scale = f->gfx_scale;
+    if (scale <= 0) scale = SUB_GFX_SCALE_DEFAULT;                  // an unstamped frame
+    if (scale < SUB_GFX_SCALE_MIN) scale = SUB_GFX_SCALE_MIN;
+    if (scale > SUB_GFX_SCALE_MAX) scale = SUB_GFX_SCALE_MAX;
+    if (scale != SUB_GFX_SCALE_DEFAULT) {
+        gfx_scale_box(&hid, (float)scale * 0.01f);
+        gfx_fit_box(&hid, ax0, my, ax1, ch - my);
+        b = hid;                       // already where the hidden fit puts it: no extra move below
+    }
+
+    // 4. the user's vertical position: one vertical shift for the whole union, a fraction of the
     // distance left, from the fitted bounds, to the viewport's top / bottom margin.
     float shift = 0.0f;
     {
@@ -164,13 +206,14 @@ static inline void gfx_map_to_canvas(const SUB_FRAME *f, const SUB_EVENT *ev,
             shift = (float)(-v) * 0.01f * room;
         }
     }
-    // The nominal cue goes where the hidden fit put it (a vertical move, if the fit made one)
-    // plus the user's shift. With the controls hidden the fit below then changes nothing, so the
-    // result is the fitted cue plus the shift exactly; and at 0 it is the plain placement.
+    // The cue goes where the hidden fit put it plus the user's shift. Unscaled, that is the
+    // nominal cue and a vertical move if the fit made one; scaled, the cue is there already. With
+    // the controls hidden the fit below then changes nothing, so the result is the fitted cue plus
+    // the shift exactly; and at 0 it is the plain placement.
     shift += hid.uy1 - b.uy1;
     b.uy0 += shift; b.uy1 += shift; b.ey += shift;
 
-    // 4. control clearance: fit with the reserved bottom space taken off the bottom.
+    // 5. control clearance: fit with the reserved bottom space taken off the bottom.
     float inset = (float)f->gfx_inset_bottom;
     if (inset < 0.0f) inset = 0.0f;
     if (inset > ch * GFX_MAX_INSET) inset = ch * GFX_MAX_INSET;

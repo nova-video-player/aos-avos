@@ -859,6 +859,7 @@ baseline.
 | `gen_token` | **Engine-level** (plain feeder threads, not `stream_sub_ext.c`): the track-generation token contract. A stale token's feed and flush never reach the new track; every cue a feeder saw accepted reached exactly one backend (none lost, none doubled) across 300 switches and `close_track()`s; nothing visible after `close_track()`; the last track loads completely and renders. Kept from `track_switch_loading` because the accepted-equals-delivered accounting cannot be observed through the real stack |
 | `ext_finish_race` (SRT, VTT) | A reopen landing exactly as a feed job finishes. The few-instruction window is opened on purpose (a hooked `pthread_mutex_unlock` sleeps on the worker after the last cue; the hook is a compile-time rename, so it needs no linker `--wrap`, which Apple's ld lacks), so it is deterministic; the test checks the window was opened every round |
 | `style_resize_paused` | Style changes and surface resizes while paused render once at the frozen clock, reach the backend as a coalesced canvas/box pair ending on the last request, survive concurrent style and resize storms, and leave the pause state untouched |
+| `gfx_scale_engine` | The user's bitmap-subtitle scale through the real engine: a track opened before any setter call gets 100 (not the calloc'd 0), a value reaches the backend once per change, values are clamped to 50..300, it is applied while paused, a track opened later starts with it, and two threads hammering the setter neither deadlock nor race |
 
 ### Limits
 

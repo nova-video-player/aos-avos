@@ -1,6 +1,6 @@
-# Runs the native subtitle host tests (test/host) on Linux AND macOS, so macOS support is
+# Runs the native subtitle host tests (test/integration/subtitles) on Linux AND macOS, so macOS support is
 # checked on every change without anyone needing a Mac. Place at <repo root>/.github/workflows/.
-# The avos repository root is the project root (Source/, Include/, test/host/). Place at
+# The avos repository root is the project root (Source/, Include/, test/integration/subtitles/). Place at
 # .github/workflows/avos-host-tests.yml.
 name: avos host tests
 
@@ -34,15 +34,15 @@ jobs:
       - name: Host tests (UBSan)
         env:
           SANITIZERS: undefined
-        run: python3 test/host/test_host_native.py -v
+        run: python3 test/integration/subtitles/test_host_native.py -v
 
       - name: Concurrency tests (ThreadSanitizer)
         env:
           SANITIZERS: thread
-        run: python3 test/host/test_host_native.py -v -k race -k registry -k switch -k seek -k close_open -k style_resize -k jni
+        run: python3 test/integration/subtitles/test_host_native.py -v -k race -k registry -k switch -k seek -k close_open -k style_resize -k jni
 
       - name: SMI error paths (AddressSanitizer, Linux)
         if: runner.os == 'Linux'   # LeakSanitizer makes the empty-record leak visible
         env:
           SANITIZERS: address
-        run: python3 test/host/test_host_native.py -v -k smi_parse_error
+        run: python3 test/integration/subtitles/test_host_native.py -v -k smi_parse_error

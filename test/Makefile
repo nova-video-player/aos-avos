@@ -1,35 +1,40 @@
-# Copyright 2017 Archos SA
+# AVOS test suite entry point (`make test` in the repository root runs this).   make -C test help
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   FFMPEG_PREFIX   install prefix of FFmpeg >= 7.1 (CI uses conda-forge ffmpeg 9)
+#   CC              compiler for the replay/integration tests (default cc)
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Layout:  replay/  integration/  tooling/  device/  support/  tools/
 
-#
-# test stuff
-#
-CC = gcc -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -g -I.
+HERE   := $(abspath .)
+FFMPEG_PREFIX ?= /
+PYTEST ?= python3 -m pytest
+export FFMPEG_PREFIX
 
-ALL = ff comp stream_url
+.PHONY: all help check replay integration tooling subtitles legacy clean
+all: check
 
-# targets
-all:	$(ALL)
+help:
+	@echo "check       run every automated test"
+	@echo "replay|integration|tooling   one test type"
+	@echo "subtitles   native subtitle host harness (SANITIZERS=thread|address|undefined)"
+	@echo "legacy      build the manual utilities in tools/legacy"
 
-comp:	comp.c ../Source/pcm_autogain.c ../Source/stream_filter_audio_agc.c
-	$(CC) -I../Include -g -o comp comp.c
+# Both halves always run; the exit status is non-zero if either one failed.
+check:
+	@rc=0; \
+	$(PYTEST) $(HERE) --ignore=$(HERE)/integration/subtitles || rc=1; \
+	$(MAKE) subtitles || rc=1; \
+	exit $$rc
 
-ff:	ff.c  ../Source/vobsub.c
-	$(CC) -I ../Include  -g -o ff -lavformat -lavcodec -lavutil -lavfilter  ff.c
+replay integration tooling:
+	$(PYTEST) $(HERE) -m $@ --ignore=$(HERE)/integration/subtitles
 
-stream_url:	stream_url.c
-	$(CC) -I ../Include -g -o stream_url stream_url.c
+subtitles:
+	python3 $(HERE)/integration/subtitles/test_host_native.py
 
-clean:	
-	rm -f *.o $(ALL) *.out *~ *.bak core
+legacy:
+	$(MAKE) -C tools/legacy
+
+clean:
+	$(MAKE) -C tools/legacy clean
+	rm -rf __pycache__ .pytest_cache

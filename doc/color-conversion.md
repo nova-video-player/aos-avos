@@ -54,14 +54,14 @@ Run against an installed host FFmpeg:
 
 ```sh
 # Set PKG_CONFIG_PATH if the host FFmpeg is not in pkg-config's search path.
-test/run-color-conversion.sh
+test/integration/ffmpeg/run-color-conversion.sh
 ```
 
 Or build the checked-out FFmpeg out of tree with libswscale and libavutil enabled,
 then use its static libraries:
 
 ```sh
-FFMPEG_BUILD_DIR=/path/to/ffmpeg-build test/run-color-conversion.sh
+FFMPEG_BUILD_DIR=/path/to/ffmpeg-build test/integration/ffmpeg/run-color-conversion.sh
 ```
 
 The script enables UBSan by default (`SANITIZERS=address,undefined` or `none`

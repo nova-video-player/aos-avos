@@ -223,7 +223,7 @@ CFLAGS='-fsanitize=undefined -g' python3 test/run-speed-transitions.py
 
 Both suites pass normally and with UndefinedBehaviorSanitizer. Android builds
 for armeabi-v7a and arm64-v8a also pass with `LIBAV_CONFIG=full`. The older
-`test/pause_resume_sync.py` cannot currently run because it extracts a removed
+`test/replay/pause_resume_sync.py` cannot currently run because it extracts a removed
 `_stream_audio_apply_preload` helper; the new presentation suite exercises the
 current pause/reset path. No physical lip-sync validation is claimed.
 

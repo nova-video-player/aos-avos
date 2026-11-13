@@ -41,7 +41,8 @@ typedef struct { struct ctx *priv; } STREAM_FILTER_AUDIO;
 static void legacy(AVFilterContext *c,int *ring,int64_t *a,int64_t *b,
     int64_t *in,int64_t *out,double *tempo) {
     (void)c;(void)a;(void)b;(void)out;(void)tempo;
-    if(ring)*ring=100; if(in)*in=1100;
+    if(ring)*ring=100;
+    if(in)*in=1100;
 }
 static void extended(AVFilterContext *c,int *ring,int64_t *a,int64_t *b,
     int64_t *in,int64_t *out,double *tempo,int64_t *media) {

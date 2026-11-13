@@ -154,7 +154,7 @@ int main(void) {
         run_c(r'''
 #include <assert.h>
 #define AUDIO_WRITE_RETRY -99
-#define DBG if (0)
+#define DBG /* debug logging is off in this replay; LOG() is already a no-op */
 #define LOG(...) ((void)0)
 struct track { int track_paused; unsigned pause_generation; };
 static int classify(struct track *at,int ret,int write_started_paused,unsigned write_pause_generation) {

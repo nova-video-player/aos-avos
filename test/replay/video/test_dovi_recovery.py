@@ -23,7 +23,7 @@ from test_dovi_policy import VIDEO, POLICY
 
 HARNESS = VIDEO.replace(
     'int dv_profile,', 'int width, height, subfmt, profile, valid, msPerFrame, '
-    'flush_frames, delay_frames, no_extra; int dv_profile,') + POLICY + r'''
+    'flush_frames, delay_frames, no_extra, dv_reshape_active; int dv_profile,') + POLICY + r'''
 #include <pthread.h>
 typedef struct STREAM STREAM;
 typedef struct DEC DEC;

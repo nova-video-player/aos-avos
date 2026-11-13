@@ -12,24 +12,73 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# AVOS test suite entry point. `make test` in the repository root runs this directory's default
+# target (`check`); `make -C test help` lists the targets.
 #
-# test stuff
+#   FFMPEG_PREFIX   install prefix of FFmpeg >= 7.1; only needed when FFmpeg is not installed
+#                   system-wide (CI uses conda-forge ffmpeg 9). Exported to pkg-config and the
+#                   dynamic loader for every recipe below.
+#   CC              compiler for the replay/integration tests (default cc)
+#   PYTEST          how to start pytest (default `python3 -m pytest`; pytest must be installed)
 #
-CC = gcc -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -g -I.
+# Layout:  replay/  integration/  tooling/  device/  support/  tools/
+# test/device/ needs an Android device and is not run by any target here.
 
-ALL = ff comp stream_url
+HERE   := $(abspath .)
+FFMPEG_PREFIX ?= /
+PYTEST ?= python3 -m pytest
+export FFMPEG_PREFIX
 
-# targets
-all:	$(ALL)
+# The shell-driven checks (colorconv, subtitles) find FFmpeg through pkg-config; pytest gets the same
+# from conftest.py.
+ifneq ($(FFMPEG_PREFIX),/)
+export PKG_CONFIG_PATH := $(FFMPEG_PREFIX)/lib/pkgconfig$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH))
+export LD_LIBRARY_PATH := $(FFMPEG_PREFIX)/lib$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
+export DYLD_LIBRARY_PATH := $(FFMPEG_PREFIX)/lib$(if $(DYLD_LIBRARY_PATH),:$(DYLD_LIBRARY_PATH))
+endif
 
-comp:	comp.c ../Source/pcm_autogain.c ../Source/stream_filter_audio_agc.c
-	$(CC) -I../Include -g -o comp comp.c
+.PHONY: all help check replay integration tooling subtitles colorconv legacy clean
+all: check
 
-ff:	ff.c  ../Source/vobsub.c
-	$(CC) -I ../Include  -g -o ff -lavformat -lavcodec -lavutil -lavfilter  ff.c
+help:
+	@echo "check       every automated test: all pytest suites, the subtitle host harness and the color-conversion check"
+	@echo "replay      pytest: regression tests that recompile functions extracted from production C"
+	@echo "integration pytest integration tests + the subtitle host harness + the color-conversion check"
+	@echo "tooling     pytest: tests of the stress analyzers and campaign scripts"
+	@echo "subtitles   native subtitle host harness alone (SANITIZERS=thread|address|undefined|none)"
+	@echo "colorconv   FFmpeg color-conversion check alone (SANITIZERS=none to disable UBSan)"
+	@echo "legacy      build the manual utilities in tools/legacy"
+	@echo "(device/ needs an Android device and is not run here)"
 
-stream_url:	stream_url.c
-	$(CC) -I ../Include -g -o stream_url stream_url.c
+# Every part always runs; the exit status is non-zero if any part failed.
+check:
+	@rc=0; \
+	$(PYTEST) $(HERE) --ignore=$(HERE)/integration/subtitles || rc=1; \
+	$(MAKE) subtitles || rc=1; \
+	$(MAKE) colorconv || rc=1; \
+	exit $$rc
 
-clean:	
-	rm -f *.o $(ALL) *.out *~ *.bak core
+replay tooling:
+	$(PYTEST) $(HERE) -m $@ --ignore=$(HERE)/integration/subtitles
+
+# "integration" is everything under integration/: the pytest part, the subtitle harness (its own runner,
+# so pytest skips it) and the color-conversion check (a shell script that builds and runs a C program).
+integration:
+	@rc=0; \
+	$(PYTEST) $(HERE) -m integration --ignore=$(HERE)/integration/subtitles || rc=1; \
+	$(MAKE) subtitles || rc=1; \
+	$(MAKE) colorconv || rc=1; \
+	exit $$rc
+
+subtitles:
+	python3 $(HERE)/integration/subtitles/test_host_native.py
+
+colorconv:
+	bash $(HERE)/integration/ffmpeg/run-color-conversion.sh
+
+legacy:
+	$(MAKE) -C tools/legacy
+
+clean:
+	$(MAKE) -C tools/legacy clean
+	rm -rf __pycache__ .pytest_cache

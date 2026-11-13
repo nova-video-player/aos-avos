@@ -50,7 +50,7 @@ retain an original `logcat -v epoch` recording and collector errors. Do not keep
 only lines containing `error`, `diff` or `wrote`.
 
 For rapid remote-OK reproduction, use `BURST_PAIRS=10
-test/stress_resume_validate.sh 5 8 2000` (on one shell line). The
+test/device/stress_resume_validate.sh 5 8 2000` (on one shell line). The
 [burst procedure](TEST.md#rapid-pauseplay-bursts) sends each sequence through
 one adb invocation and verifies the actual native pause/resume pairs. Analyze
 the saved `burst-N.log` and `burst-N-review.json`, including interrupted recovery
@@ -84,14 +84,14 @@ of underrun messages is not proof that underrun monitoring was active.
 From the repository root, analyze a saved recording, including logcat brief:
 
 ```bash
-python3 test/analyze_stress_recording.py avos-21.log --format markdown > /tmp/avos-21-report.md
-python3 test/analyze_stress_recording.py avos-21.log > /tmp/avos-21-report.json
+python3 test/device/analyze_stress_recording.py avos-21.log --format markdown > /tmp/avos-21-report.md
+python3 test/device/analyze_stress_recording.py avos-21.log > /tmp/avos-21-report.json
 ```
 
 For a harness capture, preserve its thresholds and phase reference:
 
 ```bash
-python3 test/analyze_stress_recording.py path/to/logcat.log \
+python3 test/device/analyze_stress_recording.py path/to/logcat.log \
   --config path/to/analyzer-config.json --format markdown > /tmp/playback-report.md
 ```
 
@@ -103,9 +103,9 @@ For a single epoch-timestamped harness observation, use the live analyzer with
 the threshold environment used during capture:
 
 ```bash
-python3 test/analyze_stress.py seek path/to/current-seek.log
-python3 test/analyze_stress.py resume path/to/current-resume.log
-python3 test/analyze_stress.py speed path/to/current-cycle.log
+python3 test/device/analyze_stress.py seek path/to/current-seek.log
+python3 test/device/analyze_stress.py resume path/to/current-resume.log
+python3 test/device/analyze_stress.py speed path/to/current-cycle.log
 ```
 
 Here, inspect `healthy` and `reason`: exit 0 means analysis completed, not that

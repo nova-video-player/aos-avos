@@ -98,5 +98,5 @@ the subtitle canvas are re-fitted to the new window size, also while paused.
 `.github/workflows/avos-sim-build.yml` builds this target on `ubuntu-latest` and
 `macos-latest` for every push and pull request.
 
-The native subtitle engine tests in `test/host/` are separate from the sim binary:
+The native subtitle engine tests in `test/integration/subtitles/` are separate from the sim binary:
 they compile selected engine sources plus stubs and run on the host. See `doc/TEST.md`.

@@ -1,7 +1,7 @@
 # AVOS playback validation
 
 The device harnesses drive playback that is already running. They share
-`test/analyze_stress.py` for recovery, stutter indicators and internal A/V phase
+`test/device/analyze_stress.py` for recovery, stutter indicators and internal A/V phase
 checks. A PASS applies to the captured evidence and configured thresholds.
 **Physical lipsync and displayed-frame cadence remain unmeasured.**
 
@@ -14,12 +14,12 @@ APK and is disabled by default. Start playback as usual, then for example:
 
 ```bash
 ANDROID_SERIAL=192.168.0.9:5555 SURFACEFLINGER_CAPTURE=1 \
-  bash test/stress_seek_validate.sh 10 8 2000
+  bash test/device/stress_seek_validate.sh 10 8 2000
 
 ANDROID_SERIAL=192.168.0.9:5555 SURFACEFLINGER_CAPTURE=1 \
   CONTINUE_ON_FAIL=1 ROUNDS=2 RESUME_CYCLES=5 SEEK_CYCLES=10 \
   BURST_PAIRS=10 BURST_GAP_MS=150 SESSION_RAW=1 \
-  python3 test/run_stress_campaign.py
+  python3 test/device/run_stress_campaign.py
 ```
 
 Use the address of the device being tested. The collector inherits
@@ -45,7 +45,7 @@ if that baseline is unavailable it does not substitute a later phase's baseline.
 To regenerate a phase report offline:
 
 ```bash
-python3 test/surfaceflinger_timing.py report \
+python3 test/device/surfaceflinger_timing.py report \
   --samples path/to/phase/surfaceflinger-samples.jsonl \
   --log path/to/phase/logcat.log
 ```
@@ -91,7 +91,7 @@ After installing a build with `at_pcm_observe`, enable independent diagnostics:
 
 ```bash
 PCM_PRESENTATION_CAPTURE=1 SURFACEFLINGER_CAPTURE=1 \
-  bash test/stress_seek_validate.sh 10 8 2000
+  bash test/device/stress_seek_validate.sh 10 8 2000
 ```
 
 This also works in campaign and speed-session wrappers. The existing native
@@ -121,8 +121,8 @@ collection overhead while keeping audio evidence unchanged.
 Generate a readable report and retain JSON for comparison:
 
 ```bash
-python3 test/analyze_stress_recording.py avos-21.log --format markdown > /tmp/avos-21-review.md
-python3 test/analyze_stress_recording.py avos-21.log > /tmp/avos-21-review.json
+python3 test/device/analyze_stress_recording.py avos-21.log --format markdown > /tmp/avos-21-review.md
+python3 test/device/analyze_stress_recording.py avos-21.log > /tmp/avos-21-review.json
 ```
 
 Both commands write a complete report even when they exit **1** for observed
@@ -132,7 +132,7 @@ configuration or an unreadable file. The default format remains JSON.
 For logs captured by a device harness, replay its saved thresholds and reference:
 
 ```bash
-python3 test/analyze_stress_recording.py path/to/phase/logcat.log \
+python3 test/device/analyze_stress_recording.py path/to/phase/logcat.log \
   --config path/to/phase/analyzer-config.json --format markdown > /tmp/playback-review.md
 ```
 
@@ -241,10 +241,10 @@ To run the campaign and automatically generate both recording reports:
 ```bash
 ROUNDS=2 RESUME_CYCLES=5 SEEK_CYCLES=10 \
 BURST_PAIRS=10 BURST_GAP_MS=0 SESSION_RAW=1 \
-python3 test/run_stress_campaign.py
+python3 test/device/run_stress_campaign.py
 
 # Preview without contacting the device:
-BURST_PAIRS=10 python3 test/run_stress_campaign.py --dry-run
+BURST_PAIRS=10 python3 test/device/run_stress_campaign.py --dry-run
 ```
 
 Start video playback first, or supply `--video` to capture a fresh launch:
@@ -253,7 +253,7 @@ Start video playback first, or supply `--video` to capture a fresh launch:
 PCM_PRESENTATION_CAPTURE=1 SURFACEFLINGER_CAPTURE=1 \
 CONTINUE_ON_FAIL=1 ROUNDS=2 RESUME_CYCLES=5 SEEK_CYCLES=10 \
 BURST_PAIRS=10 BURST_GAP_MS=150 SESSION_RAW=1 \
-python3 test/run_stress_campaign.py \
+python3 test/device/run_stress_campaign.py \
   --serial 67301FDDV0027C \
   --video 'content://com.archos.media.videocommunity/external/video/media/277'
 ```
@@ -305,13 +305,13 @@ The receiver is absent from release builds and accepts configuration broadcasts
 only from callers with Android's `DUMP` permission (including adb shell).
 
 ```bash
-python3 test/run_speed_session.py \
+python3 test/device/run_speed_session.py \
   --video /sdcard/Movies/test.mkv --backend atempo --cycles 5 --hold 8
 
-python3 test/run_speed_session.py \
+python3 test/device/run_speed_session.py \
   --video 'smb://server/share/test.mkv' --backend sonic --cycles 5 --hold 8
 
-python3 test/run_speed_session.py \
+python3 test/device/run_speed_session.py \
   --video /sdcard/Movies/test.mkv --backend audiotrack --cycles 5 --hold 8
 ```
 
@@ -344,7 +344,7 @@ the saved preferences. If the host is killed or adb disconnects, the on-device
 backup remains; the recovery ID is printed and saved in `manifest.json`:
 
 ```bash
-python3 test/run_speed_session.py --restore SESSION_ID
+python3 test/device/run_speed_session.py --restore SESSION_ID
 ```
 
 Use the same device/package for recovery. An outstanding backup blocks a new
@@ -362,26 +362,26 @@ Individual drivers and the campaign without automatic report generation:
 
 ```bash
 # Debug commands; the helper uses PACKAGE (default org.courville.nova).
-test/av.sh dbgs 2
-test/av.sh dbgsink 2
-test/av.sh dbga 2
+test/device/av.sh dbgs 2
+test/device/av.sh dbgsink 2
+test/device/av.sh dbga 2
 
 # count, recovery timeout seconds, minimum media/wall progress milliseconds
 # Resume also accepts minimum and maximum pause milliseconds.
-test/stress_resume_validate.sh 20 8 2000 500 3000
-test/stress_seek_validate.sh 20 8 2000
-test/stress_seek_dpad_validate.sh 20 8 2000
-test/stress_seek_dpad_hold_validate.sh 10 8 2000
+test/device/stress_resume_validate.sh 20 8 2000 500 3000
+test/device/stress_seek_validate.sh 20 8 2000
+test/device/stress_seek_dpad_validate.sh 20 8 2000
+test/device/stress_seek_dpad_hold_validate.sh 10 8 2000
 
 # cycles, high-speed hold seconds, delay between keys, return-to-1x settle seconds
-LABEL=atempo REQUIRE_FILTER=atempo test/stress_speed_validate.sh 5 8 0.02 2
-LABEL=sonic REQUIRE_FILTER=sonic test/stress_speed_validate.sh 5 8 0.02 2
-LABEL=audiotrack REQUIRE_FILTER=audiotrack test/stress_speed_validate.sh 5 8 0.02 2
+LABEL=atempo REQUIRE_FILTER=atempo test/device/stress_speed_validate.sh 5 8 0.02 2
+LABEL=sonic REQUIRE_FILTER=sonic test/device/stress_speed_validate.sh 5 8 0.02 2
+LABEL=audiotrack REQUIRE_FILTER=audiotrack test/device/stress_speed_validate.sh 5 8 0.02 2
 
 # Resume + seek; speed is optional and does not select/change the backend.
-DRY_RUN=1 SPEED_CYCLES=1 test/stress_campaign.sh
-ROUNDS=2 RESUME_CYCLES=20 SEEK_CYCLES=20 test/stress_campaign.sh
-SPEED_CYCLES=2 SPEED_HOLD_SEC=8 test/stress_campaign.sh
+DRY_RUN=1 SPEED_CYCLES=1 test/device/stress_campaign.sh
+ROUNDS=2 RESUME_CYCLES=20 SEEK_CYCLES=20 test/device/stress_campaign.sh
+SPEED_CYCLES=2 SPEED_HOLD_SEC=8 test/device/stress_campaign.sh
 ```
 
 The speed backend preference is resolved when playback starts. Start a new
@@ -405,16 +405,16 @@ the play/pause control focused; OK can operate another control if focus moves.
 
 ```bash
 # Five rounds, each with 10 pause/play pairs (20 OK presses), no added delay.
-BURST_PAIRS=10 test/stress_resume_validate.sh 5 8 2000
+BURST_PAIRS=10 test/device/stress_resume_validate.sh 5 8 2000
 
 # Add 150 ms between presses on the device.
-BURST_PAIRS=10 BURST_GAP_MS=150 test/stress_resume_validate.sh 5 8 2000
+BURST_PAIRS=10 BURST_GAP_MS=150 test/device/stress_resume_validate.sh 5 8 2000
 
 # Use the media toggle to avoid dependence on OK-button focus.
-BURST_PAIRS=10 BURST_KEY=KEYCODE_MEDIA_PLAY_PAUSE test/stress_resume_validate.sh 5 8 2000
+BURST_PAIRS=10 BURST_KEY=KEYCODE_MEDIA_PLAY_PAUSE test/device/stress_resume_validate.sh 5 8 2000
 
 # Print the device command without contacting adb or creating artifacts.
-BURST_PAIRS=10 DRY_RUN=1 test/stress_resume_validate.sh
+BURST_PAIRS=10 DRY_RUN=1 test/device/stress_resume_validate.sh
 ```
 
 Each burst uses one `adb shell` invocation. With `BURST_GAP_MS=0` (default),
@@ -676,15 +676,15 @@ default; `CONTINUE_ON_FAIL=1` permits collecting subsequent phases.
 ## Offline checks and regression tests
 
 ```bash
-python3 test/test_analyze_stress.py
+python3 -m pytest test/tooling/test_analyze_stress.py
 
 # One epoch-timestamped cycle, with its original threshold environment:
-python3 test/analyze_stress.py resume path/to/current-resume.log
-python3 test/analyze_stress.py seek path/to/current-seek.log
-python3 test/analyze_stress.py speed path/to/current-cycle.log
+python3 test/device/analyze_stress.py resume path/to/current-resume.log
+python3 test/device/analyze_stress.py seek path/to/current-seek.log
+python3 test/device/analyze_stress.py speed path/to/current-cycle.log
 
 # Saved recordings, including logcat brief without outer timestamps:
-python3 test/analyze_stress_recording.py avos-21.log > /tmp/avos-21-report.json
+python3 test/device/analyze_stress_recording.py avos-21.log > /tmp/avos-21-report.json
 ```
 
 The single-cycle analyzer prints `healthy=0|1` and a `verdict`; exit 0 means parsing completed,
@@ -716,23 +716,36 @@ on seek/open/stop so a later boundary cannot repair another playback context.
 `stress_pause.sh`, `stress_seek.sh` and `stress_speed.sh` remain unvalidated
 chaos drivers; successful completion is not a playback verdict.
 
-The separate native host harnesses are indexed in `AGENT.md`. `make test`
-builds `ff`, `comp`, and `stream_url`; it does not run the Python or shell suites
-or automatically execute those binaries. The subtitle engine's host tests live in
-`test/host/` and are run separately; see
-[Native subtitle engine host tests](#native-subtitle-engine-host-tests).
+The separate native host harnesses are indexed in `AGENT.md`. `make test` in the
+repository root runs `make -C test`, whose default target is `check`: the pytest
+suites (`replay/`, `integration/ffmpeg/`, `tooling/`), the subtitle host harness
+(`integration/subtitles/`) and the FFmpeg color-conversion check. `device/` needs
+hardware and is never run. The legacy `ff`, `comp` and `stream_url` tools are not
+part of `check`; build them with `make -C test legacy`.
 
-Run all discoverable host regression tests (no Android device required):
+Run all host regression tests (no Android device required). pytest is required
+(`pip install pytest`, or `uv run --with pytest python3 -m pytest ...`); set
+`FFMPEG_PREFIX=/path/to/ffmpeg` only for a non-system FFmpeg:
 
 ```bash
-python3 -m unittest discover -s test -p 'test_*.py'
+make -C test check        # everything below, one exit status
+make -C test replay       # pytest -m replay
+make -C test integration  # pytest -m integration + subtitles + color conversion
+make -C test tooling      # pytest -m tooling
+make -C test subtitles    # subtitle host harness only
+make -C test colorconv    # color-conversion check only
+
+python3 -m pytest test --ignore=test/integration/subtitles   # pytest suites only
 ```
+
+`python3 -m unittest discover -s test` finds no tests, because the files are
+pytest-style and live in directories that are not packages; use the commands above.
 
 The former monolithic `pause_resume_sync.py` replay used removed functions and
 obsolete preload/timeout assumptions. It is now a compatibility runner:
 
 ```bash
-python3 test/pause_resume_sync.py
+python3 test/replay/pause_resume_sync.py
 ```
 
 It runs these discoverable production-code replays:
@@ -756,14 +769,15 @@ contracts, not device scheduling, receiver relock or physical lipsync.
 
 ## Native subtitle engine host tests
 
-`test/host/test_host_native.py` compiles small C programs together with the **real**
+`test/integration/subtitles/test_host_native.py` compiles small C programs together with the **real**
 subtitle engine sources, links them on the host and runs them. No NDK, device or
 Makefile change is involved. Android-only headers (`jni.h`, `android/*`, `EGL`,
 `GLES2`) are replaced by `Include/host_compat/host_stubs.h`; the few symbols that live elsewhere in the tree
 are weak stand-ins in `stubs.c`; `fake_backend.c` replaces the SSA/SRT/GFX decoders
 where a test must control exactly when a backend answers, how slowly, and what it was
 fed. The directory is not a Python package, so
-`python3 -m unittest discover -s test` does **not** run it; invoke it explicitly.
+`pytest` does **not** collect it (it is its own unittest runner); `make -C test subtitles`
+or `make -C test check` runs it, or invoke it directly.
 
 ### Environment
 
@@ -791,18 +805,18 @@ fed. The directory is not a Python package, so
 ### Running
 
 ```bash
-python3 test/host/test_host_native.py                 # all, UBSan (the default)
-python3 test/host/test_host_native.py -v -k registry  # one test, every check listed
+python3 test/integration/subtitles/test_host_native.py                 # all, UBSan (the default)
+python3 test/integration/subtitles/test_host_native.py -v -k registry  # one test, every check listed
 
 # Concurrency tests under ThreadSanitizer
-SANITIZERS=thread python3 test/host/test_host_native.py -v \
+SANITIZERS=thread python3 test/integration/subtitles/test_host_native.py -v \
   -k race -k registry -k ext_ -k style_resize -k jni
 
 # Lifetime / use-after-free checks under AddressSanitizer
-SANITIZERS=address,undefined python3 test/host/test_host_native.py -v \
+SANITIZERS=address,undefined python3 test/integration/subtitles/test_host_native.py -v \
   -k registry -k ext_ -k jni
 
-HOST_TEST_OUTPUT=1 python3 test/host/test_host_native.py   # print passing output too
+HOST_TEST_OUTPUT=1 python3 test/integration/subtitles/test_host_native.py   # print passing output too
 ```
 
 Output is one row per test (PASS / FAIL / SKIP, duration, number of checks). A failing
@@ -871,7 +885,7 @@ baseline.
   external-SRT/VTT fixes) six of the nine `ext_*`/`gen_token` runs fail -- `ext_reselect`, `ext_interrupt`
   and `ext_finish_race`, SRT and VTT, each with "SILENT FAILURE ... n_events=0" -- and `ext_close_open` and
   `gen_token` pass:
-  `HOST_BASELINE_REV=c4cfcb8~1 python3 test/host/test_host_native.py -k ext_ -k gen_token`.
+  `HOST_BASELINE_REV=c4cfcb8~1 python3 test/integration/subtitles/test_host_native.py -k ext_ -k gen_token`.
   `HOST_TEST_LOG=1` prints the app's own log lines for a failing run.
 - The mock JavaVM validates our use of the JNI contract, not a real ART.
 - The render thread never gets a real EGL surface (the same as production 3D mode

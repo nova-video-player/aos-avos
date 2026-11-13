@@ -2,7 +2,7 @@ priv.mk
 Include/private.h
 avos.map
 tags
-build
+build*/
 test/asf
 test/clusters
 test/curl
@@ -32,3 +32,8 @@ test/sdl
 test/ifo
 obj
 libs
+__pycache__/
+*.pyc
+.pytest_cache/
+*.gcda
+*.gcno

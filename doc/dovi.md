@@ -109,7 +109,7 @@ specification. Each one logs its outcome, so a capture shows which applied.
 
 ## Validation
 
-- `test/test_dovi_reshape.py`: per-frame parameters against an independent RPU
+- `test/replay/video/test_dovi_reshape.py`: per-frame parameters against an independent RPU
   parser.
 - Device statistics (`sfdec_dovi_gl: frames= stale= unmatched= dropped= late=`)
   every 240 frames; stale, unmatched and dropped stay at 0 during playback and

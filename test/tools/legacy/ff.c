@@ -19,16 +19,6 @@
 
 #include "dump.h"
 
-#define STANDALONE
-#define CONFIG_VOBSUB
-#define serprintf printf
-
-#define DBGV1 if( 1 )
-#define DBGV2 if( 1 )
-#define DUMP_PPM
-
-#include "../Source/vobsub.c"
-
 static int video_stream, audio_stream, sub_stream;
 int video_scale;
 int video_rate;
@@ -39,9 +29,6 @@ int sub_rate;
 
 int thread_count = 2;
 
-VOBSUB *vobsub;
-VIDEO_FRAME frame;
-
 #define DUMP_VIDEO
 #define DECODE_VIDEO
 
@@ -50,7 +37,6 @@ VIDEO_FRAME frame;
 //#define DECODE_AUDIO
 
 #define DUMP_SUB
-//#define DECODE_SUB
 
 static void DumpPacketHead(const AVPacket *packet)
 {
@@ -188,10 +174,6 @@ printf("CHK %04X ", chk );
 //Dump( packet->data, packet->size );
 printf("[%s]", packet->data ? (char *)packet->data : "" );
 printf("\r\n" );
-#ifdef DECODE_SUB
-	VIDEO_FRAME *f = &frame;
-	VOBSUB_parse_chunk( vobsub, packet->data, packet->size, 0, &f );
-#endif
 #endif
 				av_packet_unref(packet);
 			}
@@ -371,15 +353,6 @@ printf("s: extradata_size %d\r\n", par->extradata_size);
 		// Find the decoder for the sub stream
 		sCodec = avcodec_find_decoder(par->codec_id);
 
-#ifdef DECODE_SUB
-		vobsub = VOBSUB_create( NULL );
-		frame.size = 2*720*576;
-		frame.data[0] = malloc( frame.size );
-		frame.colorspace = AV_IMAGE_GRAYSCALE;
-		frame.linestep[0] = 720;
-		frame.width    = 720;
-		frame.height   = 576;
-#endif
 		if (sCodec == NULL) {
 printf("cannot find sub codec\r\n");
 		} else {

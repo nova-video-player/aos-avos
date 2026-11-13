@@ -676,7 +676,7 @@ default; `CONTINUE_ON_FAIL=1` permits collecting subsequent phases.
 ## Offline checks and regression tests
 
 ```bash
-python3 test/tooling/test_analyze_stress.py
+python3 -m pytest test/tooling/test_analyze_stress.py
 
 # One epoch-timestamped cycle, with its original threshold environment:
 python3 test/device/analyze_stress.py resume path/to/current-resume.log
@@ -716,17 +716,30 @@ on seek/open/stop so a later boundary cannot repair another playback context.
 `stress_pause.sh`, `stress_seek.sh` and `stress_speed.sh` remain unvalidated
 chaos drivers; successful completion is not a playback verdict.
 
-The separate native host harnesses are indexed in `AGENT.md`. `make test`
-builds `ff`, `comp`, and `stream_url`; it does not run the Python or shell suites
-or automatically execute those binaries. The subtitle engine's host tests live in
-`test/integration/subtitles/` and are run separately; see
-[Native subtitle engine host tests](#native-subtitle-engine-host-tests).
+The separate native host harnesses are indexed in `AGENT.md`. `make test` in the
+repository root runs `make -C test`, whose default target is `check`: the pytest
+suites (`replay/`, `integration/ffmpeg/`, `tooling/`), the subtitle host harness
+(`integration/subtitles/`) and the FFmpeg color-conversion check. `device/` needs
+hardware and is never run. The legacy `ff`, `comp` and `stream_url` tools are not
+part of `check`; build them with `make -C test legacy`.
 
-Run all discoverable host regression tests (no Android device required):
+Run all host regression tests (no Android device required). pytest is required
+(`pip install pytest`, or `uv run --with pytest python3 -m pytest ...`); set
+`FFMPEG_PREFIX=/path/to/ffmpeg` only for a non-system FFmpeg:
 
 ```bash
-python3 -m unittest discover -s test -p 'test_*.py'
+make -C test check        # everything below, one exit status
+make -C test replay       # pytest -m replay
+make -C test integration  # pytest -m integration + subtitles + color conversion
+make -C test tooling      # pytest -m tooling
+make -C test subtitles    # subtitle host harness only
+make -C test colorconv    # color-conversion check only
+
+python3 -m pytest test --ignore=test/integration/subtitles   # pytest suites only
 ```
+
+`python3 -m unittest discover -s test` finds no tests, because the files are
+pytest-style and live in directories that are not packages; use the commands above.
 
 The former monolithic `pause_resume_sync.py` replay used removed functions and
 obsolete preload/timeout assumptions. It is now a compatibility runner:
@@ -763,7 +776,8 @@ Makefile change is involved. Android-only headers (`jni.h`, `android/*`, `EGL`,
 are weak stand-ins in `stubs.c`; `fake_backend.c` replaces the SSA/SRT/GFX decoders
 where a test must control exactly when a backend answers, how slowly, and what it was
 fed. The directory is not a Python package, so
-`python3 -m unittest discover -s test` does **not** run it; invoke it explicitly.
+`pytest` does **not** collect it (it is its own unittest runner); `make -C test subtitles`
+or `make -C test check` runs it, or invoke it directly.
 
 ### Environment
 

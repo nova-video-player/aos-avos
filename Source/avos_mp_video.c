@@ -136,7 +136,8 @@ static void send_metadata(avos_mp_t *mp, avos_mp_video_t *video, int notify)
 	    decoder);
 	if (changed && notify) {
 		MPLOG("changed");
-		avos_mp_sendevent(mp, MEDIA_INFO, MEDIA_INFO_METADATA_UPDATE, 0);
+		// extra=1 identifies a language-label refresh, without track reselection.
+		avos_mp_sendevent(mp, MEDIA_INFO, MEDIA_INFO_METADATA_UPDATE, notify == 2 ? 1 : 0);
 	}
 }
 
@@ -186,6 +187,9 @@ static void stream_msg_cb(STREAM *s, STREAM_MESSAGE message)
 			video->height = vp->interlaced == VIDEO_INTERLACED_ONE_FIELD ? vp->height * 2 : vp->height;
 			avos_mp_sendevent(mp, MEDIA_SET_VIDEO_SIZE, video->width, video->height);
 		}
+		break;
+	case STREAM_SUB_LANGUAGE_CHANGED:
+		send_metadata(mp, video, 2);
 		break;
 	case STREAM_AUDIO_PROPS_CHANGED:
 	case STREAM_SUB_PROPS_CHANGED:

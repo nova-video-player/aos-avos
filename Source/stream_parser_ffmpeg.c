@@ -33,6 +33,7 @@
 #include "util.h"
 #include "dts.h"
 #include "stream_fd.h"
+#include "sub_language.h"
 
 #if defined(__APPLE__) && !defined(pread64)
 #define pread64 pread
@@ -51,6 +52,7 @@
 #include "video_dovi_rpu.h"
 #include "video_hdr.h"
 #include <libavutil/time.h>
+#include <libavutil/sha.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -180,6 +182,10 @@ typedef struct FF_PRIV
 	AVQueue		vq;
 	AVQueue		sq;
 	AVQueue		sub_cache; // bounded packet history for all internal subtitle tracks
+	SUB_LANGUAGE_SESSION *language_session;
+	char language_cache_key[65];
+	int language_playback_registered;
+	int language_cache_dirty;
 	
 	STREAM		*s;
 	UINT64		size;
@@ -998,9 +1004,8 @@ DBGP serprintf("srate=%d; sscale=%d\n", sub->rate, sub->scale);
 					if (n >= AV_NAME_LEN) sub->name[AV_NAME_LEN - 1] = '\0';
 				}
 
-				if (lang) {
-					strnZcpy( sub->lang, lang->value, AV_NAME_LEN );
-				}
+				sub->language_source = sub_language_resolve(lang ? lang->value : NULL,
+					sub->name, sub->lang, sizeof(sub->lang));
 
 				sub->disposition = st->disposition;
 
@@ -1084,6 +1089,80 @@ DBGP serprintf("\r\n");
 	}
 
 	return 0;
+}
+
+static int language_format(int format)
+{
+	switch (format) {
+	case SUB_FORMAT_TEXT: return SUB_LANG_TEXT;
+	case SUB_FORMAT_SSA: case SUB_FORMAT_ASS: return SUB_LANG_ASS;
+	case SUB_FORMAT_WEBVTT: return SUB_LANG_WEBVTT;
+	case SUB_FORMAT_MOV_TEXT: return SUB_LANG_MOV_TEXT;
+	default: return 0;
+	}
+}
+
+// Fingerprint the content, not a short-lived proxy URL or authorization headers.
+static void language_cache_key(FF_PRIV *priv)
+{
+	AVIOContext *pb = priv->fmt->pb;
+	if (!sub_language_cache_enabled() || !priv->av.subs_max || !pb || !(pb->seekable & AVIO_SEEKABLE_NORMAL)) return;
+	int64_t pos = avio_tell(pb), size = avio_size(pb);
+	if (pos < 0 || size <= 0) return;
+	unsigned char prefix[65536], digest[32];
+	int count = (int)MIN(size, (int64_t)sizeof(prefix));
+	if (avio_seek(pb, 0, SEEK_SET) < 0) return;
+	int got = avio_read(pb, prefix, count);
+	if (avio_seek(pb, pos, SEEK_SET) != pos || got != count) return;
+	struct AVSHA *sha = av_sha_alloc();
+	if (!sha) return;
+	av_sha_init(sha, 256);
+	av_sha_update(sha, prefix, count);
+	char description[1024];
+	int n = snprintf(description, sizeof(description), "v2:%"PRId64":%d:%d\n", size, priv->duration, priv->av.subs_max);
+	av_sha_update(sha, (unsigned char *)description, n);
+	for (int i = 0; i < priv->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &priv->av.sub[i];
+		n = snprintf(description, sizeof(description), "%d:%d:%d:%d:%s:%s\n",
+			i, sub->stream, sub->format, sub->disposition, sub->name, sub->lang);
+		av_sha_update(sha, (unsigned char *)description, MIN(n, (int)sizeof(description) - 1));
+	}
+	av_sha_final(sha, digest);
+	av_free(sha);
+	for (int i = 0; i < 32; ++i) snprintf(priv->language_cache_key + i * 2, 3, "%02x", digest[i]);
+}
+
+static int language_cache_load(FF_PRIV *priv)
+{
+	SUB_LANGUAGE_RESULT results[SUB_TRACK_MAX];
+	int recent = 0;
+	int count = sub_language_cache_read(priv->language_cache_key, results, SUB_TRACK_MAX, &recent);
+	for (int i = 0; i < count; ++i) {
+		SUB_LANGUAGE_RESULT *r = &results[i];
+		if (r->index >= priv->av.subs_max) continue;
+		SUB_PROPERTIES *sub = &priv->av.sub[r->index];
+		if (sub->language_source != SUB_LANG_UNKNOWN || sub->stream != r->stream || sub->format != r->format) continue;
+		strnZcpy(sub->lang, r->language, AV_NAME_LEN);
+		sub->language_source = SUB_LANG_FASTTEXT;
+		sub->language_confidence = r->confidence;
+	}
+	return recent;
+}
+
+static void language_cache_save(FF_PRIV *priv, int scanned)
+{
+	SUB_LANGUAGE_RESULT results[SUB_TRACK_MAX];
+	int count = 0;
+	for (int i = 0; i < priv->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &priv->av.sub[i];
+		if (sub->language_source != SUB_LANG_FASTTEXT) continue;
+		SUB_LANGUAGE_RESULT *r = &results[count++];
+		memset(r, 0, sizeof(*r));
+		r->index = i; r->stream = sub->stream; r->format = sub->format;
+		r->confidence = sub->language_confidence;
+		snprintf(r->language, sizeof(r->language), "%.31s", sub->lang);
+	}
+	if (count || scanned) sub_language_cache_write(priv->language_cache_key, results, count, scanned);
 }
 
 static int ffmpeg_interrupt_cb(void *ctx)
@@ -1236,8 +1315,17 @@ DBGP serprintf("info\r\n");
 	}
 
 	if (_parse_format(ff_p)) goto ErrorExit4;
+	language_cache_key(ff_p);
+	language_cache_load(ff_p);
 
 	memcpy( &s->av, &ff_p->av, sizeof( AV_PROPERTIES ) );
+	for (int i = 0; i < ff_p->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &ff_p->av.sub[i];
+		if (!sub->gfx && sub->language_source == SUB_LANG_UNKNOWN) {
+			ff_p->language_session = sub_language_create();
+			break;
+		}
+	}
 
 	s->duration = ff_p->duration;
 	s->size     = ff_p->size;
@@ -1263,6 +1351,10 @@ DBGP serprintf("info\r\n");
 	}
 
 	s->parser_open = 1;
+	if (!(ff_p->flags & STREAM_PARSER_THUMB)) {
+		sub_language_playback_active(1);
+		ff_p->language_playback_registered = 1;
+	}
 
 	if( s->video->valid ) {
 		ff_p->need_key = 1;
@@ -1298,6 +1390,11 @@ serprintf("FFMPEG: not open!\r\n" );
 	} 
 	s->parser_open = 0;
 	if( ff_p ) {
+		if (ff_p->language_playback_registered) sub_language_playback_active(-1);
+		// Persist fallback results at teardown, never on the packet-reading path.
+		if (ff_p->language_cache_dirty) language_cache_save(ff_p, 1);
+		sub_language_destroy(ff_p->language_session);
+		ff_p->language_session = NULL;
 		if( ff_p->fmt ) {
 			// Close the video file
 			avformat_close_input(&ff_p->fmt);
@@ -1947,6 +2044,18 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", _
 	} else if( _subtitle_props_for_stream(s, stream) ) {
 		_rt_sub_pkts++;
 		_cache_subtitle_packet(s, &packet);
+		SUB_PROPERTIES *sub = _subtitle_props_for_stream(s, stream);
+		if (sub->language_source == SUB_LANG_UNKNOWN && ff_p->language_session) {
+			int format = 0;
+			switch (sub->format) {
+			case SUB_FORMAT_TEXT: format = SUB_LANG_TEXT; break;
+			case SUB_FORMAT_SSA: case SUB_FORMAT_ASS: format = SUB_LANG_ASS; break;
+			case SUB_FORMAT_WEBVTT: format = SUB_LANG_WEBVTT; break;
+			case SUB_FORMAT_MOV_TEXT: format = SUB_LANG_MOV_TEXT; break;
+			}
+			if (format) sub_language_feed(ff_p->language_session, sub - ff_p->av.sub,
+				format, packet.data, packet.size, _subtitle_packet_time(s, &packet));
+		}
 		if (s->subtitle->valid && !s->subtitle->ext && stream == s->subtitle->stream &&
 		    !__atomic_load_n(&s->subtitle_disabled, __ATOMIC_ACQUIRE)) {
 			if (enqueue_media_packet(s, &ff_p->sq, &packet, audio_starved)) goto QueueError;
@@ -1988,6 +2097,27 @@ QueueError:
 // ************************************************************
 static int _parse( STREAM *s)
 {
+	int language_changed = 0;
+	for (int i = 0; ff_p->language_session && i < ff_p->av.subs_max; ++i) {
+		char language[AV_NAME_LEN + 1];
+		int confidence;
+		if (!sub_language_poll(ff_p->language_session, i, language, sizeof(language), &confidence))
+			continue;
+		sub_language_metadata_lock();
+		if (ff_p->av.sub[i].language_source == SUB_LANG_UNKNOWN &&
+		    i < s->av.subs_max && s->av.sub[i].stream == ff_p->av.sub[i].stream) {
+			strnZcpy(ff_p->av.sub[i].lang, language, AV_NAME_LEN);
+			strnZcpy(s->av.sub[i].lang, language, AV_NAME_LEN);
+			ff_p->av.sub[i].language_source = s->av.sub[i].language_source = SUB_LANG_FASTTEXT;
+			ff_p->av.sub[i].language_confidence = s->av.sub[i].language_confidence = confidence;
+			language_changed = 1;
+		}
+		sub_language_metadata_unlock();
+	}
+	if (language_changed) {
+		ff_p->language_cache_dirty = 1;
+		if (s->message_cb) s->message_cb(s, STREAM_SUB_LANGUAGE_CHANGED);
+	}
 	// load chunk aggressively, try more often ...
 	int i;
 	for( i = 0; i < 5; i ++ ) {
@@ -2635,12 +2765,78 @@ typedef struct metadata_abort_context {
 	FILE_INFO_ABORT abort;
 	void *opaque;
 	int64_t deadline_us;
+	AVIOContext *io;
+	int language_probe;
 } metadata_abort_context;
 
 static int metadata_interrupted(void *opaque)
 {
 	metadata_abort_context *ctx = opaque;
-	return (ctx->abort && ctx->abort(ctx->opaque)) || av_gettime_relative() >= ctx->deadline_us;
+	return (ctx->abort && ctx->abort(ctx->opaque)) || av_gettime_relative() >= ctx->deadline_us ||
+		(ctx->language_probe && (sub_language_playback_count() ||
+		 (ctx->io && ctx->io->bytes_read >= 128LL * 1024 * 1024)));
+}
+
+static void language_probe_scan(FF_PRIV *priv, metadata_abort_context *cancel)
+{
+	if (!priv->fmt->pb || !(priv->fmt->pb->seekable & AVIO_SEEKABLE_NORMAL)) return;
+	while (!sub_language_probe_try_lock()) {
+		if (metadata_interrupted(cancel)) return;
+		av_usleep(10000);
+	}
+	SUB_LANGUAGE_SESSION *session = NULL;
+	AVPacket *packet = NULL;
+	if (metadata_interrupted(cancel) || language_cache_load(priv)) goto out;
+	int eligible = 0;
+	for (int i = 0; i < priv->av.subs_max; ++i)
+		eligible += priv->av.sub[i].language_source == SUB_LANG_UNKNOWN && language_format(priv->av.sub[i].format);
+	if (!eligible) goto out;
+	session = sub_language_create();
+	packet = av_packet_alloc();
+	if (!session || !packet) goto out;
+	// Avoid title cards/credits and the playback clock. Seek using the video index,
+	// otherwise subtitle preroll can send a multi-subtitle MKV back to its beginning.
+	int video = av_find_best_stream(priv->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+	if (video >= 0 && priv->duration > 120000) {
+		int64_t target_ms = MIN(300000, priv->duration / 4);
+		int64_t target = av_rescale_q(target_ms + priv->start_time, (AVRational){1, 1000}, priv->fmt->streams[video]->time_base);
+		av_seek_frame(priv->fmt, video, target, AVSEEK_FLAG_BACKWARD);
+	}
+	for (unsigned i = 0; i < priv->fmt->nb_streams; ++i)
+		if (priv->fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE)
+			priv->fmt->streams[i]->discard = AVDISCARD_ALL;
+	while (!metadata_interrupted(cancel) && av_read_frame(priv->fmt, packet) >= 0) {
+		for (int i = 0; i < priv->av.subs_max; ++i) {
+			SUB_PROPERTIES *sub = &priv->av.sub[i];
+			if (sub->stream != packet->stream_index || sub->language_source != SUB_LANG_UNKNOWN) continue;
+			int64_t pts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+			if (pts != AV_NOPTS_VALUE)
+				sub_language_feed(session, i, language_format(sub->format), packet->data, packet->size,
+					av_rescale_q(pts, priv->fmt->streams[sub->stream]->time_base, (AVRational){1, 1000}));
+		}
+		av_packet_unref(packet);
+		// Bound memory while scanning faster than real time; never drop the second
+		// sample merely because the inference worker has not caught up yet.
+		while (sub_language_pending(session) && !metadata_interrupted(cancel)) av_usleep(1000);
+		int remaining = 0, changed = 0;
+		for (int i = 0; i < priv->av.subs_max; ++i) {
+			SUB_PROPERTIES *sub = &priv->av.sub[i];
+			if (sub->language_source != SUB_LANG_UNKNOWN || !language_format(sub->format)) continue;
+			int confidence;
+			if (sub_language_poll(session, i, sub->lang, sizeof(sub->lang), &confidence)) {
+				sub->language_source = SUB_LANG_FASTTEXT; sub->language_confidence = confidence; changed = 1;
+			}
+			else if (!sub_language_finished(session, i)) ++remaining;
+		}
+		if (changed) language_cache_save(priv, 0);
+		if (!remaining) break;
+	}
+	// Cancelled work can be retried; budget/EOF/attempt exhaustion gets a short cooldown.
+	if (!(cancel->abort && cancel->abort(cancel->opaque)) && !sub_language_playback_count()) language_cache_save(priv, 1);
+out:
+	av_packet_free(&packet);
+	sub_language_destroy(session);
+	sub_language_probe_unlock();
 }
 
 static void metadata_tag_string(AVDictionary *dict, const char *key, char *dst, size_t size, ID3_TAG *tag)
@@ -2711,11 +2907,12 @@ static int metadata_extract_tags(AVFormatContext *fmt, ID3_TAG *tag, APIC *apic)
 	return 0;
 }
 
-static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort)
+static int get_info_with_languages(const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort, int guess)
 {
 	int err = 1;
 	AVDictionary *options = NULL;
-	metadata_abort_context cancel = {abort, info->abort_opaque, av_gettime_relative() + 30000000};
+	metadata_abort_context cancel = {.abort = abort, .opaque = info->abort_opaque,
+		.deadline_us = av_gettime_relative() + (guess ? 8000000 : 30000000), .language_probe = guess};
 	if (metadata_interrupted(&cancel)) return 1;
 	FF_PRIV *priv = acalloc(1, sizeof(*priv));
 	if (!priv) return 1;
@@ -2727,6 +2924,7 @@ static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, 
 	av_dict_set(&options, "analyzeduration", "1000000", 0);
 	ffmpeg_set_http_options(&options, src);
 	if (ffmpeg_open_input(priv, src->url, &options) < 0 || metadata_interrupted(&cancel)) goto out;
+	cancel.io = priv->fmt->pb;
 	// analyzeduration is a format option, not a per-decoder option. A failed
 	// probe must not publish a cached success, even when it found some tracks.
 	if (avformat_find_stream_info(priv->fmt, NULL) < 0 || metadata_interrupted(&cancel)) goto out;
@@ -2734,6 +2932,9 @@ static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, 
 	if (_parse_format(priv) || metadata_interrupted(&cancel)) goto out;
 	if (!priv->av.as_max && !priv->av.vs_max) goto out;
 	if (metadata_extract_tags(priv->fmt, &priv->tag, apic)) goto out;
+	language_cache_key(priv);
+	language_cache_load(priv);
+	if (guess) language_probe_scan(priv, &cancel);
 	memcpy(&info->av, &priv->av, sizeof(info->av));
 	memcpy(&info->id3_tag, &priv->tag, sizeof(info->id3_tag));
 	// Large codec headers belong to AVFormatContext. Metadata results must
@@ -2752,13 +2953,23 @@ static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, 
 	}
 	info->size = priv->size;
 	info->duration = priv->duration;
-	err = metadata_interrupted(&cancel) ? 1 : 0;
+	err = (abort && abort(info->abort_opaque)) || (!guess && metadata_interrupted(&cancel)) ? 1 : 0;
 out:
 	av_dict_free(&options);
 	if (priv->fmt) avformat_close_input(&priv->fmt);
 	ffmpeg_close_fd_input(priv);
 	afree(priv);
 	return err;
+}
+
+static int _get_info_FFMPEG(const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort)
+{
+	return get_info_with_languages(src, info, apic, abort, 0);
+}
+
+int ffmpeg_guess_subtitle_languages(const STREAM_URL *src, FILE_INFO *info, FILE_INFO_ABORT abort)
+{
+	return get_info_with_languages(src, info, NULL, abort, 1);
 }
 
 #ifdef CONFIG_MPEG_TS

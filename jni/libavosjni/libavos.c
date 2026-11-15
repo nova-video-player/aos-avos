@@ -37,6 +37,8 @@ void libavos_debug_init();
 void libavos_debug_exit();
 void libavos_avsh(const char *cmd);
 void libavos_set_subtitlepath(const char *path);
+void sub_language_set_model_path(const char *path);
+void sub_language_set_cache_path(const char *path);
 void libavos_set_decoder(int decoder);
 void libavos_set_audio_interface(int audio_interface);
 void libavos_set_audio_decoder(int audio_decoder);
@@ -282,6 +284,26 @@ Java_com_archos_medialib_LibAvos_nativeAvsh(JNIEnv *env, jobject thiz, jstring c
     }
 }
 
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetSubtitleLanguageModel(JNIEnv *env, jobject thiz, jstring path)
+{
+    if (!path) return;
+    const char *model_path = (*env)->GetStringUTFChars(env, path, NULL);
+    if (!model_path) return;
+    sub_language_set_model_path(model_path);
+    (*env)->ReleaseStringUTFChars(env, path, model_path);
+}
+
+void
+Java_com_archos_medialib_LibAvos_nativeSetSubtitleLanguageCache(JNIEnv *env, jobject thiz, jstring path)
+{
+    if (!path) return;
+    const char *cache_path = (*env)->GetStringUTFChars(env, path, NULL);
+    if (!cache_path) return;
+    sub_language_set_cache_path(cache_path);
+    (*env)->ReleaseStringUTFChars(env, path, cache_path);
+}
 
 void
 Java_com_archos_medialib_LibAvos_nativeSetSubtitlePath(JNIEnv *env, jobject thiz, jstring path)

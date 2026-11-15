@@ -28,7 +28,7 @@ AVOS_SHARED_LIBS =
 AVOS_STATIC_LIBS =
 SHARED_LIBS =
 CSRC =
-CXXSRC = sub_language.cpp
+CXXSRC = sub_language.cpp sub_language_cache.cpp
 
 ifeq ($(FASTTEXT),ON)
 DEFINES += -DCONFIG_FASTTEXT

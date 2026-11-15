@@ -309,6 +309,8 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 			ADD_STR(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_LANGUAGE, av->sub[i].lang);
 			serprintf("avos_mr_fillmetadata: sub[%d] disp=%d\n", i, av->sub[i].disposition);
 			ADD_INT(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_DISPOSITION, av->sub[i].disposition);
+			ADD_INT(AVOS_MR_METADATA_SUBTITLE_LANGUAGE_SOURCE + i, av->sub[i].language_source);
+			ADD_INT(AVOS_MR_METADATA_SUBTITLE_LANGUAGE_CONFIDENCE + i, av->sub[i].language_confidence);
 		}
 	}
 
@@ -334,6 +336,26 @@ static int avos_mr_retrieve(avos_mr_t *mr)
 		mr->info_valid = 1;
 	}
 	return AVOS_ERR_OK;
+}
+
+static int avos_mr_guess_subtitle_languages(avos_mr_t *mr)
+{
+#ifdef CONFIG_FFMPEG_PARSER
+	avos_mr_begin(mr);
+	FILE_INFO *info = acalloc(1, sizeof(*info));
+	if (!info) return AVOS_ERR;
+	info->abort_opaque = mr;
+	int ret = ffmpeg_guess_subtitle_languages(&mr->src, info, avos_mr_aborted);
+	if (!ret) {
+		mr->info = *info;
+		mr->info_valid = avos_mr_fillmetadata(mr) == AVOS_ERR_OK;
+		if (!mr->info_valid) ret = 1;
+	}
+	afree(info);
+	return ret ? AVOS_ERR : AVOS_ERR_OK;
+#else
+	return AVOS_ERR;
+#endif
 }
 
 static int avos_mr_getmetadata(avos_mr_t *mr, metadata_buffer_t **buffer)
@@ -439,6 +461,7 @@ static const avos_mr_handle_t avos_mr_handle = {
 	.setdatasource_fd = avos_mr_setdatasource_fd,
 	.getmetadata = avos_mr_getmetadata,
 	.extractmetadata = avos_mr_extractmetadata,
+	.guess_subtitle_languages = avos_mr_guess_subtitle_languages,
 	.getframe = avos_mr_getframe,
 	.getapic = avos_mr_getapic,
 	.cancel = avos_mr_cancel,

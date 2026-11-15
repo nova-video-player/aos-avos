@@ -30,6 +30,19 @@ int sub_language_model_count(void);
 int sub_language_pending(SUB_LANGUAGE_SESSION *session);
 int sub_language_finished(SUB_LANGUAGE_SESSION *session, int track);
 
+typedef struct {
+    int index, stream, format, confidence;
+    char language[32];
+} SUB_LANGUAGE_RESULT;
+void sub_language_set_cache_path(const char *path);
+int sub_language_cache_enabled(void);
+int sub_language_cache_read(const char *key, SUB_LANGUAGE_RESULT *results, int capacity, int *recent);
+void sub_language_cache_write(const char *key, const SUB_LANGUAGE_RESULT *results, int count, int scanned);
+int sub_language_probe_try_lock(void);
+void sub_language_probe_unlock(void);
+void sub_language_playback_active(int delta);
+int sub_language_playback_count(void);
+
 #ifdef __cplusplus
 }
 #endif

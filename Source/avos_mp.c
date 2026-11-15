@@ -23,6 +23,7 @@
 #include "avos_mp.h"
 #include "avos_mp_metadata.h"
 #include "sub_kind.h"
+#include "sub_language.h"
 #include "avos_mp_priv.h"
 #include "astdlib.h"
 #include "debug.h"
@@ -359,14 +360,20 @@ int avos_mp_fillmetadata(avos_mp_t *mp, int type, uint64_t size, ID3_TAG *id3_ta
 	if (type == TYPE_VID && av && av->subs_max >= 0) {
 		ADD_INT(AVOS_MP_METADATA_NB_SUBTITLE_TRACK, av->subs_max);
 		for (i = 0; i < av->subs_max; ++i) {
+			SUB_PROPERTIES sub;
+			sub_language_metadata_lock();
+			sub = av->sub[i];
+			sub_language_metadata_unlock();
 			gap_key = AVOS_MP_METADATA_SUBTITLE_TRACK + i * AVOS_MP_METADATA_SUBTITLE_TRACK_MAX;
-			ADD_STR(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_NAME, av->sub[i].name);
-			ADD_STR(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_PATH, av->sub[i].path);
-			ADD_INT(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_KIND, sub_kind_from_format(av->sub[i].format));
-			ADD_INT(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_FORMAT, av->sub[i].format);
-			ADD_STR(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_LANGUAGE, av->sub[i].lang);
-			serprintf("avos_mp_fillmetadata: sub[%d] disp=%d\n", i, av->sub[i].disposition);
-			ADD_INT(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_DISPOSITION, av->sub[i].disposition);
+			ADD_STR(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_NAME, sub.name);
+			ADD_STR(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_PATH, sub.path);
+			ADD_INT(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_KIND, sub_kind_from_format(sub.format));
+			ADD_INT(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_FORMAT, sub.format);
+			ADD_STR(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_LANGUAGE, sub.lang);
+			serprintf("avos_mp_fillmetadata: sub[%d] disp=%d\n", i, sub.disposition);
+			ADD_INT(gap_key + AVOS_MP_METADATA_SUBTITLE_TRACK_DISPOSITION, sub.disposition);
+			ADD_INT(AVOS_MP_METADATA_SUBTITLE_LANGUAGE_SOURCE + i, sub.language_source);
+			ADD_INT(AVOS_MP_METADATA_SUBTITLE_LANGUAGE_CONFIDENCE + i, sub.language_confidence);
 
 		}
 

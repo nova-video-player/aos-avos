@@ -161,6 +161,21 @@ static void keys_values_free(char **entries)
     free(entries);
 }
 
+void Java_com_archos_medialib_AvosMediaMetadataRetriever_cancel(JNIEnv *env, jobject thiz)
+{
+    // Cancellation cannot acquire the operation mutex held by the network reader.
+    pthread_mutex_lock(&mtx);
+    mr_context *ctx = (mr_context *)(intptr_t)(*env)->GetLongField(env, thiz, mr_fields.handle);
+    if (ctx) avos->cancel(ctx->mr);
+    pthread_mutex_unlock(&mtx);
+}
+
+jboolean Java_com_archos_medialib_AvosMediaMetadataRetriever_guessSubtitleLanguages(JNIEnv *env, jobject thiz)
+{
+    ACQUIRE_MR();
+    return mr && avos->guess_subtitle_languages(mr) == AVOS_ERR_OK;
+}
+
 static int keys_values_fill(JNIEnv *env, jobjectArray keys, jobjectArray values,
         char ***p_keys, char ***p_values)
 {

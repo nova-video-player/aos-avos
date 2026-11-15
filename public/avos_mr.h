@@ -39,6 +39,7 @@ typedef struct avos_mr_handle {
 	int (*getapic)		(avos_mr_t *mr, avos_apic_t **papic);
 	// May run concurrently with an operation; destruction still requires quiescence.
 	void (*cancel)          (avos_mr_t *mr);
+	int (*guess_subtitle_languages)(avos_mr_t *mr);
 } avos_mr_handle_t;
 
 const avos_mr_handle_t *avos_mr_get_handle();

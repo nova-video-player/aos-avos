@@ -693,6 +693,8 @@ typedef struct _sub_props {
 	int	gfx;
 	int	ext;
 	char lang[AV_NAME_LEN + 1];
+	int language_source;
+	int language_confidence;
 } SUB_PROPERTIES;
 
 // One font attachment found in the container (e.g. MKV AVMEDIA_TYPE_ATTACHMENT

@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+ifneq ($(wildcard $(AVOS_DIR)/../prebuilt/fastText/lib/$(TARGET_ARCH_ABI)/libfasttext.a),)
+FASTTEXT = ON
+else
+FASTTEXT = OFF
+endif
+
 GUI			= OFF
 LIBASS			= ON
 # Optional until the libdovi prebuilt is distributed with the manifest.

@@ -35,11 +35,17 @@ include $(CLEAR_VARS)
 AVOS_DEPS := $(AVOS_DIR)/Android.mk $(AVOS_DIR)/common.mk $(CONFIGMAKEFILE) $(SUBMAKEFILES)
 
 LOCAL_SRC_FILES := $(addprefix Source/, $(CSRC)) \
-	$(addprefix Source/, $(XASRC))
+	$(addprefix Source/, $(XASRC)) \
+	$(addprefix Source/, $(CXXSRC))
 
 LOCAL_C_INCLUDES := $(patsubst -I%,%,$(INCLUDES))
 LOCAL_C_INCLUDES += $(ANDROID_DIR)/libavos_android/include
-LOCAL_CFLAGS := $(CFLAGS) $(DEFINES)
+LOCAL_CFLAGS := $(filter-out -Werror-implicit-function-declaration -Wno-pointer-sign -D_FILE_OFFSET_BITS=64,$(CFLAGS) $(DEFINES))
+# Keep AVOS C large-file support; fastText's C++ stream ABI must match its builder.
+# Android 23 on 32-bit has no fseeko64/ftello64 required by libc++ with this define.
+LOCAL_CONLYFLAGS := -Werror-implicit-function-declaration -Wno-pointer-sign -D_FILE_OFFSET_BITS=64
+LOCAL_CPPFLAGS := -std=c++11
+LOCAL_CPP_FEATURES := exceptions rtti
 
 #uncomment for clang, it does not like gnu extensions
 #LOCAL_CFLAGS += -Wno-error=gnu-variable-sized-type-not-at-end

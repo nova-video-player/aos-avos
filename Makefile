@@ -62,6 +62,18 @@ all: avos-compile
 
 include common.mk
 
+CXX := $(CROSS)g++
+ifeq (1,$(ASAN))
+CXX := $(CROSS)clang++
+endif
+LINK = $(CXX)
+FASTTEXT_PREFIX ?= ../fastText-android-builder/build-host-install
+ifeq ($(FASTTEXT),ON)
+INCLUDES += -I$(FASTTEXT_PREFIX)/include
+FASTTEXT_LIB = $(FASTTEXT_PREFIX)/lib/libfasttext.a
+STATIC_LIBS += $(FASTTEXT_LIB)
+endif
+
 CFLAGS += -g -O2
 ifeq ($(TGT_BASE),sim)
 CFLAGS += -std=gnu17
@@ -163,6 +175,10 @@ $(TGT_PATH)/gfx_rgba32.o  : CFLAGS += -mfloat-abi=softfp -mfpu=neon
 $(TGT_PATH)/$(DEPDIR)/gfx_rgba32.dep  : CFLAGS += -mfloat-abi=softfp -mfpu=neon
 endif
 
+$(TGT_PATH)/%.o : %.cpp
+	@echo "CXX $<"
+	@$(CXX) $(INCLUDES) $(DEFINES) -std=c++11 -fPIC -Wall -Wextra -Werror -Wno-sign-compare -O2 -g $(ASAN_FLAGS) -MMD -MP -c $< -o $@
+
 $(TGT_PATH)/%.o : %.c
 	@echo $($(quiet)CMD_CC_O_C)
 	@$(CMD_CC_O_C)
@@ -180,6 +196,8 @@ $(TGT_PATH)/$(DEPDIR)/%.dep: %.c
 # Dependencies
 
 LIB_OBJS = $(sort $(patsubst %,$(TGT_PATH)/%,$(CSRC:.c=.o)))     $(patsubst %,$(TGT_PATH)/%,$(XASRC:.S=.o)) 
+LIB_OBJS += $(addprefix $(TGT_PATH)/,$(CXXSRC:.cpp=.o))
+-include $(addprefix $(TGT_PATH)/,$(CXXSRC:.cpp=.d))
 APP_OBJS = $(sort $(patsubst %,$(TGT_PATH)/%,$(CSRC_APP:.c=.o))) $(patsubst %,$(TGT_PATH)/%,$(XASRC_APP:.S=.o)) 
 
 ifeq (,$(NO_MAKEFILE_DEPS))
@@ -195,7 +213,7 @@ ifeq (1,$(ASAN))
 ASAN_FLAGS = -g -fsanitize=address
 endif
 
-CMD_LIB = $(LINK) $(ASAN_FLAGS) $(LDFLAGS) -shared -o $(TGT_PATH)/$(LIB_NAME) $(LIB_OBJS) $(LINK_LIBS) $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
+CMD_LIB = $(LINK) $(ASAN_FLAGS) $(LDFLAGS) -shared -o $(TGT_PATH)/$(LIB_NAME) $(LIB_OBJS) $(FASTTEXT_LIB) $(LINK_LIBS) $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 quiet_CMD_LIB = "LIB $(LIB_NAME)"
 
 ifeq (YES,$(LIBAVOS))
@@ -211,7 +229,7 @@ endif
 CMD_LINK = $(LINK) $(LDFLAGS) -o $(TGT_PATH)/$(TGT_NAME) $(APP_OBJS) $(STATIC_LIBS) -L$(TGT_PATH) $(LINK_LIBS) $(AVOS_SHARED_LIBS) $(SHARED_LIBS)
 quiet_CMD_LINK = "LD  $(TGT_NAME)"
 
-$(TGT_PATH)/$(LIB_NAME): $(LIB_OBJS)
+$(TGT_PATH)/$(LIB_NAME): $(LIB_OBJS) $(FASTTEXT_LIB)
 	@install -d $(TGT_PATH)/
 	@echo $($(quiet)CMD_LIB)
 	@$(CMD_LIB) 

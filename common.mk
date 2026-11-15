@@ -28,6 +28,11 @@ AVOS_SHARED_LIBS =
 AVOS_STATIC_LIBS =
 SHARED_LIBS =
 CSRC =
+CXXSRC = sub_language.cpp
+
+ifeq ($(FASTTEXT),ON)
+DEFINES += -DCONFIG_FASTTEXT
+endif
 
 INCLUDES += -I$(LOCAL_PATH)/Include
 INCLUDES += -I$(LOCAL_PATH)/common/Include

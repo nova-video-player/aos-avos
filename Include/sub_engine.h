@@ -157,6 +157,18 @@ void sub_engine_set_bottom_inset(SUB_ENGINE *eng, int px);
 // time.
 void sub_engine_set_gfx_position(SUB_ENGINE *eng, int value);
 
+// Reports the user's size for bitmap cues (PGS/VobSub), in percent of the cue's FITTED size:
+// value in [SUB_GFX_SCALE_MIN, SUB_GFX_SCALE_MAX] = [50, 300] (clamped), 100 = the cue as the
+// engine fits it. The reference is the cue after it has been fitted into the subtitle viewport
+// (a wide cue that had to be shrunk to the side margins is 100% at that shrunk size), not the
+// authored size. The cue is scaled about its bottom centre and kept inside the viewport
+// margins, so a value that would not fit stops having an effect (see gfx_layout.h); the
+// vertical position then moves the scaled cue and the playback controls are cleared last.
+// Forwarded to the active backend through SUB_FORMAT_BACKEND::set_gfx_scale (GFX only; text
+// subtitles use the font size / scale). Cached on the engine (default 100) and applied like
+// the inset and the position. Safe to call at any time.
+void sub_engine_set_gfx_scale(SUB_ENGINE *eng, int percent);
+
 SUB_USER_STYLE *sub_engine_get_style(SUB_ENGINE *eng);
 
 // --- CUSTOM FONTS FOLDER (MX Player / mpv-android style third-party fonts dir) ---

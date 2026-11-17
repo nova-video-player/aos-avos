@@ -163,8 +163,17 @@ typedef struct {
     int         gfx_vpos;      /* GFX frames ONLY: the user's vertical position, -100..100
                                  * (0 = computed placement, positive = up). Stamped by the GFX
                                  * backend from sub_engine_set_gfx_position(). */
+    int         gfx_scale;     /* GFX frames ONLY: the user's size for the cue, in percent of
+                                 * its FITTED size (SUB_GFX_SCALE_MIN..MAX, 100 = as fitted).
+                                 * Stamped by the GFX backend from sub_engine_set_gfx_scale().
+                                 * 0 (a frame nobody stamped) reads as 100. */
     SUB_EVENT  *events;        /* linked list, NULL = nothing to show       */
 } SUB_FRAME;
+
+/* The user's bitmap-subtitle scale, in percent of the cue's fitted size (see gfx_layout.h). */
+#define SUB_GFX_SCALE_MIN      50
+#define SUB_GFX_SCALE_MAX      300
+#define SUB_GFX_SCALE_DEFAULT  100
 
 /* ------------------------------------------------------------------
  * SUB_FMT_ID — engine backend selector. NOT the same thing as av.h's

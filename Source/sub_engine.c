@@ -109,6 +109,12 @@ struct SUB_ENGINE {
     // so attach/detach does not invalidate it.
     int gfx_vpos;
 
+    // The user's scale for bitmap cues, as last reported by sub_engine_set_gfx_scale(): percent of
+    // the cue's fitted size, SUB_GFX_SCALE_MIN..MAX (100 = as fitted). Initialised to 100 in
+    // sub_engine_create() (a calloc'd 0 would mean "unset"). Like the position it is a user
+    // setting, not a surface property, so attach/detach does not invalidate it.
+    int gfx_scale;
+
     // Custom fonts folder (MX Player / mpv-android style third-party fonts
     // dir). Both are simple owned heap strings guarded by eng->lock, snapshot
     // into SUB_FORMAT_OPEN_PARAMS at open_track() time -- the SSA backend
@@ -155,6 +161,7 @@ struct SUB_ENGINE {
 #define SUB_GEOM_BOX    0x2  // video_box_* changed (or a fresh backend needs it)
 #define SUB_GEOM_INSET  0x4  // bottom_inset changed (or a fresh backend needs it)
 #define SUB_GEOM_VPOS   0x8  // gfx_vpos changed (or a fresh backend needs it)
+#define SUB_GEOM_SCALE  0x10 // gfx_scale changed (or a fresh backend needs it)
 
 // Internal helper for safe wakeups
 static void broadcast_wake_locked(SUB_ENGINE *eng) {
@@ -210,6 +217,7 @@ static void sub_cond_timedwait_ms(pthread_cond_t *cond, pthread_mutex_t *lock, i
 
 SUB_ENGINE *sub_engine_create(void) {
     SUB_ENGINE *eng = calloc(1, sizeof(SUB_ENGINE));
+    eng->gfx_scale = SUB_GFX_SCALE_DEFAULT;     // before the render thread can look at it
 
     // FIX: Initialize mutex and cond BEFORE spawning the thread
     pthread_mutex_init(&eng->lock, NULL);
@@ -399,6 +407,20 @@ void sub_engine_set_gfx_position(SUB_ENGINE *eng, int value) {
     pthread_mutex_unlock(&eng->lock);
 }
 
+// See sub_engine.h for the full doc comment.
+void sub_engine_set_gfx_scale(SUB_ENGINE *eng, int percent) {
+    if (!eng) return;
+    if (percent < SUB_GFX_SCALE_MIN) percent = SUB_GFX_SCALE_MIN;
+    if (percent > SUB_GFX_SCALE_MAX) percent = SUB_GFX_SCALE_MAX;
+    pthread_mutex_lock(&eng->lock);
+    if (eng->gfx_scale != percent) {
+        eng->gfx_scale = percent;
+        eng->geometry_dirty |= SUB_GEOM_SCALE;
+        broadcast_wake_locked(eng); // applies while paused too, like the inset and the position
+    }
+    pthread_mutex_unlock(&eng->lock);
+}
+
 int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, int video_h,
                            const uint8_t *codec_private, int codec_private_size,
                            const SUB_EMBEDDED_FONT *embedded_fonts, int embedded_fonts_count,
@@ -438,6 +460,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     box_w = eng->video_box_w; box_h = eng->video_box_h;
     int bottom_inset = eng->bottom_inset;
     int gfx_vpos = eng->gfx_vpos;
+    int gfx_scale = eng->gfx_scale;
     pthread_mutex_unlock(&eng->lock);
 
     DBG serprintf("SUB_SURFACE: Opening track (format=%d) with canvas dimensions: %d x %d (raw video dim: %d x %d)\n",
@@ -475,6 +498,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
         .video_box_w = box_w, .video_box_h = box_h,
         .bottom_inset = bottom_inset,
         .gfx_vpos = gfx_vpos,
+        .gfx_scale = gfx_scale,
         .codec_private = codec_private, .codec_private_size = codec_private_size,
         .user_style = eng->style,
         .is_plain_text_format = (format_id == SUB_FMT_SRT), // Tell backend to force styles!
@@ -539,7 +563,7 @@ int sub_engine_open_track(SUB_ENGINE *eng, SUB_FMT_ID format_id, int video_w, in
     // mechanism as item #3 instead of a second, parallel push. poll_frame() skips the
     // resize() if no real canvas is known yet (canvas_w==0), in which case open() already got
     // the video_w/h fallback via target_w/target_h.
-    eng->geometry_dirty |= (SUB_GEOM_CANVAS | SUB_GEOM_BOX | SUB_GEOM_INSET | SUB_GEOM_VPOS);
+    eng->geometry_dirty |= (SUB_GEOM_CANVAS | SUB_GEOM_BOX | SUB_GEOM_INSET | SUB_GEOM_VPOS | SUB_GEOM_SCALE);
 
     // Drop whatever the previous track had published, in THIS lock hold -- not after it.
     // poll_and_publish() renders and publishes under eng->lock, so once the backend is
@@ -792,6 +816,8 @@ int sub_engine_poll_and_publish(SUB_ENGINE *eng, SUB_RENDERER *r) {
             be->set_bottom_inset(be, eng->bottom_inset);
         if ((eng->geometry_dirty & SUB_GEOM_VPOS) && be->set_gfx_position)
             be->set_gfx_position(be, eng->gfx_vpos);
+        if ((eng->geometry_dirty & SUB_GEOM_SCALE) && be->set_gfx_scale)
+            be->set_gfx_scale(be, eng->gfx_scale);
         eng->geometry_dirty = 0;
     }
     int64_t pts = eng->clock_fn(eng->clock_ctx);

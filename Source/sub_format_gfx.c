@@ -46,6 +46,9 @@ typedef struct {
                                               // sub_engine_set_bottom_inset().
     int        vpos;                         // the user's vertical position (-100..100), from
                                               // sub_engine_set_gfx_position().
+    int        scale;                        // the user's size, percent of the fitted size
+                                              // (SUB_GFX_SCALE_MIN..MAX), from
+                                              // sub_engine_set_gfx_scale().
 } GFX_BACKEND;
 
 // ---------------------------------------------------------------------------
@@ -80,6 +83,14 @@ static uint8_t *gfx_pixels_alloc(size_t n, atomic_int **refs_out) {
 // ---------------------------------------------------------------------------
 // gfx_open
 // ---------------------------------------------------------------------------
+// 0 (params nobody filled in) is "unset" = 100; anything else is clamped to the supported range.
+static int gfx_clamp_scale(int percent) {
+    if (percent <= 0) return SUB_GFX_SCALE_DEFAULT;
+    if (percent < SUB_GFX_SCALE_MIN) return SUB_GFX_SCALE_MIN;
+    if (percent > SUB_GFX_SCALE_MAX) return SUB_GFX_SCALE_MAX;
+    return percent;
+}
+
 static int gfx_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params) {
     GFX_BACKEND *ctx = calloc(1, sizeof(GFX_BACKEND));
     ctx->canvas_w     = params->video_w > 0 ? params->video_w : 1920;
@@ -96,6 +107,7 @@ static int gfx_open(SUB_FORMAT_BACKEND *be, const SUB_FORMAT_OPEN_PARAMS *params
     ctx->video_box_h  = params->video_box_h > 0 ? params->video_box_h : ctx->canvas_h;
     ctx->bottom_inset = params->bottom_inset > 0 ? params->bottom_inset : 0;
     ctx->vpos         = params->gfx_vpos < -100 ? -100 : params->gfx_vpos > 100 ? 100 : params->gfx_vpos;
+    ctx->scale        = gfx_clamp_scale(params->gfx_scale);
     be->priv = ctx;
     return 0;
 }
@@ -166,6 +178,7 @@ static int gfx_feed_bitmap(SUB_FORMAT_BACKEND *be,
     frame->video_box_h    = ctx->video_box_h;
     frame->gfx_inset_bottom = ctx->bottom_inset;
     frame->gfx_vpos         = ctx->vpos;
+    frame->gfx_scale        = ctx->scale;
 
     SUB_EVENT *ev = calloc(1, sizeof(SUB_EVENT));
     ev->kind             = SUB_EVENT_BITMAP;
@@ -230,7 +243,8 @@ static int gfx_geometry_stale(const GFX_BACKEND *ctx, const SUB_FRAME *f) {
            f->video_box_x != ctx->video_box_x  || f->video_box_y != ctx->video_box_y  ||
            f->video_box_w != ctx->video_box_w  || f->video_box_h != ctx->video_box_h  ||
            f->gfx_inset_bottom != ctx->bottom_inset ||
-           f->gfx_vpos         != ctx->vpos;
+           f->gfx_vpos         != ctx->vpos ||
+           f->gfx_scale        != ctx->scale;
 }
 
 // Copy-on-write: build a brand-new frame stamped with the CURRENT geometry. The old frame
@@ -260,6 +274,7 @@ static SUB_FRAME *gfx_clone_with_geometry(const GFX_BACKEND *ctx, const SUB_FRAM
     f->video_box_w  = ctx->video_box_w;    f->video_box_h  = ctx->video_box_h;
     f->gfx_inset_bottom = ctx->bottom_inset;
     f->gfx_vpos         = ctx->vpos;
+    f->gfx_scale        = ctx->scale;
 
     *ev = *sev;                      // kind, x, y, w, h, stride, rgba ptr, pixel_refs
     ev->next = NULL;
@@ -389,6 +404,21 @@ static int gfx_set_gfx_position(SUB_FORMAT_BACKEND *be, int value) {
 }
 
 // ---------------------------------------------------------------------------
+// gfx_set_gfx_scale
+//
+// The user moved the bitmap-subtitle scale slider (or a new track is being given the stored
+// value): lay the cue out again at the new size. Cheap, idempotent. Unlike the open() params
+// an explicit 0 here is out of range, not "unset", so it clamps to the minimum.
+// ---------------------------------------------------------------------------
+static int gfx_set_gfx_scale(SUB_FORMAT_BACKEND *be, int percent) {
+    GFX_BACKEND *ctx = (GFX_BACKEND *)be->priv;
+    ctx->scale    = percent < SUB_GFX_SCALE_MIN ? SUB_GFX_SCALE_MIN
+                  : percent > SUB_GFX_SCALE_MAX ? SUB_GFX_SCALE_MAX : percent;
+    ctx->is_dirty = 1;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // gfx_flush
 //
 // Called on seek — clear the stored frame so stale bitmaps don't reappear.
@@ -453,6 +483,7 @@ SUB_FORMAT_BACKEND *sub_format_gfx_create(void) {
     be->set_video_box = gfx_set_video_box;
     be->set_bottom_inset = gfx_set_bottom_inset;
     be->set_gfx_position = gfx_set_gfx_position;
+    be->set_gfx_scale = gfx_set_gfx_scale;
     be->flush      = gfx_flush;
     be->close       = gfx_close;
     be->get_schedule = gfx_get_schedule;

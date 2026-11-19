@@ -725,6 +725,7 @@ void show_video_props( VIDEO_PROPERTIES *video );
 void show_subtitle_props( SUB_PROPERTIES *sub  );
 
 typedef struct _av_props {
+	char subtitle_fingerprint[65];
 	
 	int 		force_notify;
 	int		as;

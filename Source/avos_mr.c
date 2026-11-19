@@ -26,6 +26,7 @@
 #include "avos_mr.h"
 #include "avos_mr_metadata.h"
 #include "sub_kind.h"
+#include "sub_language.h"
 #include "astdlib.h"
 #include "debug.h"
 #include "global.h"
@@ -300,6 +301,7 @@ static int avos_mr_fillmetadata(avos_mr_t *mr)
 	}
 	if (mr->type == TYPE_VID && av && av->subs_max > 0 && av->subs_max <= SUB_TRACK_MAX) {
 		ADD_INT(AVOS_MR_METADATA_NB_SUBTITLE_TRACK, av->subs_max);
+		ADD_STR(AVOS_MR_METADATA_SUBTITLE_FINGERPRINT, av->subtitle_fingerprint);
 		for (i = 0; i < av->subs_max; ++i) {
 			gap_key = AVOS_MR_METADATA_SUBTITLE_TRACK + i * AVOS_MR_METADATA_SUBTITLE_TRACK_MAX;
 			ADD_STR(gap_key + AVOS_MR_METADATA_SUBTITLE_TRACK_NAME, av->sub[i].name);
@@ -341,7 +343,8 @@ static int avos_mr_retrieve(avos_mr_t *mr)
 static int avos_mr_guess_subtitle_languages(avos_mr_t *mr)
 {
 #ifdef CONFIG_FFMPEG_PARSER
-	avos_mr_begin(mr);
+	// Explicit analysis has its own budget; the ordinary metadata timer is 30s.
+	mr->deadline_us = av_gettime_relative() + SUB_LANGUAGE_SCAN_TIMEOUT_US;
 	FILE_INFO *info = acalloc(1, sizeof(*info));
 	if (!info) return AVOS_ERR;
 	info->abort_opaque = mr;

@@ -182,10 +182,7 @@ typedef struct FF_PRIV
 	AVQueue		vq;
 	AVQueue		sq;
 	AVQueue		sub_cache; // bounded packet history for all internal subtitle tracks
-	SUB_LANGUAGE_SESSION *language_session;
-	char language_cache_key[65];
 	int language_playback_registered;
-	int language_cache_dirty;
 	
 	STREAM		*s;
 	UINT64		size;
@@ -1103,10 +1100,10 @@ static int language_format(int format)
 }
 
 // Fingerprint the content, not a short-lived proxy URL or authorization headers.
-static void language_cache_key(FF_PRIV *priv)
+static void language_fingerprint(FF_PRIV *priv)
 {
 	AVIOContext *pb = priv->fmt->pb;
-	if (!sub_language_cache_enabled() || !priv->av.subs_max || !pb || !(pb->seekable & AVIO_SEEKABLE_NORMAL)) return;
+	if (!priv->av.subs_max || !pb || !(pb->seekable & AVIO_SEEKABLE_NORMAL)) return;
 	int64_t pos = avio_tell(pb), size = avio_size(pb);
 	if (pos < 0 || size <= 0) return;
 	unsigned char prefix[65536], digest[32];
@@ -1129,40 +1126,7 @@ static void language_cache_key(FF_PRIV *priv)
 	}
 	av_sha_final(sha, digest);
 	av_free(sha);
-	for (int i = 0; i < 32; ++i) snprintf(priv->language_cache_key + i * 2, 3, "%02x", digest[i]);
-}
-
-static int language_cache_load(FF_PRIV *priv)
-{
-	SUB_LANGUAGE_RESULT results[SUB_TRACK_MAX];
-	int recent = 0;
-	int count = sub_language_cache_read(priv->language_cache_key, results, SUB_TRACK_MAX, &recent);
-	for (int i = 0; i < count; ++i) {
-		SUB_LANGUAGE_RESULT *r = &results[i];
-		if (r->index >= priv->av.subs_max) continue;
-		SUB_PROPERTIES *sub = &priv->av.sub[r->index];
-		if (sub->language_source != SUB_LANG_UNKNOWN || sub->stream != r->stream || sub->format != r->format) continue;
-		strnZcpy(sub->lang, r->language, AV_NAME_LEN);
-		sub->language_source = SUB_LANG_FASTTEXT;
-		sub->language_confidence = r->confidence;
-	}
-	return recent;
-}
-
-static void language_cache_save(FF_PRIV *priv, int scanned)
-{
-	SUB_LANGUAGE_RESULT results[SUB_TRACK_MAX];
-	int count = 0;
-	for (int i = 0; i < priv->av.subs_max; ++i) {
-		SUB_PROPERTIES *sub = &priv->av.sub[i];
-		if (sub->language_source != SUB_LANG_FASTTEXT) continue;
-		SUB_LANGUAGE_RESULT *r = &results[count++];
-		memset(r, 0, sizeof(*r));
-		r->index = i; r->stream = sub->stream; r->format = sub->format;
-		r->confidence = sub->language_confidence;
-		snprintf(r->language, sizeof(r->language), "%.31s", sub->lang);
-	}
-	if (count || scanned) sub_language_cache_write(priv->language_cache_key, results, count, scanned);
+	for (int i = 0; i < 32; ++i) snprintf(priv->av.subtitle_fingerprint + i * 2, 3, "%02x", digest[i]);
 }
 
 static int ffmpeg_interrupt_cb(void *ctx)
@@ -1315,17 +1279,9 @@ DBGP serprintf("info\r\n");
 	}
 
 	if (_parse_format(ff_p)) goto ErrorExit4;
-	language_cache_key(ff_p);
-	language_cache_load(ff_p);
+	language_fingerprint(ff_p);
 
 	memcpy( &s->av, &ff_p->av, sizeof( AV_PROPERTIES ) );
-	for (int i = 0; i < ff_p->av.subs_max; ++i) {
-		SUB_PROPERTIES *sub = &ff_p->av.sub[i];
-		if (!sub->gfx && sub->language_source == SUB_LANG_UNKNOWN) {
-			ff_p->language_session = sub_language_create();
-			break;
-		}
-	}
 
 	s->duration = ff_p->duration;
 	s->size     = ff_p->size;
@@ -1391,10 +1347,6 @@ serprintf("FFMPEG: not open!\r\n" );
 	s->parser_open = 0;
 	if( ff_p ) {
 		if (ff_p->language_playback_registered) sub_language_playback_active(-1);
-		// Persist fallback results at teardown, never on the packet-reading path.
-		if (ff_p->language_cache_dirty) language_cache_save(ff_p, 1);
-		sub_language_destroy(ff_p->language_session);
-		ff_p->language_session = NULL;
 		if( ff_p->fmt ) {
 			// Close the video file
 			avformat_close_input(&ff_p->fmt);
@@ -2044,18 +1996,6 @@ DBGC4 serprintf("VIDEO      dts/pts %8lld/%8lld  %s  %02X %02X %02X %02X\r\n", _
 	} else if( _subtitle_props_for_stream(s, stream) ) {
 		_rt_sub_pkts++;
 		_cache_subtitle_packet(s, &packet);
-		SUB_PROPERTIES *sub = _subtitle_props_for_stream(s, stream);
-		if (sub->language_source == SUB_LANG_UNKNOWN && ff_p->language_session) {
-			int format = 0;
-			switch (sub->format) {
-			case SUB_FORMAT_TEXT: format = SUB_LANG_TEXT; break;
-			case SUB_FORMAT_SSA: case SUB_FORMAT_ASS: format = SUB_LANG_ASS; break;
-			case SUB_FORMAT_WEBVTT: format = SUB_LANG_WEBVTT; break;
-			case SUB_FORMAT_MOV_TEXT: format = SUB_LANG_MOV_TEXT; break;
-			}
-			if (format) sub_language_feed(ff_p->language_session, sub - ff_p->av.sub,
-				format, packet.data, packet.size, _subtitle_packet_time(s, &packet));
-		}
 		if (s->subtitle->valid && !s->subtitle->ext && stream == s->subtitle->stream &&
 		    !__atomic_load_n(&s->subtitle_disabled, __ATOMIC_ACQUIRE)) {
 			if (enqueue_media_packet(s, &ff_p->sq, &packet, audio_starved)) goto QueueError;
@@ -2097,27 +2037,6 @@ QueueError:
 // ************************************************************
 static int _parse( STREAM *s)
 {
-	int language_changed = 0;
-	for (int i = 0; ff_p->language_session && i < ff_p->av.subs_max; ++i) {
-		char language[AV_NAME_LEN + 1];
-		int confidence;
-		if (!sub_language_poll(ff_p->language_session, i, language, sizeof(language), &confidence))
-			continue;
-		sub_language_metadata_lock();
-		if (ff_p->av.sub[i].language_source == SUB_LANG_UNKNOWN &&
-		    i < s->av.subs_max && s->av.sub[i].stream == ff_p->av.sub[i].stream) {
-			strnZcpy(ff_p->av.sub[i].lang, language, AV_NAME_LEN);
-			strnZcpy(s->av.sub[i].lang, language, AV_NAME_LEN);
-			ff_p->av.sub[i].language_source = s->av.sub[i].language_source = SUB_LANG_FASTTEXT;
-			ff_p->av.sub[i].language_confidence = s->av.sub[i].language_confidence = confidence;
-			language_changed = 1;
-		}
-		sub_language_metadata_unlock();
-	}
-	if (language_changed) {
-		ff_p->language_cache_dirty = 1;
-		if (s->message_cb) s->message_cb(s, STREAM_SUB_LANGUAGE_CHANGED);
-	}
 	// load chunk aggressively, try more often ...
 	int i;
 	for( i = 0; i < 5; i ++ ) {
@@ -2774,69 +2693,109 @@ static int metadata_interrupted(void *opaque)
 	metadata_abort_context *ctx = opaque;
 	return (ctx->abort && ctx->abort(ctx->opaque)) || av_gettime_relative() >= ctx->deadline_us ||
 		(ctx->language_probe && (sub_language_playback_count() ||
-		 (ctx->io && ctx->io->bytes_read >= 128LL * 1024 * 1024)));
+		 (ctx->io && ctx->io->bytes_read >= 256LL * 1024 * 1024)));
 }
 
-static void language_probe_scan(FF_PRIV *priv, metadata_abort_context *cancel)
+static const char *language_stop_reason(metadata_abort_context *ctx)
 {
-	if (!priv->fmt->pb || !(priv->fmt->pb->seekable & AVIO_SEEKABLE_NORMAL)) return;
+	if (av_gettime_relative() >= ctx->deadline_us) return "deadline";
+	if (sub_language_playback_count()) return "playback-active";
+	if (ctx->io && ctx->io->bytes_read >= 256LL * 1024 * 1024) return "byte-budget";
+	if (ctx->abort && ctx->abort(ctx->opaque)) return "retriever-cancel-or-deadline";
+	return "none";
+}
+
+static int language_probe_scan(FF_PRIV *priv, metadata_abort_context *cancel)
+{
+	if (!priv->fmt->pb) return 1;
 	while (!sub_language_probe_try_lock()) {
-		if (metadata_interrupted(cancel)) return;
+		if (metadata_interrupted(cancel)) return 1;
 		av_usleep(10000);
 	}
 	SUB_LANGUAGE_SESSION *session = NULL;
 	AVPacket *packet = NULL;
-	if (metadata_interrupted(cancel) || language_cache_load(priv)) goto out;
-	int eligible = 0;
+	int eligible = 0, identified = 0, packets = 0, read_error = 0, status = 1;
+	int track_packets[SUB_TRACK_MAX] = {0}, missing_pts[SUB_TRACK_MAX] = {0};
+	int64_t start = av_gettime_relative();
+	int64_t next_progress = start + 5000000;
+	const char *reason = "unavailable";
+	if (metadata_interrupted(cancel)) goto out;
 	for (int i = 0; i < priv->av.subs_max; ++i)
 		eligible += priv->av.sub[i].language_source == SUB_LANG_UNKNOWN && language_format(priv->av.sub[i].format);
-	if (!eligible) goto out;
+	if (!eligible) { status = 0; reason = "no-eligible-tracks"; goto out; }
+	sub_language_log("scan start eligible=%d bytes=%"PRId64, eligible, priv->fmt->pb->bytes_read);
 	session = sub_language_create();
 	packet = av_packet_alloc();
 	if (!session || !packet) goto out;
-	// Avoid title cards/credits and the playback clock. Seek using the video index,
-	// otherwise subtitle preroll can send a multi-subtitle MKV back to its beginning.
-	int video = av_find_best_stream(priv->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-	if (video >= 0 && priv->duration > 120000) {
-		int64_t target_ms = MIN(300000, priv->duration / 4);
-		int64_t target = av_rescale_q(target_ms + priv->start_time, (AVRational){1, 1000}, priv->fmt->streams[video]->time_base);
-		av_seek_frame(priv->fmt, video, target, AVSEEK_FLAG_BACKWARD);
-	}
+	// Continue forward from probing. A timestamp seek can parse remote Cues or
+	// scan clusters before delivering any text, exhausting the analysis budget.
 	for (unsigned i = 0; i < priv->fmt->nb_streams; ++i)
 		if (priv->fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE)
 			priv->fmt->streams[i]->discard = AVDISCARD_ALL;
-	while (!metadata_interrupted(cancel) && av_read_frame(priv->fmt, packet) >= 0) {
+	while (!metadata_interrupted(cancel) && (read_error = av_read_frame(priv->fmt, packet)) >= 0) {
+		++packets;
+		if (av_gettime_relative() >= next_progress) {
+			sub_language_log("scan progress packets=%d identified=%d bytes=%"PRId64" elapsed_ms=%"PRId64,
+				packets, identified, priv->fmt->pb->bytes_read, (av_gettime_relative() - start) / 1000);
+			next_progress = av_gettime_relative() + 5000000;
+		}
 		for (int i = 0; i < priv->av.subs_max; ++i) {
 			SUB_PROPERTIES *sub = &priv->av.sub[i];
 			if (sub->stream != packet->stream_index || sub->language_source != SUB_LANG_UNKNOWN) continue;
+			++track_packets[i];
 			int64_t pts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+			if (pts == AV_NOPTS_VALUE) ++missing_pts[i];
 			if (pts != AV_NOPTS_VALUE)
 				sub_language_feed(session, i, language_format(sub->format), packet->data, packet->size,
 					av_rescale_q(pts, priv->fmt->streams[sub->stream]->time_base, (AVRational){1, 1000}));
 		}
 		av_packet_unref(packet);
-		// Bound memory while scanning faster than real time; never drop the second
-		// sample merely because the inference worker has not caught up yet.
 		while (sub_language_pending(session) && !metadata_interrupted(cancel)) av_usleep(1000);
-		int remaining = 0, changed = 0;
+		int remaining = 0;
 		for (int i = 0; i < priv->av.subs_max; ++i) {
 			SUB_PROPERTIES *sub = &priv->av.sub[i];
 			if (sub->language_source != SUB_LANG_UNKNOWN || !language_format(sub->format)) continue;
 			int confidence;
 			if (sub_language_poll(session, i, sub->lang, sizeof(sub->lang), &confidence)) {
-				sub->language_source = SUB_LANG_FASTTEXT; sub->language_confidence = confidence; changed = 1;
+				sub->language_source = SUB_LANG_FASTTEXT; sub->language_confidence = confidence;
+				++identified;
 			}
 			else if (!sub_language_finished(session, i)) ++remaining;
 		}
-		if (changed) language_cache_save(priv, 0);
 		if (!remaining) break;
 	}
-	// Cancelled work can be retried; budget/EOF/attempt exhaustion gets a short cooldown.
-	if (!(cancel->abort && cancel->abort(cancel->opaque)) && !sub_language_playback_count()) language_cache_save(priv, 1);
+	// Harvest results that completed just as I/O or cancellation ended the loop.
+	for (int i = 0; i < priv->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &priv->av.sub[i];
+		int confidence;
+		if (sub->language_source == SUB_LANG_UNKNOWN &&
+			sub_language_poll(session, i, sub->lang, sizeof(sub->lang), &confidence)) {
+			sub->language_source = SUB_LANG_FASTTEXT; sub->language_confidence = confidence;
+			++identified;
+		}
+	}
+	reason = sub_language_failed(session) ? "model-failed" : metadata_interrupted(cancel) ? "interrupted"
+		: read_error < 0 && read_error != AVERROR_EOF ? "read-failed" : "complete";
+	// Keep accepted partial results. An interrupted/failed scan with no result
+	// must not masquerade as a successful analysis or replace earlier results.
+	status = !identified && (sub_language_failed(session) || metadata_interrupted(cancel) ||
+		(read_error < 0 && read_error != AVERROR_EOF));
 out:
+	sub_language_log("subtitle language scan: eligible=%d packets=%d identified=%d bytes=%"PRId64
+		" elapsed_ms=%"PRId64" outcome=%s stop=%s read_error=%d io_error=%d status=%d", eligible, packets, identified,
+		priv->fmt->pb->bytes_read, (av_gettime_relative() - start) / 1000, reason,
+		language_stop_reason(cancel), read_error, priv->fmt->pb->error, status);
+	for (int i = 0; i < priv->av.subs_max; ++i) {
+		SUB_PROPERTIES *sub = &priv->av.sub[i];
+		sub_language_log("mapping track=%d stream=%d format=%d source=%d language=%s confidence=%d packets=%d missing_pts=%d",
+			i, sub->stream, sub->format, sub->language_source, sub->lang, sub->language_confidence,
+			track_packets[i], missing_pts[i]);
+		sub_language_diagnostics(session, i);
+	}
 	av_packet_free(&packet);
 	sub_language_destroy(session);
 	sub_language_probe_unlock();
+	return status;
 }
 
 static void metadata_tag_string(AVDictionary *dict, const char *key, char *dst, size_t size, ID3_TAG *tag)
@@ -2910,9 +2869,12 @@ static int metadata_extract_tags(AVFormatContext *fmt, ID3_TAG *tag, APIC *apic)
 static int get_info_with_languages(const STREAM_URL *src, FILE_INFO *info, APIC *apic, FILE_INFO_ABORT abort, int guess)
 {
 	int err = 1;
+	int operation_error = 0;
+	int64_t started = av_gettime_relative();
+	const char *stage = "open";
 	AVDictionary *options = NULL;
 	metadata_abort_context cancel = {.abort = abort, .opaque = info->abort_opaque,
-		.deadline_us = av_gettime_relative() + (guess ? 8000000 : 30000000), .language_probe = guess};
+		.deadline_us = av_gettime_relative() + (guess ? SUB_LANGUAGE_SCAN_TIMEOUT_US : 30000000), .language_probe = guess};
 	if (metadata_interrupted(&cancel)) return 1;
 	FF_PRIV *priv = acalloc(1, sizeof(*priv));
 	if (!priv) return 1;
@@ -2923,18 +2885,30 @@ static int get_info_with_languages(const STREAM_URL *src, FILE_INFO *info, APIC 
 	av_dict_set(&options, "probesize", "500000", 0);
 	av_dict_set(&options, "analyzeduration", "1000000", 0);
 	ffmpeg_set_http_options(&options, src);
-	if (ffmpeg_open_input(priv, src->url, &options) < 0 || metadata_interrupted(&cancel)) goto out;
+	// Interleaved audio/video payload skips should reuse the current HTTP range.
+	// Limit this read-ahead policy to explicit analysis, not normal metadata.
+	if (guess) av_dict_set(&options, "short_seek_size", "1048576", 0);
+	if (guess) sub_language_log("demux start timeout_ms=60000 byte_limit=268435456");
+	operation_error = ffmpeg_open_input(priv, src->url, &options);
+	if (operation_error < 0 || metadata_interrupted(&cancel)) goto out;
 	cancel.io = priv->fmt->pb;
+	stage = "probe";
+	if (guess) sub_language_log("demux opened elapsed_ms=%"PRId64, (av_gettime_relative() - started) / 1000);
 	// analyzeduration is a format option, not a per-decoder option. A failed
 	// probe must not publish a cached success, even when it found some tracks.
-	if (avformat_find_stream_info(priv->fmt, NULL) < 0 || metadata_interrupted(&cancel)) goto out;
+	operation_error = avformat_find_stream_info(priv->fmt, NULL);
+	if (operation_error < 0 || metadata_interrupted(&cancel)) goto out;
 	if (priv->fmt->pb && priv->fmt->pb->error < 0 && priv->fmt->pb->error != AVERROR_EOF) goto out;
+	stage = "parse";
 	if (_parse_format(priv) || metadata_interrupted(&cancel)) goto out;
 	if (!priv->av.as_max && !priv->av.vs_max) goto out;
 	if (metadata_extract_tags(priv->fmt, &priv->tag, apic)) goto out;
-	language_cache_key(priv);
-	language_cache_load(priv);
-	if (guess) language_probe_scan(priv, &cancel);
+	stage = "fingerprint";
+	if (guess) sub_language_log("demux probed tracks=%d elapsed_ms=%"PRId64,
+		priv->av.subs_max, (av_gettime_relative() - started) / 1000);
+	language_fingerprint(priv);
+	stage = "scan";
+	if (guess && language_probe_scan(priv, &cancel)) goto out;
 	memcpy(&info->av, &priv->av, sizeof(info->av));
 	memcpy(&info->id3_tag, &priv->tag, sizeof(info->id3_tag));
 	// Large codec headers belong to AVFormatContext. Metadata results must
@@ -2953,8 +2927,13 @@ static int get_info_with_languages(const STREAM_URL *src, FILE_INFO *info, APIC 
 	}
 	info->size = priv->size;
 	info->duration = priv->duration;
-	err = (abort && abort(info->abort_opaque)) || (!guess && metadata_interrupted(&cancel)) ? 1 : 0;
+	err = !guess && metadata_interrupted(&cancel) ? 1 : 0;
 out:
+	if (guess) sub_language_log("demux end stage=%s status=%d operation_error=%d io_error=%d "
+		"bytes=%"PRId64" elapsed_ms=%"PRId64" stop=%s", stage, err, operation_error,
+		priv->fmt && priv->fmt->pb ? priv->fmt->pb->error : 0,
+		priv->fmt && priv->fmt->pb ? priv->fmt->pb->bytes_read : 0,
+		(av_gettime_relative() - started) / 1000, language_stop_reason(&cancel));
 	av_dict_free(&options);
 	if (priv->fmt) avformat_close_input(&priv->fmt);
 	ffmpeg_close_fd_input(priv);

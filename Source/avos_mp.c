@@ -359,6 +359,7 @@ int avos_mp_fillmetadata(avos_mp_t *mp, int type, uint64_t size, ID3_TAG *id3_ta
 	}
 	if (type == TYPE_VID && av && av->subs_max >= 0) {
 		ADD_INT(AVOS_MP_METADATA_NB_SUBTITLE_TRACK, av->subs_max);
+		ADD_STR(AVOS_MP_METADATA_SUBTITLE_FINGERPRINT, av->subtitle_fingerprint);
 		for (i = 0; i < av->subs_max; ++i) {
 			SUB_PROPERTIES sub;
 			sub_language_metadata_lock();

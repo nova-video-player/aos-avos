@@ -52,6 +52,7 @@ int main(int argc, char **argv) {
     sub_language_set_model_path(argv[1]);
     auto *s = sub_language_create();
     assert(s && sub_language_model_count() == 0);
+    assert(!sub_language_failed(s));
     // Repeated text, malformed UTF-8, oversized packets and a sparse track do not load a model.
     std::string large(20000, 'a');
     for (int i = 0; i < 24; ++i) {
@@ -131,6 +132,7 @@ int main(int argc, char **argv) {
     for (int cue = 0; cue < 8; ++cue)
         sub_language_feed(s, 0, SUB_LANG_TEXT, sentences[cue], std::strlen(sentences[cue]), cue);
     idle(s);
+    assert(sub_language_failed(s));
     sub_language_destroy(s);
     assert(sub_language_model_count() == 0);
 }

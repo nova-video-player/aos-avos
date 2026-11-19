@@ -9,6 +9,8 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -16,6 +18,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #ifdef CONFIG_FASTTEXT
 #include <fasttext/fasttext.h>
 #endif
@@ -225,6 +230,9 @@ struct Track {
     std::array<uint64_t, 16> hashes{};
     int64_t lastPts = std::numeric_limits<int64_t>::min();
     unsigned cues = 0, seen = 0, attempts = 0;
+    size_t sampleBytes = 0;
+    float lastScore = 0, lastRunnerUp = 0;
+    std::string lastLanguage;
     float previousScore = 0;
     int confidence = 0;
     bool ready = false, busy = false, done = false, result = false;
@@ -272,8 +280,13 @@ void run(SUB_LANGUAGE_SESSION *s) {
             sample.swap(track.text);
             track.ready = false; track.busy = true; track.cues = 0;
             ++track.attempts;
+            track.sampleBytes = sample.size();
             lock.unlock();
-            if (!model) model.reset(new Model(path));
+            if (!model) {
+                sub_language_log("model load start");
+                model.reset(new Model(path));
+                sub_language_log("model load complete");
+            }
             std::istringstream input(sample);
             std::vector<std::pair<fasttext::real, std::string>> predictions;
             model->value.predictLine(input, predictions, 2, 0.0f);
@@ -283,6 +296,9 @@ void run(SUB_LANGUAGE_SESSION *s) {
             if (s->stop) break;
             const float score = predictions.empty() ? 0 : predictions[0].first;
             const float runnerUp = predictions.size() < 2 ? 1 : predictions[1].first;
+            track.lastScore = score;
+            track.lastRunnerUp = runnerUp;
+            track.lastLanguage = predictions.empty() ? "" : predictions[0].second;
             if (score >= 0.85f && score - runnerUp >= 0.20f &&
                 predictions[0].second.compare(0, 9, "__label__") == 0) {
                 const std::string language = predictions[0].second.substr(9);
@@ -302,6 +318,7 @@ void run(SUB_LANGUAGE_SESSION *s) {
         }
     } catch (...) {
         // Missing/corrupt models or allocation failures must not escape into playback.
+        sub_language_log("model load/inference failed");
         std::lock_guard<std::mutex> guard(s->mutex);
         s->failed = true;
         for (auto &track : s->tracks) {
@@ -384,6 +401,11 @@ extern "C" int sub_language_poll(SUB_LANGUAGE_SESSION *s, int index, char *out, 
 extern "C" void sub_language_metadata_lock(void) { metadataMutex.lock(); }
 extern "C" void sub_language_metadata_unlock(void) { metadataMutex.unlock(); }
 extern "C" int sub_language_model_count(void) { return loadedModels.load(); }
+extern "C" int sub_language_failed(SUB_LANGUAGE_SESSION *s) {
+    if (!s) return 1;
+    std::lock_guard<std::mutex> guard(s->mutex);
+    return s->failed;
+}
 extern "C" int sub_language_pending(SUB_LANGUAGE_SESSION *s) {
     if (!s) return 0;
     std::lock_guard<std::mutex> guard(s->mutex);
@@ -395,4 +417,28 @@ extern "C" int sub_language_finished(SUB_LANGUAGE_SESSION *s, int index) {
     if (!s || index < 0 || index >= static_cast<int>(MAX_TRACKS)) return 1;
     std::lock_guard<std::mutex> guard(s->mutex);
     return s->failed || s->stop || s->tracks[index].done;
+}
+
+extern "C" void sub_language_log(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+#ifdef __ANDROID__
+    // Works in the worker process and release builds without AVOS debug initialization.
+    __android_log_vprint(ANDROID_LOG_INFO, "SubtitleLanguageNative", format, args);
+#else
+    std::vfprintf(stderr, format, args);
+    std::fputc('\n', stderr);
+#endif
+    va_end(args);
+}
+
+extern "C" void sub_language_diagnostics(SUB_LANGUAGE_SESSION *s, int index) {
+    if (!s || index < 0 || index >= static_cast<int>(MAX_TRACKS)) return;
+    std::lock_guard<std::mutex> guard(s->mutex);
+    const Track &t = s->tracks[index];
+    sub_language_log("track=%d unique_cues=%u buffered_cues=%u buffered_bytes=%zu attempts=%u "
+        "sample_bytes=%zu top=%s score=%.3f runner_up=%.3f accepted=%s confidence=%d "
+        "done=%d pending=%d model_failed=%d", index, t.seen, t.cues, t.text.size(), t.attempts,
+        t.sampleBytes, t.lastLanguage.c_str(), t.lastScore, t.lastRunnerUp, t.language.c_str(),
+        t.confidence, t.done, t.ready || t.busy, s->failed);
 }

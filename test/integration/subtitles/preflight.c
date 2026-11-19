@@ -12,7 +12,6 @@ static int abort_scan(void *p) { return p && av_gettime_relative() >= *(int64_t 
 int main(int argc, char **argv) {
     if (argc < 4) return 2;
     sub_language_set_model_path(argv[2]);
-    if (argc > 3) sub_language_set_cache_path(argv[3]);
     STREAM_URL src = {0}; FILE_INFO *info = calloc(1,sizeof(*info));
     stream_url_cpy_url(&src, argv[1]);
     int64_t start = av_gettime_relative(), deadline = start;

@@ -295,15 +295,7 @@ Java_com_archos_medialib_LibAvos_nativeSetSubtitleLanguageModel(JNIEnv *env, job
     (*env)->ReleaseStringUTFChars(env, path, model_path);
 }
 
-void
-Java_com_archos_medialib_LibAvos_nativeSetSubtitleLanguageCache(JNIEnv *env, jobject thiz, jstring path)
-{
-    if (!path) return;
-    const char *cache_path = (*env)->GetStringUTFChars(env, path, NULL);
-    if (!cache_path) return;
-    sub_language_set_cache_path(cache_path);
-    (*env)->ReleaseStringUTFChars(env, path, cache_path);
-}
+
 
 void
 Java_com_archos_medialib_LibAvos_nativeSetSubtitlePath(JNIEnv *env, jobject thiz, jstring path)

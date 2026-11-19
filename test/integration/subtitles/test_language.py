@@ -39,21 +39,7 @@ def test_without_fasttext(tmp_path):
     subprocess.run([str(binary)], check=True)
 
 
-def test_persistent_language_cache(tmp_path):
-    binary = tmp_path / "cache_test"
-    subprocess.run([os.environ.get("CXX", "c++"), "-std=c++11", "-pthread", "-Wall", "-Wextra", "-Werror",
-                    "-I" + str(AVOS / "Include"), str(AVOS / "Source/sub_language_cache.cpp"),
-                    str(Path(__file__).with_name("language_cache.cpp")), "-o", str(binary)], check=True)
-    # Separate processes prove persistence independently of any in-memory state.
-    subprocess.run([str(binary), str(tmp_path / "cache"), "write"], check=True)
-    subprocess.run([str(binary), str(tmp_path / "cache"), "read"], check=True)
-
-
-def test_independent_preflight_and_persistent_results(tmp_path):
-    """Opt-in production demux test; supply the unlabelled Ride.or.Die MKV locally."""
-    sample = os.environ.get("AVOS_LANGUAGE_SAMPLE")
-    if not sample:
-        pytest.skip("Set AVOS_LANGUAGE_SAMPLE to the Ride.or.Die MKV after make FASTTEXT=ON")
+def build_preflight(tmp_path):
     import shlex
     plan = subprocess.check_output(["make", "-n", "-W", "Source/main.c", "FASTTEXT=ON", "VERBOSE=1"],
                                    cwd=AVOS, text=True)
@@ -66,6 +52,15 @@ def test_independent_preflight_and_persistent_results(tmp_path):
                     "build/main.o": str(tmp_path / "preflight.o"), "build/avos": str(binary)}
     for command in (compile_command, link_command):
         subprocess.run([replacements.get(arg, arg) for arg in command], cwd=AVOS, check=True)
+    return binary
+
+
+def test_explicit_analysis_is_repeatable(tmp_path):
+    """Opt-in production demux test; supply the unlabelled Ride.or.Die MKV locally."""
+    sample = os.environ.get("AVOS_LANGUAGE_SAMPLE")
+    if not sample:
+        pytest.skip("Set AVOS_LANGUAGE_SAMPLE to the Ride.or.Die MKV after make FASTTEXT=ON")
+    binary = build_preflight(tmp_path)
     args = [str(binary), str(Path(sample).resolve()), str(PREBUILT / "share/fastText/lid.176.ftz"),
             str(tmp_path / "cache")]
     cold = subprocess.run(args, capture_output=True, text=True, check=True, timeout=15)

@@ -10,6 +10,8 @@
 extern "C" {
 #endif
 
+#define SUB_LANGUAGE_SCAN_TIMEOUT_US INT64_C(60000000)
+
 enum { SUB_LANG_UNKNOWN, SUB_LANG_METADATA, SUB_LANG_DESCRIPTION, SUB_LANG_FASTTEXT };
 enum { SUB_LANG_TEXT = 1, SUB_LANG_ASS, SUB_LANG_MOV_TEXT, SUB_LANG_WEBVTT };
 typedef struct sub_language_session SUB_LANGUAGE_SESSION;
@@ -27,17 +29,13 @@ void sub_language_metadata_lock(void);
 void sub_language_metadata_unlock(void);
 // Read-only diagnostics also used by the real-model host tests.
 int sub_language_model_count(void);
+int sub_language_failed(SUB_LANGUAGE_SESSION *session);
 int sub_language_pending(SUB_LANGUAGE_SESSION *session);
 int sub_language_finished(SUB_LANGUAGE_SESSION *session, int track);
+// Explicit-job diagnostics: no source URLs, credentials or subtitle text.
+void sub_language_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
+void sub_language_diagnostics(SUB_LANGUAGE_SESSION *session, int track);
 
-typedef struct {
-    int index, stream, format, confidence;
-    char language[32];
-} SUB_LANGUAGE_RESULT;
-void sub_language_set_cache_path(const char *path);
-int sub_language_cache_enabled(void);
-int sub_language_cache_read(const char *key, SUB_LANGUAGE_RESULT *results, int capacity, int *recent);
-void sub_language_cache_write(const char *key, const SUB_LANGUAGE_RESULT *results, int count, int scanned);
 int sub_language_probe_try_lock(void);
 void sub_language_probe_unlock(void);
 void sub_language_playback_active(int delta);

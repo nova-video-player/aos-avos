@@ -36,7 +36,7 @@ typedef int64_t INT64;
         run_c(self.helpers() + r'''
 static INT64 target;
 static int sample(pcm_drift_history_t *h,int wall,int phase) {
-    return pcm_drift_history_observe(h,1,(INT64)(10000+wall)*1000000,
+    return pcm_drift_history_observe(h,1,0,(INT64)(10000+wall)*1000000,
         10000+wall-phase,0,8,1,160,&target);
 }
 static void learn(pcm_drift_history_t *h) {
@@ -77,7 +77,7 @@ int main(void) {
         if(kind==3) generation=2;
         if(kind==4) offset=1000000;
         if(kind==5) wall=1100;
-        assert(!pcm_drift_history_observe(&h,kind!=6,
+        assert(!pcm_drift_history_observe(&h,kind!=6,0,
             (INT64)(10000+wall)*1000000,heard,offset,epoch,generation,160,&target));
         assert(!h.healthy);
         for(int t=1700;t<4000;t+=50) assert(!sample(&h,t,250));
@@ -112,7 +112,7 @@ int main(void) {
     pcm_drift_history_t h={0}; INT64 target=0; int recovered=0;
     for(unsigned i=0;i<sizeof(rows)/sizeof(*rows);i++) {
         int wall=10000+rows[i][0];
-        if(pcm_drift_history_observe(&h,1,(INT64)wall*1000000,
+        if(pcm_drift_history_observe(&h,1,0,(INT64)wall*1000000,
             wall-rows[i][1],0,8,1,160,&target)) {
             assert(rows[i][0]>10000);
             assert(target>350000000LL && target<600000000LL);
@@ -124,10 +124,104 @@ int main(void) {
 }
 ''')
 
+    def test_repeated_disturbances_during_owned_slew(self):
+        from native_replay import slew_helpers
+        text = source('codec_sfdec2.c')
+        # Model the capture: a ~278ms correction is followed by two more clock
+        # delays before it completes. Replay both observation and frame stepping.
+        run_c(self.helpers() + '\n' + extract(text, 'static void pcm_drift_history_follow(') + r'''
+#define MIN(a,b) ((a)<(b)?(a):(b))
+''' + slew_helpers(text) + r'''
+int main(void) {
+    for(int preserve=0;preserve<=1;preserve++) {
+    pcm_drift_history_t h={0};
+    INT64 offset=0,target=0;
+    offset_slew_policy_t policy={.step_ns=1000000};
+    int active=0, corrections=0, next_frame=0, last_armed=-1;
+    for(int wall=0;wall<=45000;wall+=10) {
+        while(next_frame<=wall) {
+            next_frame+=42;
+            if(active) {
+                INT64 before=offset;
+                active=!offset_slew_step(&offset,target,policy,42);
+                pcm_drift_history_follow(&h,before,offset,target);
+                assert(offset>=before && offset-before<=1000000);
+            }
+        }
+        if(wall%50) continue;
+        int phase=30;
+        if(wall>=2000) phase=30+MIN(250,(wall-2000)/4);
+        if(wall>=6500) phase+=MIN(200,(wall-6500)*2/5);
+        if(wall>=16000) phase+=MIN(300,(wall-16000)*3/5);
+        int correcting=preserve && active && h.recovery_owned && h.recovery_target_ns==target;
+        INT64 proposed=0;
+        if(pcm_drift_history_observe(&h,!active || correcting,correcting,
+            (INT64)(10000+wall)*1000000,10000+wall-phase,offset,14,1,160,&proposed)) {
+            assert(!active && wall-last_armed>=2000);
+            target=proposed;
+            active=1;
+            h.recovery_owned=1;
+            h.recovery_target_ns=target;
+            h.window.samples=0;
+            corrections++;
+            last_armed=wall;
+        }
+    }
+    assert(!active && !h.recovery_owned);
+    if(preserve) {
+        assert(corrections==2);
+        // The qualification window allows 40ms of phase variation.
+        assert(offset>=740000000LL && offset<=780000000LL);
+        assert(h.healthy);
+    } else {
+        // Previous behavior loses the witness during its first correction and
+        // never recovers the remaining ~500ms, even with stable audio afterward.
+        assert(corrections==1 && offset<300000000LL && !h.healthy);
+    }
+    }
+    return 0;
+}
+''')
+
+    def test_ownership_does_not_survive_other_changes(self):
+        text = source('codec_sfdec2.c')
+        run_c(self.helpers() + '\n' + extract(text, 'static void pcm_drift_history_follow(') + r'''
+int main(void) {
+    for(int kind=0;kind<9;kind++) {
+        pcm_drift_history_t h={.last_ns=10000000000LL,.last_time=9750,
+            .epoch=14,.audio_generation=1,.healthy=1,.recovery_owned=1,
+            .recovery_target_ns=300000000LL};
+        INT64 target=0,offset=1000000,now=10050000000LL;
+        int heard=9800,epoch=14,eligible=1;
+        unsigned generation=1;
+        // Only the exact owned target and previous offset may carry history.
+        pcm_drift_history_follow(&h,kind==1?1:0,offset,
+            kind==2?400000000:300000000);
+        if(kind==3) epoch++;
+        if(kind==4) generation++;
+        if(kind==5) now+=300000000;
+        if(kind==6) heard=9700;
+        if(kind==7) eligible=0;
+        if(kind==8) now=9900000000LL;
+        assert(!pcm_drift_history_observe(&h,eligible,1,now,heard,offset,
+            epoch,generation,160,&target));
+        if(kind==0) assert(h.healthy && h.recovery_owned && !h.window.samples);
+        else assert(!h.healthy && !h.recovery_owned);
+    }
+    // Completion carries the final offset but ends active-slew ownership.
+    pcm_drift_history_t h={.offset_ns=299000000,.healthy=1,
+        .recovery_owned=1,.recovery_target_ns=300000000};
+    pcm_drift_history_follow(&h,299000000,300000000,300000000);
+    assert(h.healthy && !h.recovery_owned && h.offset_ns==300000000);
+    return 0;
+}
+''')
+
     def test_integration_scope(self):
         text = source('codec_sfdec2.c')
         call = text[text.index('int accumulated_drift ='):text.index('\n\tif (pcm_drift_observe', text.index('int accumulated_drift ='))]
-        self.assertIn('pcm_drift_eligible && fabsf(current_speed - 1.0f) < 0.001f', call)
+        self.assertIn('pcm_drift_context_eligible && (!p->slew_active || pcm_history_slew)', call)
+        self.assertIn('fabsf(current_speed - 1.0f) < 0.001f, pcm_history_slew', call)
         self.assertIn('s->audio_lifecycle_generation', call)
         self.assertIn('s->seek_epoch', call)
         pause = extract(text, 'static void sfdec2_android_sync_on_pause_locked(')

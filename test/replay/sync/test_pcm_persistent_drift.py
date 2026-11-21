@@ -16,8 +16,9 @@ class PcmDriftTest(unittest.TestCase):
         helper = block(source, 'static int pcm_drift_observe(')
         end = source.index('} pcm_drift_t;') + len('} pcm_drift_t;')
         state = source[source.rfind('typedef struct {', 0, end):end]
-        start = source.index('int pcm_drift_eligible =')
-        gate = source[start:source.index(';', start) + 1]
+        start = source.index('int pcm_drift_context_eligible =')
+        end = source.index(';', source.index('int pcm_drift_eligible =', start)) + 1
+        gate = source[start:end]
         fields = sorted(set(re.findall(r'p->(\w+)', gate)) - {'speed_cadence'})
         private = '\n'.join('INT64 ' + name + ';' for name in fields)
         code = r'''

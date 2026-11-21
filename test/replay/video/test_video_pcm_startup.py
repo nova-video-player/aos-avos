@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from paths import REPO_ROOT
-from native_replay import block, slew_helpers
+from native_replay import block, slew_helpers, typedef
 
 
 class PcmStartupTest(unittest.TestCase):
@@ -17,6 +17,7 @@ class PcmStartupTest(unittest.TestCase):
         apply = block(source, 'if (preserve_pcm_startup_anchor)')
         slew = block(source, 'if (p->slew_active &&')
         fields = sorted(set(re.findall(r'p->(\w+)', helper + apply + slew)) - {'speed_cadence'})
+        fields.remove('pcm_drift_history')
         private = '\n'.join(
             f'{"const void *" if name.endswith("handle") else "int64_t "}{name};'
             for name in fields)
@@ -36,11 +37,13 @@ typedef struct {
     int put_time_mode, audio_time, paused, seek_paused, play_n_video_frames;
     int audio_start_pending, audio_resume_pending, seek_epoch;
 } STREAM;
+''' + typedef(source, 'pcm_drift_t') + typedef(source, 'pcm_drift_history_t') + r'''
 typedef struct {
+    pcm_drift_history_t pcm_drift_history;
     struct { int valid, epoch; } speed_cadence;
 ''' + private + r'''
 } priv_t;
-''' + slew_helpers(source) + helper + r'''
+''' + block(source, 'static void pcm_drift_history_follow(') + slew_helpers(source) + helper + r'''
 static void apply(priv_t *p, STREAM *s, INT64 startup_target_ns) {
     int preserve_pcm_startup_anchor = 1, time = 22;
     INT64 startup_offset_ns = p->render_offset_ns;

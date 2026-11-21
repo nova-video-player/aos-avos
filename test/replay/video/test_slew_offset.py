@@ -26,6 +26,7 @@ class SlewOffsetTest(unittest.TestCase):
         text = source('codec_sfdec2.c')
         functions = '\n'.join(extract(text, marker) for marker in (
             'static void speed_cadence_reset(',
+            'static void pcm_drift_history_follow(',
             'static int mode1_phase_matches_audio_l(',
             'static void mode1_resume_observe_l(',
             'static int pcm_resume_matches_audio_l(',

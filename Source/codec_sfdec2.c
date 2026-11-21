@@ -260,6 +260,8 @@ typedef struct {
 	unsigned int audio_generation;
 	int healthy;
 	int sampling_healthy;
+	int recovery_owned;
+	INT64 recovery_target_ns;
 } pcm_drift_history_t;
 
 typedef struct priv {
@@ -528,7 +530,7 @@ static int pcm_drift_observe(pcm_drift_t *d, int eligible, INT64 step_ms,
 // upstream audio gate and the retained renderer deadlines permanently at odds.
 // Only recover lag that follows observed healthy 1x PCM on this same anchor;
 // never infer a clock error from dropped frames or an existing route bias.
-static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible,
+static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible, int correcting,
 	INT64 now_ns, int heard_ms, INT64 offset_ns, int epoch,
 	unsigned int audio_generation, int threshold_ms, INT64 *target_ns)
 {
@@ -545,6 +547,13 @@ static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible,
 	h->offset_ns = offset_ns;
 	h->epoch = epoch;
 	h->audio_generation = audio_generation;
+	// Keep the healthy witness while our own target is being applied, but
+	// collect no new target until it completes. All identity/freshness checks
+	// above still apply, and a remaining lag must qualify for two seconds anew.
+	if (correcting) {
+		h->window.samples = 0;
+		return 0;
+	}
 	INT64 target = now_ns - (INT64)heard_ms * 1000000LL;
 	INT64 phase = target - offset_ns;
 	int healthy = llabs(phase) < (INT64)threshold_ms * 1000000LL;
@@ -583,8 +592,22 @@ static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible,
 		return 0;
 	}
 	*target_ns = w->target_ns;
-	memset(h, 0, sizeof(*h));
+	w->samples = 0;
 	return 1;
+}
+
+// Called under the renderer mutex only for ordinary PCM startup/drift slew.
+// Accept exactly our target's offset movement, including the final frame. An
+// unrelated target or anchor change must still invalidate the healthy witness.
+static void pcm_drift_history_follow(pcm_drift_history_t *h, INT64 before_ns,
+	INT64 after_ns, INT64 target_ns)
+{
+	if (!h->recovery_owned || h->offset_ns != before_ns ||
+		h->recovery_target_ns != target_ns)
+		return;
+	h->offset_ns = after_ns;
+	if (after_ns == target_ns)
+		h->recovery_owned = 0;
 }
 
 // One-time write-clock -> PlaybackParams-clock handoff. A transient rejects
@@ -1722,7 +1745,7 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// Lifecycle recovery, manual delay and speed-boundary cadence own their
 	// anchors. Only qualify an otherwise idle PCM anchor, then reuse the
 	// existing once-per-frame bounded startup slew without a hard reanchor.
-	int pcm_drift_eligible = !passthrough_mode && s && s->put_time_mode &&
+	int pcm_drift_context_eligible = !passthrough_mode && s && s->put_time_mode &&
 		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0 &&
 		!s->paused && !s->seek_paused && !s->audio_start_pending &&
 		!s->audio_resume_pending && s->play_n_video_frames == 0 &&
@@ -1730,20 +1753,33 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		!speed_changed && !epoch_changed && !resume_started && !pcm_resume &&
 		!in_grace && !allow_reanchor && !p->pause_armed && !p->pcm_resume_pending &&
 		!p->pcm_resume_calibration_active && !p->pending_reanchor &&
-		!p->pending_seek_reanchor && !p->slew_active && !p->at_clock_handoff_pending &&
+		!p->pending_seek_reanchor && !p->at_clock_handoff_pending &&
 		p->render_offset_ns != -1 && p->render_offset_from_audio &&
 		fabsf(requested_speed - current_speed) < 0.001f &&
 		p->speed_cadence.correction_ns == 0;
+	int pcm_drift_eligible = pcm_drift_context_eligible && !p->slew_active;
+	int pcm_history_slew = p->slew_active && p->pcm_startup_slew &&
+		!p->pcm_resume_slew && !p->pcm_seek_startup_slew &&
+		p->pcm_drift_history.recovery_owned &&
+		p->target_offset_ns == p->pcm_drift_history.recovery_target_ns;
 	INT64 drift_target_ns;
 	int frame_ms = s && s->video && s->video->msPerFrame > 0 ? s->video->msPerFrame : 33;
 	INT64 drift_now_ns = _get_monotonic_ns();
 	int accumulated_drift = pcm_drift_history_observe(&p->pcm_drift_history,
-		pcm_drift_eligible && fabsf(current_speed - 1.0f) < 0.001f,
+		pcm_drift_context_eligible && (!p->slew_active || pcm_history_slew) &&
+			fabsf(current_speed - 1.0f) < 0.001f, pcm_history_slew,
 		drift_now_ns, time, p->render_offset_ns, s ? s->seek_epoch : 0,
 		s ? s->audio_lifecycle_generation : 0, drift_threshold_ms, &drift_target_ns);
 	if (pcm_drift_observe(&p->pcm_drift, pcm_drift_eligible, diff,
 		drift_now_ns, time, p->render_offset_ns, drift_threshold_ms,
 		MAX(350, frame_ms * 8), &drift_target_ns) || accumulated_drift) {
+		// A qualified single-step correction may win over the accumulated path.
+		// Follow its target too, but only if the same healthy 1x witness exists.
+		if (p->pcm_drift_history.healthy) {
+			p->pcm_drift_history.recovery_owned = 1;
+			p->pcm_drift_history.recovery_target_ns = drift_target_ns;
+			p->pcm_drift_history.window.samples = 0;
+		}
 		p->target_offset_ns = drift_target_ns;
 		p->slew_active = 1;
 		p->pcm_startup_slew = 1;
@@ -2553,8 +2589,14 @@ static void *videosink_thread(void *ctx)
 					.snap_small_remainder = !(p->pcm_startup_slew ||
 						p->mode1_resume_slew || p->mode2_dynamic_slew),
 				};
-				if (offset_slew_step(&p->render_offset_ns, p->target_offset_ns,
-						policy, f->duration)) {
+				INT64 previous_offset_ns = p->render_offset_ns;
+				int slew_complete = offset_slew_step(&p->render_offset_ns,
+					p->target_offset_ns, policy, f->duration);
+				if (p->pcm_startup_slew && !p->pcm_resume_slew &&
+					!p->pcm_seek_startup_slew)
+					pcm_drift_history_follow(&p->pcm_drift_history, previous_offset_ns,
+						p->render_offset_ns, p->target_offset_ns);
+				if (slew_complete) {
 					p->slew_active = 0;
 					if (!p->mode2_dynamic_fast_slew) {
 						p->mode2_dynamic_settle_frames = 0;

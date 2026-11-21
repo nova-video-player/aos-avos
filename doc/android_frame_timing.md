@@ -385,3 +385,11 @@ regression, output/seek/anchor changes, pause and the existing lifecycle exclusi
 invalidate its evidence. The additional path is disabled at other speeds and uses
 the same 1ms-per-distinct-frame correction; it does not change drop thresholds or
 retained-resume, seek, speed-handoff and passthrough policies.
+
+An accumulated-lag correction retains its healthy-clock witness through its own
+per-frame offset changes. Ownership requires the same target and offset; only
+ordinary PCM drift/startup slew can advance that witness. Qualification is
+suspended during the correction, not restarted on every frame. On completion,
+a remaining lag must satisfy a fresh two-second stable, advancing window before
+a second correction. Other active corrections and all existing lifecycle,
+identity, freshness, manual-delay and speed exclusions still clear the witness.

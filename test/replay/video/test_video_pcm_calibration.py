@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from paths import REPO_ROOT
-from native_replay import block, slew_helpers
+from native_replay import block, slew_helpers, typedef
 
 
 class PcmCalibrationTest(unittest.TestCase):
@@ -30,6 +30,7 @@ class PcmCalibrationTest(unittest.TestCase):
         guard = source[guard_start:source.index(';', guard_start) + 1]
         fields = set(re.findall(r'p->(\w+)', matches + observe + write_target + slew + remember + guard + eligibility + sampling_guard + sampling_reset))
         fields.remove('pcm_resume_timeline')
+        fields.remove('pcm_drift_history')
         private = '\n'.join(
             f'{"const void *" if name.endswith("handle") else "int64_t "}{name};'
             for name in sorted(fields))
@@ -59,11 +60,13 @@ typedef struct {
 static int stream_audiotrack_epoch_active(STREAM *s) { return s->at_speed_epoch_active; }
 static int speed_enabled;
 static int audio_interface_is_audio_speed_enabled(void) { return speed_enabled; }
+''' + typedef(source, 'pcm_drift_t') + typedef(source, 'pcm_drift_history_t') + r'''
 typedef struct {
+    pcm_drift_history_t pcm_drift_history;
     timeline_state_t pcm_resume_timeline;
 ''' + private + r'''
 } priv_t;
-''' + slew_helpers(source) + matches + observe + write_target + r'''
+''' + block(source, 'static void pcm_drift_history_follow(') + slew_helpers(source) + matches + observe + write_target + r'''
 static int can_sample(priv_t *p, STREAM *s, int passthrough_mode, int preserve_output,
                       int pcm_latency_us, float current_speed) {
     int epoch_changed = 0, speed_changed = 0, no_sched_anchor = 0;

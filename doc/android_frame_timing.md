@@ -373,3 +373,15 @@ not snap the wall anchor or use late-frame drops as evidence of clock drift.
 Passthrough, manual A/V delay, pause/seek/startup recovery, pending speed changes
 and active cadence compensation are excluded. Existing hard-discontinuity and
 speed-calibration policies remain authoritative.
+
+At steady 1x PCM, accumulated positive lag has a separate qualification path.
+It first requires a healthy phase (inside the ordinary drift threshold) stable
+within 40ms for one second, with at least 800ms of audio progress. Only then can
+lag between that threshold and 750ms qualify over two stable seconds, with
+at least 1600ms of audio progress. This catches smaller delays that accumulate without a single
+large clock step. An initial route bias, negative drift, stalled clock or residual
+above the bound cannot use this path. Missing observations over 200ms, clock
+regression, output/seek/anchor changes, pause and the existing lifecycle exclusions
+invalidate its evidence. The additional path is disabled at other speeds and uses
+the same 1ms-per-distinct-frame correction; it does not change drop thresholds or
+retained-resume, seek, speed-handoff and passthrough policies.

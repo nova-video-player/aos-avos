@@ -250,6 +250,18 @@ typedef struct {
 	int samples;
 } pcm_drift_t;
 
+// Evidence for accumulated PCM lag belongs to one unchanged output/anchor.
+typedef struct {
+	pcm_drift_t window;
+	INT64 last_ns;
+	INT64 offset_ns;
+	int last_time;
+	int epoch;
+	unsigned int audio_generation;
+	int healthy;
+	int sampling_healthy;
+} pcm_drift_history_t;
+
 typedef struct priv {
 	sfdec_t *sfdec;
 	void *surface_handle;
@@ -380,6 +392,7 @@ typedef struct priv {
 	int last_user_av_delay;
 	int effective_av_delay_ms;
 	pcm_drift_t pcm_drift;
+	pcm_drift_history_t pcm_drift_history;
 	int at_clock_active;
 	int at_clock_handoff_pending;
 	INT64 at_clock_handoff_deadline_ns;
@@ -508,6 +521,69 @@ static int pcm_drift_observe(pcm_drift_t *d, int eligible, INT64 step_ms,
 		return 0;
 	*target_ns = d->target_ns;
 	d->samples = 0;
+	return 1;
+}
+
+// A series of small clock delays can bypass single-step recovery and leave the
+// upstream audio gate and the retained renderer deadlines permanently at odds.
+// Only recover lag that follows observed healthy 1x PCM on this same anchor;
+// never infer a clock error from dropped frames or an existing route bias.
+static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible,
+	INT64 now_ns, int heard_ms, INT64 offset_ns, int epoch,
+	unsigned int audio_generation, int threshold_ms, INT64 *target_ns)
+{
+	if (!eligible) {
+		memset(h, 0, sizeof(*h));
+		return 0;
+	}
+	if (h->last_ns && (offset_ns != h->offset_ns || epoch != h->epoch ||
+		audio_generation != h->audio_generation || now_ns < h->last_ns ||
+		now_ns - h->last_ns > 200000000LL || heard_ms < h->last_time))
+		memset(h, 0, sizeof(*h));
+	h->last_ns = now_ns;
+	h->last_time = heard_ms;
+	h->offset_ns = offset_ns;
+	h->epoch = epoch;
+	h->audio_generation = audio_generation;
+	INT64 target = now_ns - (INT64)heard_ms * 1000000LL;
+	INT64 phase = target - offset_ns;
+	int healthy = llabs(phase) < (INT64)threshold_ms * 1000000LL;
+	// Limit this additional path to bounded positive lag. Clock advances and
+	// large discontinuities retain their existing recovery policy.
+	if (!healthy && (!h->healthy || phase <= 0 || phase > 750000000LL)) {
+		h->healthy = 0;
+		h->window.samples = 0;
+		return 0;
+	}
+	pcm_drift_t *w = &h->window;
+	if (healthy != h->sampling_healthy ||
+		(w->samples && llabs(target - w->target_ns) > 40000000LL))
+		w->samples = 0;
+	h->sampling_healthy = healthy;
+	if (!w->samples) {
+		w->start_ns = w->last_ns = now_ns;
+		w->start_time = heard_ms;
+		w->target_ns = target;
+		w->samples = 1;
+		return 0;
+	}
+	if (now_ns - w->last_ns < 50000000LL)
+		return 0;
+	w->last_ns = now_ns;
+	w->samples++;
+	// Learn healthy playback over one second. A new lag needs two seconds of
+	// stability so a brief plateau during a slowdown cannot immediately arm
+	// a long-lived correction. Both windows require advancing audio.
+	if (w->samples < (healthy ? 11 : 21) ||
+		now_ns - w->start_ns < (healthy ? 1000000000LL : 2000000000LL) ||
+		(INT64)heard_ms - w->start_time < (healthy ? 800 : 1600))
+		return 0;
+	if (healthy) {
+		h->healthy = 1;
+		return 0;
+	}
+	*target_ns = w->target_ns;
+	memset(h, 0, sizeof(*h));
 	return 1;
 }
 
@@ -1660,9 +1736,14 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		p->speed_cadence.correction_ns == 0;
 	INT64 drift_target_ns;
 	int frame_ms = s && s->video && s->video->msPerFrame > 0 ? s->video->msPerFrame : 33;
+	INT64 drift_now_ns = _get_monotonic_ns();
+	int accumulated_drift = pcm_drift_history_observe(&p->pcm_drift_history,
+		pcm_drift_eligible && fabsf(current_speed - 1.0f) < 0.001f,
+		drift_now_ns, time, p->render_offset_ns, s ? s->seek_epoch : 0,
+		s ? s->audio_lifecycle_generation : 0, drift_threshold_ms, &drift_target_ns);
 	if (pcm_drift_observe(&p->pcm_drift, pcm_drift_eligible, diff,
-		_get_monotonic_ns(), time, p->render_offset_ns, drift_threshold_ms,
-		MAX(350, frame_ms * 8), &drift_target_ns)) {
+		drift_now_ns, time, p->render_offset_ns, drift_threshold_ms,
+		MAX(350, frame_ms * 8), &drift_target_ns) || accumulated_drift) {
 		p->target_offset_ns = drift_target_ns;
 		p->slew_active = 1;
 		p->pcm_startup_slew = 1;
@@ -3707,6 +3788,7 @@ static void sfdec2_android_sync_on_pause_locked( STREAM *s, int paused )
 		video_startup_watchdog_suspend(&p->startup_watchdog);
 		p->mode2_cold_entry_until_ms = 0;
 		p->pcm_drift.samples = 0;
+		memset(&p->pcm_drift_history, 0, sizeof(p->pcm_drift_history));
 		p->at_clock_handoff_pending = 0;
 		p->pcm_resume_sample_stage = 0;
 		p->pcm_resume_calibration_active = 0;

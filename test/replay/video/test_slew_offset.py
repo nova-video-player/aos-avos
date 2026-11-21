@@ -73,7 +73,7 @@ timeline_state_t timeline_snapshot(void) { return timeline; }
 static int mode, preserves=1;
 static int passthrough(STREAM *s) { (void)s; return mode; }
 int audio_interface_pause_preserves_output(audio_ctx_t *ctx) { (void)ctx; return preserves; }
-''' + typedef(text, 'speed_cadence_t') + '\n' + typedef(text, 'pcm_drift_t') + r'''
+''' + typedef(text, 'speed_cadence_t') + '\n' + typedef(text, 'pcm_drift_t') + '\n' + typedef(text, 'pcm_drift_history_t') + r'''
 typedef struct {
     struct { pthread_mutex_t mtx; } locked;
 ''' + '\n'.join(declarations) + '\n} priv_t;\n' + slew_helpers(text) + functions + r'''

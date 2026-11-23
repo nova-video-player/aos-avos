@@ -532,23 +532,40 @@ static int pcm_drift_observe(pcm_drift_t *d, int eligible, INT64 step_ms,
 // never infer a clock error from dropped frames or an existing route bias.
 static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible, int correcting,
 	INT64 now_ns, int heard_ms, INT64 offset_ns, int epoch,
-	unsigned int audio_generation, int threshold_ms, INT64 *target_ns)
+	unsigned int audio_generation, int threshold_ms, INT64 *target_ns, const char **event)
 {
+	*event = NULL;
 	if (!eligible) {
+		if (h->last_ns)
+			*event = "context_reset";
 		memset(h, 0, sizeof(*h));
 		return 0;
 	}
-	if (h->last_ns && (offset_ns != h->offset_ns || epoch != h->epoch ||
-		audio_generation != h->audio_generation || now_ns < h->last_ns ||
-		now_ns - h->last_ns > 200000000LL || heard_ms < h->last_time))
-		memset(h, 0, sizeof(*h));
+	if (h->last_ns) {
+		const char *reset = offset_ns != h->offset_ns ? "anchor_reset" :
+			epoch != h->epoch ? "epoch_reset" :
+			audio_generation != h->audio_generation ? "output_reset" :
+			now_ns < h->last_ns ? "wall_regression" :
+			heard_ms < h->last_time ? "audio_regression" : NULL;
+		if (reset) {
+			*event = reset;
+			memset(h, 0, sizeof(*h));
+		} else if (now_ns - h->last_ns > 200000000LL) {
+			// Missing observations invalidate a qualification window, not
+			// the historical fact that this same anchor played in sync.
+			// Preserve owned slew too; after it completes, any residual
+			// still needs a fresh, uninterrupted advancing-audio window.
+			*event = "gap_window_reset";
+			h->window.samples = 0;
+		}
+	}
 	h->last_ns = now_ns;
 	h->last_time = heard_ms;
 	h->offset_ns = offset_ns;
 	h->epoch = epoch;
 	h->audio_generation = audio_generation;
 	// Keep the healthy witness while our own target is being applied, but
-	// collect no new target until it completes. All identity/freshness checks
+	// collect no new target until it completes. All identity/continuity checks
 	// above still apply, and a remaining lag must qualify for two seconds anew.
 	if (correcting) {
 		h->window.samples = 0;
@@ -560,6 +577,8 @@ static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible, int c
 	// Limit this additional path to bounded positive lag. Clock advances and
 	// large discontinuities retain their existing recovery policy.
 	if (!healthy && (!h->healthy || phase <= 0 || phase > 750000000LL)) {
+		if (!*event && (h->healthy || h->window.samples))
+			*event = !h->healthy ? "no_healthy_history" : "phase_out_of_range";
 		h->healthy = 0;
 		h->window.samples = 0;
 		return 0;
@@ -1765,11 +1784,22 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	INT64 drift_target_ns;
 	int frame_ms = s && s->video && s->video->msPerFrame > 0 ? s->video->msPerFrame : 33;
 	INT64 drift_now_ns = _get_monotonic_ns();
+	INT64 drift_gap_ns = p->pcm_drift_history.last_ns ?
+		drift_now_ns - p->pcm_drift_history.last_ns : 0;
+	const char *drift_event;
 	int accumulated_drift = pcm_drift_history_observe(&p->pcm_drift_history,
 		pcm_drift_context_eligible && (!p->slew_active || pcm_history_slew) &&
 			fabsf(current_speed - 1.0f) < 0.001f, pcm_history_slew,
 		drift_now_ns, time, p->render_offset_ns, s ? s->seek_epoch : 0,
-		s ? s->audio_lifecycle_generation : 0, drift_threshold_ms, &drift_target_ns);
+		s ? s->audio_lifecycle_generation : 0, drift_threshold_ms, &drift_target_ns, &drift_event);
+	if (drift_event) {
+		DBGSI serprintf("android_sync: PCM drift evidence event=%s gap_ms=%lld phase_ms=%lld healthy=%d owned=%d correcting=%d epoch=%d generation=%u context=%d speed=%.3f\n",
+			drift_event, (long long)(drift_gap_ns / NSEC_PER_MSEC),
+			(long long)((drift_now_ns - (INT64)time * NSEC_PER_MSEC - p->render_offset_ns) / NSEC_PER_MSEC),
+			p->pcm_drift_history.healthy, p->pcm_drift_history.recovery_owned,
+			pcm_history_slew, s ? s->seek_epoch : 0,
+			s ? s->audio_lifecycle_generation : 0, pcm_drift_context_eligible, current_speed);
+	}
 	if (pcm_drift_observe(&p->pcm_drift, pcm_drift_eligible, diff,
 		drift_now_ns, time, p->render_offset_ns, drift_threshold_ms,
 		MAX(350, frame_ms * 8), &drift_target_ns) || accumulated_drift) {

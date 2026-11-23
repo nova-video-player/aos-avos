@@ -380,9 +380,12 @@ within 40ms for one second, with at least 800ms of audio progress. Only then can
 lag between that threshold and 750ms qualify over two stable seconds, with
 at least 1600ms of audio progress. This catches smaller delays that accumulate without a single
 large clock step. An initial route bias, negative drift, stalled clock or residual
-above the bound cannot use this path. Missing observations over 200ms, clock
-regression, output/seek/anchor changes, pause and the existing lifecycle exclusions
-invalidate its evidence. The additional path is disabled at other speeds and uses
+above the bound cannot use this path. Missing observations over 200ms restart
+the qualification window but retain previously established healthy history on
+the same anchor. No correction can qualify across that gap: fresh observations
+must still provide two uninterrupted stable seconds and 1600ms of audio
+progress. Clock regression, output/seek/anchor changes, pause and the existing
+lifecycle exclusions invalidate all evidence. The additional path is disabled at other speeds and uses
 the same 1ms-per-distinct-frame correction; it does not change drop thresholds or
 retained-resume, seek, speed-handoff and passthrough policies.
 
@@ -392,4 +395,11 @@ ordinary PCM drift/startup slew can advance that witness. Qualification is
 suspended during the correction, not restarted on every frame. On completion,
 a remaining lag must satisfy a fresh two-second stable, advancing window before
 a second correction. Other active corrections and all existing lifecycle,
-identity, freshness, manual-delay and speed exclusions still clear the witness.
+identity, manual-delay and speed exclusions still clear the witness. A temporary
+observation gap preserves ownership while discarding the sampling window.
+
+At sink debug level 1, `PCM drift evidence` reports context, anchor, epoch,
+output and clock-regression resets, observation gaps and phase rejection. These
+event diagnostics do not require per-publication tracing; they are disabled
+when the sink debug category is off. Startup with no healthy history remains
+ineligible for accumulated-lag recovery.

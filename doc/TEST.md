@@ -228,8 +228,16 @@ Unlogged route changes cannot be identified reliably.
   playback initially at 1.0x. MediaCodec audio decoding deliberately rejects
   variable speed; use FFmpeg audio decoding for the speed campaign.
 
-The preflight requires live video records and, by default, render timing.
-Missing evidence stops the test rather than silently reporting success.
+The preflight requires live video, clock (`put_time_calc`) and audio-write
+records, plus render timing by default. Missing clock/write diagnostics stop the
+test before key injection with the corresponding AVSH verbosity command. In
+particular, low-volume troubleshooting builds may emit render timing at sink
+level 1 while `put_time_calc` requires level 2. The speed-session launcher and
+campaign `--video` startup already enable the required levels; standalone
+scripts and campaigns using existing playback require the settings above.
+Phase and filtered campaign captures also retain optional `video_flow_diag`
+and PCM drift evidence/correction records for investigation. Their absence
+does not fail older diagnostic builds.
 Passthrough is supported by the resume/seek observers; speed testing rejects it.
 
 ## Commands

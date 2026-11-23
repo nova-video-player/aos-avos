@@ -154,7 +154,7 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIn('seek_preview_startup_late', self.check(overdue, 'seek')['reason'])
         self.assertEqual(analyze_recording(overdue, config({}))['verdict'], 'ISSUES_OBSERVED')
 
-    def test_capture_filters_preserve_preview_identity(self):
+    def test_capture_filters_preserve_transition_evidence(self):
         from pathlib import Path
         import re
         import subprocess
@@ -165,8 +165,47 @@ class AnalyzerTests(unittest.TestCase):
             result = subprocess.run(['bash', '-c', assignments + '\nprintf "%s" "$' + variable + '"'],
                                     check=True, capture_output=True, text=True)
             for marker in ('_stream_play_n_frames(n=10, time=0)',
-                           'SINK_REF_DEFERRED: frame_time=0 seek_epoch=1'):
+                           'SINK_REF_DEFERRED: frame_time=0 seek_epoch=1',
+                           'video_flow_diag: stage=decode outputs=24',
+                           'android_sync: PCM persistent drift slew correction=405000us epoch=8',
+                           'android_sync: PCM drift evidence event=gap_window_reset phase_rejected=1'):
                 self.assertRegex(marker, re.compile(result.stdout))
+
+    def test_preflight_requires_clock_and_write_diagnostics_before_actions(self):
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        complete = fixture()
+        cases = [
+            ('complete', complete, 0, ''),
+            ('missing_clock', '\n'.join(line for line in complete.splitlines()
+                                      if 'put_time_calc:' not in line), 2, 'enable dbgsink 2'),
+            ('missing_write', '\n'.join(line for line in complete.splitlines()
+                                      if 'audiotrack_write: wrote' not in line), 2, 'enable dbga 2'),
+        ]
+        for mode in ('resume', 'seek', 'speed'):
+            for name, capture, rc, message in cases:
+                with self.subTest(mode=mode, case=name), tempfile.TemporaryDirectory() as tmp:
+                    output = Path(tmp)
+                    (output / 'capture.log').write_text(capture)
+                    result = subprocess.run(['bash', '-c', r'''
+set -eu
+. "$SCRIPT_DIR/stress_common.sh"
+fail() { printf 'ERROR: %s\n' "$1" >&2; exit 2; }
+stress_snapshot() { :; }
+adb() { echo 'unexpected device action' >&2; exit 99; }
+LATEST="$OUTPUT_DIR/capture.log"
+REQUIRE_RENDER_TIMING=1
+EXPECTED_PHASE_MS=0
+stress_preflight
+printf 'PREFLIGHT_OK\n'
+'''], env=dict(os.environ, SCRIPT_DIR=str(DEVICE_DIR), OUTPUT_DIR=tmp,
+                                  STRESS_MODE=mode), capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
+                    self.assertIn(message, result.stderr)
+                    self.assertEqual('PREFLIGHT_OK' in result.stdout, rc == 0)
+                    self.assertEqual((output / 'analyzer-config.json').exists(), rc == 0)
 
     def test_delayed_logd_summary_is_not_playback_clock_reversal(self):
         text = fixture() + '\n1001.000 3677 3883 I chatty  : uid=1000(system) Binder identical 3 lines'

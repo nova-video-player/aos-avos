@@ -45,6 +45,7 @@ PY
 	LOGCAT_KEEP="$LOGCAT_KEEP|pcm_present_observer:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|compressed_write_wait:|mode2_seek_calibration:"
 	LOGCAT_KEEP="$LOGCAT_KEEP|android_sync anchor_diag|android_sync: (init render_offset|PCM startup correction)|pcm_startup_correction:|at_ledger:|startup_anchor_commit|audio_start_commit|heard_ts_diag:"
+	LOGCAT_KEEP="$LOGCAT_KEEP|video_flow_diag:|android_sync: PCM (persistent drift slew|drift evidence)"
 	LOGCAT_KEEP="$LOGCAT_KEEP|sfdec_dovi_gl:|Dolby Vision GPU reshaping"
 	LOGCAT_ADB_PID=''
 	LOGCAT_PIPE=''
@@ -175,6 +176,10 @@ stress_preflight()
 	if [ "$REQUIRE_RENDER_TIMING" = 1 ]; then
 		grep -q 'video_render_diag:' "$LATEST" || fail 'video_render_diag missing; install the diagnostic build or explicitly disable REQUIRE_RENDER_TIMING'
 	fi
+	# These records are required by every analyzer mode. Diagnose missing
+	# verbosity before injecting keys, rather than reporting a recovery failure.
+	grep -q 'put_time_calc:' "$LATEST" || fail 'clock diagnostics missing; enable dbgsink 2 via test/device/av.sh and confirm playback is advancing'
+	grep -q 'audiotrack_write: wrote' "$LATEST" || fail 'audio-write diagnostics missing; enable dbga 2 via test/device/av.sh and confirm playback is advancing'
 	if [ "${STRESS_MODE:-}" = speed ]; then
 		if grep -Eq 'audiotrack_write: wrote.*passthrough=[1-9]' "$LATEST"; then
 			fail 'speed validation requires decoded PCM; compressed passthrough is active'

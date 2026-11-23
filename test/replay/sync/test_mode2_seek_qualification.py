@@ -181,6 +181,7 @@ int main(void) {
         admission = extract(renderer[renderer.index('// Target render window reached;'):],
                             'if( p->mode2_seek_preroll )')
         discard = extract(renderer, 'if (mode2_preroll_interval_ns > 0 && lateness_ns')
+        release = extract(renderer, 'static int video_flow_render(')
         completion = extract(renderer, 'if (mode2_preroll_interval_ns > 0 &&\n')
         self.assertIn(completion, extract(renderer, 'if (presented) {\n\t\t\tif (mode2_'))
         run_c(r'''
@@ -192,6 +193,7 @@ int main(void) {
 #define serprintf(...) ((void)0)
 typedef int64_t INT64;
 typedef void sfbuf_t;
+typedef void sfdec_t;
 typedef struct {
     int mode2_seek_preroll, mode2_seek_start_epoch;
     unsigned int render_generation;
@@ -203,11 +205,14 @@ static int sfdec_buf_render(void *d, sfbuf_t *b, int render, int asap, INT64 dea
     (void)d; (void)b; assert(!render && !asap && !deadline);
     releases++; return fail_release;
 }
+static INT64 _get_monotonic_ns(void) { assert(0); return 0; }
+''' + release + r'''
 static int submit(priv_t *p, VIDEO_FRAME *f, INT64 cadence_interval_ns,
                   INT64 lateness_ns, int generation_change, int epoch_change) {
     INT64 mode2_preroll_interval_ns=0;
     unsigned int mode2_preroll_generation=0;
-    int render_error=0, presented=0;
+    int render_error=0, presented=0, trace_flow=0;
+    INT64 flow_call_ns=0;
 ''' + admission + r'''
 ''' + discard + r''' else { presented=1; }
     p->render_generation+=generation_change;

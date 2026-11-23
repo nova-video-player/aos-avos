@@ -703,6 +703,67 @@ static inline INT64 _get_monotonic_ns(void)
 	return (INT64)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
 }
 
+// Per-thread, debug-only observations: never publish diagnostics while holding
+// locked.mtx. Queue depths are snapshots taken under the existing lock; waits
+// include lifecycle/condition-variable wakeup time, not just starvation.
+typedef struct {
+	INT64 start_ns, last_output_ns;
+	INT64 gap_max_ns, call_max_ns, wait_ns, wait_max_ns;
+	unsigned int generation;
+	int active, calls, outputs, slow_calls;
+	int queue_min, queue_max;
+} video_flow_diag_t;
+
+static void video_flow_diag_update(video_flow_diag_t *d, const char *stage,
+	unsigned int generation, INT64 now_ns, INT64 call_ns, INT64 wait_ns,
+	int output, int pts, int queue_depth, int free_depth, int out_depth, int paused)
+{
+	if (!d->active || d->generation != generation) {
+		memset(d, 0, sizeof(*d));
+		d->active = 1;
+		d->generation = generation;
+		d->start_ns = now_ns;
+		d->queue_min = queue_depth;
+	}
+	d->calls++;
+	d->outputs += output;
+	d->slow_calls += call_ns >= 100 * NSEC_PER_MSEC;
+	d->call_max_ns = MAX(d->call_max_ns, call_ns);
+	d->wait_ns += wait_ns;
+	d->wait_max_ns = MAX(d->wait_max_ns, wait_ns);
+	d->queue_min = MIN(d->queue_min, queue_depth);
+	d->queue_max = MAX(d->queue_max, queue_depth);
+	if (output) {
+		if (d->last_output_ns)
+			d->gap_max_ns = MAX(d->gap_max_ns, now_ns - d->last_output_ns);
+		d->last_output_ns = now_ns;
+	}
+	if (now_ns - d->start_ns < NSEC_PER_SEC)
+		return;
+	serprintf_record("video_flow_diag: stage=%s generation=%u wall_ns=%lld window_ms=%lld calls=%d outputs=%d pts=%d output_gap_max_us=%lld call_max_us=%lld slow_calls=%d wait_us=%lld wait_max_us=%lld render_q_min=%d render_q_max=%d free_q=%d out_q=%d paused=%d\n",
+		stage, generation, (long long)now_ns,
+		(long long)((now_ns - d->start_ns) / NSEC_PER_MSEC), d->calls, d->outputs, pts,
+		(long long)(d->gap_max_ns / 1000), (long long)(d->call_max_ns / 1000),
+		d->slow_calls, (long long)(d->wait_ns / 1000), (long long)(d->wait_max_ns / 1000),
+		d->queue_min, d->queue_max, free_depth, out_depth, paused);
+	d->start_ns = now_ns;
+	d->calls = d->outputs = d->slow_calls = 0;
+	d->gap_max_ns = d->call_max_ns = d->wait_ns = d->wait_max_ns = 0;
+	d->queue_min = queue_depth;
+	d->queue_max = queue_depth;
+}
+
+// Measure only the MediaCodec release, excluding logging and lock acquisition.
+static int video_flow_render(sfdec_t *sfdec, sfbuf_t *buf, int render,
+	INT64 deadline_ns, int trace, INT64 *call_ns)
+{
+	INT64 start_ns = trace ? _get_monotonic_ns() : 0;
+	int ret = sfdec_buf_render(sfdec, buf, render, 0, deadline_ns);
+	if (trace)
+		*call_ns = _get_monotonic_ns() - start_ns;
+	return ret;
+}
+
 // Caller holds p->locked.mtx; snapping owns epoch-scoped phase state.
 static INT64 _snap_timestamp_ns(priv_t *p, int frame_time, int frame_epoch)
 {
@@ -1536,7 +1597,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 		!epoch_changed && !resume_reanchor ) {
 		allow_reanchor = 0;
 	}
-	DBGSI serprintf(
+	// Per-publication tracing is verbose and runs under the renderer mutex.
+	DBGSI2 serprintf(
 		"put_time_calc: req=%d now=%lld old_put=%d old_ref=%lld dt=%d dr=%lld expected=%lld diff=%lld abs=%lld thresh=%d streak=%d speed=%.3f speed_changed=%d disc=%d reanchor_disc=%d grace=%d no_sched=%d resume=%d allow_reanchor=%d\n",
 		time,
 		(long long)now_ms,
@@ -2129,6 +2191,7 @@ static void *videosink_thread(void *ctx)
 {
 	priv_t *p = (priv_t*) ctx;
 	STREAM *s = (STREAM *)p->dec->ctx;
+	video_flow_diag_t flow_diag = {0};
 
 	pthread_mutex_lock(&p->locked.mtx);
 	while (p->locked.run && !p->locked.error) {
@@ -2146,6 +2209,11 @@ static void *videosink_thread(void *ctx)
 			}
 		}
 
+		int trace_flow = 0;
+		DBGSI trace_flow = 1;
+		if (!trace_flow)
+			memset(&flow_diag, 0, sizeof(flow_diag));
+		INT64 flow_wait_ns = 0, flow_call_ns = 0;
 		VIDEO_FRAME *f = NULL;
 		INT64 render_ts_ns = 0;
 		INT64 speed_correction_ns = 0;
@@ -2160,7 +2228,10 @@ static void *videosink_thread(void *ctx)
 			f = frame_q_peek(&p->locked.venc_q);
 			if (!f) {
 				rm_state_l(p, THREAD_STATE_RENDERING);
+				INT64 wait_start_ns = trace_flow ? _get_monotonic_ns() : 0;
 				pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
+				if (trace_flow)
+					flow_wait_ns += _get_monotonic_ns() - wait_start_ns;
 				continue;
 			}
 			if (!f->android_handle) {
@@ -2751,6 +2822,14 @@ static void *videosink_thread(void *ctx)
 			goto endloop;
 		}
 
+		unsigned int flow_generation = p->render_generation;
+		int flow_queue = 0, flow_free = 0, flow_out = 0, flow_paused = 0;
+		if (trace_flow) {
+			flow_queue = frame_q_count(&p->locked.venc_q);
+			flow_free = frame_q_count(&p->locked.dec_q);
+			flow_out = frame_q_count(&p->locked.out_q);
+			flow_paused = s && (s->paused || s->paused_internal || s->seek_paused);
+		}
 		int do_render = 1;
 		int render_error = 0;
 		int presented = 0;
@@ -2779,12 +2858,12 @@ static void *videosink_thread(void *ctx)
 				// Qualification can outlive queued frames. Check the final deadline
 				// at submission, too: do not display a frame whose entire interval
 				// has elapsed, even if the heard-clock preroll check admitted it.
-				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+				render_error = video_flow_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, trace_flow, &flow_call_ns);
 				DBGSI serprintf("android_sync: mode2 seek deadline preroll frame=%d lateness_us=%lld epoch=%d\n",
 					f->time, (long long)(lateness_ns / 1000), f->epoch);
 			} else if (lateness_ns > k_late_drop_threshold_ns) {
 				// Drop/release buffer immediately without rendering to catch up
-				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+				render_error = video_flow_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, trace_flow, &flow_call_ns);
 				p->dropped++;
 				DBGSI serprintf("android_sync: late frame drop f_time=%d lateness=%lldms dropped=%d\n",
 					f->time, lateness_ns / 1000000LL, p->dropped);
@@ -2792,13 +2871,14 @@ static void *videosink_thread(void *ctx)
 				DBGCV3 CLOG("render ->");
 				int start = time_update_time();
 				// Timed rendering (asap=0) using render_ts_ns computed under the lock
-				render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, 0, render_ts_ns);
+				render_error = video_flow_render(p->sfdec, (sfbuf_t *)f->android_handle, 1, render_ts_ns, trace_flow, &flow_call_ns);
 				presented = !render_error;
 				if (presented) {
 					// Count successful submissions independently of logging. A gap
 					// in this sequence identifies missing diagnostic records.
 					p->render_submit_seq++;
-					DBGSI2 serprintf_record("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu speed_correction_us=%lld\n",
+					// Retain frame timing at level 1 without per-publication tracing.
+					DBGSI serprintf_record("video_render_diag: frame=%d epoch=%d deadline_ns=%lld submit_ns=%lld interval_ms=%.3f anchor_age_ms=%lld phase_ms=%lld render_seq=%llu speed_correction_us=%lld\n",
 						f->time, f->epoch, (long long)render_ts_ns, (long long)now_ns,
 						diag_interval_ms, (long long)(now_ns / NSEC_PER_MSEC - diag_ref_ms),
 						(long long)f->time - diag_heard -
@@ -2811,8 +2891,13 @@ static void *videosink_thread(void *ctx)
 				DBGCV3 CLOG("render <-");
 			}
 		} else {
-			render_error = sfdec_buf_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, 0);
+			render_error = video_flow_render(p->sfdec, (sfbuf_t *)f->android_handle, 0, 0, trace_flow, &flow_call_ns);
 		}
+
+		if (trace_flow)
+			video_flow_diag_update(&flow_diag, "render", flow_generation,
+				_get_monotonic_ns(), flow_call_ns, flow_wait_ns, presented,
+				f->time, flow_queue, flow_free, flow_out, flow_paused);
 
 		pthread_mutex_lock(&p->locked.mtx);
 		if (render_error) {
@@ -2862,10 +2947,16 @@ static void *videodec_thread(void *ctx)
 {
 	priv_t *p = (priv_t*) ctx;
 	sfdec_read_out_t read_out;
+	video_flow_diag_t flow_diag = {0};
 
 	pthread_mutex_lock(&p->locked.mtx);
 
 	while (p->locked.run && !p->locked.error) {
+		int trace_flow = 0;
+		DBGSI trace_flow = 1;
+		if (!trace_flow)
+			memset(&flow_diag, 0, sizeof(flow_diag));
+		INT64 flow_wait_ns = 0;
 		int time = -1;
 
 		sfbuf_t *sfbuf = NULL;
@@ -2885,7 +2976,10 @@ static void *videodec_thread(void *ctx)
 		while (p->locked.run && !p->locked.error &&
 		       (has_state_l(p, THREAD_STATE_FLUSHING) || p->output_eos || !(f = frame_q_get(&p->locked.dec_q)))) {
 			rm_state_l(p, THREAD_STATE_READING);
+			INT64 wait_start_ns = trace_flow ? _get_monotonic_ns() : 0;
 			pthread_cond_wait(&p->locked.cond, &p->locked.mtx);
+			if (trace_flow)
+				flow_wait_ns += _get_monotonic_ns() - wait_start_ns;
 		}
 		add_state_l(p, THREAD_STATE_READING);
 
@@ -2894,6 +2988,15 @@ DBGCV CLOG("stop thread");
 			continue;
 		}
 
+		unsigned int flow_generation = p->render_generation;
+		int flow_queue = 0, flow_free = 0, flow_out = 0, flow_paused = 0;
+		if (trace_flow) {
+			STREAM *s = p->dec->ctx;
+			flow_queue = frame_q_count(&p->locked.venc_q);
+			flow_free = frame_q_count(&p->locked.dec_q);
+			flow_out = frame_q_count(&p->locked.out_q);
+			flow_paused = s && (s->paused || s->paused_internal || s->seek_paused);
+		}
 		pthread_mutex_unlock(&p->locked.mtx);
 
 		if (frame_release(p->sfdec, f)) {
@@ -2910,7 +3013,16 @@ DBGCV3 CLOG("sfdec_read, ->");
 		int wait  = start - last;
 		     last = start;
 
+		INT64 flow_call_start_ns = trace_flow ? _get_monotonic_ns() : 0;
 		int ret = sfdec_read(p->sfdec, -1, &read_out);
+		if (trace_flow) {
+			INT64 now_ns = _get_monotonic_ns();
+			int output = ret >= 0 && (read_out.flag & SFDEC_READ_BUF) && read_out.buf.sfbuf;
+			video_flow_diag_update(&flow_diag, "decode", flow_generation,
+				now_ns, now_ns - flow_call_start_ns, flow_wait_ns, output,
+				output ? (int)(read_out.buf.time_us / 1000) : -1,
+				flow_queue, flow_free, flow_out, flow_paused);
+		}
 
 		int took = time_update_time() - start;
 

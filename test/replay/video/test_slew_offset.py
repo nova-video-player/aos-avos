@@ -185,12 +185,15 @@ int main(void) {
         s.video_sink=&vs; s.video_dec=&vd; mode=0; s.audio_speed_diag_epoch=3;
         arm(&p,1,122345168); p.pcm_seek_startup_slew=1;
         p.at_clock_active=p.at_clock_handoff_pending=1;
+        memset(&p.pcm_drift_history,1,sizeof(p.pcm_drift_history));
         if(pause) sfdec2_android_sync_on_pause_locked(&s,1);
         else {
             sfdec2_reset_sync_state_on_seek_locked(&s);
             assert(p.pcm_seek_startup_speed_epoch==3);
             assert(!p.at_clock_active);
         }
+        pcm_drift_history_t empty={0};
+        assert(!memcmp(&p.pcm_drift_history,&empty,sizeof(empty)));
         assert(!p.at_clock_handoff_pending);
         assert(!p.pcm_seek_startup_slew && !p.pcm_startup_slew && !p.slew_active);
         pthread_mutex_destroy(&p.locked.mtx);

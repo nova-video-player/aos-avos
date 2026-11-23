@@ -32,7 +32,7 @@ typedef int64_t INT64;
 typedef struct { int valid; } AUDIO;
 typedef struct {
     AUDIO *audio;
-    int put_time_mode, audio_time, paused, seek_paused, audio_start_pending;
+    int put_time_mode, audio_time, paused, paused_internal, audio_reconfiguring, seek_paused, audio_start_pending;
     int audio_resume_pending, play_n_video_frames, av_delay, manual_audio_delay_applied_ms;
 } STREAM;
 typedef struct {
@@ -85,6 +85,8 @@ int main(void) {
     assert(!eligible(&p,&s,0,1,1,1));
     assert(!eligible(&p,&s,0,0,1.6f,1.2f));
     s.paused=1; assert(!eligible(&p,&s,0,0,1,1)); s.paused=0;
+    s.paused_internal=1; assert(!eligible(&p,&s,0,0,1,1)); s.paused_internal=0;
+    s.audio_reconfiguring=1; assert(!eligible(&p,&s,0,0,1,1)); s.audio_reconfiguring=0;
     s.seek_paused=1; assert(!eligible(&p,&s,0,0,1,1)); s.seek_paused=0;
     s.av_delay=-100; assert(!eligible(&p,&s,0,0,1,1)); s.av_delay=0;
     p.slew_active=1; assert(!eligible(&p,&s,0,0,1,1)); p.slew_active=0;

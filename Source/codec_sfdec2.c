@@ -260,6 +260,7 @@ typedef struct {
 	unsigned int audio_generation;
 	int healthy;
 	int sampling_healthy;
+	int phase_rejected;
 	int recovery_owned;
 	INT64 recovery_target_ns;
 } pcm_drift_history_t;
@@ -568,6 +569,8 @@ static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible, int c
 	// collect no new target until it completes. All identity/continuity checks
 	// above still apply, and a remaining lag must qualify for two seconds anew.
 	if (correcting) {
+		// Qualification is suspended; do not report a previous rejection.
+		h->phase_rejected = 0;
 		h->window.samples = 0;
 		return 0;
 	}
@@ -576,13 +579,19 @@ static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible, int c
 	int healthy = llabs(phase) < (INT64)threshold_ms * 1000000LL;
 	// Limit this additional path to bounded positive lag. Clock advances and
 	// large discontinuities retain their existing recovery policy.
-	if (!healthy && (!h->healthy || phase <= 0 || phase > 750000000LL)) {
-		if (!*event && (h->healthy || h->window.samples))
-			*event = !h->healthy ? "no_healthy_history" : "phase_out_of_range";
-		h->healthy = 0;
+	int phase_rejected = !healthy && (phase <= 0 || phase > 750000000LL);
+	if (!healthy && (!h->healthy || phase_rejected)) {
+		if (!*event && (h->window.samples ||
+			(h->healthy && phase_rejected && !h->phase_rejected)))
+			*event = phase_rejected ? "phase_out_of_range" : "no_healthy_history";
+		// Reject this window, not the healthy witness for the same anchor.
+		// Returning inside the bound must qualify from scratch. Keep the
+		// rejection visible alongside gap events without logging every sample.
+		h->phase_rejected = phase_rejected;
 		h->window.samples = 0;
 		return 0;
 	}
+	h->phase_rejected = 0;
 	pcm_drift_t *w = &h->window;
 	if (healthy != h->sampling_healthy ||
 		(w->samples && llabs(target - w->target_ns) > 40000000LL))
@@ -1766,7 +1775,8 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 	// existing once-per-frame bounded startup slew without a hard reanchor.
 	int pcm_drift_context_eligible = !passthrough_mode && s && s->put_time_mode &&
 		s->audio && s->audio->valid && s->audio_time >= 0 && time >= 0 &&
-		!s->paused && !s->seek_paused && !s->audio_start_pending &&
+		!s->paused && !s->paused_internal && !s->seek_paused &&
+		!s->audio_reconfiguring && !s->audio_start_pending &&
 		!s->audio_resume_pending && s->play_n_video_frames == 0 &&
 		!s->av_delay && !manual_hold_ms && !s->manual_audio_delay_applied_ms &&
 		!speed_changed && !epoch_changed && !resume_started && !pcm_resume &&
@@ -1792,10 +1802,13 @@ static int videosink_put_time( STREAM_SINK_VIDEO *sink, int time )
 			fabsf(current_speed - 1.0f) < 0.001f, pcm_history_slew,
 		drift_now_ns, time, p->render_offset_ns, s ? s->seek_epoch : 0,
 		s ? s->audio_lifecycle_generation : 0, drift_threshold_ms, &drift_target_ns, &drift_event);
-	if (drift_event) {
-		DBGSI serprintf("android_sync: PCM drift evidence event=%s gap_ms=%lld phase_ms=%lld healthy=%d owned=%d correcting=%d epoch=%d generation=%u context=%d speed=%.3f\n",
+	if (drift_event) DBGSI {
+		int phase_valid = time >= 0 && p->render_offset_ns != -1 && p->render_offset_from_audio;
+		INT64 phase_ms = phase_valid ?
+			(drift_now_ns - (INT64)time * NSEC_PER_MSEC - p->render_offset_ns) / NSEC_PER_MSEC : 0;
+		serprintf("android_sync: PCM drift evidence event=%s gap_ms=%lld phase_valid=%d phase_ms=%lld phase_rejected=%d healthy=%d owned=%d correcting=%d epoch=%d generation=%u context=%d speed=%.3f\n",
 			drift_event, (long long)(drift_gap_ns / NSEC_PER_MSEC),
-			(long long)((drift_now_ns - (INT64)time * NSEC_PER_MSEC - p->render_offset_ns) / NSEC_PER_MSEC),
+			phase_valid, (long long)phase_ms, p->pcm_drift_history.phase_rejected,
 			p->pcm_drift_history.healthy, p->pcm_drift_history.recovery_owned,
 			pcm_history_slew, s ? s->seek_epoch : 0,
 			s ? s->audio_lifecycle_generation : 0, pcm_drift_context_eligible, current_speed);
@@ -3591,6 +3604,7 @@ DBGCV	CLOG();
 	p->mode2_cold_entry_until_ms = 0;
 	p->render_generation++;
 	p->render_offset_ns = -1;
+	memset(&p->pcm_drift_history, 0, sizeof(p->pcm_drift_history));
 	p->slew_active = 0;
 	p->mode2_dynamic_fast_slew = 0;
 	p->mode2_dynamic_settle_frames = 0;
@@ -3789,6 +3803,7 @@ static void sfdec2_reset_sync_state_on_seek_locked( STREAM *s )
 	p->mode1_resume_slew = 0;
 	p->mode1_sample_wall_ms = 0;
 	p->render_offset_ns = -1;
+	memset(&p->pcm_drift_history, 0, sizeof(p->pcm_drift_history));
 	p->render_offset_from_audio = 0;
 	p->slew_active = 0;
 	p->mode2_dynamic_fast_slew = 0;

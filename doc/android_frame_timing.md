@@ -403,3 +403,12 @@ output and clock-regression resets, observation gaps and phase rejection. These
 event diagnostics do not require per-publication tracing; they are disabled
 when the sink debug category is off. Startup with no healthy history remains
 ineligible for accumulated-lag recovery.
+
+Transient out-of-range phase also discards only the qualification window on an
+unchanged anchor. It does not erase the healthy witness; returning within the
+positive-lag bound still requires a fresh two-second window. Sustained residuals
+above 750ms remain ineligible. Internal pause, audio reconfiguration and explicit
+decoder flush/seek resets clear the witness, as do the other lifecycle exclusions.
+The diagnostic marks unavailable anchor/time with `phase_valid=0` and a zero
+placeholder, and reports `phase_rejected=1` alongside a gap event when both occur.
+Repeated rejected samples do not generate per-publication rejection logs.

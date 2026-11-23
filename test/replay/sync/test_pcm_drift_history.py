@@ -61,25 +61,27 @@ int main(void) {
     for(int t=0;t<5000;t+=50) assert(!sample(&h,t,250));
     // A burst that reverses cannot turn into a correction.
     learn(&h);
-    for(int t=1250;t<=1650;t+=50) assert(!sample(&h,t,250));
-    for(int t=1700;t<4000;t+=50) assert(!sample(&h,t,-35));
+    for(int t=1600;t<=2000;t+=50) assert(!sample(&h,t,250));
+    assert(h.healthy);
+    for(int t=2050;t<4000;t+=50) assert(!sample(&h,t,-35));
     // Continuing drift cannot qualify as a settled clock.
     learn(&h);
     for(int t=1250;t<5000;t+=50) assert(!sample(&h,t,200+(t-1250)/2));
-    // A stalled clock, backwards clock, changed output,
-    // changed anchor or seek epoch all invalidate previously healthy evidence.
-    for(int kind=0;kind<7;kind++) {
+    // Isolate each reset with advancing audio unless regression is intended.
+    const char *resets[]={"audio_regression","epoch_reset","output_reset",
+        "anchor_reset","wall_regression","context_reset"};
+    for(int kind=0;kind<6;kind++) {
         learn(&h);
-        int wall=1250,heard=10000+wall-250,epoch=8;
+        int wall=1250,heard=11250,epoch=8;
         unsigned generation=1; INT64 offset=0;
-        if(kind==0) wall=1600;
-        if(kind==1) heard=1000;
-        if(kind==2) epoch=9;
-        if(kind==3) generation=2;
-        if(kind==4) offset=1000000;
-        if(kind==5) wall=1100;
-        assert(!pcm_drift_history_observe(&h,kind!=6,0,
+        if(kind==0) heard=11200;
+        if(kind==1) epoch=9;
+        if(kind==2) generation=2;
+        if(kind==3) offset=1000000;
+        if(kind==4) wall=1100;
+        assert(!pcm_drift_history_observe(&h,kind!=5,0,
             (INT64)(10000+wall)*1000000,heard,offset,epoch,generation,160,&target,&event));
+        assert(event && !strcmp(event,resets[kind]));
         assert(!h.healthy);
         for(int t=1700;t<4000;t+=50) assert(!sample(&h,t,250));
     }
@@ -99,6 +101,110 @@ int main(void) {
     assert(samples>0);
     for(int i=0;i<10000;i++) assert(!sample(&h,2750,265));
     assert(h.window.samples==samples);
+    return 0;
+}
+''')
+
+
+    def test_transient_range_rejection_preserves_witness_only(self):
+        run_c(self.helpers() + r'''
+static INT64 target;
+static int sample(pcm_drift_history_t *h,int wall,int phase) {
+    return pcm_drift_history_observe(h,1,0,(INT64)(10000+wall)*1000000,
+        10000+wall-phase,0,8,1,160,&target,&event);
+}
+int main(void) {
+    for(int negative=0;negative<2;negative++) {
+        pcm_drift_history_t h={0};
+        for(int t=0;t<=1200;t+=50) assert(!sample(&h,t,0));
+        assert(h.healthy);
+        int start=negative?1250:2050, phase=negative?-250:800;
+        assert(!sample(&h,start,phase));
+        assert(h.healthy && h.phase_rejected && !h.window.samples);
+        assert(event && !strcmp(event,negative?"phase_out_of_range":"gap_window_reset"));
+        // A held out-of-range phase never qualifies, and does not flood logs.
+        for(int t=start+50;t<=start+3000;t+=50) {
+            assert(!sample(&h,t,phase));
+            assert(h.healthy && h.phase_rejected && !event && !h.window.samples);
+        }
+        // Let wall time catch up for negative phase, keeping heard time forward.
+        int resumed=start+3600;
+        assert(!sample(&h,resumed,300));
+        assert(h.healthy && !h.phase_rejected && h.window.samples==1);
+        for(int t=resumed+50;t<resumed+2000;t+=50) assert(!sample(&h,t,300));
+        assert(sample(&h,resumed+2000,300) && target==300000000LL);
+        // Lifecycle reset still destroys the retained witness.
+        assert(!pcm_drift_history_observe(&h,0,0,0,0,0,8,1,160,&target,&event));
+        assert(!h.healthy && !h.phase_rejected);
+        for(int t=10000;t<=14000;t+=50) assert(!sample(&h,t,300));
+    }
+    return 0;
+}
+''')
+
+    def test_owned_correction_clears_previous_phase_rejection(self):
+        run_c(self.helpers() + r'''
+int main(void) {
+    for(int gap=0;gap<2;gap++) {
+        pcm_drift_history_t h={0}; INT64 target=0;
+        for(int wall=10000;wall<=11200;wall+=50)
+            assert(!pcm_drift_history_observe(&h,1,0,(INT64)wall*1000000,
+                wall,0,8,1,160,&target,&event));
+        assert(h.healthy);
+        assert(!pcm_drift_history_observe(&h,1,0,11250000000LL,
+            11500,0,8,1,160,&target,&event));
+        assert(h.phase_rejected && !strcmp(event,"phase_out_of_range"));
+        // A separate single-step recovery owns the correction. Qualification
+        // is suspended, even when the first correcting observation has a gap.
+        h.recovery_owned=1; h.recovery_target_ns=-250000000LL;
+        int wall=gap?11600:11300;
+        assert(!pcm_drift_history_observe(&h,1,1,(INT64)wall*1000000,
+            wall+250,0,8,1,160,&target,&event));
+        assert(h.healthy && h.recovery_owned && !h.phase_rejected && !h.window.samples);
+        if(gap) assert(event && !strcmp(event,"gap_window_reset"));
+        else assert(!event);
+        // Once qualification resumes, a still-invalid phase is reported anew.
+        assert(!pcm_drift_history_observe(&h,1,0,(INT64)(wall+50)*1000000,
+            wall+300,0,8,1,160,&target,&event));
+        assert(h.phase_rejected && event && !strcmp(event,"phase_out_of_range"));
+    }
+    return 0;
+}
+''')
+
+    def test_reset_diagnostic_has_explicit_phase_validity(self):
+        text = source('codec_sfdec2.c')
+        block = extract(text, 'if (drift_event) DBGSI')
+        types = '#include <assert.h>\n#include <stdint.h>\n#include <stddef.h>\ntypedef int64_t INT64;\n'
+        types += typedef(text, 'pcm_drift_t') + '\n' + typedef(text, 'pcm_drift_history_t')
+        run_c(types + r'''
+#define NSEC_PER_MSEC 1000000LL
+static int debug_on, calls, valid_seen;
+static long long phase_seen;
+#define DBGSI if(debug_on)
+static void serprintf(const char *fmt,const char *event,long long gap,int valid,
+    long long phase,...) { (void)fmt; (void)event; (void)gap;
+    calls++; valid_seen=valid; phase_seen=phase; }
+typedef struct { INT64 render_offset_ns; int render_offset_from_audio;
+    pcm_drift_history_t pcm_drift_history; } priv_t;
+typedef struct { int seek_epoch; unsigned audio_lifecycle_generation; } STREAM;
+static void diagnostic(priv_t *p,int time) {
+    STREAM *s=NULL;
+    const char *drift_event="context_reset";
+    INT64 drift_gap_ns=250000000,drift_now_ns=9000000000000LL;
+    int pcm_history_slew=0,pcm_drift_context_eligible=0;
+    float current_speed=1;
+''' + block + r'''
+}
+int main(void) {
+    priv_t p={.render_offset_ns=-1,.render_offset_from_audio=1};
+    debug_on=1; diagnostic(&p,1000);
+    assert(calls==1 && !valid_seen && phase_seen==0);
+    p.render_offset_ns=8998750000000LL; diagnostic(&p,1000);
+    assert(calls==2 && valid_seen && phase_seen==250);
+    diagnostic(&p,-1); assert(!valid_seen && phase_seen==0);
+    p.render_offset_from_audio=0; diagnostic(&p,1000); assert(!valid_seen);
+    debug_on=0; diagnostic(&p,1000); assert(calls==4);
     return 0;
 }
 ''')
@@ -274,6 +380,6 @@ int main(void) {
         self.assertIn('fabsf(current_speed - 1.0f) < 0.001f, pcm_history_slew', call)
         self.assertIn('s->audio_lifecycle_generation', call)
         self.assertIn('s->seek_epoch', call)
-        self.assertIn('DBGSI serprintf("android_sync: PCM drift evidence', text)
+        self.assertIn('if (drift_event) DBGSI {', text)
         pause = extract(text, 'static void sfdec2_android_sync_on_pause_locked(')
         self.assertIn('memset(&p->pcm_drift_history, 0, sizeof(p->pcm_drift_history))', pause)

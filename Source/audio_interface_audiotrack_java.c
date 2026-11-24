@@ -819,6 +819,34 @@ static uint32_t audiotrack_default_channel_mask(int channels)
 	}
 }
 
+// Ordinary PCM needs scheduling headroom even when AudioTrack plays at 1x.
+// Preserve PlaybackParams' existing 3x minimum. Never shrink a driver minimum
+// or pass a partial frame/overflowed jint to the Java constructor.
+static size_t audiotrack_pcm_buffer_size(int min_bytes, int rate,
+	size_t frame_size, int hw_speed_headroom)
+{
+	if (min_bytes <= 0 || rate <= 0 || !frame_size || frame_size > INT_MAX)
+		return 0;
+	uint64_t max_bytes = (uint64_t)INT_MAX / frame_size * frame_size;
+	if ((uint64_t)min_bytes > max_bytes)
+		return 0;
+	uint64_t target = (uint64_t)min_bytes * (hw_speed_headroom ? 3 : 2);
+	if (!hw_speed_headroom) {
+		// Compute duration in frames first; even INT_MAX inputs fit uint64_t.
+		uint64_t floor_bytes = ((uint64_t)rate * 150 + 999) / 1000 * frame_size;
+		uint64_t ceiling_bytes = ((uint64_t)rate * 250) / 1000 * frame_size;
+		if (target < floor_bytes)
+			target = floor_bytes;
+		if (target > ceiling_bytes)
+			target = ceiling_bytes;
+		if (target < (uint64_t)min_bytes)
+			target = min_bytes;
+	}
+	if (target > max_bytes)
+		target = max_bytes;
+	return (size_t)((target + frame_size - 1) / frame_size * frame_size);
+}
+
 static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels, int content_channels, int bits, int format)
 {
 	uint32_t track_chanmask;
@@ -1142,7 +1170,6 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 	DBG LOG("audiotrack_set_output_params: creating new track reinit=%d speed=%.3f using_atempo=%d passthrough=%d sampleRate=%d channels=%d audioFormat=%d channelConfig=0x%x",
 		reinit, as, using_atempo, at->passthrough, sampleRateInHz, channels, audioFormat, channelConfig);
 
-	// When using atempo filter, AudioTrack always plays at 1.0x, so no need for larger buffers
 	DBG LOG( "audiotrack_set_output_params: track_format=%d, track_chanmask=0x%x, channelConfig=0x%x (format=%d, passthrough=%d, channels=%d)",
 	         track_format, track_chanmask, channelConfig, at->format, at->passthrough, channels );
 
@@ -1176,8 +1203,12 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		// Ensure minimum of 32KB for compatibility, but respect larger system requirements
 		at->buf_size = (min_buffer_size > 32768) ? min_buffer_size : 32768;
 	} else {
-		// Reserve extra capacity only for hardware PlaybackParams speed changes.
-		at->buf_size = buffer_scale * min_buffer_size;
+		at->buf_size = audiotrack_pcm_buffer_size(min_buffer_size,
+			sampleRateInHz, frame_size, buffer_scale == 3);
+		if (!at->buf_size) {
+			ERR LOG("PCM buffer geometry exceeds AudioTrack size limits");
+			return -1;
+		}
 	}
 
 	DBG LOG ( "audio_interface_audiotrack_java:audiotrack_set_output_params getMinBufferSize=%d, final buf_size=%d\n",

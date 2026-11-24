@@ -414,7 +414,7 @@ placeholder, and reports `phase_rejected=1` alongside a gap event when both occu
 Repeated rejected samples do not generate per-publication rejection logs.
 
 
-### PCM underrun observation
+### PCM underrun observation and buffer headroom
 
 With `DEBUG_LOGS` enabled, sink debug level 1 or `at_underrun 1` enables a
 PCM underrun-count query at most every 100ms on API 24+. A positive increment
@@ -434,3 +434,15 @@ selection in this observer. It runs after successful writes: it cannot diagnose
 an ongoing blocked write until that write returns, and the fresh timestamp is
 an observation after the underrun, not its exact onset. Several underruns within
 one poll interval are aggregated in `delta`.
+
+Ordinary PCM (including software tempo filters) requests
+`max(minimum, clamp(2 * minimum, 150ms, 250ms))`, rounded to whole PCM frames.
+The driver minimum is never reduced. Calculations use wide integers and reject
+geometry that cannot fit a frame-aligned Java buffer size. Hardware
+PlaybackParams speed retains its three-times-minimum policy, and passthrough
+buffer sizing is unchanged. For 48kHz, six-channel PCM16 with a 46176-byte
+minimum, this changes the requested buffer from about 80ms to 160ms (92352
+bytes). More capacity provides scheduling headroom; it does not guarantee a
+full queue or establish underruns as the cause of every clock displacement.
+The existing latency calculation uses the new geometry. Seek, pause/resume,
+speed changes and physical A/V sync still require device validation.

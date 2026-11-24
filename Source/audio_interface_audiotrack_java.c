@@ -131,6 +131,14 @@ struct audio_ctx {
 	jfieldID nanoTimeFieldID;
 	int in_error_recovery; // Flag to indicate we're in error recovery mode
 	int last_underrun_count;
+#if DEBUG_LOGS
+	int underrun_diag_initialized;
+	int64_t underrun_diag_last_ms;
+	jmethodID underrun_diag_count_method;
+	jmethodID underrun_diag_state_method;
+	jmethodID underrun_diag_head_method;
+	jmethodID underrun_diag_timestamp_ctor;
+#endif
 	int ts_success_streak;           // consecutive good AudioTrack timestamps
 	int ts_use_timestamp;            // 0 until getTimestamp is proven stable
 	int64_t ts_last_query_ms;            // last time we queried AudioTrack timing
@@ -1475,6 +1483,10 @@ static int audiotrack_set_output_params(audio_ctx_t *at, int rate, int channels,
 		return -1;
 	}
 
+	at->last_underrun_count = 0;
+#if DEBUG_LOGS
+	at->underrun_diag_last_ms = 0;
+#endif
 	at->i_samples_written = 0;
 	at->timestamp_written_offset = 0;
 	audiotrack_reset_timing(at);
@@ -2146,6 +2158,129 @@ static uint64_t audiotrack_epoch_adjust_presented_frames(audio_ctx_t *at, uint64
 	return raw_frames;
 }
 
+#if DEBUG_LOGS
+static int audiotrack_underrun_delta(int *last_count, int current_count)
+{
+	if (current_count < 0)
+		return 0;
+	int delta = current_count >= *last_count ? current_count - *last_count : 0;
+	*last_count = current_count;
+	return delta;
+}
+
+static jmethodID audiotrack_diag_method(JNIEnv *env, jclass cls,
+	const char *name, const char *signature)
+{
+	jmethodID method = (*env)->GetMethodID(env, cls, name, signature);
+	if ((*env)->ExceptionCheck(env)) {
+		(*env)->ExceptionClear(env);
+		return NULL;
+	}
+	return method;
+}
+
+static int audiotrack_diag_int(audio_ctx_t *at, jmethodID method, jint *value)
+{
+	if (!method)
+		return 0;
+	JNIEnv *env = at->env;
+	*value = (*env)->CallIntMethod(env, at->obj, method);
+	if ((*env)->ExceptionCheck(env)) {
+		(*env)->ExceptionClear(env);
+		return 0;
+	}
+	return 1;
+}
+
+// Called only after a successful PCM write: an ongoing blocked write cannot
+// report its underrun until it returns. Query at most 10Hz, log only increases.
+// The temporary timestamp is never the object used by production clock reads.
+static void audiotrack_pcm_underrun_diag(audio_ctx_t *at)
+{
+	if (at->passthrough || !(Debug[DBG_SINK] || audiotrack_log_underruns) ||
+		device_get_android_api() < 24)
+		return;
+	int64_t now_ms = atime64();
+	if (at->underrun_diag_last_ms && now_ms >= at->underrun_diag_last_ms &&
+		now_ms - at->underrun_diag_last_ms < 100)
+		return;
+	at->underrun_diag_last_ms = now_ms;
+	JNIEnv *env = at->env;
+	if (!at->underrun_diag_initialized) {
+		at->underrun_diag_initialized = 1;
+		at->underrun_diag_count_method = audiotrack_diag_method(env,
+			at->audiotrackClass, "getUnderrunCount", "()I");
+		at->underrun_diag_state_method = audiotrack_diag_method(env,
+			at->audiotrackClass, "getPlayState", "()I");
+		at->underrun_diag_head_method = audiotrack_diag_method(env,
+			at->audiotrackClass, "getPlaybackHeadPosition", "()I");
+		if (at->audioTimestampClass)
+			at->underrun_diag_timestamp_ctor = audiotrack_diag_method(env,
+				at->audioTimestampClass, "<init>", "()V");
+	}
+	jint count = -1;
+	if (!audiotrack_diag_int(at, at->underrun_diag_count_method, &count))
+		return;
+	int delta = audiotrack_underrun_delta(&at->last_underrun_count, count);
+	if (!delta)
+		return;
+
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	int64_t wall_ns = (int64_t)start.tv_sec * 1000000000LL + start.tv_nsec;
+	pthread_mutex_lock(&at->presentation_mutex);
+	uint64_t generation = at->presentation_generation;
+	pthread_mutex_unlock(&at->presentation_mutex);
+	jint state = -1, head = 0;
+	int state_ok = audiotrack_diag_int(at, at->underrun_diag_state_method, &state);
+	int head_ok = audiotrack_diag_int(at, at->underrun_diag_head_method, &head);
+	jlong fresh_frames = 0, fresh_ns = 0;
+	int fresh_ok = 0;
+	if (at->underrun_diag_timestamp_ctor && at->getTimestampMethodID &&
+		at->framePositionFieldID && at->nanoTimeFieldID) {
+		jobject timestamp = (*env)->NewObject(env, at->audioTimestampClass,
+			at->underrun_diag_timestamp_ctor);
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionClear(env);
+		} else if (timestamp) {
+			fresh_ok = (*env)->CallBooleanMethod(env, at->obj,
+				at->getTimestampMethodID, timestamp);
+			if ((*env)->ExceptionCheck(env)) {
+				(*env)->ExceptionClear(env);
+				fresh_ok = 0;
+			}
+			if (fresh_ok) {
+				fresh_frames = (*env)->GetLongField(env, timestamp, at->framePositionFieldID);
+				fresh_ns = (*env)->GetLongField(env, timestamp, at->nanoTimeFieldID);
+				if ((*env)->ExceptionCheck(env)) {
+					(*env)->ExceptionClear(env);
+					fresh_ok = 0;
+				}
+			}
+		}
+		if (timestamp)
+			(*env)->DeleteLocalRef(env, timestamp);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	int64_t end_ns = (int64_t)end.tv_sec * 1000000000LL + end.tv_nsec;
+	uint64_t written_adj = at->i_samples_written > at->timestamp_written_offset ?
+		at->i_samples_written - at->timestamp_written_offset : 0;
+	// Preserve the established underrun prefix/delta for capture filters and
+	// analyzers. Raw head/timestamp counters and adjusted writes are labelled.
+	serprintf_record("AudioTrack underruns: total=%d delta=+%d (format=%04X, passthrough=0) audiotrack_underrun_diag: wall_ns=%lld generation=%llu play_state_ok=%d play_state=%d fresh_head_ok=%d fresh_head_raw=%u fresh_ts_ok=%d fresh_ts_frames_raw=%lld fresh_ts_age_ms=%lld cached_ts_frames_raw=%llu cached_ts_age_ms=%lld ts_use=%d cached_delay_ms=%d delay_src=%s delay_ms=%d written_adj=%llu timestamp_written_offset=%llu playhead_epoch_offset=%llu buffer_bytes=%zu rate=%d frame_size=%zu speed=%.3f query_us=%lld\n",
+		count, delta, at->format, (long long)wall_ns, (unsigned long long)generation,
+		state_ok, state, head_ok, (unsigned int)(uint32_t)head, fresh_ok,
+		(long long)fresh_frames, (long long)(fresh_ok ? (end_ns - fresh_ns) / 1000000 : -1),
+		(unsigned long long)at->last_timestamp_frames,
+		(long long)(at->last_timestamp_ns ? (end_ns - at->last_timestamp_ns) / 1000000 : -1),
+		at->ts_use_timestamp, at->ts_cached_delay_ms,
+		at->last_delay_src[0] ? at->last_delay_src : "unknown", at->last_delay_ret,
+		(unsigned long long)written_adj, (unsigned long long)at->timestamp_written_offset,
+		(unsigned long long)at->playhead_epoch_offset, at->buf_size, at->rate, at->frame_size,
+		get_effective_audio_speed(), (long long)((end_ns - wall_ns) / 1000));
+}
+#endif
+
 static int audiotrack_write(audio_ctx_t *at, unsigned char *buffer, int len)
 {
 	if (!at->init) {
@@ -2187,7 +2322,10 @@ DBG			LOG("audiotrack_write: restarting passthrough track after first post-flush
 		}
 		at->i_samples_written += (uint64_t)(ret / at->frame_size);
 
-		if (audiotrack_log_underruns) {
+#if DEBUG_LOGS
+		audiotrack_pcm_underrun_diag(at);
+#endif
+		DBG_IF(audiotrack_log_underruns && at->passthrough && device_get_android_api() >= 24) {
 			int underrun_count = call_int_method(at, "getUnderrunCount", "()I");
 			if (underrun_count >= 0 && underrun_count != at->last_underrun_count) {
 				ERR LOG("AudioTrack underruns: total=%d delta=%+d (format=%04X, passthrough=%d)",

@@ -412,3 +412,25 @@ decoder flush/seek resets clear the witness, as do the other lifecycle exclusion
 The diagnostic marks unavailable anchor/time with `phase_valid=0` and a zero
 placeholder, and reports `phase_rejected=1` alongside a gap event when both occur.
 Repeated rejected samples do not generate per-publication rejection logs.
+
+
+### PCM underrun observation
+
+With `DEBUG_LOGS` enabled, sink debug level 1 or `at_underrun 1` enables a
+PCM underrun-count query at most every 100ms on API 24+. A positive increment
+emits `audiotrack_underrun_diag` on the existing `AudioTrack underruns:` record,
+so capture filters and delta counters retain it. A counter decrease silently
+rebases the diagnostic baseline; a new AudioTrack resets it to zero. API 23
+and disabled debug categories perform none of these diagnostic queries.
+
+Each event includes the monotonic time, presentation generation, play state,
+raw playback head, fresh timestamp and its age, separately labelled cached
+production timestamp/age, selected delay source, adjusted written frames,
+counter offsets, buffer geometry, speed and diagnostic query duration. Fresh
+reads use a temporary AudioTimestamp, never the production timestamp object;
+exceptions are cleared and validity flags distinguish failed observations.
+There is no timing-cache invalidation, flush, accounting reset or clock-source
+selection in this observer. It runs after successful writes: it cannot diagnose
+an ongoing blocked write until that write returns, and the fresh timestamp is
+an observation after the underrun, not its exact onset. Several underruns within
+one poll interval are aggregated in `delta`.

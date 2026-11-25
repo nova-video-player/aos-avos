@@ -19,6 +19,7 @@
 #include "stream.h"
 #include "stream_parser.h"
 #include "debug.h"
+#include "slow_call_diag.h"
 #include "astdlib.h"
 #include "util.h"
 #include "cbe.h"
@@ -224,7 +225,9 @@ static int fd_input_read(void *opaque, uint8_t *data, int size)
 		if (in->interrupt.callback && in->interrupt.callback(in->interrupt.opaque)) return AVERROR_EXIT;
 		if (in->pos >= in->length) return AVERROR_EOF;
 		int bytes = (int)MIN((int64_t)size, in->length - in->pos);
+		slow_call_diag_t read_diag = slow_call_diag_begin(SLOW_CALL_DIAG_ENABLED);
 		ssize_t ret = pread64(in->fd, data, bytes, in->start + in->pos);
+		slow_call_diag_end(read_diag, "fd_pread", ret, bytes, -1, -1);
 		if (ret < 0 && errno == EINTR) continue;
 		if (ret < 0) return AVERROR(errno);
 		if (!ret) return AVERROR(EIO); // file truncated before the promised slice end
@@ -1849,7 +1852,15 @@ DBGP serprintf("FFMPEG: sleep\r\n");
 	// Read the next packet, skipping all packets that aren't for this stream
 	AVPacket packet = { 0 };
 	// Read new packet
+	int trace_demux = SLOW_CALL_DIAG_ENABLED;
+	int diag_audio_queue = trace_demux ? queue_packets(&ff_p->aq) : -1;
+	int diag_video_queue = trace_demux ? queue_packets(&ff_p->vq) : -1;
+	int64_t diag_bytes_before = trace_demux && fmt->pb ? fmt->pb->bytes_read : -1;
+	slow_call_diag_t demux_diag = slow_call_diag_begin(trace_demux);
 	int result = av_read_frame(fmt, &packet);
+	slow_call_diag_end(demux_diag, "av_read_frame", result,
+		demux_diag.active && fmt->pb && diag_bytes_before >= 0 ? fmt->pb->bytes_read - diag_bytes_before : -1,
+		diag_audio_queue, diag_video_queue);
 	int demux_result = result;
 	clear_seek_read_error(s, fmt);
 	// Demuxers can return a partial packet after cancellation. The pending

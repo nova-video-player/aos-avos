@@ -463,3 +463,24 @@ handoff, resume, seek, negative drift, manual delay, pending speed/cadence
 corrections and passthrough do not qualify. Existing once-per-frame guards and
 history-following apply to accelerated steps too. `PCM late recovery` records
 actual accelerated steps directly to logcat at sink debug level 1.
+
+### Slow-operation diagnostics
+
+In Android debug builds with `DEBUG_LOGS` and sink debug enabled,
+`playback_slow_call` records operations returning after at least 100ms. Probes
+cover PCM AudioTrack writes and integer timing queries, production getTimestamp,
+FFmpeg av_read_frame, custom file-descriptor pread, and video waits for audio
+sync. Each record carries the originating TID, monotonic start/end and wall/CPU
+durations, result and byte count. Demux records include packet queue depths
+sampled before the call and AVIO bytes read during it. Other probes use -1 for
+unavailable queue depths; bytes is the requested length for writes/pread, and
+zero for timing queries/waits. FFmpeg handles HTTP internally; av_read_frame
+measures the combined demux/I/O boundary, not a separate network-call duration.
+
+These sparse records bypass serprintf's shared stdout pipe. Ordinary logcat
+TIDs/times on that pipe belong to the logging thread and cannot locate a stall.
+Low thread CPU with long wall time indicates waiting or descheduling, not
+necessarily a HAL/network fault. Records only describe completed operations;
+no completion record cannot rule out an ongoing stall. Probes preserve errno,
+make no extra AudioTrack queries and are inactive with debug disabled. They
+retain no cross-thread state and do not change clock caches or recovery policy.

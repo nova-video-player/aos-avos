@@ -24,6 +24,7 @@
 
 #include "global.h"
 #include "debug.h"
+#include "slow_call_diag.h"
 #include "types.h"
 #include "audio_interface.h"
 #include "android_audio.h"
@@ -340,7 +341,10 @@ static inline int call_int_method(audio_ctx_t *at, const char * name, const char
 
 	va_list args;
 	va_start(args, signature);
+	slow_call_diag_t query_diag = slow_call_diag_begin(SLOW_CALL_DIAG_ENABLED &&
+		!at->passthrough && strcmp(name, "write"));
 	jint result = (*at->env)->CallIntMethodV(at->env, at->obj, method, args);
+	slow_call_diag_end(query_diag, name, result, 0, -1, -1);
 	va_end(args);
 
 	jthrowable exception = (*at->env)->ExceptionOccurred(at->env);
@@ -376,7 +380,10 @@ static inline int call_int_method_with_env(audio_ctx_t *at, JNIEnv *env, const c
 
 	va_list args;
 	va_start(args, signature);
+	slow_call_diag_t query_diag = slow_call_diag_begin(SLOW_CALL_DIAG_ENABLED &&
+		!at->passthrough && strcmp(name, "write"));
 	jint result = (*env)->CallIntMethodV(env, at->obj, method, args);
+	slow_call_diag_end(query_diag, name, result, 0, -1, -1);
 	va_end(args);
 
 	jthrowable exception = (*env)->ExceptionOccurred(env);
@@ -2330,6 +2337,7 @@ ERR		LOG("audiotrack_write: track not valid, error");
 		len_to_write > audiotrack_force_short_write_bytes) {
 		len_to_write = audiotrack_force_short_write_bytes;
 	}
+	slow_call_diag_t write_diag = slow_call_diag_begin(SLOW_CALL_DIAG_ENABLED && !at->passthrough);
 	(*at->env)->SetByteArrayRegion(at->env, at->jbuffer, 0, len_to_write, buffer);
 	if (nonblocking_write) {
 		ret = call_int_method(at, "write", "([BIII)I", at->jbuffer, 0,
@@ -2337,6 +2345,7 @@ ERR		LOG("audiotrack_write: track not valid, error");
 	} else {
 		ret = call_int_method(at, "write", "([BII)I", at->jbuffer, 0, len_to_write);
 	}
+	slow_call_diag_end(write_diag, "audiotrack_write", ret, len_to_write, -1, -1);
 	if (ret == 0 && nonblocking_write) {
 		return 0;
 	}
@@ -2581,7 +2590,9 @@ ERR		LOG("AudioTrack object became NULL during getTimestamp, using fallback late
 	}
 
 	// Call AudioTrack.getTimestamp(AudioTimestamp)
+	slow_call_diag_t timestamp_diag = slow_call_diag_begin(SLOW_CALL_DIAG_ENABLED && !at->passthrough);
 	jboolean success = (*env)->CallBooleanMethod(env, track_obj, at->getTimestampMethodID, at->audioTimestamp);
+	slow_call_diag_end(timestamp_diag, "getTimestamp", success, 0, -1, -1);
 
 	// Check for exceptions
 	if ((*env)->ExceptionCheck(env)) {

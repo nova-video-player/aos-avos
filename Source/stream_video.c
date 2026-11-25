@@ -18,6 +18,7 @@
 #include "types.h"
 #include "avi.h"
 #include "debug.h"
+#include "slow_call_diag.h"
 #include "device_config.h"
 #include "util.h"
 #include "stream.h"
@@ -3443,6 +3444,7 @@ static void _output_frame_no_resize( STREAM *s, VIDEO_FRAME *frame, VIDEO_FRAME 
 		}
 	}
 
+	slow_call_diag_t sync_wait_diag = slow_call_diag_begin(SLOW_CALL_DIAG_ENABLED);
 	int sync_wait_ms = 0;
 	const int sync_wait_timeout_ms = 5000; // Avoid indefinite freeze if audio never starts
 
@@ -3468,6 +3470,7 @@ DBG			serprintf("video waiting for audio sync (%d ms)\n", sync_wait_ms);
 		msec_sleep( 10 );
 		sync_wait_ms += 10;
 	}
+	slow_call_diag_end(sync_wait_diag, "video_audio_sync_wait", sync_wait_ms, 0, -1, -1);
 		
 DBGV2 serprintf("  out %8d/%2d/%c", frame->time, frame->index, frame_type( frame->type ) );
 	if( s->video_sink ) {

@@ -30,6 +30,7 @@ class PcmStartupTest(unittest.TestCase):
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define DBGSI if (0)
 #define serprintf(...) ((void)0)
+#define serprintf_record(...) ((void)0)
 typedef int64_t INT64;
 typedef struct { int valid; } AUDIO;
 typedef struct {
@@ -52,6 +53,8 @@ static void apply(priv_t *p, STREAM *s, INT64 startup_target_ns) {
 }
 static void step(priv_t *p, STREAM *s, int distinct) {
     struct { int duration; } frame = { 41 }, *f = &frame;
+    // Startup/resume has no owned drift recovery; retain the ordinary step.
+    INT64 pcm_drift_step_ns = 1000000LL;
     int mode2_new_slew_frame = 0, mode2_dynamic_active = 0;
     int pcm_startup_new_slew_frame = distinct;
 ''' + slew + r'''

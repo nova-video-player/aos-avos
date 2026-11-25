@@ -44,6 +44,7 @@ class PcmCalibrationTest(unittest.TestCase):
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define DBGSI if (0)
 #define serprintf(...) ((void)0)
+#define serprintf_record(...) ((void)0)
 #define pthread_mutex_lock(m) ((void)(m))
 #define pthread_mutex_unlock(m) ((void)(m))
 typedef int64_t INT64;
@@ -84,6 +85,8 @@ static void validate(priv_t *p, STREAM *s, int passthrough_mode, int speed_chang
 static void step(priv_t *p, STREAM *s, int frame_time) {
     struct { int duration, time, epoch; const void *android_handle; }
         frame = {41, frame_time, 11, (void *)1}, *f = &frame;
+    // Startup/resume has no owned drift recovery; retain the ordinary step.
+    INT64 pcm_drift_step_ns = 1000000LL;
     int mode2_new_slew_frame = 0, mode2_dynamic_active = 0;
 ''' + guard + slew + remember + r'''
 }

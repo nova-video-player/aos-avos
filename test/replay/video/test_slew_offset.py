@@ -27,6 +27,8 @@ class SlewOffsetTest(unittest.TestCase):
         functions = '\n'.join(extract(text, marker) for marker in (
             'static void speed_cadence_reset(',
             'static void pcm_drift_history_follow(',
+            'static int pcm_drift_fast_eligible_l(',
+            'static INT64 pcm_drift_late_drop_step_ns(',
             'static int mode1_phase_matches_audio_l(',
             'static void mode1_resume_observe_l(',
             'static int pcm_resume_matches_audio_l(',
@@ -67,11 +69,15 @@ class SlewOffsetTest(unittest.TestCase):
 #include <limits.h>
 #define DBGSI if (0)
 #define serprintf printf
+#define serprintf_record printf
+static INT64 _get_monotonic_ns(void) { return 0; }
 static int64_t now_ms=10000;
 int64_t atime64(void) { return now_ms; }
 static timeline_state_t timeline={.speed=1,.inv_speed=1};
 timeline_state_t timeline_snapshot(void) { return timeline; }
 static int mode, preserves=1;
+static INT64 replay_lateness;
+float audio_interface_get_audio_speed(void) { return timeline.speed; }
 static int passthrough(STREAM *s) { (void)s; return mode; }
 int audio_interface_pause_preserves_output(audio_ctx_t *ctx) { (void)ctx; return preserves; }
 ''' + typedef(text, 'speed_cadence_t') + '\n' + typedef(text, 'pcm_drift_t') + '\n' + typedef(text, 'pcm_drift_history_t') + r'''
@@ -79,6 +85,8 @@ typedef struct {
     struct { pthread_mutex_t mtx; } locked;
 ''' + '\n'.join(declarations) + '\n} priv_t;\n' + slew_helpers(text) + functions + r'''
 static void advance(priv_t *p,STREAM *s,VIDEO_FRAME *f,int mode2_dynamic_active) {
+''' + '''INT64 pcm_drift_step_ns = pcm_drift_fast_eligible_l(p,s,mode,f->epoch) ?
+    pcm_drift_late_drop_step_ns(p->render_offset_ns,p->target_offset_ns,replay_lateness) : 1000000LL;
 ''' + guards + step + remember + r'''
 }
 ''' + (ROOT / 'test/fixtures/slew_before_refactor.c').read_text() + r'''
@@ -99,6 +107,7 @@ static void arm(priv_t *p,int policy,INT64 delta) {
     p->pcm_startup_slew_frame_time=p->mode2_slew_frame_time=INT_MIN;
 }
 int main(void) {
+    assert(pcm_drift_late_drop_step_ns(0,1000000000,450000000)==16000000);
     AUDIO_PROPERTIES audio={.valid=1}; VIDEO_PROPERTIES video={.msPerFrame=40};
     STREAM_SINK_AUDIO as={.get_passthrough=passthrough};
     STREAM s={.audio=&audio,.video=&video,.audio_sink=&as,.audio_time=1000,.video_time=1000};
@@ -417,6 +426,68 @@ int main(void) {
         pthread_mutex_destroy(&p.locked.mtx);
     }
     pthread_mutex_destroy(&s.audio_lifecycle_mutex);
+
+    // Owned positive drift only. Exercise the real step block and frame guard.
+    s.paused=0; s.paused_internal=0; s.seek_paused=0; s.audio_start_pending=0;
+    s.audio_resume_pending=0; s.audio_reconfiguring=0; s.put_time_mode=1;
+    s.play_n_video_frames=0; s.av_delay=0; s.manual_audio_hold_pending_ms=0;
+    s.manual_audio_delay_applied_ms=0; s.audio_time=1000; s.seek_epoch=9;
+    s.audio_lifecycle_generation=7; mode=0; timeline=(timeline_state_t){.speed=1,.inv_speed=1};
+    priv_t fast={0}; arm(&fast,1,480000000);
+    fast.video_timeline=timeline;
+    fast.pcm_drift_history=(pcm_drift_history_t){.healthy=1,.recovery_owned=1,
+        .offset_ns=fast.render_offset_ns,.recovery_target_ns=fast.target_offset_ns,
+        .epoch=9,.audio_generation=7};
+    VIDEO_FRAME next={.time=1000,.epoch=9,.duration=42};
+    assert(pcm_drift_fast_eligible_l(&fast,&s,0,9));
+    assert(!pcm_drift_fast_eligible_l(&fast,&s,1,9));
+    assert(!pcm_drift_fast_eligible_l(&fast,&s,2,9));
+    assert(!pcm_drift_fast_eligible_l(&fast,&s,0,8));
+#define EXCLUDE(obj,field,value) do { __typeof__((obj).field) old=(obj).field; \
+    (obj).field=(value); assert(!pcm_drift_fast_eligible_l(&fast,&s,0,9)); (obj).field=old; } while(0)
+    EXCLUDE(s,paused,1); EXCLUDE(s,paused_internal,1); EXCLUDE(s,seek_paused,1);
+    EXCLUDE(s,audio_reconfiguring,1); EXCLUDE(s,audio_start_pending,1);
+    EXCLUDE(s,audio_resume_pending,1); EXCLUDE(s,play_n_video_frames,1);
+    EXCLUDE(s,av_delay,50); EXCLUDE(s,manual_audio_hold_pending_ms,20);
+    EXCLUDE(s,manual_audio_delay_applied_ms,20); EXCLUDE(s,audio_lifecycle_generation,8);
+    EXCLUDE(s,seek_epoch,10);
+    EXCLUDE(fast,pcm_resume_slew,1); EXCLUDE(fast,pcm_seek_startup_slew,1);
+    EXCLUDE(fast,mode1_resume_slew,1); EXCLUDE(fast,mode2_dynamic_slew,1);
+    EXCLUDE(fast,pause_armed,1); EXCLUDE(fast,pcm_resume_pending,1);
+    EXCLUDE(fast,pcm_resume_calibration_active,1); EXCLUDE(fast,pending_reanchor,1);
+    EXCLUDE(fast,pending_seek_reanchor,1); EXCLUDE(fast,at_clock_handoff_pending,1);
+    EXCLUDE(fast,render_offset_ns,fast.render_offset_ns+1);
+    EXCLUDE(fast,target_offset_ns,fast.target_offset_ns+1);
+    EXCLUDE(fast.pcm_drift_history,recovery_owned,0);
+    EXCLUDE(fast.pcm_drift_history,healthy,0);
+    EXCLUDE(fast.speed_cadence,correction_ns,1);
+    EXCLUDE(fast.speed_cadence,calibration_offset_ns,1);
+    EXCLUDE(fast.video_timeline,speed,1.2); EXCLUDE(timeline,speed,1.2);
+    EXCLUDE(timeline,ts_anchor,1);
+#undef EXCLUDE
+    const INT64 initial=fast.render_offset_ns;
+    for(int i=0;i<16;i++) {
+        replay_lateness=450000000-(fast.render_offset_ns-initial);
+        INT64 before=fast.render_offset_ns;
+        advance(&fast,&s,&next,0);
+        assert(fast.render_offset_ns-before<=16000000);
+        assert(fast.pcm_drift_history.offset_ns==fast.render_offset_ns);
+        INT64 once=fast.render_offset_ns;
+        advance(&fast,&s,&next,0); assert(fast.render_offset_ns==once);
+        next.time+=42;
+    }
+    // Last accelerated step crosses the cutoff by only 1ms (199ms late).
+    assert(450000000-(fast.render_offset_ns-initial)==199000000);
+    replay_lateness=199000000;
+    INT64 before=fast.render_offset_ns;
+    advance(&fast,&s,&next,0); assert(fast.render_offset_ns-before==1000000);
+    next.time+=42;
+    while(fast.slew_active) { advance(&fast,&s,&next,0); next.time+=42; }
+    assert(fast.render_offset_ns==fast.target_offset_ns);
+    assert(!fast.pcm_drift_history.recovery_owned);
+    assert(pcm_drift_late_drop_step_ns(0,500000,450000000)==500000);
+    assert(pcm_drift_late_drop_step_ns(0,-500000000,450000000)==1000000);
+    assert(pcm_drift_late_drop_step_ns(0,500000000,200000000)==1000000);
     return 0;
 }
 ''')

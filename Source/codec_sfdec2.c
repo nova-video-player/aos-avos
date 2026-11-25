@@ -454,6 +454,7 @@ static INT64 mode2_cold_entry_limit_ns(int frame_ms)
 // Bounded renderer-offset arithmetic. The caller owns mode selection, target
 // qualification, frame identity and lifecycle state; completion only means that
 // this arithmetic reached the target (including the legacy fallback snap).
+#define ANDROID_SYNC_LATE_DROP_NS 200000000LL
 typedef struct {
 	int64_t step_ns;
 	int step_from_frame_duration;
@@ -525,6 +526,20 @@ static int pcm_drift_observe(pcm_drift_t *d, int eligible, INT64 step_ms,
 	*target_ns = d->target_ns;
 	d->samples = 0;
 	return 1;
+}
+
+// Only spend the extra step while the current frame would be discarded.
+// Cross the renderable boundary by at most the ordinary 1ms step, never
+// overshoot the qualified target, and never accelerate a negative correction.
+static INT64 pcm_drift_late_drop_step_ns(INT64 offset_ns, INT64 target_ns,
+	INT64 lateness_ns)
+{
+	const INT64 normal = 1000000LL;
+	if (target_ns <= offset_ns || lateness_ns <= ANDROID_SYNC_LATE_DROP_NS)
+		return normal;
+	INT64 excess = lateness_ns - ANDROID_SYNC_LATE_DROP_NS;
+	INT64 step = excess >= 15000000LL ? 16000000LL : excess + normal;
+	return MIN(step, target_ns - offset_ns);
 }
 
 // A series of small clock delays can bypass single-step recovery and leave the
@@ -622,6 +637,40 @@ static int pcm_drift_history_observe(pcm_drift_history_t *h, int eligible, int c
 	*target_ns = w->target_ns;
 	w->samples = 0;
 	return 1;
+}
+
+// Renderer-side recheck: ownership alone must not survive a new lifecycle or
+// timeline decision between put_time() and consuming the next frame.
+static int pcm_drift_fast_eligible_l(priv_t *p, STREAM *s, int passthrough, int epoch)
+{
+	if (!s || passthrough || !s->put_time_mode || !s->audio || !s->audio->valid ||
+		s->audio_time < 0 || s->paused || s->paused_internal || s->seek_paused ||
+		s->audio_reconfiguring || s->audio_start_pending || s->audio_resume_pending ||
+		s->play_n_video_frames || s->av_delay || s->manual_audio_hold_pending_ms ||
+		s->manual_audio_delay_applied_ms || p->effective_av_delay_ms ||
+		p->pause_armed || p->pcm_resume_pending || p->pcm_resume_calibration_active ||
+		p->pending_reanchor || p->pending_seek_reanchor || p->at_clock_handoff_pending ||
+		!p->slew_active || !p->pcm_startup_slew || p->pcm_resume_slew ||
+		p->pcm_seek_startup_slew || p->mode1_resume_slew || p->mode2_dynamic_slew ||
+		p->mode2_dynamic_fast_slew || p->render_offset_ns == -1 || !p->render_offset_from_audio ||
+		!p->pcm_drift_history.healthy || !p->pcm_drift_history.recovery_owned ||
+		p->render_offset_ns != p->pcm_drift_history.offset_ns ||
+		p->target_offset_ns != p->pcm_drift_history.recovery_target_ns ||
+		p->target_offset_ns <= p->render_offset_ns ||
+		epoch != s->seek_epoch || epoch != p->pcm_drift_history.epoch ||
+		s->audio_lifecycle_generation != p->pcm_drift_history.audio_generation ||
+		p->speed_cadence.correction_ns ||
+		p->speed_cadence.calibration_offset_ns != p->speed_cadence.submitted_calibration_offset_ns)
+		return 0;
+	timeline_state_t current = timeline_snapshot();
+	return p->video_timeline.speed == 1.0 && current.speed == 1.0 &&
+		audio_interface_get_audio_speed() == 1.0f &&
+		current.rst_anchor == p->video_timeline.rst_anchor &&
+		current.ts_anchor == p->video_timeline.ts_anchor &&
+		(!p->speed_cadence.enabled || !p->speed_cadence.valid ||
+		 (p->speed_cadence.timeline.speed == current.speed &&
+		  p->speed_cadence.timeline.rst_anchor == current.rst_anchor &&
+		  p->speed_cadence.timeline.ts_anchor == current.ts_anchor));
 }
 
 // Called under the renderer mutex only for ordinary PCM startup/drift slew.
@@ -2685,6 +2734,24 @@ static void *videosink_thread(void *ctx)
 				}
 			}
 
+			INT64 pcm_drift_step_ns = 1000000LL;
+			if (pcm_startup_new_slew_frame &&
+				pcm_drift_fast_eligible_l(p, s, passthrough, f->epoch)) {
+				INT64 pre_delay_ns = (INT64)(int)(p->effective_av_delay_ms *
+					p->video_timeline.inv_speed) * NSEC_PER_MSEC;
+				INT64 pre_deadline_ns = _snap_timestamp_ns(p, f->time, f->epoch) +
+					p->render_offset_ns + pre_delay_ns;
+				INT64 interval_ns = p->video_frame_rate_num > 0 ?
+					(INT64)(1000000000.0 * p->video_frame_rate_den /
+						(p->video_frame_rate_num * p->video_timeline.speed)) : 0;
+				INT64 ignored_correction;
+				pre_deadline_ns = speed_cadence_time(&p->speed_cadence, p->video_timeline,
+					f->epoch, f->media_time, f->media_time_valid, interval_ns,
+					pre_deadline_ns, &ignored_correction);
+				pcm_drift_step_ns = pcm_drift_late_drop_step_ns(p->render_offset_ns,
+					p->target_offset_ns, _get_monotonic_ns() - pre_deadline_ns);
+			}
+
 			if (p->slew_active &&
 				(!p->pcm_resume_slew || (!p->pause_armed && (!s || !s->paused))) &&
 				(!p->mode2_dynamic_slew || mode2_new_slew_frame) &&
@@ -2696,7 +2763,7 @@ static void *videosink_thread(void *ctx)
 				// the current frame interval, capped at 4ms.
 				offset_slew_policy_t policy = {
 					.step_ns = p->mode2_dynamic_fast_slew ? 5000000 :
-						(p->pcm_startup_slew ? 1000000 : 200000),
+						(p->pcm_startup_slew ? pcm_drift_step_ns : 200000),
 					.step_from_frame_duration =
 						(p->pcm_startup_slew && (p->pcm_resume_slew || p->pcm_seek_startup_slew)) ||
 						p->mode1_resume_slew,
@@ -2706,6 +2773,11 @@ static void *videosink_thread(void *ctx)
 				INT64 previous_offset_ns = p->render_offset_ns;
 				int slew_complete = offset_slew_step(&p->render_offset_ns,
 					p->target_offset_ns, policy, f->duration);
+				if (pcm_drift_step_ns > 1000000LL) DBGSI
+					serprintf_record("android_sync: PCM late recovery frame=%d epoch=%d step_us=%lld remaining_us=%lld wall_ns=%lld\n",
+						f->time, f->epoch, (long long)((p->render_offset_ns - previous_offset_ns) / 1000),
+						(long long)((p->target_offset_ns - p->render_offset_ns) / 1000),
+						(long long)_get_monotonic_ns());
 				if (p->pcm_startup_slew && !p->pcm_resume_slew &&
 					!p->pcm_seek_startup_slew)
 					pcm_drift_history_follow(&p->pcm_drift_history, previous_offset_ns,
@@ -2852,7 +2924,7 @@ static void *videosink_thread(void *ctx)
 		if (do_render && !stale_epoch_drop) {
 			INT64 now_ns = _get_monotonic_ns();
 			INT64 lateness_ns = now_ns - render_ts_ns;
-			const INT64 k_late_drop_threshold_ns = 200 * 1000000LL; // 200ms lateness drop limit
+			const INT64 k_late_drop_threshold_ns = ANDROID_SYNC_LATE_DROP_NS;
 
 			if (mode2_preroll_interval_ns > 0 && lateness_ns > mode2_preroll_interval_ns) {
 				// Qualification can outlive queued frames. Check the final deadline

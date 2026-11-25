@@ -446,3 +446,20 @@ bytes). More capacity provides scheduling headroom; it does not guarantee a
 full queue or establish underruns as the cause of every clock displacement.
 The existing latency calculation uses the new geometry. Seek, pause/resume,
 speed changes and physical A/V sync still require device validation.
+
+### Bounded late-frame PCM recovery
+
+An already-qualified, owned positive PCM drift correction may advance at up to
+16ms per distinct frame while that frame's cadence-adjusted deadline is more
+than the existing 200ms drop limit behind monotonic time. The step cannot pass
+the qualified target or cross the renderable boundary by more than 1ms. Once
+renderable, the existing 1ms/frame correction resumes. This reduces time spent
+discarding frames; it neither establishes why the clock drifted nor guarantees
+an invisible transition or a recovery deadline under repeated disturbances.
+
+The renderer rechecks 1x PCM, lifecycle state, current timeline, epoch, audio
+generation, healthy-history ownership, offset and target. Startup, clock
+handoff, resume, seek, negative drift, manual delay, pending speed/cadence
+corrections and passthrough do not qualify. Existing once-per-frame guards and
+history-following apply to accelerated steps too. `PCM late recovery` records
+actual accelerated steps directly to logcat at sink debug level 1.

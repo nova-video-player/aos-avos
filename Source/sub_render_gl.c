@@ -32,9 +32,6 @@ struct SUB_RENDERER {
     pthread_t       thread;
     pthread_mutex_t lock;
     int             running;
-    // Last size reported by Java; EGL drawable dimensions are queried separately.
-    int             surface_width;
-    int             surface_height;
     int             ui_mode; // 0 = 2D, 1 = SBS, 2 = TB
     const SUB_FRAME *current_frame;
     int              pending_redraw; // unified "something changed, redraw regardless"
@@ -112,7 +109,7 @@ static int subgl_check_egl(EGLBoolean result, const char *operation, int *contex
     if (result == EGL_TRUE)
         return 1;
     EGLint error = eglGetError();
-    DBG serprintf("NovaSubGL: EGL %s failed error=0x%x\n", operation, error);
+    serprintf("NovaSubGL: EGL %s failed error=0x%x\n", operation, error);
     if (context_usable && error != EGL_BAD_SURFACE && error != EGL_BAD_NATIVE_WINDOW
         && error != EGL_BAD_CURRENT_SURFACE)
         *context_usable = 0;
@@ -154,7 +151,7 @@ static void* egl_render_thread(void* arg) {
         egl_ready = subgl_check_egl(eglChooseConfig(display, attribs, &config, 1, &numConfigs),
                                     "eglChooseConfig", NULL);
         if (egl_ready && numConfigs == 0)
-            DBG serprintf("NovaSubGL: no matching EGL config\n");
+            serprintf("NovaSubGL: EGL configuration has no matches\n");
         egl_ready = egl_ready && numConfigs > 0;
     }
 
@@ -176,6 +173,7 @@ static void* egl_render_thread(void* arg) {
     // never reach it, so the first paused pass with a callback set always announces once.
     uint64_t notified_generation = UINT64_MAX;
     ANativeWindow *current_window = NULL;
+    int resize_redraw = 0;
 
     while (1) {
         // 1. Sample the generation counter BEFORE doing any work
@@ -184,7 +182,9 @@ static void* egl_render_thread(void* arg) {
             loop_generation = sub_engine_get_generation((SUB_ENGINE*)r->engine);
         }
 
-        int needs_redraw = 0;
+        int is_resize_retry = resize_redraw;
+        int needs_redraw = resize_redraw;
+        resize_redraw = 0;
 
         pthread_mutex_lock(&r->lock);
         if (!r->running) {
@@ -220,6 +220,7 @@ static void* egl_render_thread(void* arg) {
                 surface = eglCreateWindowSurface(display, config, current_window, NULL);
                 egl_ready = subgl_check_egl(surface != EGL_NO_SURFACE, "eglCreateWindowSurface", &context_usable);
                 needs_redraw = 1;
+                is_resize_retry = 0;
                 if (egl_ready) {
                     context_current = subgl_check_egl(eglMakeCurrent(display, surface, surface, context),
                                                        "eglMakeCurrent(bind)", &context_usable);
@@ -291,9 +292,11 @@ static void* egl_render_thread(void* arg) {
         if (r->pending_redraw) {
             r->pending_redraw = 0;
             needs_redraw = 1;
+            is_resize_retry = 0;
         }
         if (content_changed) {
             needs_redraw = 1; // <--- 3. FORCE REDRAW ON NEW FRAME / CLEAR
+            is_resize_retry = 0;
         }
 
         // This iteration's poll+publish (above) has now run and r->current_frame reflects
@@ -397,6 +400,8 @@ static void* egl_render_thread(void* arg) {
                     bitmap_count++;
             }
             if (bitmap_count) {
+                if (frame_textures)
+                    subgl_release_textures(&frame_textures, &texture_count);
                 frame_textures = calloc(bitmap_count, sizeof(*frame_textures));
                 if (!frame_textures) {
                     DBG serprintf("NovaSubGL: skip frame: texture list allocation failed (%zu bitmaps)\n",
@@ -496,8 +501,28 @@ static void* egl_render_thread(void* arg) {
         glDisable(GL_BLEND);
             }
 
-        if (!subgl_check_egl(eglSwapBuffers(display, surface), "eglSwapBuffers", &context_usable))
+        if (!subgl_check_egl(eglSwapBuffers(display, surface), "eglSwapBuffers", &context_usable)) {
             egl_ready = 0;
+        } else {
+            subgl_release_textures(&frame_textures, &texture_count);
+            // Some EGL implementations apply window resizing during the swap.
+            // Repaint once at the new size even if playback is paused and the
+            // subtitle does not change. Bound this retry to avoid spinning if
+            // dimensions keep changing; subsequent resize events still redraw.
+            EGLint swapped_w = 0, swapped_h = 0;
+            int swapped_width_ok = subgl_check_egl(
+                eglQuerySurface(display, surface, EGL_WIDTH, &swapped_w),
+                "eglQuerySurface(width after swap)", &context_usable);
+            int swapped_height_ok = subgl_check_egl(
+                eglQuerySurface(display, surface, EGL_HEIGHT, &swapped_h),
+                "eglQuerySurface(height after swap)", &context_usable);
+            if (!swapped_width_ok || !swapped_height_ok) {
+                egl_ready = 0;
+            } else if (!is_resize_retry && swapped_w > 0 && swapped_h > 0
+                       && (swapped_w != buffer_w || swapped_h != buffer_h)) {
+                resize_redraw = 1;
+            }
+        }
 
 release_frame:
         // Swap submits work; GL defers reclamation until pending draws finish.
@@ -613,13 +638,10 @@ void sub_render_gl_detach_surface(SUB_RENDERER *r) {
 }
 
 void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
-    pthread_mutex_lock(&r->lock);
-    r->surface_width  = width;
-    r->surface_height = height;
-    // Leave native buffer geometry to TextureView/EGL. The render thread queries
-    // its actual drawable size rather than mutating an EGL window from Java's
-    // callback thread. The engine maintains its own subtitle layout dimensions.
-    pthread_mutex_unlock(&r->lock);
+    // TextureView/EGL owns buffer sizing; the engine owns subtitle layout.
+    // Keep this notification to repaint unchanged or paused subtitles on resize.
+    (void)width;
+    (void)height;
     sub_render_gl_invalidate_cache(r);
 }
 

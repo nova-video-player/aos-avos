@@ -51,6 +51,16 @@ static GLuint bound_texture, next_texture = 1;
 static int generated_textures, context_reclaimed;
 static int live[128], uploaded[128], drawn[128], parameters[128], created_at_swap[128];
 static int is(const char *name) { return strcmp(scenario, name) == 0; }
+static int paused_resize(void) {
+    return is("paused_grow") || is("paused_shrink") || is("unstable_resize");
+}
+static int buffer_size(EGLint attribute) {
+    if (is("unstable_resize")) return 8 + 4 * swaps;
+    if (is("paused_shrink") && swaps > 0) return 4;
+    if ((is("resize") && swaps >= 2) || (is("paused_grow") && swaps > 0))
+        return attribute == EGL_WIDTH ? 16 : 12;
+    return 8;
+}
 static int recovery(void) { return strstr(scenario, "_recovery") != NULL; }
 static int fatal_replacement(void) { return is("swap_lost") || is("query_lost") || is("swap_other_error"); }
 static int fail_egl(EGLint error) {
@@ -73,8 +83,8 @@ static EGLint egl_error(void) {
 }
 static void viewport(GLint x, GLint y, GLsizei w, GLsizei h) {
     assert(current);
-    assert(w == (is("resize") && swaps == 2 ? 16 : 8));
-    assert(h == (is("resize") && swaps == 2 ? 12 : 8));
+    assert(w == buffer_size(EGL_WIDTH));
+    assert(h == buffer_size(EGL_HEIGHT));
     viewports++;
 }
 static int forbidden_geometry(ANativeWindow *window, int w, int h, int format) { abort(); }
@@ -118,7 +128,7 @@ static int query_surface(EGLDisplay d, EGLSurface s, EGLint a, EGLint *value) {
     if (swaps == 1 && a == EGL_HEIGHT &&
         (is("query_failure") || ((is("query_recovery") || is("query_lost")) && !failure_seen)))
         return fail_egl(is("query_lost") ? EGL_CONTEXT_LOST : EGL_BAD_SURFACE);
-    *value = is("resize") && swaps == 2 ? (a == EGL_WIDTH ? 16 : 12) : 8;
+    *value = buffer_size(a);
     if (is("empty_buffer")) *value = 0;
     return 1;
 }
@@ -139,7 +149,7 @@ static int destroy_context(EGLDisplay d, EGLContext c) {
                 is("oversized_bitmap") || is("replace_surface") || is("resize") ||
                 is("attribute_failure") || is("clear_only") || is("empty_buffer") ||
                 is("texture_alloc_failure") || is("texture_name_error") ||
-                is("list_alloc_failure") || is("equal_sizes") || is("many_events") || recovery();
+                is("list_alloc_failure") || is("equal_sizes") || is("many_events") || recovery() || paused_resize();
     assert(deleted_programs == clean);
     for (GLuint i = 1; i < next_texture; i++) {
         if (live[i]) {
@@ -278,14 +288,19 @@ static void finish_frame(void) {
         if (created_at_swap[i] == swaps)
             assert(live[i]);  /* Every allocated object survives through the swap. */
     }
-    if (++swaps == (is("resize") ? 3 : 2)) renderer->running = 0;
+    if (++swaps == (is("resize") ? 3 : 2) && !paused_resize()) renderer->running = 0;
     if (is("resize") && swaps == 1) sub_render_gl_resize(renderer, 16, 12);
     if (stale_error && swaps == 1) pending_error = 0x0502;  /* Left pending between frames. */
-    renderer->pending_redraw = 1;
+    if (!paused_resize()) renderer->pending_redraw = 1;
     if (replace_surface || is("rebind_failure")) renderer->window = (ANativeWindow *)2;
     if (detach_surface) renderer->window = NULL;
 }
 static int finish_offline(useconds_t delay) {
+    if (paused_resize()) {
+        assert(swaps == 2 && viewports == 2 && refs == 0);
+        renderer->running = 0;
+        return 0;
+    }
     if (recovery() && failure_seen) {
         // Two waits on the failing window must not retry EGL or allocate again.
         assert(surface_creates == 1);
@@ -307,9 +322,9 @@ static int finish_offline(useconds_t delay) {
     return 0;
 }
 int main(int argc, char **argv) {
-    assert(argc == 2);
+    assert(argc == 3);
     scenario = argv[1];
-    Debug[DBG_SUB] = 3;
+    Debug[DBG_SUB] = atoi(argv[2]);
     replace_surface = strcmp(argv[1], "replace_surface") == 0;
     detach_surface = strcmp(argv[1], "detach_surface") == 0;
     fail_texture = strcmp(argv[1], "texture_failure") == 0;
@@ -341,8 +356,7 @@ int main(int argc, char **argv) {
     sub_render_gl_resize(&r, 10, 6);  /* Requested size differs from the EGL buffer. */
     egl_render_thread(&r);
     assert(polls > 0);  /* EGL failures must not kill CPU frame processing. */
-    assert(r.surface_width == (is("resize") ? 16 : 10));
-    assert(r.surface_height == (is("resize") ? 12 : 6));
+    if (paused_resize()) assert(polls == 3);  /* One retry, then sleep without new content. */
     /* Two cues per frame, two frames unless the surface goes away after one. */
     int frames = is("resize") ? 3 : 2;
     if (detach_surface || is("rebind_failure") || is("query_failure") || is("swap_failure") || fatal_replacement()) frames = 1;
@@ -366,6 +380,9 @@ int main(int argc, char **argv) {
         assert(failure_seen && egl_logs == 1 && pending_egl_error == 0);
     }
     if (fatal_replacement()) assert(offline_waits == 2 && egl_logs == 1);
+    if (is("display_failure") || is("init_failure") || is("config_failure") ||
+        is("no_configs") || is("context_failure") || is("swap_failure"))
+        assert(egl_logs == 1);  /* Critical failures remain visible with DBG_SUB=0. */
     if (is("normal")) assert(egl_logs == 0);  /* Success logs stay quiet even at DBG_SUB=3. */
     for (GLuint i = 1; i < next_texture; i++) assert(!live[i]);
     pthread_mutex_destroy(&r.lock);
@@ -403,10 +420,12 @@ class SubtitleGLDiagnosticsTest(unittest.TestCase):
                      'texture_alloc_failure', 'texture_name_error', 'list_alloc_failure',
                      'equal_sizes', 'many_events', 'swap_recovery', 'query_recovery',
                      'create_recovery', 'bind_recovery', 'detach_recovery',
-                     'swap_lost', 'query_lost', 'swap_other_error']
+                     'swap_lost', 'query_lost', 'swap_other_error',
+                     'paused_grow', 'paused_shrink', 'unstable_resize']
             for case in cases:
-                with self.subTest(case=case):
-                    subprocess.run([str(binary), case], check=True, timeout=10)
+                for debug_level in ('0', '3'):
+                    with self.subTest(case=case, debug_level=debug_level):
+                        subprocess.run([str(binary), case, debug_level], check=True, timeout=10)
 
 
 if __name__ == '__main__':

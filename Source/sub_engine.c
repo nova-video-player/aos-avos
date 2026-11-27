@@ -355,8 +355,8 @@ void sub_engine_surface_resized(SUB_ENGINE *eng, int width, int height) {
     broadcast_wake_locked(eng); // wake the render thread so poll_frame() applies it promptly
     pthread_mutex_unlock(&eng->lock);
 
-    // The GL renderer's own framebuffer/surface resize stays eager: that's the physical
-    // render target, not content layout, and has no pairing requirement with the box.
+    // Request a redraw even for unchanged/paused subtitles. TextureView/EGL owns
+    // buffer sizing; the renderer queries the drawable dimensions on its thread.
     sub_render_gl_resize(eng->renderer, width, height);
 }
 

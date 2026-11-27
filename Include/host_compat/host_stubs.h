@@ -134,19 +134,32 @@ static inline int __android_log_print(int prio, const char *tag, const char *fmt
 
 typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface;
 typedef int   EGLint;
+typedef unsigned int EGLBoolean;
 
 #define EGL_DEFAULT_DISPLAY ((void*)0)
+#define EGL_NO_DISPLAY       ((EGLDisplay)0)
+#define EGL_TRUE 1
+#define EGL_FALSE 0
+#define EGL_SUCCESS 0x3000
+#define EGL_BAD_ALLOC 0x3003
+#define EGL_BAD_CURRENT_SURFACE 0x3007
+#define EGL_BAD_NATIVE_WINDOW 0x300B
+#define EGL_BAD_SURFACE 0x300D
+#define EGL_CONTEXT_LOST 0x300E
 #define EGL_NO_SURFACE       ((EGLSurface)0)
 #define EGL_NO_CONTEXT       ((EGLContext)0)
 enum {
     EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_BLUE_SIZE, EGL_GREEN_SIZE,
     EGL_RED_SIZE, EGL_ALPHA_SIZE, EGL_NONE, EGL_CONTEXT_CLIENT_VERSION,
-    EGL_WIDTH, EGL_HEIGHT
+    EGL_WIDTH, EGL_HEIGHT, EGL_CONFIG_ID, EGL_DEPTH_SIZE, EGL_STENCIL_SIZE,
+    EGL_SAMPLE_BUFFERS, EGL_SAMPLES
 };
 
+static inline EGLint eglGetError(void) { return EGL_SUCCESS; }
+static inline int eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint a, EGLint *v) { *v = 0; return 1; }
 static inline EGLDisplay eglGetDisplay(EGLDisplay d) { return (EGLDisplay)1; }
 static inline int eglInitialize(EGLDisplay d, EGLint *major, EGLint *minor) { return 1; }
-static inline int eglChooseConfig(EGLDisplay d, const EGLint *attribs, EGLConfig *configs, EGLint size, EGLint *num) { return 1; }
+static inline int eglChooseConfig(EGLDisplay d, const EGLint *attribs, EGLConfig *configs, EGLint size, EGLint *num) { if (size > 0) { *configs = (EGLConfig)1; *num = 1; } else { *num = 0; } return 1; }
 static inline EGLContext eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share, const EGLint *attribs) { return (EGLContext)1; }
 static inline EGLSurface eglCreateWindowSurface(EGLDisplay d, EGLConfig c, void *win, const EGLint *attribs) { return EGL_NO_SURFACE; }
 static inline int eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read, EGLContext ctx) { return 1; }
@@ -168,8 +181,10 @@ enum {
     GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, GL_LINEAR,
     GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT,
     GL_BLEND, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_UNPACK_ALIGNMENT,
-    GL_RGBA, GL_UNSIGNED_BYTE, GL_FLOAT, GL_FALSE, GL_TRIANGLE_STRIP
+    GL_RGBA, GL_UNSIGNED_BYTE, GL_FLOAT, GL_FALSE, GL_TRIANGLE_STRIP,
+    GL_MAX_TEXTURE_SIZE
 };
+#define GL_NO_ERROR 0
 
 static inline GLuint glCreateShader(GLenum type) { return 1; }
 static inline void   glShaderSource(GLuint shader, GLsizei count, const char *const *string, const GLint *length) {}
@@ -186,6 +201,8 @@ static inline void   glDeleteProgram(GLuint program) {}
 static inline GLint  glGetAttribLocation(GLuint program, const char *name) { return 0; }
 static inline void   glGenTextures(GLsizei n, GLuint *textures) {}
 static inline void   glBindTexture(GLenum target, GLuint texture) {}
+static inline GLenum glGetError(void) { return GL_NO_ERROR; }
+static inline void   glGetIntegerv(GLenum pname, GLint *data) { *data = 0; }
 static inline void   glDeleteTextures(GLsizei n, const GLuint *textures) {}
 static inline void   glTexParameteri(GLenum target, GLenum pname, GLint param) {}
 static inline void   glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {}

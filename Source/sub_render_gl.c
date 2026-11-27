@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "debug.h"
+#include <stdint.h>
 #include <time.h>
 
 #define DBG if(Debug[DBG_SUB])
@@ -31,6 +32,7 @@ struct SUB_RENDERER {
     pthread_t       thread;
     pthread_mutex_t lock;
     int             running;
+    // Last size reported by Java; EGL drawable dimensions are queried separately.
     int             surface_width;
     int             surface_height;
     int             ui_mode; // 0 = 2D, 1 = SBS, 2 = TB
@@ -45,7 +47,7 @@ struct SUB_RENDERER {
                                          // sub_render_gl_fill_bitmap().
     pthread_cond_t   frame_cond;         // broadcast whenever applied_generation advances
     GLuint           gl_program;
-    GLuint           gl_texture;
+    GLint            gl_max_texture_size;
     GLint            attrib_pos;
     GLint            attrib_tex;
     void            *engine;
@@ -88,23 +90,86 @@ static GLuint create_program(const char *vertex_src, const char *fragment_src) {
     return program;
 }
 
+// Reports and clears pending GL errors, returning the first one. Bounded,
+// because a lost context may keep reporting an error.
+static GLenum subgl_take_errors(const char *where) {
+    GLenum first = GL_NO_ERROR;
+    for (int i = 0; i < 8; i++) {
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR)
+            break;
+        if (first == GL_NO_ERROR)
+            first = err;
+        DBG serprintf("NovaSubGL: GL error 0x%x %s\n", err, where);
+    }
+    return first;
+}
+
+// Only surface/window errors permit retry, and only on a replacement window.
+// Initialization failures, context loss and other EGL errors remain fatal for
+// this renderer. Capture the error before another EGL operation can obscure it.
+static int subgl_check_egl(EGLBoolean result, const char *operation, int *context_usable) {
+    if (result == EGL_TRUE)
+        return 1;
+    EGLint error = eglGetError();
+    DBG serprintf("NovaSubGL: EGL %s failed error=0x%x\n", operation, error);
+    if (context_usable && error != EGL_BAD_SURFACE && error != EGL_BAD_NATIVE_WINDOW
+        && error != EGL_BAD_CURRENT_SURFACE)
+        *context_usable = 0;
+    return 0;
+}
+
+// Called only with a usable current context, after submission or after a
+// successful bind to a replacement surface following failed submission.
+static void subgl_release_textures(GLuint **textures, size_t *count) {
+    if (*count) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        for (size_t i = 0; i < *count; i++)
+            glDeleteTextures(1, &(*textures)[i]);
+        subgl_take_errors("after subtitle texture cleanup");
+    }
+    free(*textures);
+    *textures = NULL;
+    *count = 0;
+}
+
 static void* egl_render_thread(void* arg) {
     SUB_RENDERER *r = (SUB_RENDERER*)arg;
 
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    eglInitialize(display, NULL, NULL);
+    int initialized = 0;
+    if (subgl_check_egl(display != EGL_NO_DISPLAY, "eglGetDisplay", NULL))
+        initialized = subgl_check_egl(eglInitialize(display, NULL, NULL), "eglInitialize", NULL);
+    int egl_ready = initialized;
+    int context_current = 0;
 
     const EGLint attribs[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8,
         EGL_NONE
     };
-    EGLConfig config;
-    EGLint numConfigs;
-    eglChooseConfig(display, attribs, &config, 1, &numConfigs);
+    EGLConfig config = NULL;
+    EGLint numConfigs = 0;
+    if (egl_ready) {
+        egl_ready = subgl_check_egl(eglChooseConfig(display, attribs, &config, 1, &numConfigs),
+                                    "eglChooseConfig", NULL);
+        if (egl_ready && numConfigs == 0)
+            DBG serprintf("NovaSubGL: no matching EGL config\n");
+        egl_ready = egl_ready && numConfigs > 0;
+    }
 
     const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
+    EGLContext context = EGL_NO_CONTEXT;
+    if (egl_ready) {
+        context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
+        egl_ready = subgl_check_egl(context != EGL_NO_CONTEXT, "eglCreateContext", NULL);
+    }
+    int context_usable = egl_ready;
+    // Preserve textures after a failed swap until a successful replacement
+    // binding permits deletion. If no recovery occurs, context destruction
+    // reclaims them. Continue publishing CPU/3D frames while EGL is offline.
+    GLuint *frame_textures = NULL;
+    size_t texture_count = 0;
 
     EGLSurface surface = EGL_NO_SURFACE;
     // Last frame_generation announced through change_cb. UINT64_MAX = "never": generations
@@ -137,45 +202,36 @@ static void* egl_render_thread(void* arg) {
         // --- CLEAN EGL SURFACE CREATION ---
         if (target_window != current_window) {
             if (surface != EGL_NO_SURFACE) {
-                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-                eglDestroySurface(display, surface);
+                if (!subgl_check_egl(eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                                                   EGL_NO_CONTEXT), "eglMakeCurrent(detach)", &context_usable))
+                    egl_ready = 0;
+                context_current = 0;
+                if (!subgl_check_egl(eglDestroySurface(display, surface), "eglDestroySurface", &context_usable))
+                    egl_ready = 0;
                 surface = EGL_NO_SURFACE;
-                pthread_mutex_lock(&r->lock);
-                r->surface_width  = 0;
-                r->surface_height = 0;
-                pthread_mutex_unlock(&r->lock);
             }
 
             if (current_window) ANativeWindow_release(current_window);
             current_window = target_window; // Transfer ownership
 
-            if (current_window) {
+            // Retry only when the window changes; never spin on a failed one.
+            egl_ready = context_usable;
+            if (current_window && egl_ready) {
                 surface = eglCreateWindowSurface(display, config, current_window, NULL);
-                needs_redraw = 1; // <--- 2. FORCE REDRAW ON NEW SURFACE
-                if (surface != EGL_NO_SURFACE) {
-                    eglMakeCurrent(display, surface, surface, context);
-                    eglSwapInterval(display, 1);
-
-                    // Adopt this new surface's REAL pixel size right away, instead of
-                    // waiting for a separate sub_render_gl_resize() call to arrive from
-                    // the Java/JNI side. That call is driven by an independent callback
-                    // (TextureView's onSurfaceTextureSizeChanged) whose timing relative
-                    // to attach_surface() isn't guaranteed -- e.g. switching to the
-                    // floating player's window here would otherwise keep drawing with
-                    // r->surface_width/height still left over from whichever window
-                    // (typically full-screen) was attached before, until that callback
-                    // happens to land. Querying EGL directly makes this self-correcting.
-                    EGLint real_w = 0, real_h = 0;
-                    eglQuerySurface(display, surface, EGL_WIDTH, &real_w);
-                    eglQuerySurface(display, surface, EGL_HEIGHT, &real_h);
-                    if (real_w > 0 && real_h > 0) {
-                        pthread_mutex_lock(&r->lock);
-                        r->surface_width  = real_w;
-                        r->surface_height = real_h;
-                        pthread_mutex_unlock(&r->lock);
-                        DBG serprintf("SUB_RENDER_GL: adopted real EGL surface size %d x %d on window attach\n", real_w, real_h);
-                    }
-
+                egl_ready = subgl_check_egl(surface != EGL_NO_SURFACE, "eglCreateWindowSurface", &context_usable);
+                needs_redraw = 1;
+                if (egl_ready) {
+                    context_current = subgl_check_egl(eglMakeCurrent(display, surface, surface, context),
+                                                       "eglMakeCurrent(bind)", &context_usable);
+                    egl_ready = context_current;
+                }
+                if (egl_ready) {
+                    // The previous frame may still own textures from a failed
+                    // swap. A successful bind makes their deletion safe again.
+                    subgl_release_textures(&frame_textures, &texture_count);
+                    egl_ready = subgl_check_egl(eglSwapInterval(display, 1), "eglSwapInterval", &context_usable);
+                }
+                if (egl_ready) {
                     if (r->gl_program == 0) {
                         const char* vs_src =
                         "attribute vec4 aPosition;\n"
@@ -198,12 +254,17 @@ static void* egl_render_thread(void* arg) {
         r->attrib_pos = glGetAttribLocation(r->gl_program, "aPosition");
         r->attrib_tex = glGetAttribLocation(r->gl_program, "aTexCoord");
 
-        glGenTextures(1, &r->gl_texture);
-        glBindTexture(GL_TEXTURE_2D, r->gl_texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        r->gl_max_texture_size = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &r->gl_max_texture_size);
+        GLint linked = 0;
+        if (r->gl_program != 0)
+            glGetProgramiv(r->gl_program, GL_LINK_STATUS, &linked);
+        if (!linked || r->attrib_pos < 0 || r->attrib_tex < 0 || r->gl_max_texture_size <= 0)
+        DBG serprintf("NovaSubGL: renderer setup incomplete: program=%u linked=%d "
+                      "attribs=%d,%d max_tex=%d\n",
+                      r->gl_program, linked,
+                      r->attrib_pos, r->attrib_tex, r->gl_max_texture_size);
+        subgl_take_errors("during renderer setup");
                     }
                 }
             }
@@ -250,8 +311,6 @@ static void* egl_render_thread(void* arg) {
         void *change_ctx = r->change_ctx;
         int mode_3d = (r->ui_mode != 0);
 
-        int w = r->surface_width;
-        int h = r->surface_height;
         const SUB_FRAME *frame_to_draw = r->current_frame;
         GLint attrib_pos = r->attrib_pos;
         GLint attrib_tex = r->attrib_tex;
@@ -263,7 +322,7 @@ static void* egl_render_thread(void* arg) {
         // this exact frame's refcount to zero and free() its rgba buffer out
         // from under us mid-upload. Matched by sub_engine_release_frame() right
         // after eglSwapBuffers() below, or immediately if we end up not drawing.
-        int will_draw = (surface != EGL_NO_SURFACE) && needs_redraw;
+        int will_draw = egl_ready && context_current && (surface != EGL_NO_SURFACE) && needs_redraw;
         if (frame_to_draw && will_draw) {
             sub_frame_ref((SUB_FRAME *)frame_to_draw);
         }
@@ -280,7 +339,7 @@ static void* egl_render_thread(void* arg) {
 
         // If EGL is offline (e.g. we are in 3D Canvas mode), sleep and skip drawing.
         // The Java onFrameAvailable() callback will extract frames via RAM instead.
-        if (surface == EGL_NO_SURFACE) {
+        if (!egl_ready || !context_current || surface == EGL_NO_SURFACE) {
             // will_draw was false in this branch, so no ref was taken -- nothing to release.
             if (r->engine) {
                 sub_engine_wait_event((SUB_ENGINE*)r->engine, loop_generation);
@@ -303,8 +362,26 @@ static void* egl_render_thread(void* arg) {
             continue;
         }
 
+        // Query the actual buffer size on the EGL thread for every redraw.
+        // Java's requested layout and the frame's canvas can differ while a
+        // resize is taking effect. Normalized vertices still cover the buffer;
+        // never feed the buffer dimensions back into the requested layout size.
+        EGLint buffer_w = 0, buffer_h = 0;
+        int width_ok = subgl_check_egl(eglQuerySurface(display, surface, EGL_WIDTH, &buffer_w),
+                                       "eglQuerySurface(width)", &context_usable);
+        int height_ok = subgl_check_egl(eglQuerySurface(display, surface, EGL_HEIGHT, &buffer_h),
+                                        "eglQuerySurface(height)", &context_usable);
+        if (!width_ok || !height_ok) {
+            egl_ready = 0;
+            goto release_frame;
+        }
+        if (buffer_w <= 0 || buffer_h <= 0) {
+            DBG serprintf("NovaSubGL: skip redraw: empty EGL buffer\n");
+            goto release_frame;
+        }
+
         // --- NATIVE 2D OPENGL RENDERING ---
-        glViewport(0, 0, w, h);
+        glViewport(0, 0, buffer_w, buffer_h);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -312,29 +389,68 @@ static void* egl_render_thread(void* arg) {
             && r->gl_program != 0
             && attrib_pos != -1 && attrib_tex != -1) {
 
+            // Never redefine a texture already used by a draw. Retain every
+            // bitmap's own object through this frame's submission.
+            size_t bitmap_count = 0;
+            for (const SUB_EVENT *ev = frame_to_draw->events; ev; ev = ev->next) {
+                if (ev->kind == SUB_EVENT_BITMAP)
+                    bitmap_count++;
+            }
+            if (bitmap_count) {
+                frame_textures = calloc(bitmap_count, sizeof(*frame_textures));
+                if (!frame_textures) {
+                    DBG serprintf("NovaSubGL: skip frame: texture list allocation failed (%zu bitmaps)\n",
+                                  bitmap_count);
+                    goto release_frame;
+                }
+            }
             glUseProgram(r->gl_program);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        SUB_EVENT *ev = frame_to_draw->events;
-        while (ev) {
+        int event_index = 0;
+        for (SUB_EVENT *ev = frame_to_draw->events; ev; ev = ev->next, event_index++) {
             if (ev->kind == SUB_EVENT_BITMAP) {
-                glBindTexture(GL_TEXTURE_2D, r->gl_texture);
+                GLint max_texture_size = r->gl_max_texture_size;
+                if (ev->w <= 0 || ev->h <= 0 || !ev->data.bitmap.rgba
+                    || (max_texture_size > 0
+                        && (ev->w > max_texture_size || ev->h > max_texture_size))) {
+                    DBG serprintf("NovaSubGL: skip bitmap %dx%d rgba=%d max_tex=%d\n", ev->w, ev->h,
+                                  ev->data.bitmap.rgba != NULL, max_texture_size);
+                    continue;
+                }
+                // GL errors stay pending until queried: clear older ones so a
+                // failure below is attributed to the texture upload itself.
+                subgl_take_errors("before subtitle texture upload");
+                GLuint texture = 0;
+                glGenTextures(1, &texture);
+                GLenum allocation_error = subgl_take_errors("after subtitle texture allocation");
+                // Retain even a nonzero name returned alongside an error so it
+                // is released with the other objects after submission.
+                if (texture != 0)
+                    frame_textures[texture_count++] = texture;
+                if (texture == 0 || allocation_error != GL_NO_ERROR) {
+                    DBG serprintf("NovaSubGL: skip bitmap event=%d: texture allocation failed error=0x%x\n",
+                                  event_index, allocation_error);
+                    continue;
+                }
+                glBindTexture(GL_TEXTURE_2D, texture);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                              ev->w, ev->h, 0,
                              GL_RGBA, GL_UNSIGNED_BYTE,
                              ev->data.bitmap.rgba);
+                if (subgl_take_errors("after subtitle texture upload") != GL_NO_ERROR) {
+                    continue;
+                }
 
                 float x1, y1, x2, y2;
                 if (frame_to_draw->gfx_stream_w > 0 && frame_to_draw->gfx_stream_h > 0) {
                     // GFX (PGS/VobSub) frame: placement is decided by gfx_map_to_canvas() (gfx_layout.h).
-                    DBG serprintf("SUB_GFX: gfx_stream=%dx%d canvas=%dx%d box=(%d,%d %dx%d) ev=(%d,%d %dx%d)\n",
-                                  frame_to_draw->gfx_stream_w, frame_to_draw->gfx_stream_h,
-                                  frame_to_draw->video_w, frame_to_draw->video_h,
-                                  frame_to_draw->video_box_x, frame_to_draw->video_box_y,
-                                  frame_to_draw->video_box_w, frame_to_draw->video_box_h,
-                                  ev->x, ev->y, ev->w, ev->h);
                     float box_x, box_y, box_w, box_h, unused_sx, unused_sy;
                     gfx_map_to_canvas(frame_to_draw, ev, &box_x, &box_y, &box_w, &box_h,
                                       &unused_sx, &unused_sy);
@@ -365,17 +481,29 @@ static void* egl_render_thread(void* arg) {
                 glEnableVertexAttribArray(attrib_pos);
                 glEnableVertexAttribArray(attrib_tex);
 
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                GLenum before_draw = subgl_take_errors("before subtitle draw");
+                if (before_draw == GL_NO_ERROR) {
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                    subgl_take_errors("after subtitle draw");
+                } else {
+                    DBG serprintf("NovaSubGL: skip draw: preceding GL error\n");
+                }
 
                 glDisableVertexAttribArray(attrib_pos);
                 glDisableVertexAttribArray(attrib_tex);
             }
-            ev = ev->next;
         }
         glDisable(GL_BLEND);
             }
 
-            eglSwapBuffers(display, surface);
+        if (!subgl_check_egl(eglSwapBuffers(display, surface), "eglSwapBuffers", &context_usable))
+            egl_ready = 0;
+
+release_frame:
+        // Swap submits work; GL defers reclamation until pending draws finish.
+        // After an EGL failure, retain the names until recovery or destruction.
+        if (egl_ready && context_current)
+            subgl_release_textures(&frame_textures, &texture_count);
 
         // Done reading frame_to_draw's pixels -- release the pin taken above.
         if (frame_to_draw && will_draw) {
@@ -385,18 +513,24 @@ static void* egl_render_thread(void* arg) {
     }
 
     if (surface != EGL_NO_SURFACE) {
-        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroySurface(display, surface);
+        // Delete GL resources while this thread still has a current context.
+        if (egl_ready && context_current && r->gl_program != 0) {
+            glDeleteProgram(r->gl_program);
+        }
+        subgl_check_egl(eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT),
+                        "eglMakeCurrent(shutdown)", NULL);
+        subgl_check_egl(eglDestroySurface(display, surface), "eglDestroySurface(shutdown)", NULL);
     }
     if (current_window) {
         ANativeWindow_release(current_window);   // NEW
     }
-    if (r->gl_program != 0) {
-        glDeleteProgram(r->gl_program);
-        glDeleteTextures(1, &r->gl_texture);
-    }
-    eglDestroyContext(display, context);
-    eglTerminate(display);
+    free(frame_textures);  // Any remaining GL objects belong to the context below.
+    // With no attached surface, destroying the unshared context releases its
+    // remaining objects without issuing GL calls on a non-current context.
+    if (context != EGL_NO_CONTEXT)
+        subgl_check_egl(eglDestroyContext(display, context), "eglDestroyContext", NULL);
+    if (initialized)
+        subgl_check_egl(eglTerminate(display), "eglTerminate", NULL);
     return NULL;
 }
 
@@ -482,15 +616,9 @@ void sub_render_gl_resize(SUB_RENDERER *r, int width, int height) {
     pthread_mutex_lock(&r->lock);
     r->surface_width  = width;
     r->surface_height = height;
-    // Force the native buffer to this size synchronously. Without this,
-    // glViewport() below assumes a buffer size that SurfaceFlinger hasn't
-    // necessarily allocated yet -- buffer resize isn't guaranteed to be
-    // synchronous with this JNI call, so subs briefly draw stretched into
-    // the old buffer until a later redraw happens to land after it catches
-    // up.
-    if (r->window) {
-        ANativeWindow_setBuffersGeometry(r->window, width, height, 0);
-    }
+    // Leave native buffer geometry to TextureView/EGL. The render thread queries
+    // its actual drawable size rather than mutating an EGL window from Java's
+    // callback thread. The engine maintains its own subtitle layout dimensions.
     pthread_mutex_unlock(&r->lock);
     sub_render_gl_invalidate_cache(r);
 }
